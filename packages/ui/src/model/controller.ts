@@ -468,11 +468,6 @@ export class AncillaController {
    * outlasts a later read that brings nothing new; a failed read, or a feed Muse has since reported healthy, does not.
    */
   private readonly quietStalls = new Set<string>();
-  /**
-   * Loaded threads whose fold may have missed events: the stream dropped while they were in the background, or they
-   * left the sidebar and stopped being checked. Each is read again when it is next opened.
-   */
-  private readonly needsReload = new Set<string>();
   /** The thread each known child session (subagent, workflow child, reminder) works for. */
   private readonly childParents = new Map<string, string>();
   /** Threads whose child sessions showed activity since the last flush. */
@@ -856,7 +851,7 @@ export class AncillaController {
     if (route.kind === "thread") {
       this.markSeen(route.sessionId, true);
       const thread = this.state.threads[route.sessionId];
-      if (!thread || thread.load === "idle" || thread.load === "error" || thread.fold.closed || this.needsReload.has(route.sessionId)) {
+      if (!thread || thread.load === "idle" || thread.load === "error" || thread.fold.closed || thread.stale) {
         void this.loadThread(route.sessionId);
       }
     } else if (route.kind === "new" && route.cwd) {
@@ -958,7 +953,6 @@ export class AncillaController {
       const progressed = savedProgress || liveProgress;
       if (progressed || !active) this.staleReloads.delete(sessionId);
       this.appliedAt.set(sessionId, checkedAt);
-      this.needsReload.delete(sessionId);
       this.noteChildren(sessionId, load.events);
       this.noteChildren(sessionId, buffered);
       const unavailable = load.historyUnavailable === true || load.viewHealth?.status === "unavailable";
@@ -1059,12 +1053,17 @@ export class AncillaController {
           const route = this.state.route;
           const routed = route.kind === "thread" ? route.sessionId : null;
           // Nothing replays what the stream carried while it was down: a turn or a background agent that finished
-          // meanwhile would go on showing as working. The open thread reloads now, every other one when it is opened.
-          for (const id of Object.keys(this.state.threads)) {
-            if (id !== routed) {
-              this.needsReload.add(id);
+          // meanwhile would go on showing as working. The open thread reloads now; every other one shows what it
+          // has as last known until it is opened and read again.
+          this.update((s) => {
+            const threads = { ...s.threads };
+            for (const [id, thread] of Object.entries(threads)) {
+              if (id !== routed && !thread.stale) {
+                threads[id] = { ...thread, stale: true };
+              }
             }
-          }
+            return { ...s, threads };
+          });
           if (routed) {
             void this.loadThread(routed);
           }
@@ -1375,8 +1374,9 @@ export class AncillaController {
     this.recoveryAt.delete(sessionId);
     this.readableHistory.delete(sessionId);
     this.quietStalls.delete(sessionId);
-    if (this.state.threads[sessionId]) {
-      this.needsReload.add(sessionId);
+    const thread = this.state.threads[sessionId];
+    if (thread && !thread.stale) {
+      this.setThread(sessionId, { ...thread, stale: true });
     }
   }
 

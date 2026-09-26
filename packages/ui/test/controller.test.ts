@@ -976,11 +976,14 @@ describe("AncillaController", () => {
       client.handler?.({ type: "hello", version: "x" });
       await settle();
       assert.deepEqual(calls, [["s2", undefined]], "the open thread reloads at once");
+      assert.equal(controller.store.get().threads.s1?.stale, true, "the other shows what it has as last known");
+      assert.notEqual(controller.store.get().threads.s2?.stale, true);
       controller.openThread("s1");
       await settle();
       await settle();
       assert.deepEqual(calls.at(-1), ["s1", { refresh: true }], "the other on opening, read in place while its agent may run");
       assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 0);
+      assert.notEqual(controller.store.get().threads.s1?.stale, true, "and is live again once read");
       controller.openThread("s2");
       controller.openThread("s1");
       await settle();
