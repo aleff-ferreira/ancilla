@@ -114,6 +114,7 @@ export { TrashIcon } from "@phosphor-icons/react/dist/csr/Trash";
 export { TreeStructureIcon } from "@phosphor-icons/react/dist/csr/TreeStructure";
 export { TreeViewIcon } from "@phosphor-icons/react/dist/csr/TreeView";
 export { UserIcon } from "@phosphor-icons/react/dist/csr/User";
+export { UsersThreeIcon } from "@phosphor-icons/react/dist/csr/UsersThree";
 export { WarningCircleIcon } from "@phosphor-icons/react/dist/csr/WarningCircle";
 export { WarningIcon } from "@phosphor-icons/react/dist/csr/Warning";
 export { WrenchIcon } from "@phosphor-icons/react/dist/csr/Wrench";

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { forwardRef, type ReactNode } from "react";
 import { CheckIcon, MinusIcon, ShieldWarningIcon, WarningIcon } from "../ui/icons.js";
 import { cn } from "../ui/primitives.js";
 import { sigilGrid, type AgentState } from "../../model/swarm.js";
@@ -14,6 +14,8 @@ export interface SigilProps {
   stale?: boolean;
   /** Also badge done and waiting (the inspector and the drawer). Failed and skipped always carry theirs. */
   badge?: boolean;
+  /** Hold the mark still: it is out of view or over the breathing budget (SPEC §10: twelve at once). */
+  still?: boolean;
   className?: string;
 }
 
@@ -35,16 +37,17 @@ const TILE: Partial<Record<AgentState, string>> = {
 
 /**
  * An agent's mark: a deterministic, mirrored 5×5 pixel grid from its name, the same wherever the agent
- * appears. Decorative, because the name is always beside it.
+ * appears. Decorative, because the name is always beside it. The ref reaches the tile, for the breathing gate.
  */
-export function Sigil(props: SigilProps) {
+export const Sigil = forwardRef<HTMLSpanElement, SigilProps>(function Sigil(props, ref) {
   const size = props.size ?? 18;
   const state = props.state ?? "done";
   const pixels = PIXELS[size];
   const badge = badgeFor(state, props.badge ?? false);
   return (
     <span
-      className={cn("swarm-sigil", size !== 18 && `s${size}`, TILE[state], props.stale && "stale", props.className)}
+      ref={ref}
+      className={cn("swarm-sigil", size !== 18 && `s${size}`, TILE[state], props.stale && "stale", props.still && "still", props.className)}
       data-agent={props.name}
       aria-hidden="true"
     >
@@ -60,7 +63,7 @@ export function Sigil(props: SigilProps) {
       ) : null}
     </span>
   );
-}
+});
 
 function badgeFor(state: AgentState, wanted: boolean): { kind: string; icon: ReactNode } | null {
   switch (state) {

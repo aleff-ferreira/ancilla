@@ -38,7 +38,7 @@ import {
   ToolRow,
   type Gate,
 } from "./items.js";
-import { WorkflowCard } from "./WorkflowCard.js";
+import { SwarmAnchorRow } from "../swarm/SwarmAnchorRow.js";
 
 type GateMap = Record<string, Gate>;
 type AnswerMap = Record<string, UserInputAnswer[]>;
@@ -353,7 +353,8 @@ function Entry(props: { item: MspItem; gate?: Gate; answers: UserInputAnswer[] |
     case "subagent":
       return <SubagentRow item={item} sessionId={props.sessionId} />;
     case "workflow":
-      return <WorkflowCard item={item} sessionId={props.sessionId} />;
+      // The run lives in the dock; the transcript keeps one line at the launch point that points there.
+      return <SwarmAnchorRow item={item} sessionId={props.sessionId} />;
     case "compaction":
       return <CompactionRow item={item} />;
     case "userMessage":
@@ -428,6 +429,9 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
   const [open, setOpen] = useState(failed);
   const duration = turnDuration(turn);
   const summary = summarize(turn.entries);
+  // A run's row stays out of the fold, like the diff chips: the report it points at is still in the dock.
+  const runs = turn.entries.filter((item) => item.kind === "workflow");
+  const entries = runs.length > 0 ? turn.entries.filter((item) => item.kind !== "workflow") : turn.entries;
   return (
     <div>
       <button
@@ -453,7 +457,7 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
       </button>
       <Collapse open={open}>
         <div className="mt-1 ml-[7px] flex flex-col gap-1 border-l border-line pl-4">
-          {turn.entries.map((item) => (
+          {entries.map((item) => (
             <Entry
               key={item.itemId}
               item={item}
@@ -464,6 +468,9 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
           ))}
         </div>
       </Collapse>
+      {runs.map((item) => (
+        <SwarmAnchorRow key={item.itemId} item={item} sessionId={props.sessionId} />
+      ))}
       <DiffChips entries={turn.entries} className="mt-2" sessionId={props.sessionId} />
     </div>
   );

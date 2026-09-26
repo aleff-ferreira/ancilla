@@ -1,33 +1,39 @@
-import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, StopCircleIcon, TreeStructureIcon } from "../ui/icons.js";
+import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, TreeStructureIcon } from "../ui/icons.js";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
-import { basename, formatDuration } from "../../model/format.js";
-import { backgroundTasks } from "../../model/plan.js";
+import { basename } from "../../model/format.js";
 import { goalView } from "../../model/goal.js";
-import { agentActivityView, agentFeedRecovered, agentNumbers, markAgentFeed, type AgentFeedMark } from "../../model/agents.js";
+import { agentFeedRecovered, agentNumbers, markAgentFeed, type AgentFeedMark } from "../../model/agents.js";
+import { runLive, swarmBusy, swarmView, type SwarmVM } from "../../model/swarm.js";
 import type { ThreadState } from "../../model/store.js";
 import type { SessionSummary } from "../../types.js";
 import { SidebarToggle, TrafficLightSpacer } from "../chrome.js";
 import { Composer, ComposerFooter } from "../composer/Composer.js";
 import { TelemetryPills } from "../composer/TelemetryPills.js";
-import { ApprovalPanel, CloseCard, PlanPanel, QuestionPanel, QueuedList, ReadOnlyNotice, StalledNotice } from "../requests/Requests.js";
+import { ApprovalPanel, PlanPanel, QuestionPanel, QueuedList, ReadOnlyNotice, StalledNotice } from "../requests/Requests.js";
 import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
+import { NeedsYouChip, SwarmStatus, SwarmToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../swarm/HeaderChips.js";
+import { SwarmDockCard } from "../swarm/SwarmCard.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
-import { Button, IconButton, MOD, Spinner } from "../ui/primitives.js";
+import { IconButton, MOD } from "../ui/primitives.js";
 import { FilesPanel } from "../files/FilesPanel.js";
 import { Transcript } from "./Transcript.js";
-import { AgentPanel } from "./AgentPanel.js";
+
+/** Ages in the Swarm card tick this often; the elapsed clocks tick on their own 1 s timer (SPEC §13). */
+const AGE_TICK_MS = 15_000;
 
 export function ThreadView(props: { sessionId: string }) {
   const session = useApp((s) => s.sessions[props.sessionId] ?? null);
   const thread = useApp((s) => s.threads[props.sessionId] ?? null);
-  const filesOpen = useApp((s) => s.prefs.filesOpen);
+  const sidePanel = useApp((s) => s.prefs.sidePanel);
   const connection = useApp((s) => s.connection);
-  const agentItems = thread ? thread.fold.agentItems ?? thread.fold.items : null;
-  const agents = useMemo(() => thread ? agentActivityView(thread.fold, agentNumbers(props.sessionId)) : null,
-    [props.sessionId, agentItems, thread?.fold.activeTurnId]);
+  const models = useApp((s) => s.models);
+  const pending = useApp((s) => s.swarm.pending);
+  const skipped = useApp((s) => s.swarm.skipped);
+  const fold = thread?.fold ?? null;
+  const agentItems = fold ? fold.agentItems ?? fold.items : null;
   // Remember the agent items as the last history read left them while the live view is unavailable, to tell
   // agent progress arriving live after it apart from what a read brings back.
   const viewUnavailable = session?.live?.viewHealth?.status === "unavailable";
@@ -36,43 +42,54 @@ export function ThreadView(props: { sessionId: string }) {
   if (nextFeedMark !== feedMark) {
     setFeedMark(nextFeedMark);
   }
+  const busy = fold ? swarmBusy(fold) : false;
+  const now = useNow(AGE_TICK_MS, busy);
+  const swarmStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
+    || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
+  // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
+  const loaded = !thread || thread.fold.order.length > 0 || thread.load === "ready";
+  const swarm = useMemo<SwarmVM | null>(
+    () => (fold && loaded ? swarmView(fold, session, now, { stale: swarmStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId) }) : null),
+    // The view reads the agent items, the item order, the requests and the trace; streamed reply text changes none of them.
+    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId],
+  );
   if (!session) {
     return <MissingThread />;
   }
   const running = thread ? thread.fold.activeTurnId !== null : Boolean(session.live?.activeTurnId);
-  // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
-  const agentLoad = !thread || thread.fold.order.length > 0 || thread.load === "ready" ? "ready"
-    : thread.load === "error" ? "failed" : "loading";
-  const agentsStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
-    || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-      <ThreadHeader session={session} thread={thread} running={running} />
+      <ThreadHeader session={session} thread={thread} running={running} swarm={swarm} />
       <div className="flex min-h-0 flex-1">
         <div className="@container flex min-w-0 flex-1 flex-col">
-          {agents ? <AgentPanel key={props.sessionId} sessionId={props.sessionId} view={agents}
-            leadRunning={agentLoad === "loading" ? Boolean(session.live?.activeTurnId) : running}
-            stale={agentsStale} load={agentLoad} partial={Boolean(thread?.truncated)} /> : null}
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
-          <Dock session={session} thread={thread} running={running} />
+          <Dock session={session} thread={thread} running={running} swarm={swarm} swarmStale={swarmStale} />
         </div>
-        {filesOpen ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
+        {sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
+        {/* The Swarm panel (workstream C) mounts here; wired at integration. */}
       </div>
     </div>
   );
 }
 
-function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean }) {
+function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; swarm: SwarmVM | null }) {
   const controller = useController();
   const { session, thread } = props;
   const [renaming, setRenaming] = useState(false);
   const fold = thread?.fold ?? null;
-  const waiting = fold ? Object.keys(fold.approvals).length + Object.keys(fold.userInputs).length > 0 : false;
+  const needs = fold ? Object.keys(fold.approvals).length + Object.keys(fold.userInputs).length : 0;
   const startedAt = fold?.activeTurnId ? fold.turns[fold.activeTurnId]?.startedAt : undefined;
-  const now = useNow(1000, props.running && startedAt !== undefined);
   const drag = useOverlayDragProps();
   const noDrag = useOverlayDragProps("off");
-  const filesOpen = useApp((s) => s.prefs.filesOpen);
+  const sidePanel = useApp((s) => s.prefs.sidePanel);
+  const reportDismissed = useApp((s) => {
+    const run = headerRun(props.swarm);
+    return run ? s.swarm.dismissedReports.includes(`${session.sessionId}:${run.itemId}`) : true;
+  });
+  const run = headerRun(props.swarm);
+  const landed = useLanded(run);
+  const liveRun = run !== null && runLive(run);
+  const filesOpen = sidePanel === "files";
   return (
     <header data-drag-region {...drag} className="@container flex h-12 shrink-0 items-center gap-1.5 overflow-hidden border-b border-line px-3">
       <TrafficLightSpacer />
@@ -118,17 +135,17 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
           </span>
         </Tip>
       ) : null}
-      {waiting ? (
-        <span className="flex shrink-0 items-center gap-1.5 px-1 text-xs font-medium text-warn-text">
-          <span className="attention-pulse size-1.5 rounded-full bg-warn" aria-hidden="true" />
-          <span className="@max-[420px]:hidden">Waiting for you</span>
-        </span>
+      <NeedsYouChip count={needs} onClick={() => focusRequestPanel()} />
+      {needs > 0 ? (
+        <SwarmStatus kind="waiting" />
       ) : props.running ? (
-        <span className="flex shrink-0 items-center gap-1.5 px-1 text-xs text-muted" role="status">
-          <Spinner size={11} className="text-accent-text" />
-          <span className="@max-[420px]:hidden">Working</span>
-          {startedAt ? <span className="text-subtle tabular-nums">{formatDuration(now - startedAt)}</span> : null}
-        </span>
+        <SwarmStatus kind="working" ms={startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null} at={Date.now()} live />
+      ) : landed && run ? (
+        <SwarmStatus kind="landed" ms={run.elapsedMs} />
+      ) : run && run.stale && liveRun ? (
+        <SwarmStatus kind="stale" ms={staleAge(run, run.clockAt)} />
+      ) : run && !liveRun && !reportDismissed && run.status === "finished" ? (
+        <SwarmStatus kind="done" />
       ) : thread?.readOnly ? (
         <span className="flex shrink-0 items-center gap-1.5 px-1 text-xs text-subtle">
           <LockIcon size={12} />
@@ -143,6 +160,7 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
         </Tip>
       ) : null}
       <HiddenCardsButton sessionId={session.sessionId} running={props.running} />
+      <SwarmToggle active={sidePanel === "swarm"} count={liveRun ? run.counts.total : null} onClick={() => controller.toggleSwarmPanel()} />
       <Tip label={filesOpen ? "Hide files" : "Show files"} shortcut={[MOD, "Shift", "E"]}>
         <IconButton label={filesOpen ? "Hide files" : "Show files"} active={filesOpen} onClick={() => controller.toggleFiles()}>
           <TreeStructureIcon size={15} />
@@ -263,9 +281,6 @@ function HiddenCardsButton(props: { sessionId: string; running: boolean }) {
     if (hidden.includes(`goal:${props.sessionId}`) && goalView(fold) !== null) {
       out.push("goal");
     }
-    if (hidden.includes(`tasks:${props.sessionId}`) && backgroundTasks(fold).length > 0) {
-      out.push("background tasks");
-    }
     return out.join(", ");
   });
   if (!names) {
@@ -281,7 +296,7 @@ function HiddenCardsButton(props: { sessionId: string; running: boolean }) {
   );
 }
 
-function Dock(props: { session: SessionSummary; thread: ThreadState | null; running: boolean }) {
+function Dock(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; swarm: SwarmVM | null; swarmStale: boolean }) {
   const controller = useController();
   const { session, thread } = props;
   const fold = thread?.fold ?? null;
@@ -307,13 +322,21 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
             onRetry={() => void controller.retryStalledThread(session.sessionId)}
           />
         ) : null}
+        {props.swarm ? (
+          <SwarmDockCard
+            sessionId={session.sessionId}
+            view={props.swarm}
+            stale={props.swarmStale}
+            readOnly={Boolean(thread?.readOnly)}
+            compact={approvals.length + inputs.length > 0}
+          />
+        ) : null}
         {approvals.map((request, index) => (
           <ApprovalPanel key={request.approvalId} request={request} primary={index === 0} />
         ))}
         {inputs.map((request, index) => (
           <QuestionPanel key={request.userInputId} request={request} keyboard={approvals.length === 0 && index === 0} />
         ))}
-        {fold && !thread?.readOnly ? <BackgroundTasks sessionId={session.sessionId} /> : null}
         <GoalPanel sessionId={session.sessionId} running={props.running} readOnly={Boolean(thread?.readOnly)} />
         {showPlan && todo ? <PlanPanel sessionId={session.sessionId} items={todo} /> : null}
         {queued.length > 0 ? <QueuedList sessionId={session.sessionId} items={queued} /> : null}
@@ -328,32 +351,6 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
         />
         <ComposerFooter cwd={session.cwd} branch={fold?.meta.branch ?? null} running={props.running} />
       </div>
-    </div>
-  );
-}
-
-/** Tool calls still running after being sent to the background, with one way to stop all of them. */
-function BackgroundTasks(props: { sessionId: string }) {
-  const controller = useController();
-  const count = useApp((s) => {
-    const fold = s.threads[props.sessionId]?.fold;
-    return fold ? backgroundTasks(fold).length : 0;
-  });
-  const busy = useApp((s) => Boolean(s.busy[`task:${props.sessionId}:all`]));
-  const hidden = useApp((s) => s.prefs.hiddenCards.includes(`tasks:${props.sessionId}`));
-  if (count === 0 || hidden) {
-    return null;
-  }
-  return (
-    <div role="status" className="flex items-center gap-2 rounded-xl bg-raised px-3 py-1.5 text-xs text-muted shadow-card">
-      <Spinner size={11} className="shrink-0 text-accent-text" />
-      <span className="min-w-0 flex-1 truncate">
-        {count === 1 ? "1 task is running in the background" : `${count} tasks are running in the background`}
-      </span>
-      <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" loading={busy} onClick={() => void controller.taskAction(props.sessionId, "stopAll")}>
-        <StopCircleIcon size={12} /> Stop all
-      </Button>
-      <CloseCard label="Hide background tasks" onClose={() => controller.setCardHidden(`tasks:${props.sessionId}`, true)} />
     </div>
   );
 }

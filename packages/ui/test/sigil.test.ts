@@ -52,6 +52,7 @@ describe("Sigil", () => {
     assert.deepEqual(classes(render({ name: "a", state: "scheduled" })), ["swarm-sigil", "pending"]);
     assert.deepEqual(classes(render({ name: "a", state: "done" })), ["swarm-sigil"]);
     assert.deepEqual(classes(render({ name: "a", state: "working", stale: true })), ["swarm-sigil", "work", "stale"]);
+    assert.deepEqual(classes(render({ name: "a", state: "working", still: true })), ["swarm-sigil", "work", "still"], "held still past the breathing budget");
   });
 
   it("badges a failure and a skip on its own, done and waiting only where asked", () => {
