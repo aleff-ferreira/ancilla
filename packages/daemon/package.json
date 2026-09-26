@@ -1,6 +1,6 @@
 {
   "name": "@ancilla/daemon",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Ancilla daemon: MSP host management, session orchestration, local state, WSL routing",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",

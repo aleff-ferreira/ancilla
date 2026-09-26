@@ -1,7 +1,7 @@
 {
   "name": "ancilla",
   "private": true,
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Ancilla - open-source desktop + web ADE for Meta's Muse Code CLI",
   "workspaces": [
     "packages/*",
