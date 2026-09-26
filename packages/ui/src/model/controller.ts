@@ -259,6 +259,8 @@ const QUIET_TURN_MS = 90_000;
 const STALE_RELOAD_LIMIT = 2;
 /** After the first attempts, continue read-only recovery slowly instead of leaving a permanent spinner. */
 const STALE_BACKOFF_MS = 120_000;
+/** A retry Muse scheduled postpones the quiet-turn clock by its delay, up to this much: the wait is expected silence. */
+const RETRY_PAUSE_MAX_MS = 15 * 60_000;
 
 /** Why a loaded thread needs reloading from history: its ending never landed, or its stream went quiet mid-turn. */
 export type StaleThreadReason = "diverged" | "quiet";
@@ -317,6 +319,22 @@ function freshViewProgress(previous: ThreadFold, next: ThreadFold, events: reado
  */
 function provesLiveness(event: ViewEvent): boolean {
   return event.method !== "session/viewHealthChanged";
+}
+
+/**
+ * How long after this batch the stream is expected to stay silent: a retry Muse scheduled for the active turn, say
+ * for a rate limit, sends nothing until it is due, and that wait is not a turn going quiet.
+ */
+function expectedPause(fold: ThreadFold, events: readonly ViewEvent[]): number {
+  let pause = 0;
+  for (const event of events) {
+    const delay = event.params["retryDelayMs"];
+    if (event.method === "turn/retryScheduled" && event.params["turnId"] === fold.activeTurnId
+      && typeof delay === "number" && Number.isFinite(delay) && delay > pause) {
+      pause = delay;
+    }
+  }
+  return Math.min(pause, RETRY_PAUSE_MAX_MS);
 }
 
 /** The child session ids an item names: a subagent's own, a workflow's children's, a reminder's. */
@@ -419,6 +437,20 @@ function keepEndedTurns(previous: ThreadFold, fold: ThreadFold): ThreadFold {
     activeTurnId: null,
     turns: turn?.terminal ? fold.turns : { ...fold.turns, [turnId]: { ...turn, ...ended } },
   };
+}
+
+/**
+ * A full read rebuilds the turns from history, which need not hold the retry Muse scheduled for the one still
+ * running. The retry the stream reported stays with that turn, as it does on the live path until the turn ends.
+ */
+function keepRetry(previous: ThreadFold, fold: ThreadFold): ThreadFold {
+  const turnId = fold.activeTurnId;
+  const retry = turnId !== null ? previous.turns[turnId]?.retry : undefined;
+  const turn = turnId !== null ? (fold.turns[turnId] ?? { turnId }) : undefined;
+  if (turnId === null || !retry || !turn || turn.retry || turn.terminal) {
+    return fold;
+  }
+  return { ...fold, turns: { ...fold.turns, [turnId]: { ...turn, retry } } };
 }
 
 /**
@@ -945,7 +977,7 @@ export class AncillaController {
       const current = this.state.threads[sessionId] ?? existing;
       const previous = current?.fold ?? emptyFold();
       const saved = foldFromLoad(load, previous);
-      const fold = keepEndedTurns(previous, withBufferedDeltas(previous, saved, buffered));
+      const fold = keepRetry(previous, keepEndedTurns(previous, withBufferedDeltas(previous, saved, buffered)));
       const active = fold.activeTurnId !== null;
       const checkedAt = this.platform.now();
       const savedProgress = freshViewProgress(previous, saved, load.events);
@@ -1205,7 +1237,8 @@ export class AncillaController {
           const progressed = freshViewProgress(thread.fold, fold, events);
           const alive = events.some(provesLiveness);
           const asking = events.some((event) => event.method === "approval/requested" || event.method === "userInput/requested");
-          threads[id] = { ...thread, fold, ...this.noteActivity(id, thread, s, { progressed, alive, asking }, appliedNow) };
+          const aliveAt = appliedNow + expectedPause(fold, events);
+          threads[id] = { ...thread, fold, ...this.noteActivity(id, thread, s, { progressed, alive, asking }, aliveAt) };
         }
       }
       for (const id of children) {
@@ -1227,19 +1260,19 @@ export class AncillaController {
   /**
    * What activity on a thread's stream is worth, as a patch for the thread. New work for the turn ends every kind of
    * recovery. Anything else the stream carries, a child session's work included, still proves the stream alive:
-   * the quiet-turn clock starts over and a stall declared for silence ends, but not a saved-progress sync, since
-   * Muse can keep sending usage and reminders while its view is unavailable. A request for the user means the turn
-   * waits on them, which is never a stall.
+   * the quiet-turn clock starts over from `aliveAt` and a stall declared for silence ends, but not a saved-progress
+   * sync, since Muse can keep sending usage and reminders while its view is unavailable. A request for the user
+   * means the turn waits on them, which is never a stall.
    */
   private noteActivity(
     id: string,
     thread: ThreadState,
     state: AppState,
     activity: { progressed: boolean; alive: boolean; asking: boolean },
-    now: number,
+    aliveAt: number,
   ): Partial<ThreadState> {
     if (activity.progressed) {
-      this.appliedAt.set(id, now);
+      this.appliedAt.set(id, aliveAt);
       this.staleReloads.delete(id);
       this.recoveryAt.delete(id);
       this.readableHistory.delete(id);
@@ -1249,7 +1282,7 @@ export class AncillaController {
     const unavailable = thread.historySync !== undefined || state.sessions[id]?.live?.viewHealth?.status === "unavailable";
     const unstall = activity.asking || (activity.alive && !unavailable);
     if (activity.alive) {
-      this.appliedAt.set(id, now);
+      this.appliedAt.set(id, aliveAt);
     }
     if (!unstall) {
       return {};

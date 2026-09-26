@@ -2666,6 +2666,46 @@ describe("stale thread watchdog", () => {
     }
   });
 
+  it("expects silence while a scheduled retry waits, then still catches a stream that stays quiet past it", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    let reads = 0;
+    client.transcript = async () => { reads++; return { ...runningLoad(), session: LIVE_SESSION }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      setNow(1_015_000);
+      stream(client, controller, "s1", { method: "turn/retryScheduled", params: {
+        turnId: "live-1", attempt: 1, maxAttempts: 5, nextAttempt: 2, reason: "rateLimited", retryDelayMs: 150_000,
+      } }, 1_015_000);
+      for (const elapsed of [105_000, 165_000, 240_000]) {
+        setNow(1_000_000 + elapsed); runStaleChecks(); await settle(); await settle();
+      }
+      assert.equal(reads, 1, "the wait for the retry is expected, and the quiet clock starts when it is due");
+      setNow(1_000_000 + 270_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 2, "silence past the retry is a quiet turn again");
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps the retry Muse scheduled across a full read whose history does not record it", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => runningLoad();
+    const { controller, stop } = await startedWatching(client);
+    try {
+      stream(client, controller, "s1", { method: "turn/retryScheduled", params: {
+        turnId: "live-1", attempt: 1, maxAttempts: 5, nextAttempt: 2, reason: "rateLimited", retryDelayMs: 60_000,
+      } }, 1_000_002);
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads.s1?.fold.turns["live-1"]?.retry?.nextAttempt, 2);
+      stream(client, controller, "s1", { method: "turn/completed", params: { turnId: "live-1", terminal: "completed" } }, 1_000_003);
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads.s1?.fold.turns["live-1"]?.retry, undefined, "an ended turn's retry stays cleared");
+    } finally {
+      stop();
+    }
+  });
+
   it("counts a child session's own events as life for the lead turn that spawned it", async () => {
     const client = new FakeClient();
     client.listSessions = async () => [LIVE_SESSION];
