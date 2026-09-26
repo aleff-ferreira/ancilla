@@ -1038,9 +1038,13 @@
     background: var(--bg-hover);
   }
   .swarm-line + .swarm-line,
-  .swarm-line + .swarm-run,
-  .swarm-run + .swarm-line {
+  .swarm-line + .swarm-expanded,
+  .swarm-expanded + .swarm-line.fold {
     box-shadow: inset 0 1px 0 var(--border);
+  }
+  /* The lines an expanded card keeps folded away, for the narrowest container. */
+  .swarm-card > .swarm-line.fold {
+    display: none;
   }
   .swarm-line > .name {
     flex: 0 1 auto;
@@ -1310,16 +1314,16 @@
     white-space: nowrap;
   }
   .swarm-seg > .lbl > b {
-    flex-shrink: 0;
-    font-weight: 500;
-    color: var(--fg);
-  }
-  .swarm-seg > .lbl > span {
-    flex-shrink: 1;
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
-    color: var(--fg-subtle);
+    font-weight: 500;
+    color: var(--fg);
     text-overflow: ellipsis;
+  }
+  .swarm-seg > .lbl > span {
+    flex-shrink: 0;
+    color: var(--fg-subtle);
     font-variant-numeric: tabular-nums;
   }
   .swarm-seg.done > .lbl > b {
@@ -1557,6 +1561,25 @@
     color: var(--fg-subtle);
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+  .swarm-ag > .acts {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .swarm-ag > .acts > .confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .swarm-ag > .acts > .confirm > b {
+    font-weight: 500;
+    color: var(--fg);
   }
   .swarm-ag > .num.tok {
     width: 44px;
@@ -2158,10 +2181,10 @@
     }
   }
   @container (max-width: 360px) {
-    .swarm-card > .swarm-run {
+    .swarm-card > .swarm-expanded {
       display: none;
     }
-    .swarm-card > .swarm-line.folded {
+    .swarm-card > .swarm-line.fold {
       display: flex;
     }
   }

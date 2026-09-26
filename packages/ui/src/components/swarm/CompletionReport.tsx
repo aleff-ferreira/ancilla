@@ -202,7 +202,7 @@ export function CompletionReport(props: CompletionReportProps) {
               </ul>
             </>
           ) : null}
-          {completion.fingerprint.lanes.length > 0 && completion.fingerprint.totalMs > 0 ? (
+          {completion.fingerprint.totalMs > 0 && completion.fingerprint.lanes.some((lane) => lane.spans.length > 0) ? (
             <>
               <div className="swarm-sec">Where the time went</div>
               <Fingerprint fingerprint={completion.fingerprint} elapsed={elapsed} />

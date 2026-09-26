@@ -104,7 +104,8 @@ export function useCardKeys(root: RefObject<HTMLElement | null>, handlers: CardK
       const { element, info } = focusOf(container, event.target);
       const intent = resolveCardKey(event, info);
       if (!intent) return;
-      const all = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)];
+      // Lines an expanded card keeps folded away are in the markup but not on screen; focus skips them.
+      const all = [...container.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((candidate) => candidate.offsetParent !== null);
       const id = element?.dataset["agentId"] ?? null;
       switch (intent.type) {
         case "escape":

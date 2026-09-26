@@ -32,6 +32,7 @@ export interface SwarmLineProps {
   onChip?: (kind: SummaryChip["kind"]) => void;
   /** A line kept beside an expanded card (another run) folds the caret away. */
   folded?: boolean;
+  className?: string;
 }
 
 /** Digits in a phrase roll when they change; the words around them stay put. */
@@ -122,7 +123,7 @@ function toggleKey(event: KeyboardEvent, onToggle: () => void): void {
   }
 }
 
-export function SwarmLine({ run, expanded, selected = false, onToggle, onChip, folded = false }: SwarmLineProps) {
+export function SwarmLine({ run, expanded, selected = false, onToggle, onChip, folded = false, className }: SwarmLineProps) {
   const line = summaryLine(run);
   const live = runLive(run);
   const groups = run.phases.map((phase) => phase.agents.map((agent) => agent.state));
@@ -135,7 +136,7 @@ export function SwarmLine({ run, expanded, selected = false, onToggle, onChip, f
       aria-label={label}
       data-swarm-focus="line"
       data-run={run.itemId}
-      className={cn("swarm-line", run.stale && "stale", folded && "folded")}
+      className={cn("swarm-line", run.stale && "stale", folded && "folded", className)}
       onClick={onToggle}
       onKeyDown={(event) => toggleKey(event, onToggle)}
     >
@@ -170,6 +171,7 @@ export interface TaskLineProps {
   expanded: boolean;
   selected?: boolean;
   readOnly?: boolean;
+  className?: string;
   onToggle: () => void;
   onStop: () => void;
 }
@@ -180,7 +182,7 @@ export function taskLive(task: Pick<AgentVM, "state">): boolean {
 }
 
 /** A background task's line: the command, its last output line, and Stop while it runs; a subagent's reads the same way. */
-export function TaskLine({ task, clockAt, expanded, selected = false, readOnly = false, onToggle, onStop }: TaskLineProps) {
+export function TaskLine({ task, clockAt, expanded, selected = false, readOnly = false, className, onToggle, onStop }: TaskLineProps) {
   const live = taskLive(task);
   const info = task.taskInfo ?? null;
   const command = info?.command ?? task.name;
@@ -220,7 +222,7 @@ export function TaskLine({ task, clockAt, expanded, selected = false, readOnly =
       aria-label={`${task.kind === "subagent" ? "Subagent" : "Background task"} ${command}, ${typeof tail === "string" ? tail : ""}`}
       data-swarm-focus="line"
       data-agent-id={task.id}
-      className="swarm-line task"
+      className={cn("swarm-line task", className)}
       onClick={onToggle}
       onKeyDown={(event) => toggleKey(event, onToggle)}
     >

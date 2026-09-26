@@ -204,6 +204,7 @@ export const AgentRow = memo(function AgentRow(props: AgentRowProps) {
   const tokens = agent.tokens ? usageTotal(agent.tokens) : 0;
   const time = agent.durationMs !== null ? durationText(agent.durationMs) : agent.runningMs !== null ? durationText(agent.runningMs) : "";
   const share = agent.state === "planned" || agent.state === "scheduled" ? null : agent.shareOfLongest;
+  const confirm = props.confirm ?? null;
   return (
     <div
       {...common}
@@ -213,13 +214,21 @@ export const AgentRow = memo(function AgentRow(props: AgentRowProps) {
       <StateGlyph agent={agent} stale={stale} />
       <Sigil ref={sigilRef} name={agent.name} size={18} state={sigilState} stale={stale} still={still} />
       <AgentName agent={agent} className="nm" />
-      <span className={cn("st", state.tone)}>
-        {state.text}
-        {state.dim ? <span className="dim"> {state.dim}</span> : null}
-      </span>
-      <span className="num tok">{tokens > 0 ? formatTokens(tokens) : <span className="opacity-60">—</span>}</span>
-      <span className="num dur">{time}</span>
-      <ShareBar value={share} tone={barTone(agent, props.finale ?? false)} />
+      {confirm ? (
+        <span className="acts">
+          <Confirm agent={agent} action={confirm} onYes={() => { props.onConfirm?.(agent.id, null); props.onAction?.(agent.id, confirm); }} onNo={() => props.onConfirm?.(agent.id, null)} />
+        </span>
+      ) : (
+        <>
+          <span className={cn("st", state.tone)}>
+            {state.text}
+            {state.dim ? <span className="dim"> {state.dim}</span> : null}
+          </span>
+          <span className="num tok">{tokens > 0 ? formatTokens(tokens) : <span className="opacity-60">—</span>}</span>
+          <span className="num dur">{time}</span>
+          <ShareBar value={share} tone={barTone(agent, props.finale ?? false)} />
+        </>
+      )}
     </div>
   );
 }, sameProps);

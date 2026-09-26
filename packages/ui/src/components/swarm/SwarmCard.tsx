@@ -265,12 +265,15 @@ export function SwarmCard(props: SwarmCardProps) {
     if (peekId !== null && !agentsById.has(peekId)) setPeekId(null);
   }, [peekId, agentsById]);
 
+  // While expanded, the primary run's and the tasks' lines stay in the markup folded away: the narrowest container
+  // (SPEC §3.2, 360 px) shows them instead of the expanded body, and the expanded state survives for when it grows.
+  const fold = expanded ? "fold" : undefined;
   const lines: Line[] = [];
   for (const other of otherRuns) {
     lines.push({ id: other.itemId, node: <SwarmLine key={other.itemId} run={other} expanded={false} folded={expanded} onToggle={props.onToggle} onChip={onChip} /> });
   }
   if (run) {
-    lines.push({ id: run.itemId, node: <SwarmLine key={run.itemId} run={run} expanded={expanded} selected={props.selectedId === null || props.selectedId === run.itemId} onToggle={props.onToggle} onChip={onChip} /> });
+    lines.push({ id: run.itemId, node: <SwarmLine key={run.itemId} run={run} expanded={expanded} selected={props.selectedId === null || props.selectedId === run.itemId} className={fold} onToggle={props.onToggle} onChip={onChip} /> });
   }
   for (const task of [...tasks, ...subagents]) {
     lines.push({
@@ -283,12 +286,14 @@ export function SwarmCard(props: SwarmCardProps) {
           expanded={expanded}
           selected={props.selectedId === task.id || (props.selectedId === null && !run && lines.length === 0)}
           readOnly={readOnly}
+          className={fold}
           onToggle={props.onToggle}
           onStop={() => props.onAction(task.id, "stop")}
         />
       ),
     });
   }
+  const foldedLines = lines.filter((entry) => !otherRuns.some((other) => other.itemId === entry.id)).map((entry) => entry.node);
 
   const peekFor = (id: string): ReactNode => {
     const agent = peekId === id ? agentsById.get(id) : undefined;
@@ -360,23 +365,26 @@ export function SwarmCard(props: SwarmCardProps) {
     body = (
       <>
         {otherRuns.map((other) => lines.find((line) => line.id === other.itemId)?.node)}
-        <CompletionReport
-          run={run}
-          completion={props.completion}
-          expanded
-          sheen={props.sheen}
-          compact={props.compact}
-          onToggle={props.onToggle}
-          onOpenPanel={props.onOpenPanel}
-          onDismiss={props.onDismissReport}
-          onOpenTranscript={props.onOpenTranscript}
-        />
-        {tasks.length + subagents.length > 0 ? (
-          <div className="swarm-body pt-0">
-            {taskRows(subagents, "Subagents", false)}
-            {taskRows(tasks, "Background", false)}
-          </div>
-        ) : null}
+        <div className="swarm-expanded">
+          <CompletionReport
+            run={run}
+            completion={props.completion}
+            expanded
+            sheen={props.sheen}
+            compact={props.compact}
+            onToggle={props.onToggle}
+            onOpenPanel={props.onOpenPanel}
+            onDismiss={props.onDismissReport}
+            onOpenTranscript={props.onOpenTranscript}
+          />
+          {tasks.length + subagents.length > 0 ? (
+            <div className="swarm-body pt-0">
+              {taskRows(subagents, "Subagents", false)}
+              {taskRows(tasks, "Background", false)}
+            </div>
+          ) : null}
+        </div>
+        {foldedLines}
       </>
     );
   } else if (run) {
@@ -404,7 +412,7 @@ export function SwarmCard(props: SwarmCardProps) {
     body = (
       <>
         {otherRuns.map((other) => lines.find((line) => line.id === other.itemId)?.node)}
-        <div className="swarm-run" data-run={run.itemId}>
+        <div className="swarm-run swarm-expanded" data-run={run.itemId}>
           <div className="swarm-head">
             <button type="button" className="toggle" aria-expanded aria-controls={rowsId} data-swarm-focus="head" data-run={run.itemId} title={sub.text} onClick={props.onToggle}>
               <span className={cn("swarm-tile", stale && "mute")} aria-hidden="true">
@@ -462,9 +470,11 @@ export function SwarmCard(props: SwarmCardProps) {
                         readOnly={readOnly}
                         stale={stale}
                         clockAt={run.clockAt}
+                        confirm={confirming?.id === agent.id ? confirming.action : null}
                         onAction={props.onAction}
                         onInspect={props.onInspect}
                         onSelect={props.onSelect}
+                        onConfirm={onConfirm}
                       />
                       {peekFor(agent.id)}
                     </div>
@@ -494,15 +504,17 @@ export function SwarmCard(props: SwarmCardProps) {
             </div>
           </div>
         </div>
+        {foldedLines}
       </>
     );
   } else {
     body = (
       <>
-        <div className="swarm-body compact">
+        <div className="swarm-body compact swarm-expanded">
           {taskRows(subagents, "Subagents", tasks.length === 0)}
           {taskRows(tasks, "Background", true)}
         </div>
+        {foldedLines}
       </>
     );
   }

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { useNow } from "../../app/context.js";
-import { formatDuration } from "../../model/format.js";
 import { durationText, runLive, type RunVM, type SwarmVM } from "../../model/swarm.js";
 import { ClockCounterClockwiseIcon, GitForkIcon, SealCheckIcon, ShieldWarningIcon } from "../ui/icons.js";
 import { Tip } from "../ui/overlays.js";
@@ -72,7 +71,7 @@ export function SwarmStatus(props: SwarmStatusProps) {
       <span className="swarm-status">
         <Spinner size={12} className="text-accent-text" />
         <span className="@max-[420px]:hidden">Working</span>
-        {ms !== null ? <span className="t">{formatDuration(ms)}</span> : null}
+        {ms !== null ? <span className="t">{durationText(ms)}</span> : null}
       </span>
     );
   }
