@@ -1,6 +1,6 @@
 {
   "name": "@ancilla/server",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "description": "Ancilla local server: REST + SSE bridge between the shared UI and Muse MSP hosts",
   "main": "dist/src/index.js",
   "types": "dist/src/index.d.ts",

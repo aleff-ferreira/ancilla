@@ -10,12 +10,20 @@ on:
       - "packages/server/**"
       - ".github/workflows/linux-appimage.yml"
   push:
-    branches: [prod]
+    branches: [main]
     paths:
       - "apps/desktop/**"
       - "packages/server/**"
       - ".github/workflows/linux-appimage.yml"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes an unfinished run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   appimage:
