@@ -1,12 +1,30 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AncillaStore } from "@ancilla/daemon";
-import { DB_FILE, LEGACY_DB_FILE, envSetting, importLegacyDatabase, importLegacyRuntime, legacyDataDir } from "../src/legacy.js";
+import {
+  DB_FILE,
+  LEGACY_DB_FILE,
+  envSetting,
+  importLegacyDatabase,
+  importLegacyRuntime,
+  legacyDataDir,
+  publishSnapshot,
+} from "../src/legacy.js";
 import { AncillaServer } from "../src/server.js";
 
 function scratch(): string {
@@ -254,6 +272,25 @@ describe("Helicon database import", () => {
     }
   });
 
+  it("clears snapshots a killed import left behind, but not one still being written", () => {
+    const root = scratch();
+    const dataDir = join(root, "data");
+    seedHelicon(dataDir);
+    const stale = join(dataDir, ".ancilla.db.import-4242.tmp");
+    const live = join(dataDir, ".ancilla.db.import-4343.tmp");
+    writeFileSync(stale, "half a copy");
+    writeFileSync(live, "another Ancilla's copy in progress");
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(stale, old, old);
+    assert.equal(importLegacyDatabase(dataDir, root, () => undefined), true);
+    assertImported(dataDir);
+    assert.deepEqual(listing(dataDir), [".ancilla.db.import-4343.tmp", DB_FILE, LEGACY_DB_FILE]);
+    // Once that one stops changing, a later start clears it as well, although this data dir has started by now.
+    utimesSync(live, old, old);
+    assert.equal(importLegacyDatabase(dataDir, root, () => undefined), false);
+    assert.deepEqual(listing(dataDir), [DB_FILE, LEGACY_DB_FILE]);
+  });
+
   it("opens the server on Helicon's projects the first time the desktop app starts", async () => {
     const root = scratch();
     seedHelicon(join(root, "app.helicon.desktop"));
@@ -262,6 +299,71 @@ describe("Helicon database import", () => {
     const { value: server, stderr } = quietly(() => serverFor(dataDir, root));
     assert.match(stderr, /\[ancilla\] \S+ imported Helicon's data from .*app\.helicon\.desktop/);
     assert.deepEqual((await projectsOf(server)).map((p) => [p.cwd, p.pinned]), [["/work/app", true]]);
+  });
+});
+
+describe("putting the snapshot in place", () => {
+  function snapshotIn(root: string): { temp: string; target: string } {
+    const temp = join(root, ".ancilla.db.import-1.tmp");
+    writeFileSync(temp, "snapshot");
+    return { temp, target: join(root, DB_FILE) };
+  }
+
+  /** A rename that fails `times` times with `code`, as when a scanner holds the file, then goes through. */
+  function heldFor(code: string, times: number): { rename: (from: string, to: string) => void; calls: () => number } {
+    let calls = 0;
+    return {
+      rename: (from, to) => {
+        calls += 1;
+        if (calls <= times) {
+          throw Object.assign(new Error(`${code}: file in use`), { code });
+        }
+        renameSync(from, to);
+      },
+      calls: () => calls,
+    };
+  }
+
+  it("tries again on Windows while something holds the new file", () => {
+    const { temp, target } = snapshotIn(scratch());
+    const held = heldFor("EBUSY", 2);
+    publishSnapshot(temp, target, "win32", held.rename);
+    assert.equal(held.calls(), 3);
+    assert.equal(readFileSync(target, "utf8"), "snapshot");
+    assert.equal(existsSync(temp), false);
+  });
+
+  it("gives up after a few tries, and at once for other errors or on other systems", () => {
+    for (const [platform, code, calls] of [
+      ["win32", "EACCES", 5],
+      ["win32", "ENOENT", 1],
+      ["linux", "EPERM", 1],
+    ] as const) {
+      const { temp, target } = snapshotIn(scratch());
+      const held = heldFor(code, Number.POSITIVE_INFINITY);
+      assert.throws(() => publishSnapshot(temp, target, platform, held.rename), { code });
+      assert.equal(held.calls(), calls, `${platform} ${code}`);
+      assert.equal(existsSync(target), false);
+    }
+  });
+
+  it("never replaces an ancilla.db another Ancilla created in the meantime", () => {
+    const { temp, target } = snapshotIn(scratch());
+    writeFileSync(target, "another Ancilla's");
+    assert.throws(() => publishSnapshot(temp, target, "linux", renameSync), /was created while importing/);
+    assert.equal(readFileSync(target, "utf8"), "another Ancilla's");
+
+    // Nor one that shows up between two tries.
+    rmSync(target);
+    let calls = 0;
+    const raced = () => {
+      calls += 1;
+      writeFileSync(target, "another Ancilla's");
+      throw Object.assign(new Error("EPERM: file in use"), { code: "EPERM" });
+    };
+    assert.throws(() => publishSnapshot(temp, target, "win32", raced), /was created while importing/);
+    assert.equal(calls, 1);
+    assert.equal(readFileSync(target, "utf8"), "another Ancilla's");
   });
 });
 

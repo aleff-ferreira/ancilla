@@ -8,6 +8,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -30,6 +31,18 @@ const DESKTOP_DIR = "app.ancilla.desktop";
 const LEGACY_DESKTOP_DIR = "app.helicon.desktop";
 /** How long the snapshot waits on a write Helicon has in flight before giving up and starting fresh. */
 const BUSY_TIMEOUT_MS = 3000;
+/** The snapshot is built under this name beside `ancilla.db`, with the importing process's pid in the middle. */
+const COPY_PREFIX = `.${DB_FILE}.import-`;
+const COPY_SUFFIX = ".tmp";
+/** A snapshot nobody has written to for this long belongs to an import that was killed partway. */
+const STALE_COPY_MS = 60_000;
+/**
+ * Windows can refuse a rename for a moment while an antivirus scanner or the search indexer holds the new file. A few
+ * tries, 100 ms apart, stay far inside the desktop app's wait for the server.
+ */
+const RENAME_ATTEMPTS = 5;
+const RENAME_RETRY_MS = 100;
+const TRANSIENT_RENAME_ERRORS = new Set(["EPERM", "EBUSY", "EACCES"]);
 
 export type LegacyLog = (message: string) => void;
 
@@ -103,6 +116,67 @@ export function importLegacyRuntime(dataDir: string, home: string, log: LegacyLo
 }
 
 /**
+ * Removes the snapshots of imports that were killed partway (the desktop app stopped waiting, the user quit). It runs
+ * on every start, not only a first one, since a copy killed less than a minute before the next start is still there
+ * after that start's own import. A copy written to within the last minute may be another Ancilla's import in progress,
+ * so it is left alone.
+ */
+function removeStaleSnapshots(dataDir: string, now = Date.now()): void {
+  let names: string[];
+  try {
+    names = readdirSync(dataDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(COPY_PREFIX) || !name.endsWith(COPY_SUFFIX)) {
+      continue;
+    }
+    try {
+      const path = join(dataDir, name);
+      if (now - statSync(path).mtimeMs > STALE_COPY_MS) {
+        rmSync(path, { force: true });
+      }
+    } catch {
+      /* gone already, or still held; a later start tries again */
+    }
+  }
+}
+
+/** Blocks the thread for `ms`. The import runs before the server does anything else, so there is nothing to yield to. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Moves a finished snapshot into place as `ancilla.db`, unless one appeared while it was being made: another Ancilla
+ * starting at the same moment may already have that one open, and replacing it would lose its writes. On Windows a
+ * rename refused by a scanner holding the new file is tried again a few times.
+ */
+export function publishSnapshot(
+  temp: string,
+  target: string,
+  platform: NodeJS.Platform = process.platform,
+  rename: (from: string, to: string) => void = renameSync,
+): void {
+  for (let attempt = 1; ; attempt += 1) {
+    if (existsSync(target)) {
+      throw new Error(`${target} was created while importing`);
+    }
+    try {
+      rename(temp, target);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (platform !== "win32" || attempt >= RENAME_ATTEMPTS || !TRANSIENT_RENAME_ERRORS.has(code)) {
+        throw error;
+      }
+      pause(RENAME_RETRY_MS);
+    }
+  }
+}
+
+/**
  * Seeds a data dir that has no `ancilla.db` from Helicon's database. A read-only connection runs VACUUM INTO, which
  * copies one read transaction: a consistent snapshot even while Helicon is running, including anything committed to a
  * WAL, and Helicon's file is never opened for writing. (Helicon keeps SQLite's default rollback journal, which a
@@ -112,6 +186,9 @@ export function importLegacyRuntime(dataDir: string, home: string, log: LegacyLo
  * the store starts empty as on a fresh install.
  */
 export function importLegacyDatabase(dataDir: string, home: string, log: LegacyLog): boolean {
+  if (dataDir !== ":memory:") {
+    removeStaleSnapshots(dataDir);
+  }
   if (!unstarted(dataDir)) {
     return false;
   }
@@ -121,7 +198,7 @@ export function importLegacyDatabase(dataDir: string, home: string, log: LegacyL
   }
   const source = join(legacy, LEGACY_DB_FILE);
   const target = join(dataDir, DB_FILE);
-  const temp = join(dataDir, `.${DB_FILE}.import-${process.pid}.tmp`);
+  const temp = join(dataDir, `${COPY_PREFIX}${process.pid}${COPY_SUFFIX}`);
   let db: DatabaseSync | null = null;
   try {
     mkdirSync(dataDir, { recursive: true });
@@ -137,7 +214,7 @@ export function importLegacyDatabase(dataDir: string, home: string, log: LegacyL
     } finally {
       closeSync(fd);
     }
-    renameSync(temp, target);
+    publishSnapshot(temp, target);
     log(`imported Helicon's data from ${source}`);
     return true;
   } catch (error) {
@@ -151,7 +228,8 @@ export function importLegacyDatabase(dataDir: string, home: string, log: LegacyL
     } catch {
       /* nothing more to do; the store still starts */
     }
-    log(`could not import Helicon's data from ${source}, starting fresh: ${String(error)}`);
+    const next = existsSync(target) ? `keeping the ${DB_FILE} another Ancilla created meanwhile` : "starting fresh";
+    log(`could not import Helicon's data from ${source}, ${next}: ${String(error)}`);
     return false;
   }
 }

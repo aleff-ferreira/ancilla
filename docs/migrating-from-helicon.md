@@ -45,7 +45,9 @@ default is `http://127.0.0.1:3127`), Ancilla starts from Helicon's saved setting
 (theme, zoom and the rest) and composer drafts until it saves its own. Helicon's
 copies are only read. For a server started with `--token`, a `helicon_token`
 cookie the browser still holds for the same token is accepted as well; Ancilla
-itself only ever sets `ancilla_token`.
+itself only ever sets `ancilla_token`. The one exception is a server address and
+token saved with **Connect** (a remote or token-protected server): enter them
+once more in Ancilla. A page opened from the server's own address needs nothing.
 
 ## Where Ancilla looks
 
@@ -75,14 +77,19 @@ Windows Ancilla reads `%APPDATA%\app.helicon.desktop\helicon.db` and writes
 
 ## Running both
 
-The apps have separate data folders, ports and settings, so they can be open at
-the same time. They share threads through Muse, so avoid working in the same
-thread from both at once.
+The desktop apps have separate data folders, ports and settings, so they can be
+open at the same time. In web mode both servers default to `127.0.0.1:3127`, so
+start one of them on another port, for example `ancilla-server --port 3128`.
+The browser keeps settings and drafts per address, so they carry over only when
+Ancilla is opened at the address Helicon used. Both apps share threads through
+Muse, so avoid working in the same thread from both at once.
 
-The first start is safe while Helicon is running: the copy is a consistent
-SQLite snapshot taken through a read-only connection, and includes anything
-Helicon has already committed. If Helicon is in the middle of a write, Ancilla
-waits up to three seconds for it.
+For a clean handover, close Helicon before starting Ancilla the first time. The
+copy is a consistent SQLite snapshot taken through a read-only connection, so it
+never damages Helicon's database and includes everything Helicon has committed.
+If Helicon is open, though, a write it makes in the fraction of a second the copy
+takes may fail once, and if it is in the middle of a write, Ancilla waits up to
+three seconds for it.
 
 ## Checking the import
 
@@ -92,12 +99,18 @@ The server writes one line to its log when it imports, naming the file it read:
 [ancilla] 2026-09-26T12:00:00.000Z imported Helicon's data from C:\Users\you\AppData\Roaming\app.helicon.desktop\helicon.db
 ```
 
-If Helicon's database cannot be read (damaged, or locked for longer than three
-seconds), the log says `could not import Helicon's data ..., starting fresh` and
-Ancilla starts with an empty database instead of failing. For the desktop app
-the log is `server.log` in its log folder: `%LOCALAPPDATA%\app.ancilla.desktop\logs`
-on Windows, `~/Library/Logs/app.ancilla.desktop` on macOS. The web server logs to
-its stderr.
+If Helicon's database cannot be read (damaged, locked for longer than three
+seconds, or left mid-write by a Helicon that crashed), the log says
+`could not import Helicon's data ..., starting fresh` and Ancilla starts with an
+empty database instead of failing. It does not try again by itself. Open and
+close Helicon once, which lets it finish or roll back an interrupted write, then
+follow [Importing again](#importing-again).
+
+For the desktop app the log is `server.log` in its log folder:
+`%LOCALAPPDATA%\app.ancilla.desktop\logs` on Windows,
+`~/Library/Logs/app.ancilla.desktop` on macOS, and
+`~/.local/share/app.ancilla.desktop/logs` (or under `$XDG_DATA_HOME`) on Linux.
+The web server logs to its stderr.
 
 ## Importing again
 
