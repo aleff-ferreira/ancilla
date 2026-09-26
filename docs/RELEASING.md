@@ -89,7 +89,7 @@ Afterwards, check that the release page has all three installers and `latest.jso
 
 ## Replacing the signing key
 
-Only while you still have the old key; without it, see the warning above.
+Only while you still have the old key; without it, see the warning above. Before the first release there is nothing to keep: make a new key, put its public half in `tauri.conf.json` and set the secret, and installs made from then on trust it.
 
 1. Make a new key: `npx tauri signer generate -w ~/.tauri/ancilla-updater-2.key`.
 2. Put the new public key (the contents of `ancilla-updater-2.key.pub`) in `tauri.conf.json` as `plugins.updater.pubkey`, and release that version with the old key still in the secret. Installed copies check an update against the key they already have, so they accept this one, and from then on trust only the new key. For this one release the key and the configured public key differ on purpose, so the Windows job's key check warns that the signing key is not the configured one, and the build log has tauri's own warning that the updater secret key does not match `plugins > updater > pubkey`. Both are expected here.

@@ -13,6 +13,7 @@ import {
   type ActivityDrawerProps,
 } from "../src/components/swarm/ActivityDrawer.js";
 import { activityKey, itemElapsed, splitProgress, stopQuestion, stoppable } from "../src/components/swarm/ActivityItem.js";
+import { MOD } from "../src/components/ui/primitives.js";
 import type { ActivityItemVM, ActivityVM } from "../src/model/swarm.js";
 import { APPROVAL_COMMAND, NOW, RUN_NAME, TASK_COMMAND, appState, approvalEvents, fold, runEvents, session, taskEvents, thread } from "./swarm-fixtures.js";
 
@@ -62,7 +63,8 @@ describe("ActivityDrawer", () => {
     assert.match(markup, /role="dialog"/);
     assert.match(markup, /aria-modal="true"/);
     assert.match(markup, /aria-label="Activity"/);
-    assert.match(markup, /<h2[^>]*>.*Activity.*<kbd[^>]*>Ctrl<\/kbd><kbd[^>]*>Shift<\/kbd><kbd[^>]*>A<\/kbd>/);
+    // MOD reads the platform, and Node reports a Mac as one, so a macOS runner renders Cmd here.
+    assert.match(markup, new RegExp(`<h2[^>]*>.*Activity.*<kbd[^>]*>${MOD}</kbd><kbd[^>]*>Shift</kbd><kbd[^>]*>A</kbd>`));
     assert.match(markup, /aria-label="Close"/);
     assert.equal(render({ open: false }), "");
   });
