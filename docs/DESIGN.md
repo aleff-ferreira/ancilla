@@ -1,12 +1,12 @@
 # Design
 
-The visual system behind Helicon's web and desktop UI. Strategy and audience live in [PRODUCT.md](PRODUCT.md); this file is the how.
+The visual system behind Ancilla's web and desktop UI, inherited from Helicon. Strategy and audience live in [PRODUCT.md](PRODUCT.md); this file is the how.
 
 ## Visual theme
 
-A calm agent workbench in the lineage of Codex, Claude desktop and T3 Code: a recessed sidebar, a centered transcript column, and a composer docked at the bottom. Neutral surfaces carry almost everything; one blue, taken from the app icon, marks action, live state and focus. Light and dark are both first class and follow the system by default.
+A calm agent workbench in the lineage of Codex, Claude desktop and T3 Code: a recessed sidebar, a centered transcript column, and a composer docked at the bottom. Neutral surfaces carry almost everything; one blue accent marks action, live state and focus. Light and dark are both first class and follow the system by default.
 
-Physical scene: a developer at a desk in the evening, editor and terminal open beside Helicon, glancing at the sidebar to see which agent threads need them before diving into one.
+Physical scene: a developer at a desk in the evening, editor and terminal open beside Ancilla, glancing at the sidebar to see which agent threads need them before diving into one.
 
 ## Color
 
@@ -37,7 +37,7 @@ Status is never color alone: every status glyph has a text label next to it or i
 | --- | --- | --- |
 | Interface | Inter Variable | Everything functional: sidebar, transcript, controls |
 | Code | JetBrains Mono Variable | Commands, paths, diffs, output |
-| Display | Newsreader Variable | Only first-run and empty-state headings (a nod to Helicon, home of the Muses) |
+| Display | Newsreader Variable | Only first-run and empty-state headings (kept from Helicon, where it was a nod to the home of the Muses) |
 
 Fixed rem scale, ratio about 1.1 to 1.2: 11, 12, 13, 14, 15, 17, 20, 26, 34 px. Agent prose is 15 px at 1.65 line height inside a 728 px column. Changing numbers use `tabular-nums`. Fonts are bundled, so the desktop app renders identically offline.
 
@@ -56,6 +56,8 @@ Fixed rem scale, ratio about 1.1 to 1.2: 11, 12, 13, 14, 15, 17, 20, 26, 34 px. 
 - **Work-log rows**: icon, verb, and a chip holding the command or path; hovering swaps the icon for a chevron and the row expands to output, diffs or arguments.
 - **Request panels**: approvals and questions sit directly above the composer with a warm ring, keyboard shortcuts (1 to 9), and plain-language titles ("Muse wants to run a shell command").
 - **Composer**: model, reasoning effort and permission pickers, a context-window ring, and a single send button that morphs into stop while a turn runs. Enter queues a follow-up while Muse works; Ctrl/Cmd+Enter steers the running turn.
+- **Agents panel**: a collapsible strip under the thread title with a count and a one-line summary (working, waiting, completed, failed, stopped, unknown). Expanded, it shows one card per subagent or workflow agent, working ones first, two columns once the thread is wide enough; finished agents fold behind a "Show N finished agents" control. When the view is stale, the strip reads "Last known activity", working cards read "Was working", and the spinner and accent stop.
+- **Saved-progress notice**: when the live feed is unavailable, a sunken panel above the composer says "Syncing saved progress" with "Last checked" and "Progress updated" times and a Reload results button. It uses the neutral history icon, not the warning color, because nothing is wrong with the work itself.
 
 ## Motion
 

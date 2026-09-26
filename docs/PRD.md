@@ -1,6 +1,8 @@
-# PRD: Helicon v1 - Desktop + Web ADE for Muse Code CLI
+# PRD: Ancilla - Desktop + Web ADE for Muse Code CLI
 
-> Status: draft · Scope: desktop + web together · Daemon: local-first, self-hosted remote supported · Approvals: configurable · Tests: deep modules
+> Status: living · Scope: desktop + web together · Daemon: local-first, self-hosted remote supported · Approvals: configurable · Tests: deep modules
+
+> Origin: Ancilla is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon), and this document began as Helicon's v1 PRD, written by the Helicon authors before Muse Code for Windows shipped natively. The requirements below still describe the product; the stories Ancilla added are under [Reliability and agent visibility](#reliability-and-agent-visibility-added-in-ancilla).
 
 ## Problem Statement
 
@@ -8,7 +10,7 @@ Muse Code is a terminal-only agent (`muse`, macOS/Linux, WSL2 on Windows). Devel
 
 ## Solution
 
-Helicon: a sidebar-first desktop app (Tauri 2, Win/Mac/Linux) and web app sharing one React UI and one daemon design. The daemon spawns one `muse serve` host per workspace over the Muse Session Protocol (MSP) via the official MIT `@muse-code/sdk`. Users see projects grouped by working directory (including isolated worktrees), each with its sessions/tasks, resumable - including sessions started from the `muse` TUI. Windows routes through WSL2 with path translation. Auth stays the user's own `muse login`; Helicon never stores credentials and never bypasses approvals or billing.
+Ancilla: a sidebar-first desktop app (Tauri 2, Win/Mac/Linux) and web app sharing one React UI and one daemon design. The daemon spawns one `muse serve` host per workspace over the Muse Session Protocol (MSP) via the official MIT `@muse-code/sdk`. Users see projects grouped by working directory (including isolated worktrees), each with its sessions/tasks, resumable - including sessions started from the `muse` TUI. On Windows, Muse Code for Windows runs natively, or Muse inside WSL2 runs with path translation. Auth stays the user's own `muse login`; Ancilla never stores credentials and never bypasses approvals or billing.
 
 ## User Stories
 
@@ -55,7 +57,7 @@ Helicon: a sidebar-first desktop app (Tauri 2, Win/Mac/Linux) and web app sharin
 
 ### Windows / cross-platform
 
-27. As a Windows developer, I want Helicon to detect missing WSL2/Ubuntu and guide setup, so that I am not stuck on install.
+27. As a Windows developer, I want Ancilla to detect missing WSL2/Ubuntu and guide setup, so that I am not stuck on install.
 28. As a Windows developer, I want `muse serve` to run inside WSL2 transparently with path translation, so that the app feels native.
 29. As a macOS/Linux developer, I want the CLI auto-detected on PATH and common install locations, so that onboarding is one login.
 
@@ -68,7 +70,16 @@ Helicon: a sidebar-first desktop app (Tauri 2, Win/Mac/Linux) and web app sharin
 ### Auth & onboarding
 
 33. As a new user, I want a checklist (CLI found → logged in → folder opened → first prompt), so that I succeed in under 10 minutes.
-34. As a user, I want sign-in to happen via the official `muse login` flow only, so that Helicon never sees my credentials.
+34. As a user, I want sign-in to happen via the official `muse login` flow only, so that Ancilla never sees my credentials.
+
+### Reliability and agent visibility (added in Ancilla)
+
+35. As a developer, I want a thread whose live feed stalls to keep showing the progress Muse has saved, so that I can follow a long run without restarting anything.
+36. As a developer, I want recovery never to resend my prompt, resume a running turn, or restart delegation, so that stalled updates never cost duplicate work.
+37. As a developer, I want a thread to tell me when it is showing saved rather than live progress, and when it last checked, so that I know how current the view is.
+38. As a developer, I want to see the native subagents and workflow children of each thread, with their status, so that I know what my agents are doing without reading the whole transcript.
+39. As a developer, I want a prompt I sent with attachments to appear once, so that I am never unsure whether it was sent twice.
+40. As a developer, I want to keep thread titles local when Muse's own rename breaks later workflows, so that naming a thread never breaks a workflow.
 
 ## Implementation Decisions
 
@@ -100,8 +111,8 @@ Helicon: a sidebar-first desktop app (Tauri 2, Win/Mac/Linux) and web app sharin
 
 ## Further Notes
 
-- Name `Helicon` avoids the `Muse` mark. Keep the "Not affiliated with Meta" note in README and docs; app UI stays unbranded. Attorney review still pending before first public launch.
-- Repo default branch is `prod`; either keep or migrate to `main` before first tag.
+- Name `Ancilla` avoids the `Muse` mark, and does not reuse the Helicon name or logo. Keep the "Not affiliated with Meta" note in README and docs, and the Helicon credit in README and NOTICE.md; app UI stays unbranded.
+- Repo default branch is `main`.
 - Revisit `allow-all` posture and remote-daemon hardening at a security review before any release.
 - Releases: every release gets a git tag plus a GitHub Release with downloadable desktop binaries. Windows is the primary target, with macOS and Linux supported from day one.
 - Versioning: semver. Merged PRs with considerable work bump at least the patch version, never major for routine work.

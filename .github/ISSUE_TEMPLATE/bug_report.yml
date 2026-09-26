@@ -1,0 +1,82 @@
+name: Bug report
+description: Something in Ancilla does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please search the existing issues first.
+        Security problems go through [private vulnerability reporting](https://github.com/aleff-ferreira/ancilla/security/advisories/new), not here.
+        Leave out tokens, `auth.json` contents and private paths or logs; redact anything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Screenshots help.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a thread in ...
+        2. Send ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: ancilla-version
+    attributes:
+      label: Ancilla version
+      description: Shown in Settings.
+      placeholder: "0.18.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: App
+      options:
+        - Desktop app
+        - Web app (local server)
+        - Web app (remote server)
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: OS version
+      placeholder: "Windows 11 24H2, macOS 15.5, Ubuntu 24.04, ..."
+  - type: dropdown
+    id: muse-runtime
+    attributes:
+      label: Where Muse runs (Windows only)
+      options:
+        - Not on Windows
+        - Native Muse for Windows
+        - Muse inside WSL2
+        - Not sure
+  - type: input
+    id: muse-version
+    attributes:
+      label: Muse CLI version
+      description: Output of `muse --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from the server log or the browser console, redacted.
+      render: text

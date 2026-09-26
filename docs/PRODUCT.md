@@ -6,11 +6,11 @@ product
 
 ## Users
 
-Developers who run Meta's Muse Code CLI and want a Codex, Claude desktop or T3 Code style surface for it. They usually have several agent threads going at once across a handful of repositories, often on Windows through WSL2, and they keep an editor and a terminal open alongside. They glance at Helicon to see which threads need them, then go deep into one thread to read what the agent did, approve a command, answer a question, or steer the next step.
+Developers who run Meta's Muse Code CLI and want a Codex, Claude desktop or T3 Code style surface for it. They usually have several agent threads going at once across a handful of repositories, often on Windows, natively or through WSL2, and they keep an editor and a terminal open alongside. They glance at Ancilla to see which threads need them, then go deep into one thread to read what the agent did, approve a command, answer a question, or steer the next step.
 
 ## Product Purpose
 
-Helicon is a desktop and web client for `muse serve`. It groups every thread by the project it ran in, shows which threads are working, waiting on the user, finished or failed, and lets the user resume any session, including ones started from the terminal TUI. Success means the user never has to open the TUI to find, read, approve, or continue agent work, and never loses track of a thread that is waiting on them.
+Ancilla is a desktop and web client for `muse serve`, forked from Helicon. It groups every thread by the project it ran in, shows which threads are working, waiting on the user, finished or failed, shows the subagents each thread has delegated to, and lets the user resume any session, including ones started from the terminal TUI. Success means the user never has to open the TUI to find, read, approve, or continue agent work, never loses track of a thread that is waiting on them, and never loses sight of a run because Muse's live feed went quiet.
 
 ## Brand Personality
 
@@ -26,7 +26,7 @@ Quiet, exact, trustworthy. The interface should feel like a well-made tool that 
 
 ## Design Principles
 
-1. **Status first.** Whether a thread is working, waiting on you, done, or failed is visible from the sidebar without opening it.
+1. **Status first.** Whether a thread is working, waiting on you, done, or failed is visible from the sidebar without opening it. When status comes from saved progress rather than the live feed, the thread says so.
 2. **Show the work.** Commands, file edits, reasoning and results are legible and inspectable, never summarized away.
 3. **Consent is explicit.** Approvals and questions from the agent are impossible to miss and quick to answer; nothing is auto-approved.
 4. **Earned familiarity.** Follow the conventions of Codex, Claude desktop and T3 Code so the app feels known on first use; spend novelty only where it helps.
