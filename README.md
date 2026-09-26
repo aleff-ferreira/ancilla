@@ -60,8 +60,11 @@ panel for native subagents and workflows, and fixes for Windows and WSL; see [NO
 - **Local thread titles.** An opt-in `runtime.json` option keeps titles in Ancilla's database instead of sending them to
   Muse, which works around a Muse 1.4.0 bug that breaks a later workflow's event log.
   [Configuration](docs/muse-recovery.md#local-thread-titles)
-- **Windows and WSL fixes:** projects opened from `\\wsl.localhost\<distro>\...`, in-app login when Muse runs in WSL, and
-  a per-machine `runtime.json` that pins the runtime and forwards environment variables into WSL.
+- **Windows and WSL fixes:** projects opened from `\\wsl.localhost\<distro>\...`, an existing `muse login` recognised
+  on Windows and in WSL, and a per-machine `runtime.json` that pins the runtime, the distro and the `muse` path and
+  forwards environment variables into WSL (for example a file-based credential store).
+
+![The Agents panel: a native Muse workflow with agents working, waiting and finished, above the workflow card](docs/assets/agents.png)
 
 ![Starting a thread: recent work per project above the composer](docs/assets/home.png)
 
