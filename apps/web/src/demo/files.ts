@@ -40,7 +40,9 @@ npm test
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "docs:build": "typedoc --out docs/api-ref src"
   }
 }
 `,

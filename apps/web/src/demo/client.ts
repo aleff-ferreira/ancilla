@@ -3,7 +3,7 @@
  * back what `muse serve` would stream, so the real Ancilla UI renders and responds exactly as it does
  * against a live server. Nothing leaves the browser: no server, no Muse, no model calls.
  */
-import { parseModelList } from "@ancilla/ui";
+import { AncillaError, parseModelList } from "@ancilla/ui";
 import type {
   AccountView,
   AncillaClient,
@@ -30,6 +30,7 @@ import type {
   SessionSummary,
   ShellRun,
   SkillCatalog,
+  TaskAction,
   TitleSettings,
   TranscriptLoad,
   TurnOptions,
@@ -42,13 +43,34 @@ import type {
 } from "@ancilla/ui";
 import { DemoFiles } from "./files.js";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
-import { AUDIT_SUMMARY, HOME, PROJECTS, SIDE_ACCOUNT, auditItem, seed, type AuditRun } from "./seed.js";
+import {
+  HOME,
+  PROJECTS,
+  SIDE_ACCOUNT,
+  THREADS,
+  auditItem,
+  childIdFor,
+  childrenAt,
+  seed,
+  tokensOf,
+  type AuditAttempt,
+  type AuditChild,
+  type AuditRun,
+  type ChildCache,
+  type Scenario,
+  type TaskStream,
+} from "./seed.js";
 
 /** What Settings shows as the Ancilla version; the demo has no server to ask. */
-const DEMO_VERSION = "0.17.1";
+const DEMO_VERSION = "0.18.0";
 
-/** How often the running workflow reports new activity, which also keeps the stall watchdog quiet. */
+/** How often the running workflow re-sends its item, which keeps the stall watchdog quiet and the clocks moving. */
 const HEARTBEAT_MS = 6_000;
+/** A background task prints its next line every this many beats. */
+const OUTPUT_EVERY_BEATS = 3;
+
+/** Tokens an agent reports when the demo lets it finish, by label; the design's figures where it has them. */
+const FINISH_TOKENS: Record<string, number> = { "judge:compat": 96_000, "report:release-notes": 41_000 };
 
 const REPLY =
   "This is Ancilla's demo mode: the real interface running on sample data, so nothing ran and no model was called. " +
@@ -62,6 +84,7 @@ interface Thread {
   seq: number;
   approvals: ApprovalRequest[];
   timers: Set<Timer>;
+  truncated: boolean;
 }
 
 function idle(lastTerminal: string | null = "completed"): LiveView {
@@ -72,12 +95,25 @@ function basename(path: string): string {
   return path.replace(/\/+$/, "").split("/").pop() || path;
 }
 
+/** The attempt an agent is on. */
+function current(child: AuditChild): AuditAttempt | undefined {
+  return child.attempts[child.attempts.length - 1];
+}
+
 export class DemoAncillaClient implements AncillaClient {
   private readonly now = Date.now();
   private readonly handlers = new Set<EventHandler>();
   private readonly threads = new Map<string, Thread>();
   private readonly files = new DemoFiles(this.now);
-  private readonly audit: AuditRun;
+  private readonly audit: AuditRun | null;
+  /** The last entry each agent got, so an unchanged agent keeps its object from one revision to the next. */
+  private readonly auditCache: ChildCache = new Map();
+  /** The heartbeat's own last revision in history, which the next one replaces. */
+  private auditBeat: ViewEvent | null = null;
+  private streams: TaskStream[];
+  private beats = 0;
+  /** Muse's live view is unavailable: nothing streams, and history still fills in. */
+  private outage = false;
   private projects: ProjectView[];
   private accounts: AccountView[];
   private titleSettings: TitleSettings = { enabled: true, modelId: null };
@@ -88,12 +124,17 @@ export class DemoAncillaClient implements AncillaClient {
   private listed: (() => void)[] = [];
   private hasListed = false;
 
-  constructor() {
-    const seeded = seed(this.now);
+  constructor(readonly scenario: Scenario = "running") {
+    const seeded = seed(this.now, scenario);
     for (const entry of seeded.threads) {
-      this.threads.set(entry.summary.sessionId, { ...entry, timers: new Set() });
+      this.threads.set(entry.summary.sessionId, { ...entry, timers: new Set(), truncated: entry.truncated === true });
     }
     this.audit = seeded.audit;
+    if (this.audit) {
+      // What the history already said of every agent, so the first live revision repeats no label or usage.
+      childrenAt(this.audit, this.audit.revisedAt, Number.NEGATIVE_INFINITY, this.auditCache);
+    }
+    this.streams = seeded.streams;
     this.projects = [
       { cwd: PROJECTS.atlas, displayName: "atlas-api", pinned: true, activityAt: iso(this.now), defaultAccountId: null },
       { cwd: PROJECTS.lumen, displayName: "lumen-web", pinned: false, activityAt: iso(this.now), defaultAccountId: null },
@@ -103,6 +144,9 @@ export class DemoAncillaClient implements AncillaClient {
       { id: SIDE_ACCOUNT, name: "Side projects", hasLogin: true, email: "demo@example.com", lastUsedAt: iso(this.now - 3 * HOUR) },
       { id: "client", name: "Client work", hasLogin: false, email: null, lastUsedAt: null },
     ];
+    if (scenario === "reconnect") {
+      void this.whenListed().then(() => this.startOutage());
+    }
   }
 
   /** Resolves once the app has listed its threads, which is when the demo can open overlays on top. */
@@ -136,7 +180,9 @@ export class DemoAncillaClient implements AncillaClient {
     }
     const event = this.event(thread, method, params);
     thread.events.push(event);
-    this.send(thread, event);
+    if (!this.outage) {
+      this.send(thread, event);
+    }
   }
 
   private setLive(sessionId: string, live: LiveView): void {
@@ -168,6 +214,7 @@ export class DemoAncillaClient implements AncillaClient {
     thread?.timers.clear();
   }
 
+  /** The newest revision of an item in a thread's history. */
   private findItem(thread: Thread, itemId: string): MspItem | null {
     for (let i = thread.events.length - 1; i >= 0; i--) {
       const item = thread.events[i]?.params["item"] as MspItem | undefined;
@@ -178,39 +225,145 @@ export class DemoAncillaClient implements AncillaClient {
     return null;
   }
 
+  /** A tool call's output so far: its newest revision's, plus every delta streamed since. */
+  private currentOutput(thread: Thread, itemId: string): string {
+    let output = "";
+    for (const event of thread.events) {
+      const item = event.params["item"] as MspItem | undefined;
+      if (item?.itemId === itemId) {
+        output = item.visibleOutput ?? output;
+      } else if (event.method === "item/delta" && event.params["itemId"] === itemId && event.params["field"] === "output") {
+        output += typeof event.params["delta"] === "string" ? event.params["delta"] : "";
+      }
+    }
+    return output;
+  }
+
+  /** Every background task still running in a thread, at its newest revision. */
+  private runningTasks(thread: Thread): MspItem[] {
+    const latest = new Map<string, MspItem>();
+    for (const event of thread.events) {
+      const item = event.params["item"] as MspItem | undefined;
+      if (item) {
+        latest.set(item.itemId, item);
+      }
+    }
+    return [...latest.values()].filter((item) => item.kind === "toolCall" && item.background === true && item.status === "inProgress");
+  }
+
   /**
-   * The workflow's new revision replaces its last one in history rather than piling up behind it, so
-   * a page left open for an hour reloads the same size it started.
+   * Sends the workflow's next revision. A transition is kept in history for good; a heartbeat, which
+   * changes nothing, replaces the heartbeat before it, so a page left open for an hour reloads the size
+   * it started. During an outage the revision reaches history alone, the way saved progress does.
    */
-  private reviseAudit(): void {
-    const thread = this.threads.get(this.audit.sessionId);
+  private reviseAudit(heartbeat = false): void {
+    const run = this.audit;
+    const thread = run ? this.threads.get(run.sessionId) : undefined;
+    if (!run || !thread) {
+      return;
+    }
+    const at = Date.now();
+    run.revision += 1;
+    const event = this.event(thread, "item/updated", { item: auditItem(run, at, run.revisedAt, run.revision, this.auditCache) });
+    run.revisedAt = at;
+    if (this.auditBeat) {
+      const index = thread.events.indexOf(this.auditBeat);
+      if (index >= 0) {
+        thread.events.splice(index, 1);
+      }
+    }
+    this.auditBeat = heartbeat ? event : null;
+    thread.events.push(event);
+    if (!this.outage) {
+      this.send(thread, event);
+    }
+  }
+
+  /** Nothing an agent does between lifecycle points reaches the wire, so a beat only re-sends the item; the tasks print. */
+  private beat(): void {
+    if (this.outage) {
+      return;
+    }
+    this.beats += 1;
+    if (this.audit?.status === "inProgress") {
+      this.reviseAudit(true);
+    }
+    if (this.beats % OUTPUT_EVERY_BEATS === 0) {
+      this.streamTasks();
+    }
+  }
+
+  /** Each running task prints its next line; one waiting on a request stays quiet; one with nothing left finishes. */
+  private streamTasks(): void {
+    for (const stream of [...this.streams]) {
+      const thread = this.threads.get(stream.sessionId);
+      const item = thread ? this.findItem(thread, stream.itemId) : null;
+      if (!thread || !item || item.status !== "inProgress") {
+        this.streams = this.streams.filter((candidate) => candidate !== stream);
+        continue;
+      }
+      if (thread.approvals.some((request) => request.itemId === stream.itemId)) {
+        continue;
+      }
+      const line = stream.lines.shift();
+      if (line === undefined) {
+        this.endTask(thread, item, { status: "completed" });
+        continue;
+      }
+      this.emit(stream.sessionId, "item/delta", { itemId: stream.itemId, field: "output", delta: line, turnId: item.turnId });
+    }
+  }
+
+  private endTask(thread: Thread, item: MspItem, patch: Partial<MspItem>): void {
+    this.streams = this.streams.filter((stream) => stream.itemId !== item.itemId);
+    this.emit(thread.summary.sessionId, "item/completed", {
+      item: { ...item, revision: item.revision + 1, visibleOutput: this.currentOutput(thread, item.itemId), recordedAt: iso(Date.now()), ...patch },
+    });
+  }
+
+  /** Muse's view of the audit thread goes away for twelve seconds; the run lands an agent meanwhile. */
+  private startOutage(): void {
+    const run = this.audit;
+    if (!run) {
+      return;
+    }
+    const sessionId = run.sessionId;
+    this.later(sessionId, () => {
+      this.outage = true;
+      this.viewHealth(sessionId, { status: "unavailable", reason: "projectionUnavailable" });
+    }, 4_000);
+    this.later(sessionId, () => {
+      // The severity judge landed while nothing streamed: the revision reaches the saved history, which a
+      // read of saved progress picks up, and the next live revision after recovery carries it too.
+      const severity = run.children.find((child) => child.label === "judge:severity");
+      const attempt = severity ? current(severity) : undefined;
+      if (attempt && attempt.endedAt === undefined) {
+        const at = Date.now();
+        attempt.startedAt ??= at;
+        if (attempt.usageAt === undefined) {
+          attempt.usageAt = at;
+          attempt.usage = tokensOf(148_000);
+        }
+        attempt.endedAt = at;
+        attempt.terminal = "completed";
+        attempt.durationMs = at - attempt.startedAt;
+        this.reviseAudit();
+      }
+    }, 8_000);
+    this.later(sessionId, () => {
+      this.outage = false;
+      this.viewHealth(sessionId, null);
+    }, 16_000);
+  }
+
+  private viewHealth(sessionId: string, health: { status: "unavailable"; reason: string } | null): void {
+    const thread = this.threads.get(sessionId);
     if (!thread) {
       return;
     }
-    this.audit.revision += 1;
-    const event = this.event(thread, "item/updated", { item: auditItem(this.audit, Date.now()) });
-    let index = -1;
-    for (let i = thread.events.length - 1; i >= 0; i--) {
-      if ((thread.events[i]?.params["item"] as MspItem | undefined)?.itemId === this.audit.itemId) {
-        index = i;
-        break;
-      }
-    }
-    if (index > 0 && thread.events[index]?.method === "item/updated") {
-      thread.events[index] = event;
-    } else {
-      thread.events.push(event);
-    }
-    this.send(thread, event);
-  }
-
-  /** The working agents move on to their next step now and then; the counts stay where they are. */
-  private beat(): void {
-    if (this.audit.status !== "inProgress") {
-      return;
-    }
-    this.audit.tick += 1;
-    this.reviseAudit();
+    const params: Record<string, unknown> = health ? { sessionId, health: "unavailable", noneReason: health.reason } : { sessionId, health: "healthy" };
+    this.broadcast({ type: "msp", sessionId, method: "session/viewHealthChanged", params, at: Date.now() });
+    this.setLive(sessionId, { ...(thread.summary.live ?? idle(null)), viewHealth: health });
   }
 
   dispose(): void {
@@ -346,7 +499,7 @@ export class DemoAncillaClient implements AncillaClient {
       accountId: options?.accountId ?? null,
       live: idle(null),
     };
-    this.threads.set(sessionId, { summary, events: script.events, seq: script.seq, approvals: [], timers: new Set() });
+    this.threads.set(sessionId, { summary, events: script.events, seq: script.seq, approvals: [], timers: new Set(), truncated: false });
     this.broadcast({ type: "sessions-changed" });
     return summary;
   }
@@ -357,6 +510,7 @@ export class DemoAncillaClient implements AncillaClient {
       throw Object.assign(new Error("That thread is not in the demo."), { status: 404 });
     }
     const live = thread.summary.live;
+    const unavailable = this.outage && sessionId === this.audit?.sessionId;
     return {
       session: thread.summary,
       msp: {
@@ -368,13 +522,14 @@ export class DemoAncillaClient implements AncillaClient {
         turnCount: thread.summary.turnCount,
       },
       events: [...thread.events],
-      truncated: false,
+      truncated: thread.truncated,
       attachments: [],
       shellRuns: [],
       pending: { approvals: [...thread.approvals], userInputs: [] },
       pendingComplete: true,
       readOnly: false,
       readOnlyReason: null,
+      viewHealth: unavailable ? { status: "unavailable", reason: "projectionUnavailable" } : null,
     };
   }
 
@@ -426,7 +581,7 @@ export class DemoAncillaClient implements AncillaClient {
       unsettledAt: null,
       live: idle(),
     };
-    this.threads.set(forkId, { summary, events, seq: source.seq, approvals: [], timers: new Set() });
+    this.threads.set(forkId, { summary, events, seq: source.seq, approvals: [], timers: new Set(), truncated: false });
     this.broadcast({ type: "sessions-changed" });
     return summary;
   }
@@ -526,13 +681,13 @@ export class DemoAncillaClient implements AncillaClient {
       return;
     }
     this.cancelTimers(sessionId);
-    if (sessionId === this.audit.sessionId && this.audit.status === "inProgress") {
+    if (this.audit && sessionId === this.audit.sessionId && this.audit.status === "inProgress") {
       this.stopAudit();
     }
     for (const request of thread.approvals.splice(0)) {
       this.emit(sessionId, "approval/resolved", { approvalId: request.approvalId, decision: "cancelled", resolvedBy: "system" });
       const item = request.itemId ? this.findItem(thread, request.itemId) : null;
-      if (item) {
+      if (item && item.background !== true) {
         this.emit(sessionId, "item/completed", { item: { ...item, status: "cancelled", revision: item.revision + 1, recordedAt: iso(Date.now()) } });
       }
     }
@@ -555,13 +710,46 @@ export class DemoAncillaClient implements AncillaClient {
     const approved = choice?.decision === "approved";
     const turnId = request.turnId ?? thread.summary.live?.activeTurnId ?? null;
     this.emit(input.sessionId, "approval/resolved", { approvalId: request.approvalId, decision: approved ? "approved" : "denied", resolvedBy: "user" });
-    this.setLive(input.sessionId, { ...idle(null), activeTurnId: turnId, turnStartedAt: thread.summary.live?.turnStartedAt ?? iso(Date.now()) });
+    this.setLive(input.sessionId, {
+      ...(thread.summary.live ?? idle(null)),
+      activeTurnId: turnId,
+      turnStartedAt: thread.summary.live?.turnStartedAt ?? iso(Date.now()),
+      pendingApprovals: thread.approvals.length,
+    });
+    this.settleApproval(thread, request, approved, turnId);
+  }
+
+  /** What follows a decision: the command runs or is refused, and the thread that was only waiting on it ends its turn. */
+  private settleApproval(thread: Thread, request: ApprovalRequest, approved: boolean, turnId: string | null): void {
+    const sessionId = thread.summary.sessionId;
     const item = request.itemId ? this.findItem(thread, request.itemId) : null;
-    this.later(input.sessionId, () => {
-      if (!item) {
-        return;
+    if (!item) {
+      return;
+    }
+    if (item.background === true) {
+      // A background task's own request: allowed, it carries on printing; refused, it ends there.
+      if (!approved) {
+        this.later(sessionId, () => this.endTask(thread, item, { status: "failed", failureKind: "permission_denied", failureReason: `Network access to ${request.subject.host ?? "the host"} was refused.` }), 600);
       }
-      this.emit(input.sessionId, "item/completed", {
+      return;
+    }
+    if (sessionId !== THREADS.contrast) {
+      // The lead's own command in a thread whose turn goes on: it runs, or it is refused, and the work continues.
+      this.later(sessionId, () => {
+        this.emit(sessionId, "item/completed", {
+          item: {
+            ...item,
+            status: approved ? "completed" : "rejected",
+            revision: item.revision + 1,
+            recordedAt: iso(Date.now()),
+            ...(approved ? { visibleOutput: "\n> atlas-api@2.0.0-rc.1 test\n> vitest run test/sdk-compat.test.ts\n\n ✓ test/sdk-compat.test.ts (6 tests) 412ms\n\n Test Files  1 passed (1)\n      Tests  6 passed (6)\n" } : {}),
+          },
+        });
+      }, approved ? 2_600 : 600);
+      return;
+    }
+    this.later(sessionId, () => {
+      this.emit(sessionId, "item/completed", {
         item: {
           ...item,
           status: approved ? "completed" : "rejected",
@@ -579,15 +767,15 @@ export class DemoAncillaClient implements AncillaClient {
     const reply = approved
       ? "Muted text in dark mode is now `#a1a8b3`, 7.7:1 on the dialog's surface (it was 3.8:1), set in [src/styles/tokens.css](src/styles/tokens.css). The two dark-theme snapshots were rewritten and the two light ones came out identical, so the light theme is untouched. The same token also lifts the sidebar's muted labels, which had the same problem."
       : "I left the snapshots alone. The token change is in [src/styles/tokens.css](src/styles/tokens.css); run `npx playwright test settings-dialog --update-snapshots` when you want the dark-theme screenshots refreshed.";
-    this.later(input.sessionId, () => {
-      this.emit(input.sessionId, "item/completed", {
+    this.later(sessionId, () => {
+      this.emit(sessionId, "item/completed", {
         item: { itemId: sampleId(`reply:${request.approvalId}`), kind: "agentMessage", status: "completed", revision: 1, text: reply, turnId, recordedAt: iso(Date.now()) },
       });
       if (turnId) {
         const startedAt = Date.parse(thread.summary.live?.turnStartedAt ?? iso(Date.now()));
-        this.emit(input.sessionId, "turn/completed", { turnId, terminal: "completed", durationMs: Date.now() - startedAt, timeToFirstTokenMs: 1500 });
+        this.emit(sessionId, "turn/completed", { turnId, terminal: "completed", durationMs: Date.now() - startedAt, timeToFirstTokenMs: 1500 });
       }
-      this.setLive(input.sessionId, idle());
+      this.setLive(sessionId, idle());
     }, approved ? 4200 : 1800);
   }
 
@@ -599,31 +787,34 @@ export class DemoAncillaClient implements AncillaClient {
 
   /** Cancels the run: agents that finished keep their results, the rest stop where they are. */
   private stopAudit(): void {
-    this.audit.status = "cancelled";
-    this.audit.children = this.audit.children.map((child) =>
-      child.state === "working" || child.state === "waiting" ? { ...child, state: "cancelled" as const } : child,
-    );
+    const run = this.audit;
+    if (!run || run.status !== "inProgress") {
+      return;
+    }
+    const at = Date.now();
+    for (const child of run.children) {
+      const attempt = current(child);
+      if (attempt && attempt.endedAt === undefined) {
+        attempt.endedAt = at;
+        attempt.terminal = "cancelled";
+      }
+    }
+    run.status = "cancelled";
+    run.endedAt = at;
     this.reviseAudit();
   }
 
   async workflow(sessionId: string, action: WorkflowAction, workflowRunId: string, child?: { childId: string; attempt: number }): Promise<void> {
-    if (sessionId !== this.audit.sessionId || workflowRunId !== this.audit.runId || this.audit.status !== "inProgress") {
+    const run = this.audit;
+    if (!run || sessionId !== run.sessionId || workflowRunId !== run.runId || run.status !== "inProgress") {
       throw new Error("That workflow is not running.");
     }
     if (action === "cancel") {
       this.stopAudit();
-      const turnId = this.audit.turnId;
+      const turnId = run.turnId;
       this.later(sessionId, () => {
         this.emit(sessionId, "item/completed", {
-          item: {
-            itemId: sampleId(`reply:cancel:${this.audit.runId}`),
-            kind: "agentMessage",
-            status: "completed",
-            revision: 1,
-            text: "Stopped the audit. The route scan and the migration review had finished: `DELETE /v1/tokens/legacy` is gone and `orders.total_cents` became `total_amount` plus `currency`. The schema and SDK checks did not complete, so the report is not final.",
-            turnId,
-            recordedAt: iso(Date.now()),
-          },
+          item: { itemId: sampleId(`reply:cancel:${run.runId}`), kind: "agentMessage", status: "completed", revision: 1, text: run.stoppedReply, turnId, recordedAt: iso(Date.now()) },
         });
         const startedAt = Date.parse(this.threads.get(sessionId)?.summary.live?.turnStartedAt ?? iso(Date.now()));
         this.emit(sessionId, "turn/completed", { turnId, terminal: "completed", durationMs: Date.now() - startedAt, timeToFirstTokenMs: 1600 });
@@ -631,44 +822,176 @@ export class DemoAncillaClient implements AncillaClient {
       }, 1600);
       return;
     }
-    const target = this.audit.children.find((entry) => entry.childId === child?.childId);
-    if (!target) {
+    const target = run.children.find((entry) => entry.childId === child?.childId);
+    const attempt = target ? current(target) : undefined;
+    if (!target || !attempt || !child) {
       throw new Error("That agent is not part of this run.");
     }
-    if (action === "skip" && (target.state === "working" || target.state === "waiting")) {
-      target.state = "skipped";
-      this.reviseAudit();
+    // Controls name the attempt they saw; one that moved on since is refused, as Muse refuses it.
+    if (attempt.attempt !== child.attempt) {
+      throw new AncillaError("That attempt already moved on.", 409, "stale_attempt");
     }
+    const at = Date.now();
+    if (action === "skip") {
+      if (attempt.endedAt !== undefined) {
+        throw new AncillaError("That attempt already ended.", 409, "stale_attempt");
+      }
+      attempt.endedAt = at;
+      attempt.terminal = "cancelled";
+      this.reviseAudit();
+      return;
+    }
+    if (attempt.endedAt === undefined) {
+      throw new Error("That agent is still running.");
+    }
+    // A retry is a new attempt on the same agent: queued now, at work in a moment, landed within the minute.
+    const next: AuditAttempt = { attempt: attempt.attempt + 1, scheduledAt: at };
+    target.attempts.push(next);
+    this.reviseAudit();
+    this.later(sessionId, () => {
+      next.startedAt = Date.now();
+      this.reviseAudit();
+    }, 1_800);
+    this.later(sessionId, () => {
+      next.usageAt = Date.now();
+      next.usage = tokensOf(118_000);
+      this.reviseAudit();
+    }, 46_000);
+    this.later(sessionId, () => {
+      const ended = Date.now();
+      next.endedAt = ended;
+      next.terminal = "completed";
+      next.durationMs = ended - (next.startedAt ?? ended);
+      this.reviseAudit();
+    }, 48_000);
   }
 
   async subagent(): Promise<void> {}
-  async task(): Promise<void> {}
 
-  /** Lets the audit finish, for a screenshot of the completed report. Not reachable from the UI. */
-  finishAudit(): void {
-    if (this.audit.status !== "inProgress") {
+  async task(sessionId: string, action: TaskAction, taskId?: string): Promise<void> {
+    const thread = this.threads.get(sessionId);
+    if (!thread) {
+      throw new Error("That thread is not in the demo.");
+    }
+    if (action === "stopAll") {
+      for (const item of this.runningTasks(thread)) {
+        this.endTask(thread, item, { status: "cancelled" });
+      }
       return;
     }
-    const sessionId = this.audit.sessionId;
-    this.audit.children = this.audit.children.map((child, index) =>
-      child.state === "completed" ? child : { ...child, state: "completed" as const, durationMs: 64_000 + index * 9_000, toolCalls: 7 + index },
-    );
-    this.audit.status = "completed";
-    this.audit.summary = AUDIT_SUMMARY;
-    this.reviseAudit();
-    this.emit(sessionId, "session/todoListChanged", {
-      items: [
-        { text: "Scope the diff since v1.9.0", status: "completed" },
-        { text: "Audit routes, schema, SDK and migrations in parallel", status: "completed" },
-        { text: "Merge the findings into release-note wording", status: "completed" },
-      ],
+    const item = taskId ? this.findItem(thread, taskId) : null;
+    if (!item || item.status !== "inProgress") {
+      throw new Error("That task is not running.");
+    }
+    if (action === "stop") {
+      this.endTask(thread, item, { status: "cancelled" });
+      return;
+    }
+    if (item.background !== true) {
+      this.emit(sessionId, "item/updated", {
+        item: { ...item, revision: item.revision + 1, background: true, backgroundInitiator: "user", visibleOutput: this.currentOutput(thread, item.itemId), recordedAt: iso(Date.now()) },
+      });
+    }
+  }
+
+  /**
+   * Lets the run finish from where it stands, for a screenshot of the completed report: the agents at work
+   * report their usage and land, the ones the script still planned get their turn, and the terminal revision
+   * brings the report. A failed agent stays failed, and the last failure's text arrives with the report.
+   * Not reachable from the UI.
+   */
+  finishAudit(): void {
+    const run = this.audit;
+    if (!run || run.status !== "inProgress") {
+      return;
+    }
+    const sessionId = run.sessionId;
+    const live = () => run.children.map(current).filter((attempt): attempt is AuditAttempt => attempt !== undefined && attempt.endedAt === undefined);
+    const land = (attempts: AuditAttempt[], at: number) => {
+      for (const attempt of attempts) {
+        attempt.endedAt = at;
+        attempt.terminal = "completed";
+        attempt.durationMs = at - (attempt.startedAt ?? at);
+      }
+    };
+    let delay = 0;
+    const step = (gap: number, fn: () => void) => {
+      delay += gap;
+      this.later(sessionId, fn, delay);
+    };
+    step(0, () => {
+      const at = Date.now();
+      for (const child of run.children) {
+        const attempt = current(child);
+        if (!attempt || attempt.endedAt !== undefined) {
+          continue;
+        }
+        attempt.startedAt ??= at;
+        if (attempt.usageAt === undefined) {
+          attempt.usageAt = at;
+          attempt.usage = tokensOf(FINISH_TOKENS[child.label] ?? 24_000);
+        }
+      }
+      this.reviseAudit();
     });
-    this.emit(sessionId, "item/completed", {
-      item: { itemId: sampleId(`reply:${this.audit.runId}`), kind: "agentMessage", status: "completed", revision: 1, text: AUDIT_SUMMARY, turnId: this.audit.turnId, recordedAt: iso(Date.now()) },
+    step(900, () => {
+      land(live(), Date.now());
+      this.reviseAudit();
     });
-    const startedAt = Date.parse(this.threads.get(sessionId)?.summary.live?.turnStartedAt ?? iso(Date.now()));
-    this.emit(sessionId, "turn/completed", { turnId: this.audit.turnId, terminal: "completed", durationMs: Date.now() - startedAt, timeToFirstTokenMs: 1600 });
-    this.setLive(sessionId, idle());
+    const planned = run.plan.filter((agent) => !run.children.some((child) => child.label === agent.label));
+    if (planned.length > 0) {
+      const added: AuditChild[] = [];
+      step(900, () => {
+        const at = Date.now();
+        for (const agent of planned) {
+          const child: AuditChild = { childId: childIdFor(sessionId, agent.label, at), label: agent.label, toolCalls: 9, attempts: [{ attempt: 1, scheduledAt: at }] };
+          added.push(child);
+          run.children.push(child);
+        }
+        this.reviseAudit();
+      });
+      step(800, () => {
+        for (const child of added) {
+          (current(child) as AuditAttempt).startedAt = Date.now();
+        }
+        this.reviseAudit();
+      });
+      step(1_200, () => {
+        for (const child of added) {
+          const attempt = current(child) as AuditAttempt;
+          attempt.usageAt = Date.now();
+          attempt.usage = tokensOf(FINISH_TOKENS[child.label] ?? 24_000);
+        }
+        this.reviseAudit();
+      });
+      step(800, () => {
+        land(added.map((child) => current(child) as AuditAttempt), Date.now());
+        this.reviseAudit();
+      });
+    }
+    step(600, () => {
+      const at = Date.now();
+      run.status = "completed";
+      run.endedAt = at;
+      run.summary = run.report;
+      this.reviseAudit();
+      const thread = this.threads.get(sessionId);
+      if (thread?.events.some((event) => event.method === "session/todoListChanged")) {
+        this.emit(sessionId, "session/todoListChanged", {
+          items: [
+            { text: "Scope the diff since v1.9.0", status: "completed" },
+            { text: "Audit routes, schema, SDK and migrations in parallel", status: "completed" },
+            { text: "Merge the findings into release-note wording", status: "completed" },
+          ],
+        });
+      }
+      this.emit(sessionId, "item/completed", {
+        item: { itemId: sampleId(`reply:${run.runId}`), kind: "agentMessage", status: "completed", revision: 1, text: run.report, turnId: run.turnId, recordedAt: iso(at) },
+      });
+      const startedAt = Date.parse(thread?.summary.live?.turnStartedAt ?? iso(at));
+      this.emit(sessionId, "turn/completed", { turnId: run.turnId, terminal: "completed", durationMs: at - startedAt, timeToFirstTokenMs: 1600 });
+      this.setLive(sessionId, idle());
+    });
   }
 
   // ------------------------------------------------------------------------------------ session controls

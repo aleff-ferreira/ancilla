@@ -87,6 +87,12 @@ export class Script {
     this.events.push({ method, params: { sessionId: this.sessionId, viewCursor: `v:${this.sessionId}:${this.seq}`, ...params }, at: this.at });
   }
 
+  /** Records an event at an absolute time, for a stretch of history assembled from several timelines and sorted. */
+  pushAt(at: number, method: string, params: Record<string, unknown>): void {
+    this.at = at;
+    this.push(method, params, 0);
+  }
+
   /** Records an item; `method` is `item/started` for one still running. */
   add(input: ItemInput, gap = 40, method: "item/started" | "item/completed" = "item/completed"): MspItem {
     this.at += gap;
