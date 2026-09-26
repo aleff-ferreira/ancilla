@@ -8,7 +8,8 @@ which is also under the MIT License. Helicon's copyright and permission notice i
 and covers the parts of Ancilla that come from Helicon.
 
 Desktop builds of Ancilla also redistribute the third-party components below, each under its own license.
-An installed copy carries this file, LICENSE and the Node.js license in its `resources/legal` folder.
+An installed copy carries this file, [LICENSE](LICENSE), the Node.js license and the Rust crates' license texts in its
+`resources/legal` folder.
 
 - [JavaScript packages](#javascript-packages): 2 bundled into the local server, 133 into the interface
 - [Node.js runtime](#nodejs-runtime): Node.js v22.23.2
@@ -160,7 +161,8 @@ module-preload polyfill) is not listed.
 
 ## JavaScript packages
 
-The license files each package publishes, as published.
+The license files each package publishes, as published. A package that declares the MIT License without
+publishing its text gets the license's standard text as well.
 
 ### @floating-ui/core 1.8.0
 
@@ -1905,7 +1907,7 @@ SOFTWARE.
 - Source: <https://github.com/tauri-apps/plugins-workspace>
 - Shipped in: the interface (`resources/frontend`)
 
-The published package's license file is an SPDX summary, which names its licenses rather than quoting them.
+The published package's license file is an SPDX summary, which names its licenses rather than quoting them. The MIT License's standard text is added below.
 
 `LICENSE.spdx`:
 
@@ -1930,6 +1932,32 @@ PackageDownloadLocation: git://github.com/tauri-apps/tauri
 PackageDownloadLocation: git+https://github.com/tauri-apps/tauri.git
 PackageDownloadLocation: git+ssh://github.com/tauri-apps/tauri.git
 Creator: Person: Daniel Thompson-Yvetot
+```
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) 2019-2022, The Tauri Programme in the Commons Conservancy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @tauri-apps/plugin-process 2.3.1
@@ -1938,7 +1966,7 @@ Creator: Person: Daniel Thompson-Yvetot
 - Source: <https://github.com/tauri-apps/plugins-workspace>
 - Shipped in: the interface (`resources/frontend`)
 
-The published package's license file is an SPDX summary, which names its licenses rather than quoting them.
+The published package's license file is an SPDX summary, which names its licenses rather than quoting them. The MIT License's standard text is added below.
 
 `LICENSE.spdx`:
 
@@ -1965,13 +1993,39 @@ PackageDownloadLocation: git+ssh://github.com/tauri-apps/tauri.git
 Creator: Person: Daniel Thompson-Yvetot
 ```
 
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) 2019-2022, The Tauri Programme in the Commons Conservancy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### @tauri-apps/plugin-updater 2.11.0
 
 - License: MIT OR Apache-2.0
 - Source: <https://github.com/tauri-apps/plugins-workspace>
 - Shipped in: the interface (`resources/frontend`)
 
-The published package's license file is an SPDX summary, which names its licenses rather than quoting them.
+The published package's license file is an SPDX summary, which names its licenses rather than quoting them. The MIT License's standard text is added below.
 
 `LICENSE.spdx`:
 
@@ -1996,6 +2050,32 @@ PackageDownloadLocation: git://github.com/tauri-apps/tauri
 PackageDownloadLocation: git+https://github.com/tauri-apps/tauri.git
 PackageDownloadLocation: git+ssh://github.com/tauri-apps/tauri.git
 Creator: Person: Daniel Thompson-Yvetot
+```
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) 2019-2022, The Tauri Programme in the Commons Conservancy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### @ungap/structured-clone 1.4.0
@@ -4079,7 +4159,33 @@ SOFTWARE.
 - Source: <https://github.com/theKashey/react-remove-scroll-bar>
 - Shipped in: the interface (`resources/frontend`)
 
-The published package includes no license file. Its package.json declares MIT, by Anton Korzunov.
+The published package includes no license file. Its package.json declares MIT, by Anton Korzunov. The MIT License's standard text is added below.
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) Anton Korzunov
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ### react-style-singleton 2.2.3
 
@@ -4348,7 +4454,33 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 - Source: <https://github.com/huozhi/sugar-high>
 - Shipped in: the interface (`resources/frontend`)
 
-The published package includes no license file. Its package.json declares MIT.
+The published package includes no license file. Its package.json declares MIT. The MIT License's standard text is added below.
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) huozhi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ### tailwindcss 4.3.3
 
@@ -4841,8 +4973,10 @@ archive as the binary, is installed with Ancilla as `resources/legal/node-LICENS
 
 The desktop executable is compiled from apps/desktop/src-tauri against the crates below: everything its
 Cargo.lock resolves, for every platform. A given build links only the ones its target uses, and some (build
-scripts, procedural macros) run only while building. Their license texts are not reproduced here yet; each
-crate's license is on its crates.io page.
+scripts, procedural macros) run only while building. Their license texts are only in the crate sources Cargo
+downloads, so the desktop build collects them from there (`npm run notices -- --crates <file>`) and an
+installed copy carries them as `resources/legal/RUST_CRATE_LICENSES.md`. Each crate's crates.io page names its
+license too.
 
 - [adler2 2.0.1](https://crates.io/crates/adler2/2.0.1)
 - [aho-corasick 1.1.5](https://crates.io/crates/aho-corasick/1.1.5)
