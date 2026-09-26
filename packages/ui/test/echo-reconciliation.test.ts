@@ -121,6 +121,32 @@ describe("prompt echo reconciliation", () => {
     assert.equal(fold.echoes.length, 0, "its own prompt still replaces it before the ack");
   });
 
+  it("pairs two identical steers with their own items when both land before either ack", () => {
+    let fold = addEcho(emptyFold(), echo({ localId: "s1", text: "go", turnId: null, disposition: "steered" }));
+    fold = addEcho(fold, echo({ localId: "s2", text: "go", turnId: null, disposition: "steered" }));
+    fold = applyEvent(fold, prompt({ itemId: "st1", commandId: "c1", text: "go", steered: true }));
+    assert.deepEqual(fold.echoes.map((item) => item.localId), ["s2"]);
+    fold = applyEvent(fold, prompt({ itemId: "st2", commandId: "c2", text: "go", steered: true }));
+    assert.equal(fold.echoes.length, 0);
+    fold = updateEcho(updateEcho(fold, "s1", { turnId: "turn", disposition: "steered" }), "s2", { turnId: "turn", disposition: "steered" });
+    assert.equal(fold.echoes.length, 0, "late acknowledgements change nothing");
+    assert.equal(fold.order.length, 2, "both steers stay in the thread");
+  });
+
+  it("pairs two queued sends with the same text with their own turns", () => {
+    let fold = applyEvent(emptyFold(), { method: "turn/started", params: { turnId: "turn" } });
+    fold = addEcho(fold, echo({ localId: "q1", text: "then tests", turnId: null, disposition: "queued" }));
+    fold = addEcho(fold, echo({ localId: "q2", text: "then tests", turnId: null, disposition: "queued" }));
+    fold = updateEcho(fold, "q1", { turnId: "next", disposition: "queued" });
+    fold = updateEcho(fold, "q2", { turnId: "later", disposition: "queued" });
+    fold = applyEvent(fold, { method: "turn/started", params: { turnId: "next" } });
+    fold = applyEvent(fold, prompt({ itemId: "n", turnId: "next", commandId: "next", text: "then tests" }));
+    assert.deepEqual(fold.echoes.map((item) => [item.localId, item.disposition]), [["q2", "queued"]]);
+    fold = applyEvent(fold, { method: "turn/started", params: { turnId: "later" } });
+    fold = applyEvent(fold, prompt({ itemId: "l", turnId: "later", commandId: "later", text: "then tests" }));
+    assert.equal(fold.echoes.length, 0);
+  });
+
   it("does not match a normal prompt to a steered item with a shared turn id", () => {
     const fold = applyEvent(addEcho(emptyFold(), echo()), prompt({ itemId: "steer", commandId: "other", steered: true }));
     assert.equal(fold.echoes.length, 1);

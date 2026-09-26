@@ -112,6 +112,22 @@ describe("non-authoritative history recovery", () => {
       const later = foldFromLoad(partial([{ method: "turn/completed", params: { turnId: "A", terminal: "completed" } }], null), shown);
       assert.equal(later.turns.A?.terminal, "failed", "only a placeholder gives way to a later read");
     });
+
+    it("gives way to a real outcome read or streamed later, and never softens one already shown", () => {
+      const placeholder = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), running);
+      assert.equal(placeholder.turns.A?.terminal, "unknown");
+      const failure: ViewEvent = { method: "turn/completed", params: { turnId: "A", terminal: "failed", error: { kind: "provider", message: "Provider down", retryable: true } } };
+      const failed = foldFromLoad(partial([failure], null), placeholder);
+      assert.equal(failed.turns.A?.terminal, "failed", "a real failure read later replaces the placeholder");
+      assert.equal(failed.turns.A?.error?.message, "Provider down");
+      assert.equal(foldFromLoad(partial([incomplete("A")], null), failed).turns.A?.terminal, "failed", "a later placeholder does not soften it");
+      const streamed = applyEvent(placeholder, { method: "turn/completed", params: { turnId: "A", terminal: "completed" }, at: 5 });
+      assert.equal(streamed.turns.A?.terminal, "completed", "a live outcome that arrived during the read replaces the placeholder");
+      assert.equal(foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), streamed).turns.A?.terminal, "completed");
+      const shown = applyEvent(running, failure);
+      const contradicted = foldFromLoad(partial([{ method: "turn/completed", params: { turnId: "A", terminal: "completed" } }], null), shown);
+      assert.equal(contradicted.turns.A?.error?.message, "Provider down", "a failure the live feed showed is never replaced by a page");
+    });
   });
 
   it("lets a saved finished item replace an open one, and never reopens a finished one", () => {
@@ -200,6 +216,64 @@ describe("non-authoritative history recovery", () => {
     assert.equal(fold.items.wf?.revision, 11);
     assert.deepEqual(fold.items.wf?.children?.map((child) => [child.label, child.status]), [["Read alpha", "started"], ["Verify beta", "scheduled"]]);
     assert.deepEqual(fold.agentItems?.wf?.children?.map((child) => child.label), ["Read alpha", "Verify beta"]);
+  });
+
+  it("neither duplicates nor drops an item across partial pages that overlap the screen differently", () => {
+    const said = (itemId: string, turnId: string, kind = "toolCall", text?: string): ViewEvent => ({
+      method: "item/completed", params: { item: { itemId, kind, turnId, text, revision: 1, status: "completed" } },
+    });
+    let fold = foldAll([
+      { method: "turn/started", params: { turnId: "A" } },
+      said("uA", "A", "userMessage", "a"), said("t1", "A"), said("final", "A", "agentMessage", "All done."),
+      { method: "turn/completed", params: { turnId: "A", terminal: "completed" } },
+      { method: "turn/started", params: { turnId: "active" } },
+      said("uB", "active", "userMessage", "b"), said("l1", "active"), said("l2", "active"),
+    ]);
+    for (const page of [
+      [said("uA", "A", "userMessage", "a"), said("t1", "A"), said("t2", "A")],
+      [said("t2", "A"), said("t3", "A"), said("final", "A", "agentMessage", "All done.")],
+      [said("uA", "A", "userMessage", "a"), said("t1", "A"), said("t2", "A"), said("t3", "A"), said("final", "A", "agentMessage", "All done."), said("uB", "active", "userMessage", "b"), said("l1", "active")],
+    ]) {
+      fold = foldFromLoad(partial(page), fold);
+      assert.equal(new Set(fold.order).size, fold.order.length, "no item is shown twice");
+      assert.deepEqual([...fold.order].sort(), Object.keys(fold.items).sort(), "no item is dropped");
+    }
+    assert.deepEqual(fold.order, ["uA", "t1", "t2", "t3", "final", "uB", "l1", "l2"]);
+    assert.equal(buildTurns(fold)[0]?.final?.text, "All done.");
+  });
+
+  it("shows the running turn's open requests from the page when a thread first opens with an incomplete pending list", () => {
+    const page: ViewEvent[] = [
+      { method: "turn/started", params: { turnId: "old" } },
+      { method: "approval/requested", params: { approvalId: "Y", itemId: "tool-Y", turnId: "old" } },
+      { method: "approval/resolved", params: { approvalId: "Y", decision: "approved", resolvedBy: "user" } },
+      { method: "turn/completed", params: { turnId: "old", terminal: "completed" } },
+      { method: "turn/started", params: { turnId: "active" } },
+      { method: "approval/requested", params: { approvalId: "X", itemId: "tool-X", turnId: "active" } },
+      { method: "userInput/requested", params: { userInputId: "Q", itemId: "ask", turnId: "active", questions: [] } },
+    ];
+    for (const previous of [null, emptyFold()]) {
+      const fold = foldFromLoad({ ...partial(page), pendingComplete: false }, previous);
+      assert.deepEqual(Object.keys(fold.approvals), ["X"]);
+      assert.deepEqual(Object.keys(fold.userInputs), ["Q"]);
+    }
+  });
+
+  it("merges a long thread's partial page in a fraction of a second", () => {
+    const step = (i: number): ViewEvent => ({
+      method: "item/completed",
+      params: { item: { itemId: `i${i}`, kind: i % 7 === 0 ? "userMessage" : "toolCall", turnId: `T${Math.floor(i / 50)}`, text: `step ${i}`, revision: 1, status: "completed" } },
+    });
+    let previous = foldAll([{ method: "turn/started", params: { turnId: "active" } }, ...Array.from({ length: 20_000 }, (_, i) => step(i))]);
+    previous = addEcho(previous, { localId: "e", text: "step 7", turnId: null, disposition: "sending", createdAt: 1 });
+    previous = addEcho(previous, { localId: "s", text: "steer", turnId: "active", disposition: "steered", createdAt: 2 });
+    const started = Date.now();
+    const merged = foldFromLoad(partial(Array.from({ length: 20_000 }, (_, i) => step(10_000 + i))), previous);
+    const took = Date.now() - started;
+    assert.equal(merged.order.length, 30_000);
+    assert.equal(new Set(merged.order).size, 30_000);
+    assert.equal(merged.echoes.length, 2);
+    assert.ok(took < 2_000, `a 20k-item page onto 20k shown items took ${took}ms`);
   });
 
   it("keeps newer plan metadata and explicit clears, then accepts later saved plan changes", () => {
