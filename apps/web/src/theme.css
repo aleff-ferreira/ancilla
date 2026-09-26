@@ -1257,10 +1257,14 @@
   }
   .swarm-body {
     max-height: min(56dvh, 520px);
-    padding: 2px 14px 8px;
+    /* No bottom padding: a sticky footer pins to the content edge, so rows would show through it. */
+    padding: 2px 14px 0;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
+  }
+  .swarm-body:not(:has(.swarm-foot)) {
+    padding-bottom: 8px;
   }
   .swarm-body.compact {
     max-height: min(40dvh, 400px);
@@ -1711,7 +1715,8 @@
     gap: 4px;
     min-height: 36px;
     margin-top: 4px;
-    padding-top: 6px;
+    /* The body's bottom padding lives here, under the footer, where scrolled rows cannot show through. */
+    padding: 6px 0 8px;
     background: var(--bg-raised);
     box-shadow: inset 0 1px 0 var(--border);
     white-space: nowrap;
