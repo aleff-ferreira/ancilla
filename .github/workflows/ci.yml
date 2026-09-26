@@ -22,8 +22,8 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -36,9 +36,22 @@ jobs:
       - if: runner.os == 'Linux'
         run: npm run notices:check
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
-      - run: npm run test --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      # The test output is kept so a failure can be named below. Bash on every runner: the pipe and its status.
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server 2>&1 | tee "$RUNNER_TEMP/test.log"
       - run: npm run build --workspace @ancilla/web
-      - run: npm run test --workspace @ancilla/web
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test --workspace @ancilla/web 2>&1 | tee "$RUNNER_TEMP/web-test.log"
+      # One annotation per failing test, with its file, line and error. The run's annotations can be read
+      # through the API where the job log cannot, so a failure on a runner one cannot open still says which test.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: node scripts/annotate-test-failures.mjs "$RUNNER_TEMP/test.log" "$RUNNER_TEMP/web-test.log"
 
   # The desktop crate is only otherwise compiled while cutting a release, which is far too late to
   # find out that it does not build.
@@ -49,8 +62,8 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm

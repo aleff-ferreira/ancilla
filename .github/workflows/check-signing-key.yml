@@ -1,0 +1,27 @@
+name: Check the updater signing key
+
+# Run by hand (gh workflow run check-signing-key.yml) to see, without cutting a release, whether the
+# TAURI_SIGNING_PRIVATE_KEY secret is set, opens, and is the key installed copies trust. The answer is in the
+# run's annotations.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check the updater signing key
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/check-signing-key.mjs

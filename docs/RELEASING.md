@@ -12,6 +12,8 @@ Installed copies only accept an update signed with the key whose public half is 
 gh secret set TAURI_SIGNING_PRIVATE_KEY --repo aleff-ferreira/ancilla < ~/.tauri/ancilla-updater.key
 ```
 
+To see that the secret is set, opens, and is the key installed copies trust, without cutting a release, run `gh workflow run check-signing-key.yml --repo aleff-ferreira/ancilla` and read the run's annotations.
+
 The key has no password, so there is no `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret to add. The workflow passes an empty password when that secret is absent, which is what opens a key made without one. The secret is only needed if the key is ever replaced with one that has a password.
 
 Every release job checks for `TAURI_SIGNING_PRIVATE_KEY` before anything else and stops within seconds, saying so, if it is missing. Once its dependencies are installed, the Windows job also signs a scratch file with the key, so a key that is damaged or needs a password it was not given fails there, before the build, and it adds a warning to the run if the key is not the one whose public half is in `tauri.conf.json`.
