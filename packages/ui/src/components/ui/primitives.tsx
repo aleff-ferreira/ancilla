@@ -51,7 +51,7 @@ export function Shimmer(props: { children: ReactNode; className?: string }) {
 }
 
 type ButtonVariant = "primary" | "accent" | "secondary" | "ghost" | "danger";
-type ButtonSize = "sm" | "md";
+type ButtonSize = "xs" | "sm" | "md";
 
 const VARIANTS: Record<ButtonVariant, string> = {
   primary: "bg-inverse text-inverse-fg hover:opacity-90",
@@ -62,6 +62,8 @@ const VARIANTS: Record<ButtonVariant, string> = {
 };
 
 const SIZES: Record<ButtonSize, string> = {
+  /** Row controls in the dock cards: the smallest target that still reads as a button. */
+  xs: "h-6 gap-1.5 rounded-md px-2 text-xs",
   sm: "h-7 gap-1.5 rounded-md px-2.5 text-sm",
   md: "h-8 gap-2 rounded-lg px-3 text-sm",
 };
