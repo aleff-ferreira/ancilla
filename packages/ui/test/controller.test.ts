@@ -2,7 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
-import { agentActivityView } from "../src/model/agents.js";
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
 import { swarmView } from "../src/model/swarm.js";
@@ -966,8 +965,9 @@ describe("AncillaController", () => {
       return load({ session: sessionId === "s1" ? SESSION : other, events: sessionId === "s1" ? events : [] });
     };
     const { controller, stop } = await started(client);
+    const working = () => swarmView(controller.store.get().threads.s1!.fold, SESSION, Date.now()).runs[0]?.counts.working;
     try {
-      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 1);
+      assert.equal(working(), 1);
       controller.openThread("s2");
       await settle();
       // The child finishes while the stream is down, and nothing replays that.
@@ -983,7 +983,7 @@ describe("AncillaController", () => {
       await settle();
       await settle();
       assert.deepEqual(calls.at(-1), ["s1", { refresh: true }], "the other on opening, read in place while its agent may run");
-      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 0);
+      assert.equal(working(), 0);
       assert.notEqual(controller.store.get().threads.s1?.stale, true, "and is live again once read");
       controller.openThread("s2");
       controller.openThread("s1");

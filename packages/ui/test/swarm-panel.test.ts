@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { createElement } from "react";
 import { chipCounts, rosterEntries, sortAgents, summaryText } from "../src/components/swarm/panel.js";
+import { Roster } from "../src/components/swarm/Roster.js";
 import { panelRun } from "../src/components/swarm/SwarmPanel.js";
 import { applyEvents, emptyFold } from "../src/model/fold.js";
 import { pendingKey, type RunVM } from "../src/model/swarm.js";
 import type { ViewEvent } from "../src/types.js";
-import { Feed, MIN, NOW, S, approvalAt, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, renderPanel, rowTag, textOf } from "./swarm-panel-fixture.js";
+import { Feed, MIN, NOW, S, approvalAt, atNow, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, panelStore, renderPanel, renderWith, rowTag, textOf } from "./swarm-panel-fixture.js";
 
 /** The rows of the roster grid in order: phase heads by name, agents by id. */
 function rows(markup: string): string[] {
@@ -225,6 +227,30 @@ describe("SwarmPanel", () => {
 
   it("ends with the key hints", () => {
     assert.match(textOf(renderPanel()), /j k move ↵ inspect space peek n next issue \/ filter x stop esc close$/);
+  });
+
+  it("shows a peek under the focused row once Space asks for one, inside the row so the row keeps focus", () => {
+    const run = lanternRun();
+    const entries = rosterEntries(run, { filter: "all", query: "", openPhases: [], sort: "time", unfolded: new Set() });
+    const noop = () => undefined;
+    const roster = (peekId: string | null) => atNow(NOW, () => renderWith(panelStore(), createElement(Roster, {
+      run, entries, focusId: "c-cf", peekId, finale: false, stale: false, readOnly: false, sort: "time", confirm: null,
+      onSort: noop, onFocus: noop, onInspect: noop, onTogglePhase: noop, onUnfold: noop, onAction: noop, onConfirm: noop, onReview: noop, register: noop,
+    })));
+    assert.doesNotMatch(roster(null), /swarm-peek/, "nothing until Space asks");
+    const markup = roster("c-cf");
+    assert.equal((markup.match(/class="swarm-peek"/g) ?? []).length, 1, "one peek, under one row");
+    const from = markup.indexOf('id="swarm-row-c-cf"');
+    const peekAt = markup.indexOf('<div class="swarm-peek"', from);
+    assert.ok(peekAt > from && peekAt < markup.indexOf('role="row"', from), "the peek is the focused row's own child, positioned under it");
+    assert.match(rowTag(markup, "c-cf"), /tabindex="0" aria-selected="true"/, "the row keeps the tab stop");
+    const peek = markup.slice(peekAt, markup.indexOf("close</span>", peekAt));
+    assert.match(peek, /^<div class="swarm-peek" role="dialog" aria-modal="false" aria-label="design:conflict-ledger: Design · attempt 2 · /);
+    assert.doesNotMatch(peek, /tabindex|<button|<a /, "nothing in it takes focus");
+    assert.match(textOf(peek), /Failed/);
+    assert.match(textOf(peek), /Design the conflict ledger: define how two devices reconcile\./, "the task from the plan");
+    assert.match(textOf(peek), /Attempts 2/);
+    assert.match(textOf(peek), /Enter open Esc/);
   });
 
   it("reads as last known when the feed is not live, with every clock frozen at the last event seen", () => {

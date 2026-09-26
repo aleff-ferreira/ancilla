@@ -16,6 +16,8 @@ export interface RosterProps {
   run: RunVM | null;
   entries: readonly RosterEntry[];
   focusId: string | null;
+  /** The agent whose peek is open under its row, if any. */
+  peekId?: string | null;
   finale: boolean;
   stale: boolean;
   readOnly: boolean;
@@ -240,6 +242,7 @@ export function Roster(props: RosterProps) {
             agent={entry.agent}
             run={props.run}
             focused={props.focusId === entry.id}
+            peek={props.peekId === entry.id}
             finale={props.finale}
             stale={props.stale}
             readOnly={props.readOnly}

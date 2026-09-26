@@ -112,6 +112,7 @@ export function SwarmPanel(props: { sessionId: string }) {
   const [confirm, setConfirm] = useState<RowConfirm | null>(null);
   const [stopping, setStopping] = useState(false);
   const [unfolded, setUnfolded] = useState<ReadonlySet<string>>(NO_SET);
+  const [peekId, setPeekId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const asideRef = useRef<HTMLElement>(null);
   const rows = useRef(new Map<string, HTMLElement>());
@@ -145,6 +146,11 @@ export function SwarmPanel(props: { sessionId: string }) {
     }
   });
 
+  // A peek belongs to the focused row: moving focus, or the row leaving the roster, closes it.
+  useEffect(() => {
+    if (peekId !== null && peekId !== focused) setPeekId(null);
+  }, [peekId, focused]);
+
   // Opening the panel takes focus, unless the user is typing; closing gives it back to where it was.
   useEffect(() => {
     const opener = typeof document !== "undefined" ? document.activeElement : null;
@@ -168,6 +174,7 @@ export function SwarmPanel(props: { sessionId: string }) {
 
   const inspect = useCallback((id: string | null) => {
     setConfirm(null);
+    setPeekId(null);
     controller.inspectAgent(sessionId, id);
     if (id !== null) setFocusId(id);
   }, [controller, sessionId]);
@@ -222,8 +229,10 @@ export function SwarmPanel(props: { sessionId: string }) {
         const entry = entries.find((candidate) => candidate.id === focused);
         if (!entry) return false;
         if (entry.kind === "phase") togglePhase(entry.phase.name);
-        else if (entry.kind === "agent") inspect(entry.id);
         else if (entry.kind === "need") review(entry.need);
+        // Enter opens an agent's inspector; Space peeks at it in place, and again puts the peek away.
+        else if (entry.kind === "agent" && action === "peek") setPeekId((current) => (current === entry.id ? null : entry.id));
+        else if (entry.kind === "agent") inspect(entry.id);
         return true;
       }
       case "next-issue":
@@ -286,6 +295,10 @@ export function SwarmPanel(props: { sessionId: string }) {
       case "tab-lifecycle": setTab("lifecycle"); return true;
       case "tab-result": setTab("result"); return true;
       case "back":
+        if (peekId !== null) {
+          setPeekId(null);
+          return true;
+        }
         if (confirm) {
           setConfirm(null);
           return true;
@@ -299,7 +312,7 @@ export function SwarmPanel(props: { sessionId: string }) {
         controller.toggleSwarmPanel(false);
         return true;
     }
-  }, [act, agentOrder, confirm, controller, counts, entries, focused, inspect, inspected, issues, mode, moveFocus, order, panel.filter, readOnly, review, run, sessionId, split, togglePhase]);
+  }, [act, agentOrder, confirm, controller, counts, entries, focused, inspect, inspected, issues, mode, moveFocus, order, panel.filter, peekId, readOnly, review, run, sessionId, split, togglePhase]);
   const onKeyDown = usePanelKeys(mode, handleKey);
 
   const style = { "--pane-bg": overlay ? "var(--bg-raised)" : "var(--bg)", width } as CSSProperties;
@@ -419,6 +432,7 @@ export function SwarmPanel(props: { sessionId: string }) {
         run={run}
         entries={entries}
         focusId={focused}
+        peekId={peekId}
         finale={finale}
         stale={stale}
         readOnly={readOnly}

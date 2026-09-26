@@ -13,12 +13,14 @@ export const LANDED_MS = 5000;
 const PANELS = 'section[aria-label="Approval needed"], section[aria-label="Muse has a question"]';
 
 /**
- * Scrolls the first request panel into view, focuses its primary button and flashes its ring once (SPEC §11).
+ * Scrolls a request panel into view, focuses its primary button and flashes its ring once (SPEC §11): the one
+ * carrying `requestId` (Requests.tsx marks each panel with its id), else the first request panel in the dock.
  * Returns false when no panel is in the document.
  */
-export function focusRequestPanel(): boolean {
+export function focusRequestPanel(requestId: string | null = null): boolean {
   if (typeof document === "undefined") return false;
-  const panel = document.querySelector<HTMLElement>(PANELS);
+  const own = requestId ? document.querySelector<HTMLElement>(`[data-request-id="${CSS.escape(requestId)}"]`) : null;
+  const panel = own ?? document.querySelector<HTMLElement>(PANELS);
   if (!panel) return false;
   panel.scrollIntoView({ block: "nearest" });
   panel.querySelector<HTMLElement>("button, textarea, input")?.focus();

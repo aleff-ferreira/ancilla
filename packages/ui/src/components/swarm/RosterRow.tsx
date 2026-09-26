@@ -1,10 +1,11 @@
-import { forwardRef, type CSSProperties, type ReactNode } from "react";
+import { forwardRef, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import {
   ArrowCounterClockwiseIcon, CaretRightIcon, ChatCircleDotsIcon, CheckCircleIcon, CircleDashedIcon, ClockCounterClockwiseIcon,
   EyeIcon, HourglassIcon, MinusCircleIcon, QuestionIcon, ShieldWarningIcon, SkipForwardIcon, StopCircleIcon, WarningCircleIcon,
 } from "../ui/icons.js";
 import { durationText, type AgentState, type AgentVM, type RunNeedVM, type RunVM } from "../../model/swarm.js";
 import { Button, Spinner, cn } from "../ui/primitives.js";
+import { Peek } from "./Peek.js";
 import { Sigil } from "./Sigil.js";
 import { isTall, rowLabel, subline, timeText, tokensText, type Subline } from "./panel.js";
 
@@ -28,6 +29,8 @@ export interface RosterRowProps {
   stale: boolean;
   readOnly: boolean;
   confirm: RowConfirm | null;
+  /** The peek is open under this row (Space): its facts beside it, while the row keeps focus. */
+  peek?: boolean;
   onFocus(id: string): void;
   onInspect(id: string): void;
   onAction(agent: AgentVM, action: RowAction): void;
@@ -155,6 +158,8 @@ export const RosterRow = forwardRef<HTMLDivElement, RosterRowProps>(function Ros
   const tokens = tokensText(agent);
   const time = timeText(agent);
   const dim = time === "—" || (agent.durationMs === null && agent.state !== "done");
+  /** A click on the row's own buttons, or inside its peek, is theirs rather than the row's. */
+  const own = (event: MouseEvent<HTMLElement>) => !(event.target as HTMLElement).closest("button, .swarm-peek");
   return (
     <div
       ref={ref}
@@ -166,11 +171,11 @@ export const RosterRow = forwardRef<HTMLDivElement, RosterRowProps>(function Ros
       aria-label={rowLabel(agent, props.run)}
       onFocus={() => props.onFocus(agent.id)}
       onClick={(event) => {
-        if ((event.target as HTMLElement).closest("button")) return;
+        if (!own(event)) return;
         props.onFocus(agent.id);
         props.onInspect(agent.id);
       }}
-      onDoubleClick={() => props.onInspect(agent.id)}
+      onDoubleClick={(event) => { if (own(event)) props.onInspect(agent.id); }}
       style={props.style}
       className={cn(
         "relative grid items-center px-4 outline-none",
@@ -201,6 +206,7 @@ export const RosterRow = forwardRef<HTMLDivElement, RosterRowProps>(function Ros
           <RowActions agent={agent} readOnly={props.readOnly} confirm={props.confirm} onAction={props.onAction} onConfirm={props.onConfirm} onInspect={() => props.onInspect(agent.id)} />
         </span>
       ) : null}
+      {props.peek ? <Peek agent={agent} run={props.run} stale={props.stale} /> : null}
     </div>
   );
 });
