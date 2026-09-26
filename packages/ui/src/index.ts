@@ -5,6 +5,7 @@ export * from "./model/status.js";
 export * from "./model/format.js";
 export * from "./model/store.js";
 export * from "./model/swarm.js";
+export * from "./model/research.js";
 export { AncillaController, browserPlatform, hashToRoute, routeToHash, type Platform } from "./model/controller.js";
 export { AncillaApp, type AncillaAppProps } from "./app/AncillaApp.js";
 export type { WindowFrame } from "./app/frame.js";

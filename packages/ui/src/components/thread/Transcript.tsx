@@ -39,6 +39,7 @@ import {
   type Gate,
 } from "./items.js";
 import { SwarmAnchorRow } from "../swarm/SwarmAnchorRow.js";
+import { ResearchRunRow } from "./ResearchRunRow.js";
 
 type GateMap = Record<string, Gate>;
 type AnswerMap = Record<string, UserInputAnswer[]>;
@@ -94,7 +95,8 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
   const costs = useMemo(() => turnCosts(fold, models), [fold.meta.calls, models]);
   const echoes = fold.echoes.filter((e) => e.disposition !== "queued");
   // Files the server kept for this thread, grouped by the turn they were sent with.
-  // Turns and the commands Ancilla ran share one timeline: a command's output caused the prompt after it.
+  // Turns, the commands Ancilla ran and the research runs it started share one timeline: a command's output or
+  // a report caused the prompt after it.
   const timeline = useMemo(() => {
     let last = 0;
     const blocks = turns.map((turn) => {
@@ -103,8 +105,9 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
       return { kind: "turn" as const, at, turn };
     });
     const runs = (thread.shellRuns ?? []).map((run) => ({ kind: "run" as const, at: Date.parse(run.at) || 0, run }));
-    return [...blocks, ...runs].sort((a, b) => a.at - b.at);
-  }, [turns, thread.shellRuns]);
+    const research = (thread.researchRuns ?? []).map((run) => ({ kind: "research" as const, at: Date.parse(run.createdAt) || 0, run }));
+    return [...blocks, ...runs, ...research].sort((a, b) => a.at - b.at);
+  }, [turns, thread.shellRuns, thread.researchRuns]);
   // The latest turn is the one shown last, which is what carries a failure's full notice and its Retry.
   const latestKey = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index -= 1) {
@@ -178,8 +181,10 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
                   speed={entry.turn.turnId ? (speeds[entry.turn.turnId] ?? null) : null}
                   cost={entry.turn.turnId ? (costs[entry.turn.turnId] ?? null) : null}
                 />
-              ) : (
+              ) : entry.kind === "run" ? (
                 <ShellRunRow key={entry.run.id} run={entry.run} sessionId={props.sessionId} />
+              ) : (
+                <ResearchRunRow key={entry.run.runId} run={entry.run} sessionId={props.sessionId} />
               ),
             )}
             {echoes.map((echo) => (

@@ -211,7 +211,7 @@ export function lanternRun(now = NOW, extra: ViewEvent[] = [], feed: Feed = lant
 }
 
 export function thread(extra: Partial<ThreadState> = {}): ThreadState {
-  return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: emptyFold(), attachments: [], shellRuns: [], stalled: false, ...extra };
+  return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: emptyFold(), attachments: [], shellRuns: [], researchRuns: [], stalled: false, ...extra };
 }
 
 export interface PanelSetup {

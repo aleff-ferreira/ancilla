@@ -14,7 +14,7 @@ import {
   type TranscriptLoad,
 } from "@ancilla/ui";
 import { DemoAncillaClient } from "../src/demo/client.js";
-import { REPLAY_FAILURE, SCENARIOS, THREADS, seed, type Scenario, type SeedThread } from "../src/demo/seed.js";
+import { REPLAY_FAILURE, RESEARCH_RUNS, SCENARIOS, THREADS, seed, type Scenario, type SeedThread } from "../src/demo/seed.js";
 
 /**
  * The demo seed builds every `?swarm=` scenario as the wire Muse would have sent, and the UI's own model
@@ -65,13 +65,36 @@ function workflowEvents(thread: SeedThread): MspItem[] {
 }
 
 describe("the demo seed", () => {
-  it("builds every scenario from the same eight threads", () => {
+  it("builds every scenario from the same nine threads", () => {
     for (const scenario of SCENARIOS) {
       const seeded = seed(NOW, scenario);
-      assert.equal(seeded.threads.length, 8, scenario);
+      assert.equal(seeded.threads.length, 9, scenario);
       assert.equal(seeded.threads[0]?.summary.sessionId, THREADS.audit, `${scenario} keeps the audit thread's id`);
       assert.equal(seeded.audit === null, scenario === "task", `${scenario} ${scenario === "task" ? "has no run" : "has a run"}`);
     }
+  });
+
+  it("carries a finished research run with its cited report and a running one on the research thread", () => {
+    const seeded = seed(NOW);
+    assert.equal(seeded.research.length, 2);
+    const done = seeded.research.find((run) => run.runId === RESEARCH_RUNS.done);
+    const running = seeded.research.find((run) => run.runId === RESEARCH_RUNS.running);
+    assert.ok(done && running);
+    assert.ok(seeded.threads.some((thread) => thread.summary.sessionId === THREADS.research), "the thread the runs belong to is seeded");
+    assert.equal(done.sessionId, THREADS.research);
+    assert.equal(done.status, "completed");
+    assert.ok(done.reportAvailable && done.report && done.reportPath);
+    // Every citation in the report names a source the report lists, and nothing is cited that is not listed.
+    const cited = new Set([...done.report.replace(/## Sources[\s\S]*$/, "").matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+    const listed = new Set([...(/## Sources([\s\S]*)$/.exec(done.report)?.[1] ?? "").matchAll(/^\[(\d+)\] .+ \(https?:\/\/\S+\)$/gm)].map((m) => Number(m[1])));
+    assert.ok(cited.size > 0 && listed.size > 0);
+    assert.deepEqual([...cited].sort(), [...listed].sort());
+    assert.ok(done.workers.every((worker) => worker.state === "completed"));
+    assert.equal(running.status, "running");
+    assert.equal(running.phase, "researching");
+    assert.equal(running.round, 2);
+    assert.ok(running.workers.some((worker) => worker.state === "working") && running.workers.some((worker) => worker.state === "failed"));
+    assert.ok(Date.parse(running.createdAt) > Date.parse(done.endedAt as string), "the running one came after the finished one");
   });
 
   it("sends labels only when an agent is scheduled and usage on exactly one revision, as Muse does", () => {
@@ -319,6 +342,14 @@ describe("the demo client", () => {
     return { client, run, runId: run.runId as string };
   }
 
+  /**
+   * Moves the clock on by one research step at a time. A timer set inside a mocked timer's callback lands after the
+   * tick that ran it, so one step per tick is what the clock allows, and every step's delay is under this.
+   */
+  function researchSteps(steps: number) {
+    for (let i = 0; i < steps; i += 1) mock.timers.tick(3_100);
+  }
+
   async function reload(client: DemoAncillaClient, now = Date.now()) {
     const load = await client.loadTranscript(THREADS.audit);
     const fold = foldFromLoad(load);
@@ -396,6 +427,53 @@ describe("the demo client", () => {
     assert.deepEqual(Object.keys(after.fold.approvals), []);
     assert.equal(after.load.session?.live?.pendingApprovals, 0);
     assert.equal(after.vm.tasks[0]?.state, "working", "the background task outlives the turn and goes on printing");
+  });
+
+  it("serves the seeded research runs with the thread, carries the running one to its report, and stops one on request", async () => {
+    const { client } = clientFor("running");
+    const events: { sessionId: string; runId: string; status: string; phase: string; report: string | null }[] = [];
+    client.subscribe((event) => {
+      if (event.type === "research-run") events.push({ sessionId: event.sessionId, runId: event.run.runId, status: event.run.status, phase: event.run.phase, report: event.run.report });
+    });
+    const load = await client.loadTranscript(THREADS.research);
+    assert.deepEqual((load.researchRuns ?? []).map((run) => [run.runId, run.status]), [[RESEARCH_RUNS.done, "completed"], [RESEARCH_RUNS.running, "running"]]);
+    assert.equal(load.researchRuns?.[0]?.report, null, "the transcript load carries summaries; the report comes from getResearch");
+    assert.match((await client.getResearch(RESEARCH_RUNS.done)).report ?? "", /^# What muted text has to meet in dark mode/);
+    assert.deepEqual((await client.listResearch(THREADS.research)).map((run) => run.runId), [RESEARCH_RUNS.done, RESEARCH_RUNS.running]);
+    // The seeded run only moves once the app has listed its threads, then on its own timers until it has written.
+    await client.listSessions();
+    await client.whenListed();
+    await Promise.resolve();
+    researchSteps(40);
+    const final = await client.getResearch(RESEARCH_RUNS.running);
+    assert.equal(final.status, "completed");
+    assert.equal(final.phase, "done");
+    assert.ok(final.workers.every((worker) => worker.state !== "working" && worker.state !== "queued"));
+    assert.match(final.report ?? "", /## Sources/);
+    assert.ok(events.some((event) => event.runId === RESEARCH_RUNS.running && event.phase === "writing"), "the writing phase was broadcast");
+    assert.ok(events.every((event) => event.report === null), "the stream never carries the report");
+    // A run started from the composer walks the same phases; a second one in the thread is refused; stopping keeps what it has.
+    const started = await client.startResearch(THREADS.research, "What is the state of the art?", { maxParallel: 2 }, "cmd-1");
+    assert.equal(started.status, "queued");
+    assert.equal(started.config.maxParallel, 2);
+    assert.equal((await client.startResearch(THREADS.research, "again", null, "cmd-1")).runId, started.runId, "the same commandId returns the same run");
+    await assert.rejects(client.startResearch(THREADS.research, "another", null, "cmd-2"), /already has a research run/);
+    researchSteps(10);
+    const midway = await client.getResearch(started.runId);
+    assert.equal(midway.status, "running");
+    assert.equal(midway.phase, "researching");
+    assert.ok(midway.sources.verified > 0, "workers have read pages by now");
+    const stopped = await client.stopResearch(started.runId, true);
+    assert.equal(stopped.status, "partial");
+    assert.match((await client.getResearch(started.runId)).report ?? "", /stopped after/);
+    researchSteps(20);
+    assert.equal((await client.getResearch(started.runId)).status, "partial", "a stopped run stays stopped");
+    const dropped = await client.startResearch(THREADS.research, "once more", null, "cmd-3");
+    researchSteps(1);
+    assert.equal((await client.getResearch(dropped.runId)).status, "running");
+    assert.equal((await client.stopResearch(dropped.runId, false)).status, "cancelled");
+    researchSteps(5);
+    assert.equal((await client.getResearch(dropped.runId)).status, "cancelled");
   });
 
   it("keeps one heartbeat revision in history and streams the background task's output", async () => {

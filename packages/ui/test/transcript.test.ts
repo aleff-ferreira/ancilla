@@ -13,7 +13,7 @@ import type { ViewEvent } from "../src/types.js";
 function render(fold: ThreadFold): string {
   const thread: ThreadState = {
     load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false,
-    fold, attachments: [], shellRuns: [], stalled: false,
+    fold, attachments: [], shellRuns: [], researchRuns: [], stalled: false,
   };
   const state = initialState(defaultPrefs());
   const store = new Store({ ...state, threads: { s1: thread } });

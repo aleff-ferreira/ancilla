@@ -48,6 +48,20 @@ describe("slash commands", () => {
     assert.ok(!home.includes("compact") && !home.includes("fork"), "thread-only commands are hidden without a thread");
   });
 
+  it("offers /research with its question, and never runs it bare", () => {
+    const research = slashCommands([], { inThread: false }).find((c) => c.name === "research");
+    assert.ok(research, "the built-in is listed outside a thread too, since it can start one");
+    assert.equal(research.action, "research");
+    assert.equal(research.hint, "<question>");
+    assert.equal(research.runsBare, false);
+    assert.equal(research.needsThread, false);
+    assert.match(research.description, /cited report/);
+    assert.equal(matchSlash(slashCommands(SKILLS, { inThread: true }), "rese")[0]?.name, "research");
+    const resolved = resolveSlash({ name: "research", args: "what changed in WCAG 2.2?" }, slashCommands(SKILLS, { inThread: true }), SKILLS);
+    assert.equal(resolved.kind, "action");
+    assert.equal(resolved.kind === "action" ? resolved.args : null, "what changed in WCAG 2.2?");
+  });
+
   it("ranks exact and prefix matches first, built-ins before skills", () => {
     const commands = slashCommands(SKILLS, { inThread: true });
     assert.deepEqual(

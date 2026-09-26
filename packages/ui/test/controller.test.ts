@@ -7,6 +7,7 @@ import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } fr
 import { swarmView } from "../src/model/swarm.js";
 import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
+import { fakeResearchRun } from "./fixtures/research.js";
 
 const SESSION: SessionSummary = {
   sessionId: "s1",
@@ -37,48 +38,6 @@ function load(overrides: Partial<TranscriptLoad> = {}): TranscriptLoad {
     readOnly: false,
     readOnlyReason: null,
     ...overrides,
-  };
-}
-
-/** A run view with every field filled, for the fake client and for render tests. */
-export function fakeResearchRun(over: Partial<ResearchRunView>): ResearchRunView {
-  return {
-    runId: "run-1",
-    sessionId: "s1",
-    status: "running",
-    phase: "researching",
-    question: "How is geothermal energy developing in Europe?",
-    brief: null,
-    round: 1,
-    maxRounds: 12,
-    createdAt: "2026-09-26T00:00:00.000Z",
-    startedAt: "2026-09-26T00:00:01.000Z",
-    endedAt: null,
-    researchDeadlineAt: "2026-09-26T00:10:01.000Z",
-    workers: [],
-    sources: { registry: 0, verified: 0, curated: 0 },
-    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
-    failure: null,
-    reportAvailable: false,
-    report: null,
-    reportPath: null,
-    config: {
-      windowMinMinutes: 3,
-      windowMaxMinutes: 10,
-      maxRounds: 12,
-      maxParallel: 3,
-      workerMaxToolCalls: 25,
-      workerMaxSearches: 3,
-      workerMaxReads: 10,
-      workerMaxSaves: 10,
-      workerWallTimeMinutes: 10,
-      draftFirst: false,
-      salvageFraction: 0.6,
-      tokenSoftCap: null,
-      trace: false,
-      models: { supervisor: null, worker: null, writer: null },
-    },
-    ...over,
   };
 }
 
@@ -284,16 +243,23 @@ class FakeClient implements AncillaClient {
     return { noop: this.compactNoop, reason: this.compactNoop ? "no_compactable_history" : null };
   }
   researchRuns: ResearchRunView[] = [];
+  researchStarts: { sessionId: string; question: string; config: Partial<ResearchConfig> | null; commandId: string }[] = [];
+  researchStops: { runId: string; writeReport: boolean }[] = [];
+  researchSettings: ResearchSettings = { enabled: true, config: fakeResearchRun({}).config };
+  researchPatches: { enabled?: boolean; config?: Partial<ResearchConfig> }[] = [];
+  startResearchError: Error | null = null;
   async startResearch(sessionId: string, question: string, config: Partial<ResearchConfig> | null, commandId: string): Promise<ResearchRunView> {
-    void config;
+    this.researchStarts.push({ sessionId, question, config, commandId });
+    if (this.startResearchError) throw this.startResearchError;
     const run = fakeResearchRun({ runId: `run-${this.researchRuns.length + 1}-${commandId.slice(0, 4)}`, sessionId, question });
     this.researchRuns.push(run);
     return run;
   }
-  async stopResearch(runId: string): Promise<ResearchRunView> {
+  async stopResearch(runId: string, writeReport: boolean): Promise<ResearchRunView> {
+    this.researchStops.push({ runId, writeReport });
     const run = this.researchRuns.find((r) => r.runId === runId);
     if (!run) throw new Error("Unknown run.");
-    return { ...run, status: "cancelled" };
+    return { ...run, status: writeReport ? "partial" : "cancelled", phase: "done", reportAvailable: writeReport };
   }
   async listResearch(sessionId: string): Promise<ResearchRunView[]> {
     return this.researchRuns.filter((r) => r.sessionId === sessionId);
@@ -301,13 +267,18 @@ class FakeClient implements AncillaClient {
   async getResearch(runId: string): Promise<ResearchRunView> {
     const run = this.researchRuns.find((r) => r.runId === runId);
     if (!run) throw new Error("Unknown run.");
-    return run;
+    return { ...run, report: run.report ?? "# Report\n\nA line [1].\n\n## Sources\n\n[1] A (https://example.com)" };
   }
   async getResearchSettings(): Promise<ResearchSettings> {
-    return { enabled: true, config: fakeResearchRun({}).config };
+    return this.researchSettings;
   }
   async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<ResearchSettings> {
-    return { enabled: patch.enabled ?? true, config: { ...fakeResearchRun({}).config, ...(patch.config ?? {}) } as ResearchConfig };
+    this.researchPatches.push(patch);
+    this.researchSettings = {
+      enabled: patch.enabled ?? this.researchSettings.enabled,
+      config: { ...this.researchSettings.config, ...(patch.config ?? {}), models: { ...this.researchSettings.config.models, ...(patch.config?.models ?? {}) } },
+    };
+    return this.researchSettings;
   }
   async runShell(sessionId: string, command: string) {
     this.actions.push(`shell:${sessionId}:${command}`);
@@ -2043,6 +2014,155 @@ describe("AncillaController", () => {
     assert.match(sent?.text ?? "", /ran ls -la/);
     assert.equal(sent?.displayText, "Shared the output of `ls -la`");
     stop();
+  });
+
+  describe("deep research", () => {
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+    it("loads a thread's runs with its transcript, and leaves the list empty for a server without them", async () => {
+      const client = new FakeClient();
+      client.transcript = async () => load({ researchRuns: [fakeResearchRun({ status: "completed", phase: "done", reportAvailable: true })] });
+      const { controller, stop } = await started(client);
+      assert.equal(controller.store.get().threads["s1"]?.researchRuns.length, 1);
+      assert.equal(controller.store.get().threads["s1"]?.researchRuns[0]?.status, "completed");
+      stop();
+      const plain = new FakeClient();
+      const second = await started(plain);
+      assert.deepEqual(second.controller.store.get().threads["s1"]?.researchRuns, []);
+      second.stop();
+    });
+
+    it("starts a run with a minted UUID commandId, showing it queued before the server answers", async () => {
+      const client = new FakeClient();
+      let release: (() => void) | null = null;
+      const original = client.startResearch.bind(client);
+      client.startResearch = async (...args) => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return original(...args);
+      };
+      const { controller, stop } = await started(client);
+      const promise = controller.startResearch("s1", "  How is geothermal energy developing in Europe?  ", { maxParallel: 2 });
+      await flushMicrotasks();
+      const optimistic = controller.store.get().threads["s1"]?.researchRuns[0];
+      assert.equal(optimistic?.status, "queued");
+      assert.equal(optimistic?.question, "How is geothermal energy developing in Europe?");
+      assert.match(optimistic?.runId ?? "", /^pending:/);
+      assert.equal(optimistic?.config.maxParallel, 2, "the popover's overrides show on the optimistic row");
+      assert.equal(optimistic?.config.maxRounds, 12, "the rest comes from the loaded defaults");
+      (release as unknown as () => void)();
+      assert.equal(await promise, true);
+      const runs = controller.store.get().threads["s1"]?.researchRuns ?? [];
+      assert.equal(runs.length, 1, "the optimistic row is replaced, not kept beside the real one");
+      assert.match(runs[0]?.runId ?? "", /^run-1-/);
+      const call = client.researchStarts[0];
+      assert.equal(call?.sessionId, "s1");
+      assert.equal(call?.question, "How is geothermal energy developing in Europe?");
+      assert.deepEqual(call?.config, { maxParallel: 2 });
+      assert.match(call?.commandId ?? "", UUID);
+      stop();
+    });
+
+    it("drops the optimistic row and says so when the server refuses the run", async () => {
+      const client = new FakeClient();
+      client.startResearchError = new AncillaError("This thread already has a research run going.", 409);
+      const { controller, stop } = await started(client);
+      assert.equal(await controller.startResearch("s1", "anything"), false);
+      assert.deepEqual(controller.store.get().threads["s1"]?.researchRuns, []);
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not start the research run");
+      stop();
+    });
+
+    it("refuses a second run while one is live, and any run while the setting is off", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      assert.equal(await controller.startResearch("s1", "first"), true);
+      assert.equal(await controller.startResearch("s1", "second"), false);
+      assert.equal(client.researchStarts.length, 1);
+      assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /already going/);
+      controller.store.set((s) => ({ ...s, researchSettings: { enabled: false, config: fakeResearchRun({}).config } }));
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "run-1-" + client.researchStarts[0]!.commandId.slice(0, 4), status: "cancelled", phase: "done" }) });
+      assert.equal(await controller.startResearch("s1", "third"), false);
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Deep research is off");
+      stop();
+    });
+
+    it("merges research-run events by runId, newest winning, and keeps a report already read", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 1 }) });
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r2", round: 1, createdAt: "2026-09-26T00:05:00.000Z" }) });
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3, phase: "writing" }) });
+      const runs = controller.store.get().threads["s1"]?.researchRuns ?? [];
+      assert.deepEqual(runs.map((r) => [r.runId, r.round, r.phase]), [["r1", 3, "writing"], ["r2", 1, "researching"]]);
+      // A thread this app has not opened keeps nothing: it reads its runs when opened.
+      client.handler?.({ type: "research-run", sessionId: "elsewhere", run: fakeResearchRun({ runId: "r9", sessionId: "elsewhere" }) });
+      assert.equal(controller.store.get().threads["elsewhere"], undefined);
+      // The report, once read, survives the summaries the stream keeps sending.
+      client.researchRuns.push(fakeResearchRun({ runId: "r1", status: "completed", phase: "done", reportAvailable: true }));
+      assert.equal(await controller.openResearchReport("r1"), true);
+      assert.match(controller.store.get().threads["s1"]?.researchRuns[0]?.report ?? "", /^# Report/);
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", status: "completed", phase: "done", reportAvailable: true, report: null }) });
+      assert.match(controller.store.get().threads["s1"]?.researchRuns[0]?.report ?? "", /^# Report/);
+      stop();
+    });
+
+    it("stops a run, with or without a report, and shows the server's answer", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      assert.equal(await controller.startResearch("s1", "first"), true);
+      const runId = controller.store.get().threads["s1"]!.researchRuns[0]!.runId;
+      assert.equal(await controller.stopResearch(runId, true), true);
+      assert.deepEqual(client.researchStops, [{ runId, writeReport: true }]);
+      assert.equal(controller.store.get().threads["s1"]?.researchRuns[0]?.status, "partial");
+      assert.equal(await controller.stopResearch("missing", false), false);
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not stop the research run");
+      stop();
+    });
+
+    it("routes /research to a run in the open thread, and starts a thread for it from the new-thread screen", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      assert.equal(await controller.send("/research how is geothermal developing in Europe?"), true);
+      assert.equal(client.researchStarts.at(-1)?.sessionId, "s1");
+      assert.equal(client.researchStarts.at(-1)?.question, "how is geothermal developing in Europe?");
+      assert.equal(client.sent.length, 0, "nothing goes to Muse as a prompt");
+      assert.equal(await controller.send("/research"), false);
+      assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /Add the question/);
+      controller.newThread("/work/app");
+      const startsBefore = client.startCalls.length;
+      assert.equal(await controller.send("/research what changed in WCAG 2.2?"), true);
+      assert.equal(client.startCalls.length, startsBefore + 1, "a thread was started for the run");
+      assert.equal(client.startCalls.at(-1)?.cwd, "/work/app");
+      // The fake starts every thread as s1, so the run lands there; the route follows the new thread.
+      assert.equal(controller.store.get().route.kind, "thread");
+      assert.equal(client.researchStarts.at(-1)?.sessionId, "s1");
+      assert.equal(client.researchStarts.at(-1)?.question, "what changed in WCAG 2.2?");
+      assert.equal(client.sent.length, 0);
+      stop();
+    });
+
+    it("loads the research settings at boot and patches them with the change shown at once", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      assert.equal(controller.store.get().researchSettings?.enabled, true);
+      assert.equal(controller.store.get().researchSettings?.config.maxParallel, 3);
+      await controller.setResearchSettings({ config: { maxParallel: 4, models: { supervisor: null, worker: "muse-spark-1.3", writer: null } } });
+      assert.deepEqual(client.researchPatches, [{ config: { maxParallel: 4, models: { supervisor: null, worker: "muse-spark-1.3", writer: null } } }]);
+      assert.equal(controller.store.get().researchSettings?.config.maxParallel, 4);
+      assert.equal(controller.store.get().researchSettings?.config.models.worker, "muse-spark-1.3");
+      assert.equal(controller.store.get().researchSettings?.config.models.writer, null, "the other models keep their value");
+      client.setResearchSettings = async () => {
+        throw new Error("nope");
+      };
+      await controller.setResearchSettings({ enabled: false });
+      assert.equal(controller.store.get().researchSettings?.enabled, true, "a refused patch is taken back");
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not change the research settings");
+      controller.setResearchStopWrites(false);
+      assert.equal(controller.store.get().researchStopWrites, false);
+      stop();
+    });
   });
 
   it("starts a thread beside one whose reasoning cannot be replayed", async () => {

@@ -848,7 +848,7 @@ describe("sidebar, activity and the window title", () => {
     return { ...base, connection: "open", route, sessions, threads, projects: [{ cwd: "/work/lantern", displayName: "lantern", pinned: true, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd: "/work/lantern", displayName: "lantern" }] }] };
   }
   function thread(f: ThreadFold, extra: Partial<ThreadState> = {}): ThreadState {
-    return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: f, attachments: [], shellRuns: [], stalled: false, ...extra };
+    return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: f, attachments: [], shellRuns: [], researchRuns: [], stalled: false, ...extra };
   }
 
   it("summarizes the open thread's run for the sidebar row", () => {

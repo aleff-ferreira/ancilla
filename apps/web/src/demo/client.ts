@@ -3,24 +3,7 @@
  * back what `muse serve` would stream, so the real Ancilla UI renders and responds exactly as it does
  * against a live server. Nothing leaves the browser: no server, no Muse, no model calls.
  */
-import { AncillaError, parseModelList } from "@ancilla/ui";
-
-const DEMO_RESEARCH_CONFIG: ResearchConfig = {
-  windowMinMinutes: 3,
-  windowMaxMinutes: 10,
-  maxRounds: 12,
-  maxParallel: 3,
-  workerMaxToolCalls: 25,
-  workerMaxSearches: 3,
-  workerMaxReads: 10,
-  workerMaxSaves: 10,
-  workerWallTimeMinutes: 10,
-  draftFirst: false,
-  salvageFraction: 0.6,
-  tokenSoftCap: null,
-  trace: false,
-  models: { supervisor: null, worker: null, writer: null },
-};
+import { AncillaError, parseModelList, researchLive } from "@ancilla/ui";
 import type {
   AccountView,
   AncillaClient,
@@ -60,12 +43,14 @@ import type {
   ResearchConfig,
   ResearchRunView,
   ResearchSettings,
+  ResearchWorkerView,
 } from "@ancilla/ui";
 import { DemoFiles } from "./files.js";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
 import {
   HOME,
   PROJECTS,
+  RESEARCH_CONFIG,
   SIDE_ACCOUNT,
   THREADS,
   auditItem,
@@ -97,6 +82,14 @@ const REPLY =
   "In your own project this thread would stream from `muse serve`, with every tool call, diff and approval shown right here.";
 
 type Timer = ReturnType<typeof setTimeout>;
+
+/** What the demo's research workers look into, by round: the same for every question, since nothing is searched. */
+const RESEARCH_TOPICS: readonly (readonly string[])[] = [
+  ["what the primary sources say", "how it is done in practice", "criticism and open questions"],
+  ["figures and measurements", "recent changes"],
+];
+/** How long each research step takes on the page, so a run started from the composer reports in under a minute. */
+const RESEARCH_STEP_MS = { queue: 400, scope: 2_000, spawn: 1_200, tick: 1_100, write: 3_000 } as const;
 
 interface Thread {
   summary: SessionSummary;
@@ -143,6 +136,10 @@ export class DemoAncillaClient implements AncillaClient {
   private created = 0;
   private listed: (() => void)[] = [];
   private hasListed = false;
+  private researchSettings: ResearchSettings = { enabled: true, config: RESEARCH_CONFIG };
+  /** Every research run, seeded or started here; the running ones advance on their own timers. */
+  private readonly research = new Map<string, ResearchRunView>();
+  private readonly researchTimers = new Map<string, Timer>();
 
   constructor(readonly scenario: Scenario = "running") {
     const seeded = seed(this.now, scenario);
@@ -155,6 +152,9 @@ export class DemoAncillaClient implements AncillaClient {
       childrenAt(this.audit, this.audit.revisedAt, Number.NEGATIVE_INFINITY, this.auditCache);
     }
     this.streams = seeded.streams;
+    for (const run of seeded.research) {
+      this.research.set(run.runId, run);
+    }
     this.projects = [
       { cwd: PROJECTS.atlas, displayName: "atlas-api", pinned: true, activityAt: iso(this.now), defaultAccountId: null, folders: [{ cwd: PROJECTS.atlas, displayName: "atlas-api" }] },
       {
@@ -178,6 +178,12 @@ export class DemoAncillaClient implements AncillaClient {
     if (scenario === "reconnect") {
       void this.whenListed().then(() => this.startOutage());
     }
+    // The seeded run carries on from where the seed left it once the app is watching.
+    void this.whenListed().then(() => {
+      for (const run of this.research.values()) {
+        if (researchLive(run)) this.scheduleResearch(run.runId, RESEARCH_STEP_MS.tick);
+      }
+    });
   }
 
   /** Resolves once the app has listed its threads, which is when the demo can open overlays on top. */
@@ -601,6 +607,7 @@ export class DemoAncillaClient implements AncillaClient {
       truncated: thread.truncated,
       attachments: [],
       shellRuns: [],
+      researchRuns: this.researchFor(sessionId),
       pending: { approvals: [...thread.approvals], userInputs: [] },
       pendingComplete: true,
       readOnly: false,
@@ -1127,24 +1134,283 @@ export class DemoAncillaClient implements AncillaClient {
     return { noop: false, reason: null };
   }
 
-  // ---------------------------------------------------------------- deep research (demo: filled in with the feature)
-  async startResearch(): Promise<ResearchRunView> {
-    throw new Error("Deep research is not part of the demo yet.");
+  // ---------------------------------------------------------------- deep research
+
+  /**
+   * A run in memory that walks the real run's phases on timers: scoping, then rounds of workers whose counters
+   * tick, then writing, then a report. Nothing is searched and no model is called; the report says so.
+   */
+  async startResearch(sessionId: string, question: string, config: Partial<ResearchConfig> | null, commandId: string): Promise<ResearchRunView> {
+    if (!this.threads.has(sessionId)) {
+      throw Object.assign(new Error("That thread is not in the demo."), { status: 404 });
+    }
+    const repeat = [...this.research.values()].find((run) => run.runId === sampleId(`research:${commandId}`));
+    if (repeat) {
+      return this.researchSummary(repeat);
+    }
+    if (this.researchFor(sessionId).some(researchLive)) {
+      throw new AncillaError("This thread already has a research run going.", 409);
+    }
+    const runId = sampleId(`research:${commandId}`);
+    const merged: ResearchConfig = { ...this.researchSettings.config, ...(config ?? {}), models: { ...this.researchSettings.config.models, ...(config?.models ?? {}) } };
+    const run: ResearchRunView = {
+      runId,
+      sessionId,
+      status: "queued",
+      phase: "scoping",
+      question: question.trim(),
+      brief: null,
+      round: 0,
+      maxRounds: merged.maxRounds,
+      createdAt: iso(Date.now()),
+      startedAt: null,
+      endedAt: null,
+      researchDeadlineAt: null,
+      workers: [],
+      sources: { registry: 0, verified: 0, curated: 0 },
+      usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
+      failure: null,
+      reportAvailable: false,
+      report: null,
+      reportPath: null,
+      config: merged,
+    };
+    this.research.set(runId, run);
+    this.scheduleResearch(runId, RESEARCH_STEP_MS.queue);
+    return this.researchSummary(run);
   }
-  async stopResearch(): Promise<ResearchRunView> {
-    throw new Error("Deep research is not part of the demo yet.");
+
+  async stopResearch(runId: string, writeReport: boolean): Promise<ResearchRunView> {
+    const run = this.research.get(runId);
+    if (!run) {
+      throw Object.assign(new Error("No such research run."), { status: 404 });
+    }
+    if (!researchLive(run)) {
+      return this.researchSummary(run);
+    }
+    this.clearResearchTimer(runId);
+    const at = Date.now();
+    const workers = run.workers.map((worker) => (worker.state === "working" || worker.state === "queued" ? { ...worker, state: "cancelled" as const, endedAt: iso(at) } : worker));
+    const found = run.sources.verified > 0;
+    const next: ResearchRunView =
+      writeReport && found
+        ? {
+            ...run,
+            status: "partial",
+            phase: "done",
+            endedAt: iso(at),
+            workers,
+            failure: "stopped by you before the window ended",
+            reportAvailable: true,
+            report: this.researchReportFor(run, true),
+            reportPath: `${this.threads.get(run.sessionId)?.summary.cwd ?? HOME}/.ancilla/research/${runId}/report.md`,
+          }
+        : { ...run, status: "cancelled", phase: "done", endedAt: iso(at), workers, failure: writeReport ? "stopped before any worker had verified a source" : null };
+    this.setResearch(next);
+    return this.researchSummary(next);
   }
-  async listResearch(): Promise<ResearchRunView[]> {
-    return [];
+
+  async listResearch(sessionId: string): Promise<ResearchRunView[]> {
+    return this.researchFor(sessionId);
   }
-  async getResearch(): Promise<ResearchRunView> {
-    throw new Error("Deep research is not part of the demo yet.");
+
+  async getResearch(runId: string): Promise<ResearchRunView> {
+    const run = this.research.get(runId);
+    if (!run) {
+      throw Object.assign(new Error("No such research run."), { status: 404 });
+    }
+    return { ...run };
   }
+
   async getResearchSettings(): Promise<ResearchSettings> {
-    return { enabled: true, config: DEMO_RESEARCH_CONFIG };
+    return { enabled: this.researchSettings.enabled, config: { ...this.researchSettings.config } };
   }
+
   async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<ResearchSettings> {
-    return { enabled: patch.enabled ?? true, config: { ...DEMO_RESEARCH_CONFIG, ...(patch.config ?? {}) } as ResearchConfig };
+    const previous = this.researchSettings;
+    this.researchSettings = {
+      enabled: patch.enabled ?? previous.enabled,
+      config: { ...previous.config, ...(patch.config ?? {}), models: { ...previous.config.models, ...(patch.config?.models ?? {}) } },
+    };
+    return this.getResearchSettings();
+  }
+
+  /** A thread's runs in the order they were started, as summaries: the report only travels with `getResearch`. */
+  private researchFor(sessionId: string): ResearchRunView[] {
+    return [...this.research.values()]
+      .filter((run) => run.sessionId === sessionId)
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+      .map((run) => this.researchSummary(run));
+  }
+
+  private researchSummary(run: ResearchRunView): ResearchRunView {
+    return { ...run, report: null };
+  }
+
+  private setResearch(run: ResearchRunView): void {
+    this.research.set(run.runId, run);
+    this.broadcast({ type: "research-run", sessionId: run.sessionId, run: this.researchSummary(run) });
+  }
+
+  private clearResearchTimer(runId: string): void {
+    const timer = this.researchTimers.get(runId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.researchTimers.delete(runId);
+    }
+  }
+
+  private scheduleResearch(runId: string, ms: number): void {
+    this.clearResearchTimer(runId);
+    const timer = setTimeout(() => {
+      this.researchTimers.delete(runId);
+      this.advanceResearch(runId);
+    }, ms);
+    this.researchTimers.set(runId, timer);
+  }
+
+  /** One step of the run: whichever comes next for its phase, then the timer for the step after. */
+  private advanceResearch(runId: string): void {
+    const run = this.research.get(runId);
+    if (!run || !researchLive(run)) {
+      return;
+    }
+    const at = Date.now();
+    if (run.status === "queued") {
+      this.setResearch({ ...run, status: "running", phase: "scoping", startedAt: iso(at), researchDeadlineAt: iso(at + run.config.windowMaxMinutes * MIN) });
+      this.scheduleResearch(runId, RESEARCH_STEP_MS.scope);
+      return;
+    }
+    if (run.phase === "scoping" || run.phase === "drafting") {
+      this.setResearch({
+        ...run,
+        phase: "researching",
+        brief: `Find out, from sources the workers open themselves, ${run.question.replace(/\?+$/, "").trim()}.`,
+        round: 1,
+        workers: this.spawnResearchWorkers(run, 1, at),
+        usage: this.researchUsage(run, 6_400, 380),
+      });
+      this.scheduleResearch(runId, RESEARCH_STEP_MS.tick);
+      return;
+    }
+    if (run.phase === "researching") {
+      const working = run.workers.filter((worker) => worker.state === "working");
+      if (working.length > 0) {
+        // The worker with the fewest calls goes next, so the chips advance side by side rather than one at a time.
+        const next = working.reduce((least, worker) => (worker.toolCalls < least.toolCalls ? worker : least));
+        this.setResearch(this.tickResearchWorker(run, next, at));
+        this.scheduleResearch(runId, RESEARCH_STEP_MS.tick);
+        return;
+      }
+      const queued = run.workers.find((worker) => worker.state === "queued");
+      if (queued) {
+        this.setResearch({ ...run, workers: run.workers.map((worker) => (worker === queued ? { ...worker, state: "working", startedAt: iso(at) } : worker)) });
+        this.scheduleResearch(runId, RESEARCH_STEP_MS.tick);
+        return;
+      }
+      if (run.round < RESEARCH_TOPICS.length && run.round < run.maxRounds) {
+        const round = run.round + 1;
+        this.setResearch({ ...run, round, workers: [...run.workers, ...this.spawnResearchWorkers(run, round, at)], usage: this.researchUsage(run, 12_800, 560) });
+        this.scheduleResearch(runId, RESEARCH_STEP_MS.spawn);
+        return;
+      }
+      this.setResearch({ ...run, phase: "writing", usage: this.researchUsage(run, 14_200, 610) });
+      this.scheduleResearch(runId, RESEARCH_STEP_MS.write);
+      return;
+    }
+    this.setResearch({
+      ...run,
+      status: "completed",
+      phase: "done",
+      endedAt: iso(at),
+      sources: { ...run.sources, curated: Math.min(run.sources.verified, 4) },
+      usage: this.researchUsage(run, 31_500, 2_900),
+      reportAvailable: true,
+      report: this.researchReportFor(run, false),
+      reportPath: `${this.threads.get(run.sessionId)?.summary.cwd ?? HOME}/.ancilla/research/${runId}/report.md`,
+    });
+  }
+
+  /** The supervisor's delegations for a round: as many start as the parallel cap allows, the rest queue. */
+  private spawnResearchWorkers(run: ResearchRunView, round: number, at: number): ResearchWorkerView[] {
+    const topics = RESEARCH_TOPICS[Math.min(round, RESEARCH_TOPICS.length) - 1] ?? [];
+    const first = run.workers.length + 1;
+    const slots = Math.max(1, run.config.maxParallel);
+    return topics.map((topic, index) => ({
+      agentId: first + index,
+      round,
+      topic,
+      discovery: false,
+      state: index < slots ? "working" : "queued",
+      toolCalls: 0,
+      searches: 0,
+      reads: 0,
+      saved: 0,
+      startedAt: iso(at),
+      endedAt: null,
+    }));
+  }
+
+  /** One worker's next tool call: its searches, then its reads, then what it keeps, then it is done. */
+  private tickResearchWorker(run: ResearchRunView, worker: ResearchWorkerView, at: number): ResearchRunView {
+    const searches = Math.min(run.config.workerMaxSearches, 2 + (worker.agentId % 2));
+    const reads = 2 + (worker.agentId % 3);
+    const saves = 1 + (worker.agentId % 2);
+    let next: ResearchWorkerView;
+    let sources = run.sources;
+    if (worker.searches < searches) {
+      next = { ...worker, searches: worker.searches + 1, toolCalls: worker.toolCalls + 1 };
+      sources = { ...sources, registry: sources.registry + 3 };
+    } else if (worker.reads < reads) {
+      next = { ...worker, reads: worker.reads + 1, toolCalls: worker.toolCalls + 1 };
+      sources = { ...sources, verified: Math.min(sources.registry, sources.verified + 1) };
+    } else if (worker.saved < saves) {
+      next = { ...worker, saved: worker.saved + 1, toolCalls: worker.toolCalls + 1 };
+    } else {
+      next = { ...worker, state: "completed", endedAt: iso(at) };
+    }
+    const workers = run.workers.map((candidate) => (candidate === worker ? next : candidate));
+    // The next queued worker starts as soon as one finishes, up to the parallel cap.
+    const live = workers.filter((candidate) => candidate.state === "working").length;
+    const queued = live < run.config.maxParallel ? workers.find((candidate) => candidate.state === "queued") : undefined;
+    const started = queued ? workers.map((candidate) => (candidate === queued ? { ...candidate, state: "working" as const, startedAt: iso(at) } : candidate)) : workers;
+    return { ...run, workers: started, sources, usage: this.researchUsage(run, 4_700, 210) };
+  }
+
+  private researchUsage(run: ResearchRunView, input: number, output: number): ResearchRunView["usage"] {
+    const cached = Math.round(input * 0.45);
+    return {
+      inputTokens: run.usage.inputTokens + input,
+      outputTokens: run.usage.outputTokens + output,
+      cachedInputTokens: run.usage.cachedInputTokens + cached,
+      totalTokens: run.usage.totalTokens + input + output,
+    };
+  }
+
+  /** What a demo run writes: honest about being a demo, in the shape a real report takes. */
+  private researchReportFor(run: ResearchRunView, partial: boolean): string {
+    const done = run.workers.filter((worker) => worker.state === "completed").length;
+    const opening = partial
+      ? `The run was stopped after ${done} of ${run.workers.length} workers had reported, so this is written from what they had.`
+      : `This is Ancilla's demo mode, so no worker searched anything and no model was called. In your own project this is where the report goes: the writer's answer, with a numbered citation on every claim.`;
+    return [
+      // A real writer titles the report; the demo's has nothing to title, so the row's question stands for it.
+      partial ? "# What the workers had found" : "# What the workers found",
+      "",
+      opening,
+      "",
+      "## What a real report looks like",
+      "",
+      `Each claim carries a marker like this one [1], and the marker points at a page one of the workers actually opened, never at something the model remembered. The supervisor sent ${run.workers.length} workers over ${run.round} ${run.round === 1 ? "round" : "rounds"}; ${run.sources.verified} of the ${run.sources.registry} pages they turned up were read and verified, and the writer cites only those [2].`,
+      "",
+      "Muse ran every search and every read here on your plan, so the tokens above are the run's real cost and appear on the Usage page under this thread.",
+      "",
+      "## Sources",
+      "",
+      "[1] Ancilla demo mode (https://example.com/ancilla-demo)",
+      "[2] How deep research cites its sources (https://example.com/ancilla-demo/citations)",
+      "",
+    ].join("\n");
   }
 
   async runShell(sessionId: string, command: string): Promise<void> {
