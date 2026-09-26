@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Ancilla",
-  "version": "0.17.1",
+  "version": "0.18.0",
   "identifier": "app.ancilla.desktop",
   "build": {
     "frontendDist": "../../web/dist",
@@ -36,11 +36,8 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBOEFGNzkyMDBBNkZERkEKUldUNi9hWUFrdmVLYXV1aFFUeXpWWVJ3UXhZY3psT0hGSUxieUVrUkwxSmh0Wjg3WHJ0NkM1U0UK",
-      "endpoints": [
-        "https://example.com/api/update/{{target}}/{{current_version}}",
-        "https://github.com/aleff-ferreira/ancilla/releases/latest/download/latest.json"
-      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0NEJBNzA3OThCNTRDN0IKUldSN1RMV1lCNmRMZER4SDViQTNKVXlQYlpmR3l0RE9MMy9LWjU5c3ZYT0J4ZVlhdU1IZGNXNDkK",
+      "endpoints": ["https://github.com/aleff-ferreira/ancilla/releases/latest/download/latest.json"],
       "windows": { "installMode": "passive" }
     }
   }

@@ -15,16 +15,21 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(root, "docs", "CHANGELOG.md");
 const target = join(root, "packages", "ui", "src", "model", "changelog.generated.ts");
 
-/** Splits the changelog on its `## <version>` headings, keeping each entry's markdown as written. */
+/**
+ * Splits the changelog on its `## <version>` headings, keeping each entry's markdown as written.
+ * Any other `## ` heading ends the entry above it and is left out, along with what follows it up to
+ * the next version: that is where a note about the changelog itself goes, like where Helicon's
+ * history starts.
+ */
 function parse(markdown) {
   const entries = [];
-  const lines = markdown.split("\n");
+  const lines = markdown.split(/\r?\n/);
   let current = null;
   for (const line of lines) {
     const heading = /^## +(\d+\.\d+\.\d+) *$/.exec(line);
-    if (heading) {
+    if (heading || line.startsWith("## ")) {
       if (current) entries.push(current);
-      current = { version: heading[1], lines: [] };
+      current = heading ? { version: heading[1], lines: [] } : null;
       continue;
     }
     if (current) current.lines.push(line);

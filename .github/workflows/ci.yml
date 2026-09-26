@@ -2,8 +2,17 @@ name: CI
 
 on:
   push:
-    branches: [prod]
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes an unfinished run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   node:
@@ -18,6 +27,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Every file that carries the version agrees, and the changelog has an entry for it
+      # (scripts/bump-version.mjs), so a half-done bump never reaches a tag.
+      - run: node scripts/bump-version.mjs --check
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       - run: npm run test --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
