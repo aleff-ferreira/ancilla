@@ -191,6 +191,12 @@ export interface ThreadState {
   stalled: boolean;
   /** Saved history is being checked while live view updates are unavailable. This is not a restored live stream. */
   historySync?: { checkedAt: number; progressAt: number | null };
+  /**
+   * The fold may have missed stream events: the connection dropped while the thread was in the background, or the
+   * thread left the sidebar and stopped being checked. It is read again when it is next opened; until then what it
+   * shows of its agents is last known, not live.
+   */
+  stale?: boolean;
 }
 
 export interface Toast {

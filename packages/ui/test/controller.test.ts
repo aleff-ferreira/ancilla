@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
+import { agentActivityView } from "../src/model/agents.js";
 import { buildTurns } from "../src/model/fold.js";
 import { ZOOM_MAX, ZOOM_MIN } from "../src/model/store.js";
 import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
@@ -943,6 +944,55 @@ describe("AncillaController", () => {
     stop();
   });
 
+  it("rereads a background thread that missed a dropped stream when it is opened, so a finished agent stops working", async () => {
+    const client = new FakeClient();
+    const other: SessionSummary = { ...SESSION, sessionId: "s2", title: "Other" };
+    client.listSessions = async () => [SESSION, other];
+    const workflow = (revision: number, status: string, child: Record<string, unknown>): ViewEvent => ({
+      method: "item/updated",
+      params: { item: { itemId: "wf-1", kind: "workflow", revision, status, turnId: "t1", workflowRunId: "run-1",
+        children: [{ childId: "c1", attempt: 1, label: "bg-reader", ...child }] } },
+    });
+    // The lead turn ended; its workflow child carries on in the background.
+    let events: ViewEvent[] = [
+      { method: "turn/started", params: { turnId: "t1" } },
+      workflow(1, "inProgress", { status: "started" }),
+      { method: "turn/completed", params: { turnId: "t1", terminal: "completed" } },
+    ];
+    const calls: [string, { refresh?: boolean } | undefined][] = [];
+    client.loadTranscript = async (sessionId: string, options?: { refresh?: boolean }) => {
+      calls.push([sessionId, options]);
+      return load({ session: sessionId === "s1" ? SESSION : other, events: sessionId === "s1" ? events : [] });
+    };
+    const { controller, stop } = await started(client);
+    try {
+      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 1);
+      controller.openThread("s2");
+      await settle();
+      // The child finishes while the stream is down, and nothing replays that.
+      events = [...events, workflow(2, "completed", { status: "terminal", terminal: "completed" })];
+      calls.length = 0;
+      client.handler?.({ type: "connection", state: "lost" });
+      client.handler?.({ type: "hello", version: "x" });
+      await settle();
+      assert.deepEqual(calls, [["s2", undefined]], "the open thread reloads at once");
+      assert.equal(controller.store.get().threads.s1?.stale, true, "the other shows what it has as last known");
+      assert.notEqual(controller.store.get().threads.s2?.stale, true);
+      controller.openThread("s1");
+      await settle();
+      await settle();
+      assert.deepEqual(calls.at(-1), ["s1", { refresh: true }], "the other on opening, read in place while its agent may run");
+      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 0);
+      assert.notEqual(controller.store.get().threads.s1?.stale, true, "and is live again once read");
+      controller.openThread("s2");
+      controller.openThread("s1");
+      await settle();
+      assert.equal(calls.length, 2, "once reread, it is not read again on every visit");
+    } finally {
+      stop();
+    }
+  });
+
   it("echoes a sent prompt, marks the turn running, then drops the echo", async () => {
     const client = new FakeClient();
     const { controller, stop } = await started(client);
@@ -1241,6 +1291,108 @@ describe("AncillaController", () => {
     assert.equal(await controller.send("hello"), false);
     assert.equal(client.sent.length, 0);
     stop();
+  });
+
+  /**
+   * The server's side of loading: a resume attaches the session to one of its hosts, a read in place never does, and
+   * a read of a session none of its hosts holds comes back read-only with no reason given.
+   */
+  function hostLike(client: FakeClient): { hosted: boolean } {
+    const host = { hosted: false };
+    client.loadTranscript = async (_sessionId: string, options?: { refresh?: boolean }) => {
+      client.transcriptOptions.push(options);
+      if (options?.refresh) {
+        return load({ readOnly: !host.hosted, readOnlyReason: null });
+      }
+      host.hosted = true;
+      return load();
+    };
+    client.sendResult = async () => {
+      if (!host.hosted) {
+        throw new AncillaError("Session is not loaded", 409, "sessionNotLoaded");
+      }
+      return { turnId: "t9", disposition: "started" };
+    };
+    return host;
+  }
+
+  it("resumes a session its host unloaded when a send is refused, rather than reading it back read-only", async () => {
+    const client = new FakeClient();
+    const host = hostLike(client);
+    const { controller, stop } = await started(client);
+    try {
+      assert.equal(host.hosted, true, "opening an idle thread resumes it");
+      // Muse idles the session out, so the server forgets which host had it.
+      host.hosted = false;
+      client.handler?.({ type: "msp", sessionId: "s1", method: "session/closed", params: {}, at: 1 });
+      controller.flush();
+      assert.equal(controller.store.get().threads["s1"]?.fold.closed, true);
+      assert.equal(await controller.send("hello again"), true);
+      assert.deepEqual(client.transcriptOptions, [undefined, undefined], "the refused send resumes instead of reading");
+      assert.equal(client.sent.length, 2, "the prompt the host refused goes once more, and only once");
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, false);
+      // The hosts restart for a settings change, which drops the binding again.
+      host.hosted = false;
+      client.handler?.({ type: "host", key: "k", state: "restarted", message: "restarted" });
+      await settle();
+      assert.equal(await controller.send("and again"), true);
+      assert.equal(client.sent.length, 4);
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, false);
+    } finally {
+      stop();
+    }
+  });
+
+  it("resumes an idle session on reload even after a recovery was recorded for it, so Take over works", async () => {
+    const client = new FakeClient();
+    const host = hostLike(client);
+    const { controller, stop } = await started(client);
+    try {
+      await controller.retryStalledThread("s1");
+      host.hosted = false;
+      client.handler?.({ type: "msp", sessionId: "s1", method: "session/closed", params: {}, at: 1 });
+      controller.flush();
+      await controller.loadThread("s1");
+      assert.deepEqual(client.transcriptOptions, [undefined, undefined, undefined], "an idle thread is never read in place");
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, false);
+      assert.equal(host.hosted, true);
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps the composer open when a read in place reports read-only without saying why", async () => {
+    const client = new FakeClient();
+    const session: SessionSummary = {
+      ...SESSION,
+      live: { activeTurnId: "live-1", turnStartedAt: null, pendingApprovals: 0, pendingInputs: 0, lastTerminal: null, lastError: null },
+    };
+    client.listSessions = async () => [session];
+    const running = (readOnly: boolean, readOnlyReason: string | null): TranscriptLoad => load({
+      session,
+      msp: { status: "running", activeTurnId: "live-1", modelId: "muse-spark-1.3", approvalMode: "onRequest", workspaceRoot: "/work/app", turnCount: 4 },
+      events: [...historyEvents, { method: "turn/started", params: { turnId: "live-1" }, at: 1 }],
+      readOnly,
+      readOnlyReason,
+    });
+    // A fresh page reads the running session in place; a server with no host of its own for it says so, bare.
+    client.transcript = async () => running(true, null);
+    const { controller, stop } = await started(client);
+    try {
+      assert.deepEqual(client.transcriptOptions, [{ refresh: true }]);
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, false, "a bare flag from a read is the server not knowing");
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, false);
+      // Another client holding the session is a reason, and that still locks the composer.
+      client.transcript = async () => running(true, "Another Muse session has it open.");
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads["s1"]?.readOnly, true);
+      assert.equal(controller.store.get().threads["s1"]?.readOnlyReason, "Another Muse session has it open.");
+      assert.equal(await controller.send("hello"), false);
+      assert.equal(client.sent.length, 0);
+    } finally {
+      stop();
+    }
   });
 
   it("runs slash commands, skills and shell lines instead of sending their text", async () => {
@@ -2084,6 +2236,16 @@ describe("stale thread watchdog", () => {
     historyUnavailable: true,
     viewHealth: { status: "unavailable", reason: "projectionUnavailable" },
   });
+  /** The server's live state agreeing the turn runs, so a quiet stream gets the longer grace rather than the missed-ending one. */
+  const LIVE_SESSION: SessionSummary = {
+    ...SESSION,
+    live: { activeTurnId: "live-1", turnStartedAt: null, pendingApprovals: 0, pendingInputs: 0, lastTerminal: null, lastError: null },
+  };
+  /** One event over the live stream, applied at once. */
+  const stream = (client: FakeClient, controller: AncillaController, sessionId: string, event: ViewEvent, at: number) => {
+    client.handler?.({ type: "msp", sessionId, ...event, at });
+    controller.flush();
+  };
 
   it("checks progressing partial history every 15 seconds without claiming the live stream recovered", async () => {
     const client = new FakeClient();
@@ -2418,5 +2580,358 @@ describe("stale thread watchdog", () => {
     await settle();
     assert.equal(loads, 2, "a reload never piles onto a load already in flight");
     stop();
+  });
+
+  it("queues a resume behind a read in flight and lets later loads share it, so one request runs at a time", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    const options: ({ refresh?: boolean } | undefined)[] = [];
+    let finish!: (value: TranscriptLoad) => void;
+    client.loadTranscript = (_sessionId: string, requested?: { refresh?: boolean }) => {
+      options.push(requested);
+      return new Promise<TranscriptLoad>((resolve) => {
+        finish = resolve;
+      });
+    };
+    const controller = new AncillaController(client, watchPlatform().fake);
+    const stop = controller.start();
+    await settle();
+    try {
+      assert.deepEqual(options, [{ refresh: true }], "the running session is read in place");
+      const resume = controller.loadThread("s1", { resume: true });
+      assert.equal(controller.loadThread("s1", { resume: true }), resume, "a second resume shares the queued one");
+      assert.equal(controller.loadThread("s1"), resume, "and so does a plain load asked meanwhile");
+      assert.equal(options.length, 1, "the read in flight is not interrupted");
+      finish({ ...runningLoad(), session: LIVE_SESSION });
+      await settle();
+      assert.deepEqual(options, [{ refresh: true }, undefined], "the resume follows the read");
+      finish(load({ session: LIVE_SESSION }));
+      await resume;
+      assert.equal(controller.store.get().threads.s1?.load, "ready");
+      assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, null);
+    } finally {
+      stop();
+    }
+  });
+
+  it("takes retry notices on the stream as life, so a turn waiting out a rate limit is neither reread nor stalled", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    let reads = 0;
+    client.transcript = async () => { reads++; return { ...runningLoad(), session: LIVE_SESSION }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      let attempt = 1;
+      for (let elapsed = 15_000; elapsed <= 480_000; elapsed += 15_000) {
+        const at = 1_000_000 + elapsed;
+        if (elapsed % 75_000 === 0) {
+          attempt += 1;
+          stream(client, controller, "s1", { method: "turn/retryScheduled", params: {
+            turnId: "live-1", attempt, maxAttempts: 10, nextAttempt: attempt + 1, reason: "rateLimited", retryDelayMs: 75_000,
+          } }, at);
+        }
+        setNow(at); runStaleChecks(); await settle();
+      }
+      assert.equal(reads, 1, "a stream that keeps reporting is never reread");
+      const thread = controller.store.get().threads.s1!;
+      assert.equal(thread.stalled, false);
+      assert.equal(thread.fold.activeTurnId, "live-1");
+      assert.equal(thread.fold.turns["live-1"]?.retry?.attempt, attempt, "the retry notice is kept");
+    } finally {
+      stop();
+    }
+  });
+
+  it("takes usage and reminder traffic on the stream as life too", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    let reads = 0;
+    client.transcript = async () => { reads++; return { ...runningLoad(), session: LIVE_SESSION }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      for (let elapsed = 15_000; elapsed <= 480_000; elapsed += 15_000) {
+        const at = 1_000_000 + elapsed;
+        stream(client, controller, "s1", { method: "session/tokenUsage", params: {
+          turnId: "live-1", cumulative: { promptTokens: elapsed, outputTokens: 1, totalTokens: elapsed + 1 }, viewCursor: `v:s1:${elapsed}`,
+        } }, at);
+        stream(client, controller, "s1", { method: "item/completed", params: { item: {
+          itemId: `reminder-${elapsed}`, kind: "reminderChild", status: "completed", revision: 1, turnId: "live-1", childSessionId: `helper-${elapsed}`,
+        } } }, at);
+        setNow(at); runStaleChecks(); await settle();
+      }
+      assert.equal(reads, 1);
+      assert.equal(controller.store.get().threads.s1?.stalled, false);
+    } finally {
+      stop();
+    }
+  });
+
+  it("expects silence while a scheduled retry waits, then still catches a stream that stays quiet past it", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    let reads = 0;
+    client.transcript = async () => { reads++; return { ...runningLoad(), session: LIVE_SESSION }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      setNow(1_015_000);
+      stream(client, controller, "s1", { method: "turn/retryScheduled", params: {
+        turnId: "live-1", attempt: 1, maxAttempts: 5, nextAttempt: 2, reason: "rateLimited", retryDelayMs: 150_000,
+      } }, 1_015_000);
+      for (const elapsed of [105_000, 165_000, 240_000]) {
+        setNow(1_000_000 + elapsed); runStaleChecks(); await settle(); await settle();
+      }
+      assert.equal(reads, 1, "the wait for the retry is expected, and the quiet clock starts when it is due");
+      setNow(1_000_000 + 270_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 2, "silence past the retry is a quiet turn again");
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps the retry Muse scheduled across a full read whose history does not record it", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => runningLoad();
+    const { controller, stop } = await startedWatching(client);
+    try {
+      stream(client, controller, "s1", { method: "turn/retryScheduled", params: {
+        turnId: "live-1", attempt: 1, maxAttempts: 5, nextAttempt: 2, reason: "rateLimited", retryDelayMs: 60_000,
+      } }, 1_000_002);
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads.s1?.fold.turns["live-1"]?.retry?.nextAttempt, 2);
+      stream(client, controller, "s1", { method: "turn/completed", params: { turnId: "live-1", terminal: "completed" } }, 1_000_003);
+      await controller.loadThread("s1");
+      assert.equal(controller.store.get().threads.s1?.fold.turns["live-1"]?.retry, undefined, "an ended turn's retry stays cleared");
+    } finally {
+      stop();
+    }
+  });
+
+  it("counts a child session's own events as life for the lead turn that spawned it", async () => {
+    const client = new FakeClient();
+    client.listSessions = async () => [LIVE_SESSION];
+    let reads = 0;
+    client.transcript = async () => { reads++; return { ...runningLoad(), session: LIVE_SESSION }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      // The lead delegates, then says nothing itself while its subagent works in a session of its own.
+      stream(client, controller, "s1", { method: "item/started", params: { item: {
+        itemId: "sub-1", kind: "subagent", status: "inProgress", revision: 1, turnId: "live-1", childSessionId: "child-1",
+      } } }, 1_010_000);
+      for (let elapsed = 30_000; elapsed <= 480_000; elapsed += 30_000) {
+        const at = 1_000_000 + elapsed;
+        stream(client, controller, "child-1", { method: "item/delta", params: { itemId: `c${elapsed}`, field: "text", delta: "…", turnId: "child-turn" } }, at);
+        setNow(at); runStaleChecks(); await settle();
+      }
+      assert.equal(reads, 1, "a lead whose child is working is not reread");
+      assert.equal(controller.store.get().threads.s1?.stalled, false);
+      assert.equal(controller.store.get().threads["child-1"], undefined, "the child's events open no thread of their own");
+      // Everything goes silent, the child included: that is a quiet turn again.
+      setNow(1_000_000 + 480_000 + 91_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 2);
+    } finally {
+      stop();
+    }
+  });
+
+  it("ends a stall the moment the turn asks the user something, and starts the next quiet stretch afresh", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => { reads++; return runningLoad(); };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      for (const elapsed of [31_000, 62_000, 93_000]) {
+        setNow(1_000_000 + elapsed); runStaleChecks(); await settle(); await settle();
+      }
+      assert.equal(controller.store.get().threads.s1?.stalled, true);
+      assert.equal(reads, 3);
+      stream(client, controller, "s1", { method: "userInput/requested", params: { userInputId: "q1", sessionId: "s1", turnId: "live-1", questions: [] } }, 1_093_500);
+      const asked = controller.store.get().threads.s1!;
+      assert.equal(asked.stalled, false, "a question over the live stream is not a stopped stream");
+      assert.ok(asked.fold.userInputs["q1"]);
+      setNow(1_600_000); runStaleChecks(); await settle();
+      assert.equal(reads, 3, "and the wait for the answer is never reread");
+      assert.equal(controller.store.get().threads.s1?.stalled, false);
+      stream(client, controller, "s1", { method: "userInput/settled", params: { userInputId: "q1", outcome: "answered", answers: [] } }, 1_600_000);
+      setNow(1_631_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 4, "the quiet stretch after the answer gets its quick reads again");
+      assert.equal(controller.store.get().threads.s1?.stalled, false, "rather than going straight back to stalled");
+    } finally {
+      stop();
+    }
+  });
+
+  it("never calls a thread stalled for a read that failed, and a healthy read after it leaves nothing behind", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => runningLoad();
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      client.transcript = async () => { throw new Error("socket hang up"); };
+      await controller.loadThread("s1");
+      const failed = controller.store.get().threads.s1!;
+      assert.equal(failed.load, "ready");
+      assert.equal(failed.error, "socket hang up");
+      assert.equal(failed.stalled, false, "one failed read says nothing about the stream");
+      client.transcript = async () => runningLoad();
+      setNow(1_031_000); runStaleChecks(); await settle(); await settle();
+      const healthy = controller.store.get().threads.s1!;
+      assert.equal(healthy.error, null);
+      assert.equal(healthy.stalled, false);
+      assert.equal(healthy.historySync, undefined);
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops reading a thread that was archived, and never puts it back into the sidebar", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    let archived = false;
+    client.transcript = async () => { reads++; return { ...fallbackLoad(reads), session: { ...SESSION, archived } }; };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      archived = true;
+      client.listSessions = async () => [];
+      await controller.archive("s1");
+      await controller.refresh();
+      assert.equal(controller.store.get().sessions.s1, undefined);
+      const before = reads;
+      for (let tick = 1; tick <= 6; tick++) {
+        setNow(1_000_000 + tick * 121_000); runStaleChecks(); await settle(); await settle();
+      }
+      assert.equal(reads, before, "nobody can see it, so nothing reads it");
+      assert.equal(controller.store.get().sessions.s1, undefined);
+      assert.equal(controller.store.get().threads.s1?.stale, true, "opening it again reads it afresh");
+    } finally {
+      stop();
+    }
+  });
+
+  it("does not put an archived thread back when a read of it was still in flight", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => fallbackLoad(1);
+    const { controller, stop } = await startedWatching(client);
+    try {
+      let finish!: (value: TranscriptLoad) => void;
+      client.transcript = () => new Promise((resolve) => { finish = resolve; });
+      const reading = controller.loadThread("s1");
+      await settle();
+      client.listSessions = async () => [];
+      await controller.archive("s1");
+      finish({ ...fallbackLoad(2), session: { ...SESSION, archived: true } });
+      await reading;
+      assert.equal(controller.store.get().sessions.s1, undefined);
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops reading the threads of a project taken out of the sidebar", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => { reads++; return fallbackLoad(reads); };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      await controller.hideProject("/work/app");
+      assert.deepEqual(controller.store.get().route, { kind: "home" });
+      const before = reads;
+      for (let tick = 1; tick <= 3; tick++) {
+        setNow(1_000_000 + tick * 121_000); runStaleChecks(); await settle(); await settle();
+      }
+      assert.equal(reads, before);
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps a turn the stream saw end from coming back through a read that still names it", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => runningLoad();
+    const { controller, stop } = await startedWatching(client);
+    try {
+      stream(client, controller, "s1", { method: "turn/completed", params: { turnId: "live-1", terminal: "completed" } }, 1_000_005);
+      assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, null);
+      // Muse then reports its view unavailable; a finished turn has nothing there to recover.
+      client.handler?.({ type: "msp", sessionId: "s1", method: "session/viewHealthChanged",
+        params: { health: "unavailable", noneReason: "projectionUnavailable" }, at: 1_000_006 });
+      await settle();
+      await settle();
+      assert.equal(client.transcriptOptions.length, 1, "an idle thread is not reread for an unavailable view");
+      // A read that raced the ending still names the turn, in a partial page and in a full one alike.
+      for (const partial of [true, false]) {
+        client.transcript = async () => ({
+          ...runningLoad(),
+          ...(partial ? { historyUnavailable: true, viewHealth: { status: "unavailable", reason: "projectionUnavailable" } } : {}),
+        });
+        await controller.loadThread("s1");
+        const thread = controller.store.get().threads.s1!;
+        assert.equal(thread.fold.activeTurnId, null, `${partial ? "partial" : "full"}: an ending the fold accepted is newer than the read`);
+        assert.equal(thread.fold.turns["live-1"]?.terminal, "completed");
+        assert.equal(thread.stalled, false);
+        assert.equal(thread.historySync, undefined);
+      }
+    } finally {
+      stop();
+    }
+  });
+
+  for (const partial of [true, false]) {
+    for (const held of [false, true]) {
+      it(`applies a live delta buffered during a ${partial ? "partial" : "full"} read once when the read ${held ? "already holds" : "lacks"} it`, async () => {
+        const client = new FakeClient();
+        const message = (text: string): ViewEvent => ({
+          method: "item/updated", params: { item: { itemId: "m", kind: "agentMessage", turnId: "live-1", revision: 1, status: "inProgress", text } },
+        });
+        const delta = (text: string): ViewEvent => ({ method: "item/delta", params: { itemId: "m", field: "text", delta: text, turnId: "live-1" } });
+        const read = (text: string): TranscriptLoad => ({
+          ...runningLoad(),
+          events: [...runningLoad().events, message(text)],
+          ...(partial ? { historyUnavailable: true, viewHealth: { status: "unavailable", reason: "projectionUnavailable" } } : {}),
+        });
+        const shown = () => controller.store.get().threads.s1?.fold.items["m"]?.text;
+        client.transcript = async () => read("Hello");
+        const { controller, stop } = await startedWatching(client);
+        try {
+          stream(client, controller, "s1", delta("!"), 1_000_002);
+          assert.equal(shown(), "Hello!");
+          let finish!: (value: TranscriptLoad) => void;
+          client.transcript = () => new Promise((resolve) => { finish = resolve; });
+          const reading = controller.loadThread("s1");
+          await settle();
+          // The feed delivers " world" while the read is in flight; the read may have caught it or not.
+          client.handler?.({ type: "msp", sessionId: "s1", ...delta(" world"), at: 1_000_003 });
+          finish(read(held ? "Hello! world" : "Hello!"));
+          await reading;
+          assert.equal(shown(), "Hello! world");
+        } finally {
+          stop();
+        }
+      });
+    }
+  }
+
+  it("ends a saved-progress sync when the server reports the view healthy again, and keeps watching for silence", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => { reads++; return fallbackLoad(reads); };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    try {
+      assert.ok(controller.store.get().threads.s1?.historySync);
+      setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 2, "saved progress is checked every 15 seconds while the view is unavailable");
+      const live = (viewHealth: { status: string; reason: string | null } | null) =>
+        ({ ...LIVE_SESSION.live!, viewHealth });
+      client.handler?.({ type: "session-status", sessionId: "s1", live: live({ status: "unavailable", reason: "projectionUnavailable" }) });
+      client.handler?.({ type: "session-status", sessionId: "s1", live: live(null) });
+      const recovered = controller.store.get().threads.s1!;
+      assert.equal(recovered.historySync, undefined);
+      assert.equal(recovered.stalled, false);
+      setNow(1_030_000); runStaleChecks(); await settle(); await settle();
+      setNow(1_045_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 2, "the fast cadence stops with the sync");
+      setNow(1_015_000 + 91_000); runStaleChecks(); await settle(); await settle();
+      assert.equal(reads, 3, "a stream that then stays silent is still caught");
+    } finally {
+      stop();
+    }
   });
 });

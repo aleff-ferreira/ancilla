@@ -5,6 +5,7 @@ import type {
   AttachmentView,
   GoalAction,
   AncillaEvent,
+  MspItem,
   OutgoingAttachment,
   OutputRange,
   ReasoningEffort,
@@ -17,6 +18,7 @@ import type {
   ViewEvent,
   WorkflowAction,
 } from "../types.js";
+import { agentActivityView } from "./agents.js";
 import { describeTool, modelDisplayName } from "./format.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
@@ -257,6 +259,8 @@ const QUIET_TURN_MS = 90_000;
 const STALE_RELOAD_LIMIT = 2;
 /** After the first attempts, continue read-only recovery slowly instead of leaving a permanent spinner. */
 const STALE_BACKOFF_MS = 120_000;
+/** A retry Muse scheduled postpones the quiet-turn clock by its delay, up to this much: the wait is expected silence. */
+const RETRY_PAUSE_MAX_MS = 15 * 60_000;
 
 /** Why a loaded thread needs reloading from history: its ending never landed, or its stream went quiet mid-turn. */
 export type StaleThreadReason = "diverged" | "quiet";
@@ -309,6 +313,147 @@ function freshViewProgress(previous: ThreadFold, next: ThreadFold, events: reado
 }
 
 /**
+ * Whether an event shows the session's stream is still carrying, which is a different question from whether the
+ * turn moved on. A turn backing off between rate-limited retries, or sending only usage and reminders, is alive
+ * though quiet. Muse reporting its view unavailable is the one thing that says the opposite.
+ */
+function provesLiveness(event: ViewEvent): boolean {
+  return event.method !== "session/viewHealthChanged";
+}
+
+/**
+ * How long after this batch the stream is expected to stay silent: a retry Muse scheduled for the active turn, say
+ * for a rate limit, sends nothing until it is due, and that wait is not a turn going quiet.
+ */
+function expectedPause(fold: ThreadFold, events: readonly ViewEvent[]): number {
+  let pause = 0;
+  for (const event of events) {
+    const delay = event.params["retryDelayMs"];
+    if (event.method === "turn/retryScheduled" && event.params["turnId"] === fold.activeTurnId
+      && typeof delay === "number" && Number.isFinite(delay) && delay > pause) {
+      pause = delay;
+    }
+  }
+  return Math.min(pause, RETRY_PAUSE_MAX_MS);
+}
+
+/** The child session ids an item names: a subagent's own, a workflow's children's, a reminder's. */
+function childSessions(event: ViewEvent): string[] {
+  const item = event.method.startsWith("item/") ? event.params["item"] : undefined;
+  if (!item || typeof item !== "object") {
+    return [];
+  }
+  const record = item as Record<string, unknown>;
+  const ids = typeof record["childSessionId"] === "string" ? [record["childSessionId"]] : [];
+  for (const child of Array.isArray(record["children"]) ? (record["children"] as unknown[]) : []) {
+    const id = child && typeof child === "object" ? (child as Record<string, unknown>)["childSessionId"] : undefined;
+    if (typeof id === "string") {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
+/** Of what the live stream and a read each hold for one field, the longer when one extends the other. */
+function longerText(streamed: string | undefined, read: string | undefined, both: string | undefined): string | undefined {
+  const live = streamed ?? "";
+  const saved = read ?? "";
+  if (!live) {
+    return both;
+  }
+  if (saved.startsWith(live)) {
+    return read;
+  }
+  return live.startsWith(saved) ? streamed : both;
+}
+
+/**
+ * Applies the live deltas that arrived while a read was in flight to what the read returned. The read can already
+ * hold some of them, and appending those again doubled the text until a final revision replaced it, or for good on
+ * a field the final leaves out. Where the live stream has followed an item from before the read began, it knows the
+ * item's whole text, so whichever side extends the other is the text; anything else is left as applied.
+ */
+function withBufferedDeltas(previous: ThreadFold, saved: ThreadFold, buffered: readonly ViewEvent[]): ThreadFold {
+  const fold = applyEvents(saved, buffered);
+  const opened = new Set<string>();
+  const deltas = new Set<string>();
+  for (const event of buffered) {
+    const raw = event.params["item"];
+    const item = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    if (event.method === "item/started" && typeof item?.["itemId"] === "string") {
+      opened.add(item["itemId"]);
+    } else if (event.method === "item/delta" && typeof event.params["itemId"] === "string") {
+      deltas.add(event.params["itemId"]);
+    }
+  }
+  if (deltas.size === 0) {
+    return fold;
+  }
+  const live = applyEvents(previous, buffered);
+  let items: Record<string, MspItem> | null = null;
+  for (const id of deltas) {
+    const applied = fold.items[id];
+    const streamed = live.items[id];
+    const read = saved.items[id];
+    // The agent panel's index shares workflow and subagent items, and their text is not streamed.
+    if (!applied || !streamed || !read || applied.status !== "inProgress" || applied.kind === "workflow" ||
+      applied.kind === "subagent" || !(previous.items[id] || opened.has(id))) {
+      continue;
+    }
+    const next: MspItem = { ...applied };
+    const text = longerText(streamed.text, read.text, applied.text);
+    const output = longerText(streamed.visibleOutput, read.visibleOutput, applied.visibleOutput);
+    if (text !== undefined) next.text = text;
+    if (output !== undefined) next.visibleOutput = output;
+    if (applied.summary && (streamed.summary || read.summary)) {
+      next.summary = applied.summary.map((part, index) =>
+        longerText(streamed.summary?.[index], read.summary?.[index], part) ?? part);
+    }
+    const changed = next.text !== applied.text || next.visibleOutput !== applied.visibleOutput ||
+      (next.summary ?? []).some((part, index) => part !== applied.summary?.[index]);
+    if (changed) {
+      items ??= { ...fold.items };
+      items[id] = next;
+    }
+  }
+  return items ? { ...fold, items } : fold;
+}
+
+/**
+ * A read that raced the stream can still name as active a turn the stream has already ended. Turn ids are never
+ * reused, so an ending this fold accepted is newer than any such read: the turn stays ended, with its outcome.
+ * A turn the fold itself still held as active is left to the read, which is how a saved `incomplete` record for a
+ * turn that is still running gets overruled.
+ */
+function keepEndedTurns(previous: ThreadFold, fold: ThreadFold): ThreadFold {
+  const turnId = fold.activeTurnId;
+  const ended = turnId !== null && previous.activeTurnId !== turnId ? previous.turns[turnId] : undefined;
+  if (turnId === null || !ended?.terminal) {
+    return fold;
+  }
+  const turn = fold.turns[turnId];
+  return {
+    ...fold,
+    activeTurnId: null,
+    turns: turn?.terminal ? fold.turns : { ...fold.turns, [turnId]: { ...turn, ...ended } },
+  };
+}
+
+/**
+ * A full read rebuilds the turns from history, which need not hold the retry Muse scheduled for the one still
+ * running. The retry the stream reported stays with that turn, as it does on the live path until the turn ends.
+ */
+function keepRetry(previous: ThreadFold, fold: ThreadFold): ThreadFold {
+  const turnId = fold.activeTurnId;
+  const retry = turnId !== null ? previous.turns[turnId]?.retry : undefined;
+  const turn = turnId !== null ? (fold.turns[turnId] ?? { turnId }) : undefined;
+  if (turnId === null || !retry || !turn || turn.retry || turn.terminal) {
+    return fold;
+  }
+  return { ...fold, turns: { ...fold.turns, [turnId]: { ...turn, retry } } };
+}
+
+/**
  * Owns app state and every side effect: server calls, the event stream, routing and prefs.
  * Components read state through hooks and call these methods; they never talk to the client.
  */
@@ -330,8 +475,11 @@ export class AncillaController {
   readonly store: Store<AppState>;
   private readonly pending = new Map<string, ViewEvent[]>();
   private readonly loading = new Map<string, ViewEvent[]>();
-  /** Thread loads in flight, so overlapping reloads of one session coalesce onto a single buffer. */
-  private readonly inflightLoads = new Map<string, Promise<void>>();
+  /**
+   * Thread loads in flight, so overlapping reloads of one session coalesce onto a single buffer. `resume` says
+   * whether the load in flight is one that attaches the session, which a read in place cannot stand in for.
+   */
+  private readonly inflightLoads = new Map<string, { run: Promise<void>; resume: boolean }>();
   /** Keys of prompt deliveries still waiting for the server, so a double-sent draft turns once. */
   private readonly inflightSends = new Set<string>();
   private readonly disposers: (() => void)[] = [];
@@ -347,6 +495,15 @@ export class AncillaController {
   private readonly recoveryAt = new Map<string, number>();
   /** A successful fallback returned usable history; failed/empty reads use the slower recovery path. */
   private readonly readableHistory = new Set<string>();
+  /**
+   * Threads the watchdog said stalled because their stream stayed silent through its reloads. Only that verdict
+   * outlasts a later read that brings nothing new; a failed read, or a feed Muse has since reported healthy, does not.
+   */
+  private readonly quietStalls = new Set<string>();
+  /** The thread each known child session (subagent, workflow child, reminder) works for. */
+  private readonly childParents = new Map<string, string>();
+  /** Threads whose child sessions showed activity since the last flush. */
+  private readonly childActivity = new Set<string>();
   private refreshing: Promise<void> | null = null;
   private refreshQueued = false;
   private toastSeq = 0;
@@ -563,6 +720,11 @@ export class AncillaController {
       byId[session.sessionId] = session;
     }
     this.update((s) => ({ ...s, projects, sessions: byId, sessionsLoaded: true }));
+    for (const id of Object.keys(this.state.threads)) {
+      if (!this.listed(id)) {
+        this.forget(id);
+      }
+    }
   }
 
   private scheduleRefresh(): void {
@@ -721,7 +883,7 @@ export class AncillaController {
     if (route.kind === "thread") {
       this.markSeen(route.sessionId, true);
       const thread = this.state.threads[route.sessionId];
-      if (!thread || thread.load === "idle" || thread.load === "error" || thread.fold.closed) {
+      if (!thread || thread.load === "idle" || thread.load === "error" || thread.fold.closed || thread.stale) {
         void this.loadThread(route.sessionId);
       }
     } else if (route.kind === "new" && route.cwd) {
@@ -752,51 +914,91 @@ export class AncillaController {
     return this.loadThread(sessionId);
   }
 
-  async loadThread(sessionId: string): Promise<void> {
+  /**
+   * Loads a thread. By default a session that may still be working or waiting on the user is only read in place
+   * (`mayBeBusy`), and any other is resumed, which is what brings back a session its host unloaded. `resume` asks
+   * for the attach outright, for a caller that knows nothing of the session runs on this host any more.
+   */
+  loadThread(sessionId: string, options: { resume?: boolean } = {}): Promise<void> {
     // A second load while one is in flight would orphan the first load's buffer: every event that
     // streamed into it is dropped, and the thread never shows them (#32: a frozen view on a thread
     // whose backend kept working). Coalescing waits on the one buffer instead, so nothing is lost.
     const inflight = this.inflightLoads.get(sessionId);
-    if (inflight) {
-      return inflight;
+    const resume = options.resume === true;
+    if (inflight && (inflight.resume || !resume)) {
+      return inflight.run;
     }
-    const run = this.reloadThread(sessionId).finally(() => {
-      if (this.inflightLoads.get(sessionId) === run) {
+    // A read in flight cannot attach the session, so a resume queues behind it: still one request at a time.
+    const started = inflight
+      ? inflight.run.catch(() => undefined).then(() => this.reloadThread(sessionId, resume))
+      : this.reloadThread(sessionId, resume);
+    const run = started.finally(() => {
+      if (this.inflightLoads.get(sessionId)?.run === run) {
         this.inflightLoads.delete(sessionId);
       }
     });
-    this.inflightLoads.set(sessionId, run);
+    this.inflightLoads.set(sessionId, { run, resume });
     return run;
   }
 
-  private async reloadThread(sessionId: string): Promise<void> {
+  /**
+   * Whether anything of a session may still be working or waiting on the user, as far as this client can tell: a
+   * turn, an approval or question, or a background agent the lead turn left running. Resuming into any of those must
+   * not happen, so such a session is only read. A session its host closed has nothing left running there.
+   */
+  private mayBeBusy(sessionId: string, thread: ThreadState | undefined): boolean {
+    const live = this.state.sessions[sessionId]?.live;
+    if (live?.activeTurnId || (live?.pendingApprovals ?? 0) > 0 || (live?.pendingInputs ?? 0) > 0) {
+      return true;
+    }
+    const fold = thread?.fold;
+    if (!fold || fold.closed) {
+      return false;
+    }
+    if (fold.activeTurnId !== null || Object.keys(fold.approvals).length > 0 || Object.keys(fold.userInputs).length > 0) {
+      return true;
+    }
+    const agents = agentActivityView(fold);
+    return agents.working + agents.waiting > 0;
+  }
+
+  private async reloadThread(sessionId: string, resume = false): Promise<void> {
     const readStartedAt = this.platform.now();
     const existing = this.state.threads[sessionId];
+    // Reading never reattaches: a fresh browser has no fold yet, but the server may already own a running turn.
+    // What happened to recover the thread before says nothing about whether it is busy now.
+    const refresh = !resume && this.mayBeBusy(sessionId, existing);
     this.loading.set(sessionId, []);
     this.setThread(sessionId, { ...(existing ?? blankThread()), load: "loading", error: null });
     try {
-      // A fresh browser has no fold yet, but the server may already own a running turn.
-      // Read its current view without resuming that session in the middle of its work.
-      const running = Boolean(existing?.fold.activeTurnId || this.state.sessions[sessionId]?.live?.activeTurnId);
-      const refresh = running || this.recoveryAt.has(sessionId) ||
-        (existing && !existing.readOnly && existing.load === "ready");
       const load = await this.client.loadTranscript(sessionId, refresh ? { refresh: true } : undefined);
       const buffered = this.loading.get(sessionId) ?? [];
       this.loading.delete(sessionId);
       const current = this.state.threads[sessionId] ?? existing;
       const previous = current?.fold ?? emptyFold();
       const saved = foldFromLoad(load, previous);
-      const fold = applyEvents(saved, buffered);
+      const fold = keepRetry(previous, keepEndedTurns(previous, withBufferedDeltas(previous, saved, buffered)));
+      const active = fold.activeTurnId !== null;
       const checkedAt = this.platform.now();
       const savedProgress = freshViewProgress(previous, saved, load.events);
       const liveProgress = buffered.length > 0 && freshViewProgress(previous, applyEvents(previous, buffered), buffered);
       const progressed = savedProgress || liveProgress;
-      if (progressed) this.staleReloads.delete(sessionId);
+      if (progressed || !active) this.staleReloads.delete(sessionId);
       this.appliedAt.set(sessionId, checkedAt);
+      this.noteChildren(sessionId, load.events);
+      this.noteChildren(sessionId, buffered);
       const unavailable = load.historyUnavailable === true || load.viewHealth?.status === "unavailable";
-      const historySync = fold.activeTurnId !== null && !liveProgress && (unavailable || current?.historySync)
+      // A server that says the view is healthy ends a saved-progress sync; one that says nothing leaves it standing.
+      const healthy = !unavailable && load.viewHealth === null;
+      const historySync = active && !liveProgress && (unavailable || (current?.historySync && !healthy))
         ? { checkedAt, progressAt: savedProgress ? checkedAt : current?.historySync?.progressAt ?? null }
         : undefined;
+      // Silence the watchdog already called a stall stays one until something moves; nothing else carries over.
+      const stalled = active && !progressed && (unavailable || (current?.stalled === true && this.quietStalls.has(sessionId)));
+      if (!stalled) this.quietStalls.delete(sessionId);
+      // A read only proves another client holds the session when it says why. A bare flag from a read is this server
+      // not knowing, and must not lock a composer that was working: a send the host refuses resumes it instead.
+      const unexplained = refresh && load.readOnly && !load.readOnlyReason;
       const readable = load.events.some((event) => {
         if (!event.method.startsWith("item/")) return false;
         const raw = event.params["item"];
@@ -806,7 +1008,9 @@ export class AncillaController {
       });
       if (historySync && readable) this.readableHistory.add(sessionId);
       else this.readableHistory.delete(sessionId);
+      // An idle session has nothing left to recover; a later turn starts from a clean slate.
       if (historySync) this.recoveryAt.set(sessionId, readStartedAt);
+      else if (!active) this.recoveryAt.delete(sessionId);
       this.update((s) => ({
         ...s,
         threads: {
@@ -814,19 +1018,22 @@ export class AncillaController {
           [sessionId]: {
             load: "ready",
             error: null,
-            readOnly: load.readOnly,
-            readOnlyReason: load.readOnlyReason,
+            readOnly: unexplained ? current?.readOnly ?? false : load.readOnly,
+            readOnlyReason: unexplained ? current?.readOnlyReason ?? null : load.readOnlyReason,
             truncated: load.truncated,
             fold,
             attachments: (load.attachments ?? []).map((file) => this.stamp(file)),
             shellRuns: load.shellRuns ?? [],
             // Saved progress is useful even when the live projection remains unavailable.
             // Keep that distinction in historySync instead of claiming the stream recovered.
-            stalled: fold.activeTurnId !== null && !progressed && (unavailable || current?.stalled === true),
+            stalled,
             ...(historySync ? { historySync } : {}),
           },
         },
-        sessions: load.session ? { ...s.sessions, [sessionId]: load.session } : s.sessions,
+        // A read that was in flight when the thread was archived or left the list must not put it back.
+        sessions: load.session && !load.session.archived && (!s.sessionsLoaded || s.sessions[sessionId])
+          ? { ...s.sessions, [sessionId]: load.session }
+          : s.sessions,
       }));
       // Whatever was already waiting when the thread opened counts too, not only what arrives next.
       this.autoAllow([sessionId]);
@@ -840,16 +1047,22 @@ export class AncillaController {
       const usable = fold.order.length > 0 || fold.activeTurnId !== null;
       this.readableHistory.delete(sessionId);
       this.recoveryAt.set(sessionId, this.platform.now());
-      if (progressed) {
-        this.staleReloads.delete(sessionId);
+      this.noteChildren(sessionId, buffered);
+      if (progressed || buffered.some(provesLiveness)) {
         this.appliedAt.set(sessionId, this.platform.now());
       }
+      if (progressed) {
+        this.staleReloads.delete(sessionId);
+        this.quietStalls.delete(sessionId);
+      }
+      // A failed read retries on the slower cadence. It says nothing about the stream itself, so it never raises
+      // the stalled notice on its own: the watchdog's spent reloads, or Muse reporting the view unavailable, do.
       this.setThread(sessionId, {
         ...current,
         fold,
         load: usable ? "ready" : "error",
         error: errorMessage(error),
-        stalled: fold.activeTurnId !== null && !progressed,
+        stalled: current.stalled && fold.activeTurnId !== null && !progressed,
         ...(progressed ? { historySync: undefined } : {}),
       });
     }
@@ -870,8 +1083,21 @@ export class AncillaController {
           }
           void this.refresh();
           const route = this.state.route;
-          if (route.kind === "thread") {
-            void this.loadThread(route.sessionId);
+          const routed = route.kind === "thread" ? route.sessionId : null;
+          // Nothing replays what the stream carried while it was down: a turn or a background agent that finished
+          // meanwhile would go on showing as working. The open thread reloads now; every other one shows what it
+          // has as last known until it is opened and read again.
+          this.update((s) => {
+            const threads = { ...s.threads };
+            for (const [id, thread] of Object.entries(threads)) {
+              if (id !== routed && !thread.stale) {
+                threads[id] = { ...thread, stale: true };
+              }
+            }
+            return { ...s, threads };
+          });
+          if (routed) {
+            void this.loadThread(routed);
           }
         }
         break;
@@ -885,7 +1111,10 @@ export class AncillaController {
         }
         if (event.method === "session/viewHealthChanged" && event.params["health"] === "unavailable") {
           const thread = this.state.threads[event.sessionId];
-          if (thread) {
+          // Only a running turn has updates to lose. An idle thread has nothing to recover, and reading it anyway
+          // could only put back a turn it already saw end; a thread nobody can see waits until it is opened.
+          const running = thread && (thread.fold.activeTurnId !== null || Boolean(this.state.sessions[event.sessionId]?.live?.activeTurnId));
+          if (thread && running && this.listed(event.sessionId)) {
             this.setThread(event.sessionId, { ...thread, stalled: thread.fold.activeTurnId !== null });
             const now = this.platform.now();
             const selected = this.state.route.kind === "thread" && this.state.route.sessionId === event.sessionId;
@@ -913,6 +1142,9 @@ export class AncillaController {
           return current ? { ...s, sessions: { ...s.sessions, [event.sessionId]: { ...current, live: event.live } } } : s;
         });
         this.announce(event.sessionId, known.title, before, event.live);
+        if (before?.viewHealth?.status === "unavailable" && event.live?.viewHealth?.status !== "unavailable") {
+          this.viewRecovered(event.sessionId);
+        }
         // The only word we get about a thread this app has never opened: it is waiting on someone.
         if (this.bypassArmed(event.sessionId) && (event.live?.pendingApprovals ?? 0) > 0) {
           this.loadForBypass(event.sessionId);
@@ -948,6 +1180,14 @@ export class AncillaController {
       return;
     }
     if (!this.state.threads[sessionId]) {
+      // A child session's own events: the lead turn that spawned it is alive while it works, however quiet the
+      // lead is itself. A grandchild the child names works for the same lead.
+      const parent = this.childParents.get(sessionId);
+      if (parent && this.state.threads[parent] && provesLiveness(event)) {
+        this.noteChildren(parent, [event]);
+        this.childActivity.add(parent);
+        this.scheduleFlush();
+      }
       return;
     }
     const list = this.pending.get(sessionId);
@@ -956,34 +1196,55 @@ export class AncillaController {
     } else {
       this.pending.set(sessionId, [event]);
     }
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
     if (this.flushHandle === null) {
       this.flushHandle = this.platform.schedule(() => this.flush(), FLUSH_MS);
+    }
+  }
+
+  /** Remembers the child sessions a thread's events name, so their own events can vouch for it. */
+  private noteChildren(parent: string, events: readonly ViewEvent[]): void {
+    for (const event of events) {
+      for (const child of childSessions(event)) {
+        if (child !== parent) {
+          this.childParents.set(child, parent);
+        }
+      }
     }
   }
 
   /** Apply queued stream events once per frame-ish, so fast deltas cost one render. */
   flush(): void {
     this.flushHandle = null;
-    if (this.pending.size === 0) {
+    if (this.pending.size === 0 && this.childActivity.size === 0) {
       return;
     }
     const batches = [...this.pending];
     this.pending.clear();
+    const children = [...this.childActivity];
+    this.childActivity.clear();
     const appliedNow = this.platform.now();
     this.update((s) => {
       const threads = { ...s.threads };
       for (const [id, events] of batches) {
         const thread = threads[id];
         if (thread) {
+          this.noteChildren(id, events);
           const fold = applyEvents(thread.fold, events);
           const progressed = freshViewProgress(thread.fold, fold, events);
-          if (progressed) {
-            this.appliedAt.set(id, appliedNow);
-            this.staleReloads.delete(id);
-            this.recoveryAt.delete(id);
-            this.readableHistory.delete(id);
-          }
-          threads[id] = { ...thread, fold, ...(progressed ? { stalled: false, historySync: undefined, error: null } : {}) };
+          const alive = events.some(provesLiveness);
+          const asking = events.some((event) => event.method === "approval/requested" || event.method === "userInput/requested");
+          const aliveAt = appliedNow + expectedPause(fold, events);
+          threads[id] = { ...thread, fold, ...this.noteActivity(id, thread, s, { progressed, alive, asking }, aliveAt) };
+        }
+      }
+      for (const id of children) {
+        const thread = threads[id];
+        if (thread) {
+          threads[id] = { ...thread, ...this.noteActivity(id, thread, s, { progressed: false, alive: true, asking: false }, appliedNow) };
         }
       }
       return { ...s, threads };
@@ -994,6 +1255,41 @@ export class AncillaController {
     if (route.kind === "thread" && batches.some(([id]) => id === route.sessionId)) {
       this.markSeen(route.sessionId);
     }
+  }
+
+  /**
+   * What activity on a thread's stream is worth, as a patch for the thread. New work for the turn ends every kind of
+   * recovery. Anything else the stream carries, a child session's work included, still proves the stream alive:
+   * the quiet-turn clock starts over from `aliveAt` and a stall declared for silence ends, but not a saved-progress
+   * sync, since Muse can keep sending usage and reminders while its view is unavailable. A request for the user
+   * means the turn waits on them, which is never a stall.
+   */
+  private noteActivity(
+    id: string,
+    thread: ThreadState,
+    state: AppState,
+    activity: { progressed: boolean; alive: boolean; asking: boolean },
+    aliveAt: number,
+  ): Partial<ThreadState> {
+    if (activity.progressed) {
+      this.appliedAt.set(id, aliveAt);
+      this.staleReloads.delete(id);
+      this.recoveryAt.delete(id);
+      this.readableHistory.delete(id);
+      this.quietStalls.delete(id);
+      return { stalled: false, historySync: undefined, error: null };
+    }
+    const unavailable = thread.historySync !== undefined || state.sessions[id]?.live?.viewHealth?.status === "unavailable";
+    const unstall = activity.asking || (activity.alive && !unavailable);
+    if (activity.alive) {
+      this.appliedAt.set(id, aliveAt);
+    }
+    if (!unstall) {
+      return {};
+    }
+    this.staleReloads.delete(id);
+    this.quietStalls.delete(id);
+    return thread.stalled ? { stalled: false } : {};
   }
 
   private scheduleStaleCheck(): void {
@@ -1018,12 +1314,19 @@ export class AncillaController {
     }
     const now = this.platform.now();
     for (const [id, thread] of Object.entries(this.state.threads)) {
+      if (!this.listed(id)) {
+        // Archived, or in a project taken out of the sidebar: nobody can see it, so nothing reads it until it is
+        // opened again. Its stream events still land, as they do for any loaded thread.
+        this.forget(id);
+        continue;
+      }
       if (thread.load !== "ready" || this.loading.has(id)) {
         continue;
       }
       const turnId = thread.fold.activeTurnId;
       if (!turnId) {
         this.staleReloads.delete(id);
+        this.quietStalls.delete(id);
         continue;
       }
       const applied = this.appliedAt.get(id) ?? null;
@@ -1042,6 +1345,13 @@ export class AncillaController {
         (live?.pendingApprovals ?? 0) > 0;
       if (waiting && !unavailable && !thread.error) {
         this.appliedAt.set(id, now);
+        // Whatever the watchdog concluded before the request no longer holds: the turn is waiting, not stalled,
+        // and the next quiet stretch after the answer starts again with its quick reads.
+        this.staleReloads.delete(id);
+        this.quietStalls.delete(id);
+        if (thread.stalled) {
+          this.setThread(id, { ...thread, stalled: false });
+        }
         continue;
       }
       const selected = this.state.route.kind === "thread" && this.state.route.sessionId === id;
@@ -1064,6 +1374,9 @@ export class AncillaController {
       if (count >= STALE_RELOAD_LIMIT) {
         // Initial reads did not move the turn. Explain the unavailable live view and continue
         // less frequent reads instead of leaving a permanent spinner (#42).
+        if (!unavailable && !thread.error) {
+          this.quietStalls.add(id);
+        }
         if (!thread.stalled) {
           this.setThread(id, { ...thread, stalled: true });
         }
@@ -1075,6 +1388,48 @@ export class AncillaController {
       this.recoveryAt.set(id, now);
       this.staleReloads.set(id, { turnId, count: count + 1 });
       void this.loadThread(id);
+    }
+  }
+
+  /** Whether the sidebar lists this thread, or it is the one open: archived threads and hidden projects' are not. */
+  private listed(sessionId: string): boolean {
+    const s = this.state;
+    if (!s.sessionsLoaded || (s.route.kind === "thread" && s.route.sessionId === sessionId)) {
+      return true;
+    }
+    const session = s.sessions[sessionId];
+    return session !== undefined && !session.archived && s.projects.some((p) => p.cwd === session.cwd);
+  }
+
+  /** Stops recovering a thread that left the sidebar. Its fold is no longer kept current, so opening it reads it again. */
+  private forget(sessionId: string): void {
+    this.staleReloads.delete(sessionId);
+    this.recoveryAt.delete(sessionId);
+    this.readableHistory.delete(sessionId);
+    this.quietStalls.delete(sessionId);
+    const thread = this.state.threads[sessionId];
+    if (thread && !thread.stale) {
+      this.setThread(sessionId, { ...thread, stale: true });
+    }
+  }
+
+  /**
+   * The server reports Muse's view of a session healthy again. The saved-progress sync, its notice and its fast
+   * cadence end with it; the quiet-turn clock starts over, so a feed that stays silent is still caught.
+   */
+  private viewRecovered(sessionId: string): void {
+    const thread = this.state.threads[sessionId];
+    if (!thread) {
+      return;
+    }
+    this.readableHistory.delete(sessionId);
+    this.recoveryAt.delete(sessionId);
+    this.staleReloads.delete(sessionId);
+    this.quietStalls.delete(sessionId);
+    this.appliedAt.set(sessionId, this.platform.now());
+    if (thread.historySync !== undefined || thread.stalled) {
+      const { historySync: _historySync, ...rest } = thread;
+      this.setThread(sessionId, { ...rest, stalled: false });
     }
   }
 
@@ -1318,7 +1673,10 @@ export class AncillaController {
       this.patchFold(sessionId, (f) => removeEcho(f, echo.localId));
       const kind = errorKind(error);
       if (!retried && (kind === "sessionNotLoaded" || kind === "sessionStreamMismatch")) {
-        await this.loadThread(sessionId);
+        // The host refused the turn because it does not hold the session, so nothing of it runs there: only a
+        // resume brings it back, where a read in place would leave it unloaded. Another client's lease still
+        // comes back as read-only, with its reason, and the retry below then stops.
+        await this.loadThread(sessionId, { resume: true });
         // The retry re-sends under this key, so it must not trip over its own guard.
         this.inflightSends.delete(key);
         return this.sendToThread(sessionId, text, options, true);
@@ -2163,6 +2521,7 @@ export class AncillaController {
     if (route.kind === "thread" && route.sessionId === sessionId) {
       this.navigate({ kind: "new", cwd: current.cwd });
     }
+    this.forget(sessionId);
     try {
       await this.client.updateSession(sessionId, { archived: true });
       this.toast("info", "Thread archived", current.title, {
@@ -2303,6 +2662,11 @@ export class AncillaController {
     const active = route.kind === "thread" ? this.state.sessions[route.sessionId] : null;
     if ((route.kind === "new" && route.cwd === cwd) || active?.cwd === cwd) {
       this.navigate({ kind: "home" });
+    }
+    for (const id of Object.keys(this.state.threads)) {
+      if (this.state.sessions[id]?.cwd === cwd) {
+        this.forget(id);
+      }
     }
     try {
       await this.client.hideProject(cwd);
