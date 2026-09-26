@@ -42,6 +42,7 @@ import {
   type TurnImage,
 } from "@ancilla/daemon";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
+import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
@@ -623,7 +624,10 @@ const OUTPUT_PAGE_BYTES = 1024 * 1024;
 const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 const MAX_BODY_BYTES = 96 * 1024 * 1024;
-/** Where a non-image attachment lands inside the workspace, so Muse's own tools can open it. */
+/**
+ * Where a non-image attachment lands inside the workspace, so Muse's own tools can open it. Prompts sent from Helicon
+ * mention `.helicon/attachments` instead; nothing here parses either path, and those files are left where they are.
+ */
 const ATTACHMENT_DIR = [".ancilla", "attachments"];
 
 interface PreparedAttachment {
@@ -718,7 +722,7 @@ export class AncillaServer {
       platform: options.platform ?? process.platform,
       distro: options.distro,
       musePath: options.musePath,
-      runtime: options.runtime ?? parseRuntimePreference(process.env["ANCILLA_MUSE_RUNTIME"]),
+      runtime: options.runtime ?? parseRuntimePreference(envSetting("MUSE_RUNTIME")),
       syncSessionNames: options.syncSessionNames ?? true,
       findNativeMuse: options.findNativeMuse,
       hostFactory: options.hostFactory ?? realHostFactory,
@@ -729,8 +733,10 @@ export class AncillaServer {
       loginSpawn: options.loginSpawn ?? defaultLoginSpawn,
     };
     this.opener = options.opener ?? defaultOpener(this.options.platform);
+    // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
+    importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
     this.store = new AncillaStore(
-      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, "ancilla.db"),
+      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
     );
     this.aonia = options.aonia ?? createAonia(this.options.musePath ? { musePath: this.options.musePath } : {});
     this.server = createServer((req, res) => {
@@ -804,6 +810,8 @@ export class AncillaServer {
 
   /** What the event stream authenticates with, since EventSource cannot be given a header. */
   private static readonly AUTH_COOKIE = "ancilla_token";
+  /** Helicon's name for it: a browser still holding one for the same token needs no new handshake. Never set. */
+  private static readonly LEGACY_AUTH_COOKIE = "helicon_token";
 
   /**
    * The origin of a request that came from a different site. A browser sends `Origin` on its own
@@ -859,7 +867,10 @@ export class AncillaServer {
     if (!this.options.token) {
       return true;
     }
-    if (this.cookie(req, AncillaServer.AUTH_COOKIE) === this.options.token) {
+    if (
+      this.cookie(req, AncillaServer.AUTH_COOKIE) === this.options.token ||
+      this.cookie(req, AncillaServer.LEGACY_AUTH_COOKIE) === this.options.token
+    ) {
       return true;
     }
     if (req.headers["authorization"] === `Bearer ${this.options.token}`) {

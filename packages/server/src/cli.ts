@@ -46,8 +46,15 @@ async function main(): Promise<void> {
     return;
   }
   const { AncillaServer } = await import("./server.js");
+  const { envSetting, importLegacyRuntime } = await import("./legacy.js");
   const portRaw = flagValue(argv, "--port");
   const dataDir = flagValue(argv, "--data-dir") ?? join(homedir(), ".ancilla");
+  if (dataDir !== ":memory:") {
+    mkdirSync(dataDir, { recursive: true });
+    // A first start brings Helicon's runtime choice along. Only stderr: stdout's first line is the readiness handshake.
+    const log = (message: string) => process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
+    importLegacyRuntime(dataDir, homedir(), log);
+  }
   // Machine-local runtime selection survives replacing the bundled server on an app update.
   const runtimeFile = join(dataDir, "runtime.json");
   const local = dataDir !== ":memory:" && existsSync(runtimeFile)
@@ -64,9 +71,6 @@ async function main(): Promise<void> {
     }
     process.env["WSLENV"] = forwarded.join(":");
   }
-  if (dataDir !== ":memory:") {
-    mkdirSync(dataDir, { recursive: true });
-  }
   const server = new AncillaServer({
     port: portRaw ? Number.parseInt(portRaw, 10) : 3127,
     host: flagValue(argv, "--host") ?? "127.0.0.1",
@@ -75,7 +79,7 @@ async function main(): Promise<void> {
     token: flagValue(argv, "--token"),
     allowOrigins: flagValues(argv, "--allow-origin"),
     distro: flagValue(argv, "--distro") ?? local.distro,
-    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? process.env["ANCILLA_MUSE_RUNTIME"] ?? local.runtime),
+    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? envSetting("MUSE_RUNTIME") ?? local.runtime),
     musePath: flagValue(argv, "--muse") ?? local.musePath,
     syncSessionNames: local.syncSessionNames,
   });

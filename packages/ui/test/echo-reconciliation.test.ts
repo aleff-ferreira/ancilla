@@ -25,6 +25,14 @@ describe("prompt echo reconciliation", () => {
     assert.equal(before.echoes.length, 1, "the previous fold is immutable");
   });
 
+  it("replaces the preview just the same when the prompt mentions Helicon's attachment folder", () => {
+    const legacy = prompt({ text: "Review the attached report\n\n@.helicon/attachments/report.pdf[Image #1]" });
+    assert.equal(applyEvent(addEcho(emptyFold(), echo()), legacy).echoes.length, 0);
+    const reloaded = foldFromLoad(load([legacy]), addEcho(emptyFold(), echo()));
+    assert.equal(reloaded.echoes.length, 0, "a thread sent from Helicon reloads without a duplicate bubble");
+    assert.equal(reloaded.order.length, 1);
+  });
+
   it("reconciles an attachment-only prompt when its item arrives before the ack", () => {
     let fold = addEcho(emptyFold(), echo({ text: "", turnId: null, disposition: "sending" }));
     fold = applyEvent(fold, prompt({ text: "[Image #1]" }));

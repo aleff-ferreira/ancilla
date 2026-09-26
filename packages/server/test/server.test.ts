@@ -504,6 +504,19 @@ describe("AncillaServer", () => {
     assert.equal((await fetch(`${base}/api/health`, { headers: { cookie: "ancilla_token=secret" } })).status, 200);
   });
 
+  it("still takes the cookie Helicon set, for the same token only", async () => {
+    const connection = new FakeConnection();
+    const { base } = await start(connection, { token: "secret" });
+    assert.equal((await fetch(`${base}/api/health`, { headers: { cookie: "helicon_token=secret" } })).status, 200);
+    assert.equal((await fetch(`${base}/api/health`, { headers: { cookie: "helicon_token=other" } })).status, 401);
+    const res = await fetch(`${base}/api/auth`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "secret" }),
+    });
+    assert.doesNotMatch(res.headers.get("set-cookie") ?? "", /helicon_token/, "only Ancilla's cookie is ever set");
+  });
+
   it("takes a token from the URL only when no other site is asking", async () => {
     const connection = new FakeConnection();
     const { base } = await start(connection, { token: "secret", allowOrigins: ["https://ancilla.example"] });
