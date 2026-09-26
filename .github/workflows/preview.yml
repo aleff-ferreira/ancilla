@@ -1,0 +1,44 @@
+name: Preview build
+
+# A Windows installer from any branch, for trying a change before it is released: `gh workflow run preview.yml --ref <branch>`,
+# then `gh run download <run id> --name ancilla-windows-preview`. It is not signed for the updater and not published, so it
+# needs no secrets; an installed preview still trusts Ancilla's release key and updates to the next real release.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      - name: Build the installer
+        shell: bash
+        env:
+          # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
+          ANCILLA_NODE_TARGET: x86_64-pc-windows-msvc
+        run: |
+          set -euo pipefail
+          # No updater signature without the release key; everything else is what a release builds.
+          echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/preview.json"
+          npm run tauri --workspace ancilla-desktop -- build --target x86_64-pc-windows-msvc --config "$RUNNER_TEMP/preview.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ancilla-windows-preview
+          path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 14
