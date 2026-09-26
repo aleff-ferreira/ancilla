@@ -347,7 +347,10 @@ export function SettingsPage() {
     <div className="@container flex h-full min-w-0 flex-col">
       {collapsed ? <TopBar /> : null}
       <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-      <header {...drag} className="mx-auto flex w-full max-w-[720px] shrink-0 items-center gap-3 px-4 pt-8 pb-1 @min-[520px]:px-6">
+      {/* The whole strip moves the window, like the top bar the other views start with: on Windows only a
+          `data-drag-region` surface does, and with the sidebar open this page has no top bar. */}
+      <div data-drag-region {...drag} className="shrink-0">
+      <header className="mx-auto flex w-full max-w-[720px] items-center gap-3 px-4 pt-8 pb-1 @min-[520px]:px-6">
         <Button size="sm" variant="ghost" onClick={() => controller.goBack()}>
           <ArrowLeftIcon size={14} /> Back
         </Button>
@@ -356,6 +359,7 @@ export function SettingsPage() {
           <p className="text-xs text-muted">Kept on this device. Most settings leave running threads alone; the sandbox and YOLO switches restart Muse hosts at once.</p>
         </div>
       </header>
+      </div>
 
       <div className="mx-auto w-full min-w-0 max-w-[720px] px-4 pb-16 @min-[520px]:px-6">
         <Section title="Appearance">

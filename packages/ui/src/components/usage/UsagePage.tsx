@@ -64,7 +64,9 @@ export function UsagePage() {
     <div className="@container flex h-full min-w-0 flex-col">
       {collapsed ? <TopBar /> : null}
       <div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
-      <header {...drag} className="mx-auto flex w-full max-w-[980px] shrink-0 flex-wrap items-center gap-3 px-4 pt-6 pb-4 @min-[520px]:px-6 sm:pt-8">
+      {/* The whole strip moves the window, as on the Settings page: on Windows only a `data-drag-region` surface does. */}
+      <div data-drag-region {...drag} className="shrink-0">
+      <header className="mx-auto flex w-full max-w-[980px] flex-wrap items-center gap-3 px-4 pt-6 pb-4 @min-[520px]:px-6 sm:pt-8">
         <Button size="sm" variant="ghost" onClick={() => controller.goBack()}>
           <ArrowLeftIcon size={14} /> Back
         </Button>
@@ -88,6 +90,7 @@ export function UsagePage() {
           ))}
         </div>
       </header>
+      </div>
 
       <div className="mx-auto w-full min-w-0 max-w-[980px] px-4 pb-16 @min-[520px]:px-6">
         <div className="mb-6">
