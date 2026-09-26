@@ -5,7 +5,7 @@ import { panelRun } from "../src/components/swarm/SwarmPanel.js";
 import { applyEvents, emptyFold } from "../src/model/fold.js";
 import { pendingKey, type RunVM } from "../src/model/swarm.js";
 import type { ViewEvent } from "../src/types.js";
-import { Feed, NOW, S, approvalAt, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, renderPanel, rowTag, textOf } from "./swarm-panel-fixture.js";
+import { Feed, MIN, NOW, S, approvalAt, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, renderPanel, rowTag, textOf } from "./swarm-panel-fixture.js";
 
 /** The rows of the roster grid in order: phase heads by name, agents by id. */
 function rows(markup: string): string[] {
@@ -134,6 +134,11 @@ describe("SwarmPanel", () => {
     assert.deepEqual(sortAgents(design.agents, "time").map((a) => a.name), ["design:crdt-ledger", "design:op-log", "design:conflict-ledger"]);
     assert.deepEqual(sortAgents(design.agents, "tokens").map((a) => a.name), ["design:crdt-ledger", "design:op-log", "design:conflict-ledger"]);
     assert.deepEqual(sortAgents(design.agents, "order").map((a) => a.name), ["design:crdt-ledger", "design:op-log", "design:conflict-ledger"]);
+    // Nothing reorders while you look (SPEC §9.1): a running agent never overtakes a finished one on a tick.
+    const research = run.phases[0]!;
+    const mixed = [...research.agents, { ...run.phases[2]!.agents[1]!, startedAt: S(12, 0), runningMs: 60_000 }];
+    assert.deepEqual(sortAgents(mixed, "time").map((a) => a.name), ["judge:perf", "research:field-notes", "research:crdt-survey", "research:prior-art", "research:constraints"]);
+    assert.deepEqual(sortAgents(mixed.map((a) => ({ ...a, runningMs: a.runningMs === null ? null : a.runningMs + 20 * MIN })), "time").map((a) => a.name)[0], "judge:perf");
     const grid = markup.slice(markup.indexOf('role="grid"'));
     assert.equal((grid.match(/tabindex="0"/g) ?? []).length, 1, "one tabbable row");
   });

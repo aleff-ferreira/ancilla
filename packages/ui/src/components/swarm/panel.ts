@@ -130,11 +130,15 @@ export function measureOf(agent: Pick<AgentVM, "durationMs" | "runningMs">): num
   return agent.durationMs ?? agent.runningMs;
 }
 
-/** Rows within a phase, by the column chosen; `order` is the schedule order the model gives. Planned agents stay last. */
+/**
+ * Rows within a phase, by the column chosen; `order` is the schedule order the model gives. By time, the agents
+ * still going come first in the order they started (their clocks grow together, so nothing overtakes anything
+ * while you look), then the finished ones by duration; planned agents stay last.
+ */
 export function sortAgents(agents: readonly AgentVM[], sort: RosterSort): AgentVM[] {
   if (sort === "order") return [...agents];
   const key = sort === "time"
-    ? (agent: AgentVM) => measureOf(agent)
+    ? (agent: AgentVM) => (isLive(agent) ? (agent.startedAt !== null ? Number.MAX_SAFE_INTEGER - agent.startedAt : Number.MAX_SAFE_INTEGER) : measureOf(agent))
     : (agent: AgentVM) => (agent.tokens ? usageTotal(agent.tokens) : null);
   return agents
     .map((agent, index) => ({ agent, index, value: agent.state === "planned" ? null : key(agent) }))
