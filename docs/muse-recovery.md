@@ -70,19 +70,21 @@ stops animating agents that were working when the feed went quiet.
 
 ## Local thread titles
 
-`syncSessionNames` controls whether Ancilla shares thread titles with Muse. It defaults to `true`: a title you type,
-or one Ancilla generates, is sent to Muse with `session/rename`, and names chosen in Muse or another client show up in
-Ancilla.
-
-Set it to `false` in [`runtime.json`](#runtime-configuration) if you hit the workflow failure above. Ancilla then:
+`syncSessionNames` controls whether Ancilla shares thread titles with Muse. It defaults to `false`, so out of the box
+Ancilla:
 
 - never sends `session/rename`;
 - keeps generated and typed titles in its own database;
 - takes a name from Muse only for a thread that has no title of its own yet.
 
-Title generation and agent delegation keep working. Muse's session logs are not rewritten, so an older session that
-already recorded a rename can still fail its workflows; start a fresh thread for that work. Saved work and transcripts
-stay available.
+Set it to `true` in [`runtime.json`](#runtime-configuration) to share titles: a title you type, or one Ancilla
+generates, is then sent to Muse with `session/rename`, and names chosen in Muse or another client show up in Ancilla.
+Even then, once a Muse host reports the `missing field kind` failure above, from a rename or from a workflow in one of
+its threads, Ancilla sends that host no more titles and writes one line to the server log saying so.
+
+Title generation and agent delegation keep working either way. Muse's session logs are not rewritten, so an older
+session that already recorded a rename can still fail its workflows; start a fresh thread for that work. Saved work and
+transcripts stay available.
 
 ## Runtime configuration
 
@@ -98,9 +100,9 @@ The server reads an optional `runtime.json` from its data directory when it star
 | Key | Meaning |
 | --- | --- |
 | `runtime` | Windows only: `native`, `wsl` or `auto` (the default: native Muse once it is installed) |
-| `distro` | the WSL distribution Muse runs in (default `Ubuntu`) |
-| `musePath` | an explicit `muse` binary path, as the chosen runtime sees it |
-| `syncSessionNames` | `false` keeps thread titles local; see [above](#local-thread-titles) |
+| `distro` | the WSL distribution Muse runs in; without it, `Ubuntu` when Muse is installed there, else WSL's default distribution |
+| `musePath` | an explicit `muse` binary path, as the chosen runtime sees it; a Linux path is checked in that distribution |
+| `syncSessionNames` | `true` shares thread titles with Muse; see [above](#local-thread-titles) |
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
 
 Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `ANCILLA_MUSE_RUNTIME` overrides its
@@ -111,7 +113,6 @@ Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `A
   "runtime": "wsl",
   "distro": "Ubuntu",
   "musePath": "/home/USER/.local/bin/muse",
-  "syncSessionNames": false,
   "wslEnv": {
     "BASH_ENV": "/home/USER/.config/muse/runtime-env.sh",
     "TBH_CREDENTIAL_BACKEND": "file"
@@ -119,13 +120,22 @@ Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `A
 }
 ```
 
-`wslEnv` names must be uppercase environment variable names and values must be strings. Each one is set for the
-server unless it is already set, and forwarded into WSL through `WSLENV`, including for in-app `muse login`. The example
-uses `BASH_ENV` to point Muse's non-interactive tool shells at a file that selects the intended Node installation; that
-file must already exist. Never put API keys or other secrets in `runtime.json`.
+The distribution named here, or found as described above, is the one Ancilla starts Muse in, runs CLI calls through
+and checks `\\wsl.localhost\` project folders against, so a folder from another distribution is refused with a message
+naming both.
 
-The file is read once at startup, so restart Ancilla after changing it. A file that is not valid JSON, or an invalid
-`wslEnv` entry, stops the server from starting; the reason is written to the server log.
+`wslEnv` names are environment variable names (letters, digits and underscores, in any case); `PATH` and `WSLENV`
+are refused because WSL sets them itself. The values go only to processes Ancilla starts through `wsl.exe`: Muse
+hosts, the environment probe, CLI calls, in-app `muse login` and `git clone` into a Linux folder. They are forwarded
+through `WSLENV`, replace a Windows variable of the same name for those processes, and are never set on the server
+itself, so the file opener, native Muse and the updater see none of them. The example uses `BASH_ENV` to point Muse's
+non-interactive tool shells at a file that selects the intended Node installation; that file must already exist.
+Never put API keys or other secrets in `runtime.json`.
+
+The file is read once at startup, so restart Ancilla after changing it. It may be UTF-8 with or without a byte order
+mark, or UTF-16, which is what Windows PowerShell writes. A file that is not a JSON object is ignored as a whole, and a
+field of the wrong type or an unusable `wslEnv` entry is ignored on its own; each is one line in the server log, and
+the server starts either way.
 
 ## Verifying it
 
