@@ -1,4 +1,4 @@
-import { ArrowCounterClockwiseIcon, ArrowDownIcon, CaretRightIcon, NotePencilIcon, SquareIcon, TerminalWindowIcon, WarningCircleIcon, XIcon } from "../ui/icons.js";
+import { ArrowCounterClockwiseIcon, ArrowDownIcon, CaretRightIcon, ClockCounterClockwiseIcon, NotePencilIcon, SquareIcon, TerminalWindowIcon, WarningCircleIcon, XIcon } from "../ui/icons.js";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { useApp, useController, useNow } from "../../app/context.js";
@@ -97,14 +97,24 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
   // Turns and the commands Ancilla ran share one timeline: a command's output caused the prompt after it.
   const timeline = useMemo(() => {
     let last = 0;
-    const blocks = turns.map((turn, index) => {
+    const blocks = turns.map((turn) => {
       const at = sentTime(turn) ?? completedTime(turn) ?? last + 1;
       last = at;
-      return { kind: "turn" as const, at, turn, index };
+      return { kind: "turn" as const, at, turn };
     });
     const runs = (thread.shellRuns ?? []).map((run) => ({ kind: "run" as const, at: Date.parse(run.at) || 0, run }));
     return [...blocks, ...runs].sort((a, b) => a.at - b.at);
   }, [turns, thread.shellRuns]);
+  // The latest turn is the one shown last, which is what carries a failure's full notice and its Retry.
+  const latestKey = useMemo(() => {
+    for (let index = timeline.length - 1; index >= 0; index -= 1) {
+      const entry = timeline[index];
+      if (entry?.kind === "turn") return entry.turn.key;
+    }
+    return null;
+  }, [timeline]);
+  // A prompt already on its way makes the failure above it an earlier one.
+  const followed = echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started");
 
   const attachmentsByTurn = useMemo(() => {
     const map: Record<string, AttachmentView[]> = {};
@@ -162,7 +172,8 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
                   answers={answers}
                   attachments={attachmentsByTurn}
                   sessionId={props.sessionId}
-                  isLast={entry.index === turns.length - 1}
+                  isLast={entry.turn.key === latestKey}
+                  followed={entry.turn.key === latestKey && followed}
                   readOnly={thread.readOnly}
                   speed={entry.turn.turnId ? (speeds[entry.turn.turnId] ?? null) : null}
                   cost={entry.turn.turnId ? (costs[entry.turn.turnId] ?? null) : null}
@@ -214,6 +225,8 @@ const TurnBlock = memo(
     attachments: Record<string, AttachmentView[]>;
     sessionId: string;
     isLast: boolean;
+    /** A newer prompt is already on its way, so this turn's failure is no longer the latest word. */
+    followed: boolean;
     readOnly: boolean;
     speed: TurnSpeed | null;
     cost: TurnCost | null;
@@ -223,6 +236,7 @@ const TurnBlock = memo(
     const closed = useApp((s) => (turn.turnId ? s.prefs.dismissedTurnErrors.includes(`${props.sessionId}:${turn.turnId}`) : false));
     const failed = info?.terminal === "failed" && !info.dismissed && !closed;
     const cancelled = info?.terminal === "cancelled";
+    const unconfirmed = info?.terminal === "unknown" && !turn.running;
     const hasWork = turn.entries.length > 0;
     // Items outside any turn are the user's own `!` commands: shown as they are, never folded into a work log.
     const standalone = !turn.turnId && !turn.prompt;
@@ -272,9 +286,11 @@ const TurnBlock = memo(
             sessionId={props.sessionId}
             turnId={turn.turnId}
             readOnly={props.readOnly}
+            followed={props.followed}
             files={props.attachments[turn.turnId ?? ""] ?? []}
           />
         ) : null}
+        {unconfirmed ? <UnconfirmedOutcome sessionId={props.sessionId} latest={props.isLast} /> : null}
         {cancelled ? (
           <p className="flex items-center gap-1.5 text-xs text-subtle">
             <SquareIcon weight="fill" size={11} /> Stopped
@@ -293,6 +309,7 @@ const TurnBlock = memo(
     a.gates === b.gates &&
     a.answers === b.answers &&
     a.isLast === b.isLast &&
+    a.followed === b.followed &&
     a.readOnly === b.readOnly &&
     a.attachments === b.attachments &&
     // Prices arrive after the catalog loads, so a turn's cost can change with nothing else about it changing.
@@ -504,7 +521,8 @@ function LiveStatus(props: { turn: TurnView; gates: GateMap }) {
 function TurnFooter(props: { turn: TurnView; speed: TurnSpeed | null; cost: TurnCost | null }) {
   const duration = turnDuration(props.turn);
   const hasWork = props.turn.entries.length > 0;
-  const completed = completedTime(props.turn);
+  // A turn whose outcome is not known yet is not called completed.
+  const completed = props.turn.info?.terminal === "unknown" ? null : completedTime(props.turn);
   const dot = (
     <span aria-hidden="true" className="text-line-strong">
       ·
@@ -653,6 +671,39 @@ function PendingPrompt(props: { echo: LocalEcho }) {
   );
 }
 
+/**
+ * Muse says the turn is over, but the saved history Ancilla could read stops before its outcome, as it does while
+ * Muse's live view is unavailable. Nothing is claimed about how it went: no failure, and no Retry that could run the
+ * work a second time. Reading the results again is safe, so the latest turn offers that.
+ */
+function UnconfirmedOutcome(props: { sessionId: string; latest: boolean }) {
+  const controller = useController();
+  const busy = useApp((s) => s.threads[props.sessionId]?.load === "loading");
+  if (!props.latest) {
+    return (
+      <p className="flex min-w-0 items-center gap-1.5 text-xs text-subtle">
+        <ClockCounterClockwiseIcon size={12} className="shrink-0" />
+        <span className="shrink-0">Outcome not saved yet</span>
+      </p>
+    );
+  }
+  return (
+    <div className="flex items-start gap-3 rounded-xl bg-sunken px-3.5 py-3 shadow-[0_0_0_1px_var(--border)]">
+      <ClockCounterClockwiseIcon size={15} className="mt-0.5 shrink-0 text-subtle" />
+      <div className="min-w-0 flex-1">
+        <p role="status" className="text-sm font-medium text-fg">Outcome not saved yet</p>
+        <p className="mt-0.5 text-xs text-muted">
+          Muse reports this turn is over, but the saved history Ancilla could read stops before it ends. Nothing was sent
+          again.
+        </p>
+      </div>
+      <Button size="sm" loading={busy} onClick={() => void controller.retryStalledThread(props.sessionId)}>
+        Reload results
+      </Button>
+    </div>
+  );
+}
+
 function TurnError(props: {
   message: string;
   retryable: boolean;
@@ -660,16 +711,12 @@ function TurnError(props: {
   sessionId: string;
   turnId: string | null;
   readOnly: boolean;
+  /** A newer prompt is already on its way. */
+  followed: boolean;
   /** The failed turn's own files: what the provider rejects in the same words, and what a retry has to carry. */
   files: AttachmentView[];
 }) {
   const controller = useController();
-  const earlier = useApp((s) => {
-    const fold = s.threads[props.sessionId]?.fold;
-    if (!fold || !props.turnId) return false;
-    const latest = [...fold.order].reverse().map((id) => fold.items[id]).find((item) => item?.kind === "userMessage" && item.turnId);
-    return Boolean(latest && latest.turnId !== props.turnId);
-  });
   const hadImages = props.files.some((file) => file.kind === "image");
   // Some failures are about the thread, not the turn: retrying sends the same history and fails the same way.
   const stuck = stuckThread(props.message, { ownImages: hadImages });
@@ -702,7 +749,9 @@ function TurnError(props: {
     <div className="flex items-start gap-3 rounded-xl bg-danger-soft px-3.5 py-3" role="alert">
       <WarningCircleIcon size={16} className="mt-0.5 shrink-0 text-danger" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-fg">{earlier ? "An earlier turn failed" : stuck ? "This thread cannot go on as it is" : "This turn failed"}</p>
+        <p className="text-sm font-medium text-fg">
+          {stuck ? "This thread cannot go on as it is" : props.followed ? "An earlier turn failed" : "This turn failed"}
+        </p>
         <p className="mt-0.5 text-sm break-words text-muted">{stuck ? stuck.message : props.message}</p>
         {stuck ? <p className="mt-1 text-2xs break-words text-subtle">{props.message}</p> : null}
       </div>

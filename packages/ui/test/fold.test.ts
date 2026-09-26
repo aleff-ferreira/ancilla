@@ -63,6 +63,219 @@ describe("non-authoritative history recovery", () => {
     assert.equal(ended.echoes.length, 0);
   });
 
+  describe("Muse's failed/incomplete record for a run the projection cannot see the end of", () => {
+    const said = (itemId: string, turnId: string, text: string, kind = "userMessage"): ViewEvent => ({
+      method: "item/completed", params: { item: { itemId, kind, turnId, text, revision: 1, status: "completed" } },
+    });
+    const incomplete = (turnId: string): ViewEvent => ({ method: "turn/completed", params: { turnId, terminal: "failed", reason: "incomplete" } });
+    const running = foldAll([{ method: "turn/started", params: { turnId: "A" }, at: 1 }, said("uA", "A", "refactor")]);
+
+    it("is not taken as a failure of a turn the session no longer runs, and the real outcome replaces it later", () => {
+      const ended = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), running);
+      assert.equal(ended.turns.A?.terminal, "unknown");
+      assert.equal(ended.turns.A?.error, undefined);
+      assert.equal(ended.activeTurnId, null);
+      assert.notEqual(buildTurns(ended).at(-1)?.info?.terminal, "failed");
+      const again = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), ended);
+      assert.equal(again.turns.A?.terminal, "unknown", "a repeated placeholder changes nothing");
+      const saved = foldFromLoad(partial([
+        said("uA", "A", "refactor"), said("fin", "A", "Done.", "agentMessage"),
+        { method: "turn/completed", params: { turnId: "A", terminal: "completed" } },
+      ], null), again);
+      assert.equal(saved.turns.A?.terminal, "completed", "a later partial read with the real outcome replaces the placeholder");
+      assert.equal(buildTurns(saved).at(-1)?.final?.text, "Done.");
+      const stale = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), saved);
+      assert.equal(stale.turns.A?.terminal, "completed", "an older placeholder never replaces a real outcome");
+      const live = applyEvent(ended, { method: "turn/completed", params: { turnId: "A", terminal: "completed" } });
+      assert.equal(live.turns.A?.terminal, "completed");
+      assert.equal(live.turns.A?.provisional, undefined, "a live outcome is final");
+    });
+
+    it("is not taken as a failure of a finished turn while the session runs the next one", () => {
+      const next = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], "B"), running);
+      assert.equal(next.turns.A?.terminal, "unknown");
+      assert.equal(next.activeTurnId, "B");
+    });
+
+    it("leaves the turn running when the session's own state is unknown", () => {
+      const load = { ...partial([incomplete("A")]), msp: null };
+      const kept = foldFromLoad(load, running);
+      assert.equal(kept.turns.A?.terminal, undefined);
+      assert.equal(kept.activeTurnId, "A");
+    });
+
+    it("keeps a real saved failure visible", () => {
+      const failure: ViewEvent = { method: "turn/completed", params: { turnId: "A", terminal: "failed", error: { kind: "provider", message: "Provider down", retryable: true } } };
+      const shown = foldFromLoad(partial([failure], null), running);
+      assert.equal(shown.turns.A?.terminal, "failed");
+      assert.equal(shown.turns.A?.error?.message, "Provider down");
+      const later = foldFromLoad(partial([{ method: "turn/completed", params: { turnId: "A", terminal: "completed" } }], null), shown);
+      assert.equal(later.turns.A?.terminal, "failed", "only a placeholder gives way to a later read");
+    });
+
+    it("gives way to a real outcome read or streamed later, and never softens one already shown", () => {
+      const placeholder = foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), running);
+      assert.equal(placeholder.turns.A?.terminal, "unknown");
+      const failure: ViewEvent = { method: "turn/completed", params: { turnId: "A", terminal: "failed", error: { kind: "provider", message: "Provider down", retryable: true } } };
+      const failed = foldFromLoad(partial([failure], null), placeholder);
+      assert.equal(failed.turns.A?.terminal, "failed", "a real failure read later replaces the placeholder");
+      assert.equal(failed.turns.A?.error?.message, "Provider down");
+      assert.equal(foldFromLoad(partial([incomplete("A")], null), failed).turns.A?.terminal, "failed", "a later placeholder does not soften it");
+      const streamed = applyEvent(placeholder, { method: "turn/completed", params: { turnId: "A", terminal: "completed" }, at: 5 });
+      assert.equal(streamed.turns.A?.terminal, "completed", "a live outcome that arrived during the read replaces the placeholder");
+      assert.equal(foldFromLoad(partial([said("uA", "A", "refactor"), incomplete("A")], null), streamed).turns.A?.terminal, "completed");
+      const shown = applyEvent(running, failure);
+      const contradicted = foldFromLoad(partial([{ method: "turn/completed", params: { turnId: "A", terminal: "completed" } }], null), shown);
+      assert.equal(contradicted.turns.A?.error?.message, "Provider down", "a failure the live feed showed is never replaced by a page");
+    });
+  });
+
+  it("lets a saved finished item replace an open one, and never reopens a finished one", () => {
+    const wf = (revision: number, status: string): ViewEvent => ({
+      method: "item/updated", params: { item: { itemId: "wf", kind: "workflow", turnId: "active", revision, status, children: [] } },
+    });
+    const open = foldAll([1, 2, 3, 4].map((revision) => wf(revision, "inProgress")));
+    // History numbers revisions apart from the live feed, so a saved completion can carry a lower number.
+    assert.equal(foldFromLoad(partial([wf(2, "completed")]), open).items.wf?.status, "completed");
+    const done = foldAll([wf(1, "inProgress"), wf(2, "completed")]);
+    assert.equal(foldFromLoad(partial([wf(5, "inProgress")]), done).items.wf?.status, "completed");
+  });
+
+  it("places backfilled items where the page has them, not after everything on screen", () => {
+    const said = (itemId: string, turnId: string, kind = "toolCall", text?: string): ViewEvent => ({
+      method: "item/completed", params: { item: { itemId, kind, turnId, text, revision: 1, status: "completed" } },
+    });
+    const previous = foldAll([
+      { method: "turn/started", params: { turnId: "A" } },
+      said("uA", "A", "userMessage", "do it"), said("t1", "A"), said("final", "A", "agentMessage", "All done."),
+      { method: "turn/completed", params: { turnId: "A", terminal: "completed" } },
+      { method: "turn/started", params: { turnId: "active" } },
+      said("uB", "active", "userMessage", "next"), said("live", "active"),
+    ]);
+    // The live feed missed t2; the page stops before the newest step on screen.
+    const merged = foldFromLoad(partial([said("uA", "A", "userMessage", "do it"), said("t1", "A"), said("t2", "A"), said("final", "A", "agentMessage", "All done."), said("uB", "active", "userMessage", "next")]), previous);
+    assert.deepEqual(merged.order, ["uA", "t1", "t2", "final", "uB", "live"]);
+    assert.equal(buildTurns(merged)[0]?.final?.text, "All done.", "the reply stays the reply");
+    // An older turn first seen in a partial page goes before the newer one.
+    const newest = foldAll([{ method: "turn/started", params: { turnId: "active" } }, said("uB", "active", "userMessage", "newest")]);
+    const older = foldFromLoad(partial([
+      said("uA", "A", "userMessage", "older"),
+      { method: "turn/completed", params: { turnId: "A", terminal: "failed", error: { kind: "x", message: "boom", retryable: true } } },
+      said("uB", "active", "userMessage", "newest"),
+    ]), newest);
+    assert.deepEqual(buildTurns(older).map((turn) => turn.turnId), ["A", "active"]);
+    // Items only the screen holds, before and after what the page shares with it, keep their place.
+    const edges = foldFromLoad(partial([said("t1", "A"), said("t2", "A")]), foldAll([said("t0", "A"), said("t1", "A"), said("t3", "A")]));
+    assert.deepEqual(edges.order, ["t0", "t1", "t2", "t3"]);
+  });
+
+  it("merges approvals and questions with the history when the host's pending list is incomplete", () => {
+    const approval = (approvalId: string, turnId: string) => ({ method: "approval/requested", params: { approvalId, itemId: `tool-${approvalId}`, turnId } });
+    const previous = foldAll([
+      { method: "turn/started", params: { turnId: "active" } },
+      approval("X", "active"),
+      approval("K", "active"),
+    ]);
+    const events: ViewEvent[] = [
+      approval("X", "active"),
+      { method: "approval/resolved", params: { approvalId: "X", decision: "approved", resolvedBy: "user" } },
+      { method: "userInput/requested", params: { userInputId: "Q", itemId: "ask", turnId: "active", questions: [] } },
+      approval("OLD", "earlier"),
+    ];
+    for (const authoritative of [false, true]) {
+      const load = { ...partial(events), pendingComplete: false, ...(authoritative ? { historyUnavailable: false, viewHealth: null } : {}) };
+      const fold = foldFromLoad(load, previous);
+      assert.deepEqual(Object.keys(fold.approvals).sort(), ["K"], "resolved in history: closed; not contradicted: kept; another turn's: not revived");
+      assert.deepEqual(Object.keys(fold.userInputs), ["Q"], "a question the running turn is waiting on is shown");
+    }
+  });
+
+  it("promotes a queued prompt once the session reports its turn running, even if the page stops short of it", () => {
+    const previous = addEcho(foldAll([{ method: "turn/started", params: { turnId: "A" } }]), {
+      localId: "q", text: "then run tests", turnId: "B", disposition: "queued", createdAt: 2,
+    });
+    const fold = foldFromLoad(partial([], "B"), previous);
+    assert.equal(fold.activeTurnId, "B");
+    assert.deepEqual(fold.echoes.map((echo) => echo.disposition), ["started"]);
+    // The same holds when the acknowledgement arrives after the turn already started.
+    const queued = addEcho(foldAll([{ method: "turn/started", params: { turnId: "B" } }]), {
+      localId: "q", text: "then run tests", turnId: null, disposition: "queued", createdAt: 2,
+    });
+    assert.equal(updateEcho(queued, "q", { turnId: "B", disposition: "queued" }).echoes[0]?.disposition, "started");
+  });
+
+  it("keeps the agent labels a partial page holds in an older revision", () => {
+    const wf = (revision: number, children: unknown[]): ViewEvent => ({
+      method: "item/updated", params: { item: { itemId: "wf", kind: "workflow", turnId: "active", revision, status: "inProgress", children } },
+    });
+    const previous = foldAll([wf(11, [{ childId: "a", attempt: 1, status: "started" }, { childId: "b", attempt: 1, status: "scheduled" }])]);
+    const fold = foldFromLoad(partial([wf(2, [
+      { childId: "a", attempt: 1, status: "scheduled", label: "Read alpha" },
+      { childId: "b", attempt: 1, status: "scheduled", label: "Verify beta" },
+    ])]), previous);
+    assert.equal(fold.items.wf?.revision, 11);
+    assert.deepEqual(fold.items.wf?.children?.map((child) => [child.label, child.status]), [["Read alpha", "started"], ["Verify beta", "scheduled"]]);
+    assert.deepEqual(fold.agentItems?.wf?.children?.map((child) => child.label), ["Read alpha", "Verify beta"]);
+  });
+
+  it("neither duplicates nor drops an item across partial pages that overlap the screen differently", () => {
+    const said = (itemId: string, turnId: string, kind = "toolCall", text?: string): ViewEvent => ({
+      method: "item/completed", params: { item: { itemId, kind, turnId, text, revision: 1, status: "completed" } },
+    });
+    let fold = foldAll([
+      { method: "turn/started", params: { turnId: "A" } },
+      said("uA", "A", "userMessage", "a"), said("t1", "A"), said("final", "A", "agentMessage", "All done."),
+      { method: "turn/completed", params: { turnId: "A", terminal: "completed" } },
+      { method: "turn/started", params: { turnId: "active" } },
+      said("uB", "active", "userMessage", "b"), said("l1", "active"), said("l2", "active"),
+    ]);
+    for (const page of [
+      [said("uA", "A", "userMessage", "a"), said("t1", "A"), said("t2", "A")],
+      [said("t2", "A"), said("t3", "A"), said("final", "A", "agentMessage", "All done.")],
+      [said("uA", "A", "userMessage", "a"), said("t1", "A"), said("t2", "A"), said("t3", "A"), said("final", "A", "agentMessage", "All done."), said("uB", "active", "userMessage", "b"), said("l1", "active")],
+    ]) {
+      fold = foldFromLoad(partial(page), fold);
+      assert.equal(new Set(fold.order).size, fold.order.length, "no item is shown twice");
+      assert.deepEqual([...fold.order].sort(), Object.keys(fold.items).sort(), "no item is dropped");
+    }
+    assert.deepEqual(fold.order, ["uA", "t1", "t2", "t3", "final", "uB", "l1", "l2"]);
+    assert.equal(buildTurns(fold)[0]?.final?.text, "All done.");
+  });
+
+  it("shows the running turn's open requests from the page when a thread first opens with an incomplete pending list", () => {
+    const page: ViewEvent[] = [
+      { method: "turn/started", params: { turnId: "old" } },
+      { method: "approval/requested", params: { approvalId: "Y", itemId: "tool-Y", turnId: "old" } },
+      { method: "approval/resolved", params: { approvalId: "Y", decision: "approved", resolvedBy: "user" } },
+      { method: "turn/completed", params: { turnId: "old", terminal: "completed" } },
+      { method: "turn/started", params: { turnId: "active" } },
+      { method: "approval/requested", params: { approvalId: "X", itemId: "tool-X", turnId: "active" } },
+      { method: "userInput/requested", params: { userInputId: "Q", itemId: "ask", turnId: "active", questions: [] } },
+    ];
+    for (const previous of [null, emptyFold()]) {
+      const fold = foldFromLoad({ ...partial(page), pendingComplete: false }, previous);
+      assert.deepEqual(Object.keys(fold.approvals), ["X"]);
+      assert.deepEqual(Object.keys(fold.userInputs), ["Q"]);
+    }
+  });
+
+  it("merges a long thread's partial page in a fraction of a second", () => {
+    const step = (i: number): ViewEvent => ({
+      method: "item/completed",
+      params: { item: { itemId: `i${i}`, kind: i % 7 === 0 ? "userMessage" : "toolCall", turnId: `T${Math.floor(i / 50)}`, text: `step ${i}`, revision: 1, status: "completed" } },
+    });
+    let previous = foldAll([{ method: "turn/started", params: { turnId: "active" } }, ...Array.from({ length: 20_000 }, (_, i) => step(i))]);
+    previous = addEcho(previous, { localId: "e", text: "step 7", turnId: null, disposition: "sending", createdAt: 1 });
+    previous = addEcho(previous, { localId: "s", text: "steer", turnId: "active", disposition: "steered", createdAt: 2 });
+    const started = Date.now();
+    const merged = foldFromLoad(partial(Array.from({ length: 20_000 }, (_, i) => step(10_000 + i))), previous);
+    const took = Date.now() - started;
+    assert.equal(merged.order.length, 30_000);
+    assert.equal(new Set(merged.order).size, 30_000);
+    assert.equal(merged.echoes.length, 2);
+    assert.ok(took < 2_000, `a 20k-item page onto 20k shown items took ${took}ms`);
+  });
+
   it("keeps newer plan metadata and explicit clears, then accepts later saved plan changes", () => {
     const previous = foldAll([
       { method: "session/todoListChanged", params: { viewCursor: "v:s:20", items: [{ content: "Verify", status: "inProgress" }] }, at: 20 },

@@ -21,7 +21,13 @@ export interface TurnInfo {
   turnId: string;
   startedAt?: number;
   completedAt?: number;
+  /**
+   * Muse's word for how the turn ended. `unknown` is Ancilla's own: Muse says the turn is over, but the saved history
+   * it could read stops before the outcome, so nothing is claimed about it.
+   */
   terminal?: string;
+  /** The outcome came from a partial history read, so a later read that holds the real one may still replace it. */
+  provisional?: boolean;
   durationMs?: number;
   /** Time to the first streamed token, when the host measured it. */
   firstTokenMs?: number;
@@ -50,6 +56,12 @@ export interface LocalEcho {
   disposition: "sending" | "started" | "queued" | "steered";
   createdAt: number;
   attachments?: EchoAttachment[];
+  /**
+   * Prompt items text alone must not match this echo to: the ones already in the thread when it was sent, and the ones
+   * that already stand for another send. Two identical steers ("continue", "yes") share a turn and a text, so this is
+   * what keeps the first one's item from taking the second one's bubble.
+   */
+  excluded?: string[];
 }
 
 /** One model call's usage, from its `session/tokenUsage` event. */
@@ -235,8 +247,10 @@ class Draft {
    * Only the maps this batch can write to are copied. A long thread holds tens of thousands of items, and copying
    * every map for every batch made applying a stream cost time in the square of the thread's length: a thread with
    * subagents in it, which produce far more items than anything else, would slow to a stop and never recover.
+   *
+   * `saved` marks a partial history page folded onto what is on screen: it can lag what the thread already shows.
    */
-  constructor(base: ThreadFold, touches: Touched) {
+  constructor(base: ThreadFold, touches: Touched, readonly saved = false) {
     this.fold = {
       ...base,
       ...(touches.items ? { items: { ...base.items } } : {}),
@@ -270,6 +284,14 @@ class Draft {
       this.echoesCopied = true;
     }
     this.fold.echoes[index] = { ...(this.fold.echoes[index] as LocalEcho), ...patch };
+  }
+
+  claimForEchoes(item: MspItem): void {
+    const echoes = claimedBy(this.fold.echoes, item);
+    if (echoes !== this.fold.echoes) {
+      this.fold.echoes = echoes;
+      this.echoesCopied = true;
+    }
   }
 
   putCall(key: string, call: CallUsage): void {
@@ -311,10 +333,13 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
   }
   const currentDone = current.status !== "inProgress";
   const incomingDone = incoming.status !== "inProgress";
-  const newer =
-    incoming.revision > current.revision ||
-    current.revision === 0 ||
-    (incoming.revision === current.revision && incomingDone && !currentDone);
+  // An item never reopens once it has finished. A saved page's numbering can run apart from the live one's, so there
+  // the status decides first: a finished record beats an open one, and an open record never replaces a finished one.
+  const newer = draft.saved && incomingDone !== currentDone
+    ? incomingDone
+    : incoming.revision > current.revision ||
+      current.revision === 0 ||
+      (incoming.revision === current.revision && incomingDone && !currentDone);
   if (!newer) {
     return;
   }
@@ -349,9 +374,18 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
   }
 }
 
+/** What the server appends to a prompt sent with files: `@<folder>/attachments/<file>` mentions and image markers. */
+const ATTACHMENT_TAIL = /(?:\s*(?:@\S*?attachments\/\S+?|\[Image #\d+\]))+\s*$/;
+const ATTACHMENT_MARK = /attachments\/|\[Image #\d+\]/;
+
 /** Both forms of a prompt: what the transcript shows and what the model got; a local echo holds one of them. */
 function promptTexts(item: MspItem): Set<string> {
-  return new Set([item.displayText, item.text].filter((t): t is string => Boolean(t)).map((t) => normalizeText(t)));
+  const texts = [item.displayText, item.text];
+  // A saved prompt without its shown text is still the typed text followed by the files that went with it.
+  if (!item.displayText && item.text && ATTACHMENT_MARK.test(item.text)) {
+    texts.push(item.text.replace(ATTACHMENT_TAIL, ""));
+  }
+  return new Set(texts.filter((t): t is string => Boolean(t)).map((t) => normalizeText(t)).filter(Boolean));
 }
 
 function observeMeta(meta: ThreadMeta, field: MetaField, event: ViewEvent): void {
@@ -375,9 +409,33 @@ function echoMatchesPrompt(echo: LocalEcho, item: MspItem): boolean {
     // A normal/queued send owns its turn. A steer shares the ongoing turn with the
     // original prompt, so its text must match an actual steered item as well.
     if (echo.disposition !== "steered") return item.steered !== true;
-    return item.steered === true && promptTexts(item).has(normalizeText(echo.text));
+    return item.steered === true && textMatches(echo, item);
   }
-  return promptTexts(item).has(normalizeText(echo.text));
+  return textMatches(echo, item);
+}
+
+/** Text cannot tell two identical sends apart, so it never matches an item the echo already ruled out. */
+function textMatches(echo: LocalEcho, item: MspItem): boolean {
+  return !echo.excluded?.includes(item.itemId) && promptTexts(item).has(normalizeText(echo.text));
+}
+
+/** Echoes matched by text rather than by a turn of their own. */
+function matchedByText(echo: LocalEcho): boolean {
+  return echo.turnId === null || echo.disposition === "steered";
+}
+
+/**
+ * The item now stands for one send, so an identical send still in flight is never matched to it as well: not by a
+ * later revision of it, and not when that send's own acknowledgement comes back before its own item does.
+ */
+function claimedBy(echoes: LocalEcho[], item: MspItem): LocalEcho[] {
+  let result = echoes;
+  echoes.forEach((echo, index) => {
+    if (!matchedByText(echo) || !echoMatchesPrompt(echo, item)) return;
+    if (result === echoes) result = [...echoes];
+    result[index] = { ...echo, excluded: [...(echo.excluded ?? []), item.itemId] };
+  });
+  return result;
 }
 
 function matchEcho(draft: Draft, item: MspItem): void {
@@ -392,6 +450,7 @@ function matchEcho(draft: Draft, item: MspItem): void {
   }
   if (index >= 0) {
     draft.removeEcho(index);
+    draft.claimForEchoes(item);
   }
 }
 
@@ -499,7 +558,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
         break;
       }
       const error = asRecord(params["error"]);
-      d.turns[turnId] = {
+      const ended: TurnInfo = {
         ...d.turns[turnId],
         turnId,
         terminal: str(params["terminal"]) ?? "completed",
@@ -515,6 +574,13 @@ function applyOne(draft: Draft, event: ViewEvent): void {
           : undefined,
         retry: undefined,
       };
+      // A live or authoritative outcome is final; one read from a partial page stays open to correction.
+      if (draft.saved) {
+        ended.provisional = true;
+      } else {
+        delete ended.provisional;
+      }
+      d.turns[turnId] = ended;
       if (d.activeTurnId === turnId) {
         d.activeTurnId = null;
       }
@@ -707,10 +773,14 @@ function applyOne(draft: Draft, event: ViewEvent): void {
 
 /** Apply a batch of view events. Returns the input fold untouched when the batch is empty. */
 export function applyEvents(fold: ThreadFold, events: readonly ViewEvent[]): ThreadFold {
+  return applyBatch(fold, events, false);
+}
+
+function applyBatch(fold: ThreadFold, events: readonly ViewEvent[], saved: boolean): ThreadFold {
   if (events.length === 0) {
     return fold;
   }
-  const draft = new Draft(fold, touchedBy(events));
+  const draft = new Draft(fold, touchedBy(events), saved);
   for (const event of events) {
     applyOne(draft, event);
   }
@@ -729,7 +799,8 @@ export function applyEvent(fold: ThreadFold, event: ViewEvent): ThreadFold {
  * way a second "continue" would, and vanish while still in flight.
  */
 function carriedEchoes(fold: ThreadFold, echoes: readonly LocalEcho[]): LocalEcho[] {
-  const kept: LocalEcho[] = [];
+  let kept: LocalEcho[] = [];
+  const claimed: MspItem[] = [];
   for (const echo of echoes) {
     const turnId = echo.turnId;
     if (!turnId) {
@@ -739,17 +810,37 @@ function carriedEchoes(fold: ThreadFold, echoes: readonly LocalEcho[]): LocalEch
     if (fold.turns[turnId]?.terminal) {
       continue;
     }
-    const landed = fold.order.some((id) => {
-      const item = fold.items[id];
-      return item !== undefined && echoMatchesPrompt(echo, item);
-    });
+    const landed = landedItem(fold, echo, claimed);
     if (landed) {
+      claimed.push(landed);
       continue;
     }
-    // A queued prompt whose turn history shows started is running now, as the live stream would have said.
-    kept.push(echo.disposition === "queued" && fold.turns[turnId] ? { ...echo, disposition: "started" } : echo);
+    kept.push(started(fold, echo));
+  }
+  for (const item of claimed) {
+    kept = claimedBy(kept, item);
   }
   return kept;
+}
+
+/** The prompt item an acknowledged echo stands for, if it is in the thread and no other send already owns it. */
+function landedItem(fold: ThreadFold, echo: LocalEcho, claimed: readonly MspItem[] = []): MspItem | undefined {
+  for (const id of fold.order) {
+    const item = fold.items[id];
+    if (item !== undefined && echoMatchesPrompt(echo, item) && !claimed.includes(item)) {
+      return item;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A queued prompt whose turn is under way is running now, as the live stream would have said: its turn is in the
+ * fold, or the session reports it active even though the page read with it stops short of its start.
+ */
+function started(fold: ThreadFold, echo: LocalEcho): LocalEcho {
+  const running = echo.turnId !== null && (fold.turns[echo.turnId] !== undefined || fold.activeTurnId === echo.turnId);
+  return echo.disposition === "queued" && running ? { ...echo, disposition: "started" } : echo;
 }
 
 /** A capped history page can omit the scheduling revision that gave a child its label. */
@@ -780,6 +871,16 @@ function carriedWorkflowLabels(fold: ThreadFold, previous: ThreadFold | null | u
   return result;
 }
 
+/**
+ * Muse's history projection writes `failed`/`incomplete` for any run it cannot see the end of, including one that is
+ * still running or that finished while the projection was stalled. That record says nothing about how the turn went.
+ */
+function incompleteRecord(event: ViewEvent): boolean {
+  const error = asRecord(event.params["error"]);
+  return event.method === "turn/completed" && event.params["terminal"] === "failed" &&
+    (event.params["reason"] === "incomplete" || error?.["kind"] === "incomplete");
+}
+
 /** A partial projection can contain old terminal and metadata records alongside genuinely newer work. */
 function partialHistoryEvents(load: TranscriptLoad, previous: ThreadFold): ViewEvent[] {
   const fields: Record<string, MetaField> = {
@@ -787,40 +888,119 @@ function partialHistoryEvents(load: TranscriptLoad, previous: ThreadFold): ViewE
     "session/contextUsage": "contextUsage", "session/modelChanged": "modelId",
     "session/approvalModeChanged": "approvalMode", "session/goalChanged": "goal",
   };
-  return load.events.filter((event) => {
+  return load.events.flatMap((event): ViewEvent[] => {
     const field = fields[event.method];
     if (field) {
       const observed = previous.meta.observed?.[field];
-      if (observed) return newerObservation(event, observed);
-      return field === "goal" ? !previous.meta.goalSeen : previous.meta[field] === null;
+      if (observed) return newerObservation(event, observed) ? [event] : [];
+      return (field === "goal" ? !previous.meta.goalSeen : previous.meta[field] === null) ? [event] : [];
     }
     const turnId = str(event.params["turnId"]);
     const turn = turnId ? previous.turns[turnId] : undefined;
     switch (event.method) {
       case "turn/started":
-        return !turn?.terminal && turn?.startedAt === undefined;
+        return !turn?.terminal && turn?.startedAt === undefined ? [event] : [];
       case "turn/completed":
-      case "turn/unqueued":
+      case "turn/unqueued": {
         // A saved failure/incomplete is not authority to stop a session still reported running.
-        return !turn?.terminal && turnId !== load.msp?.activeTurnId;
+        if (!turnId || turnId === load.msp?.activeTurnId) return [];
+        // A live or authoritative outcome stands; only a placeholder from an earlier partial read gives way.
+        if (turn?.terminal && !(turn.provisional && turn.terminal === "unknown")) return [];
+        if (!incompleteRecord(event)) return [event];
+        // Without the session's word, the turn on screen may well still be running.
+        if (turn?.terminal || (!load.msp && turnId === previous.activeTurnId)) return [];
+        // The session says the turn is over, but not how. Record that much, and no failure.
+        return [{ method: "turn/completed", params: { turnId, terminal: "unknown" } }];
+      }
       case "turn/retryScheduled":
         return !turn?.terminal && (!turn || (turn.retry !== undefined &&
-          (numberOr(event.params["nextAttempt"]) ?? 0) > turn.retry.nextAttempt));
+          (numberOr(event.params["nextAttempt"]) ?? 0) > turn.retry.nextAttempt)) ? [event] : [];
       case "turn/retracted":
-        return true;
+        return [event];
       case "approval/resolved":
-        return !previous.resolved[str(event.params["approvalId"]) ?? ""];
+        return !previous.resolved[str(event.params["approvalId"]) ?? ""] ? [event] : [];
       case "userInput/settled":
-        return !previous.settled[str(event.params["userInputId"]) ?? ""];
+        return !previous.settled[str(event.params["userInputId"]) ?? ""] ? [event] : [];
       default:
         // Items are merged separately; cumulative usage is monotonic below. An old session/started
         // or session/closed must not replace current settings or revive/stop the displayed turn.
-        return false;
+        return [];
     }
   });
 }
 
-/** Build a fold from a resume response; the server's pending set is authoritative. */
+/**
+ * Where the items a partial page adds belong. The page is Muse's own ordered record, so it is the backbone; an item
+ * only the thread on screen holds goes just before the next item both know, or at the end when the page stops short
+ * of it. Appending them instead put a backfilled step after its turn's final reply, and an older turn after newer ones.
+ */
+function mergedOrder(shown: readonly string[], page: readonly string[], all: readonly string[]): string[] {
+  const inPage = new Set(page);
+  const leading = new Map<string, string[]>();
+  let run: string[] = [];
+  for (const id of shown) {
+    if (!inPage.has(id)) {
+      run.push(id);
+    } else if (run.length > 0) {
+      leading.set(id, run);
+      run = [];
+    }
+  }
+  const present = new Set(all);
+  const order: string[] = [];
+  for (const id of page) {
+    order.push(...(leading.get(id) ?? []));
+    if (present.has(id)) order.push(id);
+  }
+  order.push(...run);
+  return order.length === all.length ? order : [...all];
+}
+
+/**
+ * The approvals and questions waiting after a load. The server's pending set is authoritative when it is complete.
+ * When it is not (the list failed, another host owns the session, or live activity overtook the read), nothing that
+ * was waiting is dropped on its word alone: what was on screen stays, the running turn's requests the history shows
+ * open are added, and whatever the history shows answered is closed.
+ */
+function pendingRequests(
+  load: TranscriptLoad,
+  fold: ThreadFold,
+  snapshot: ThreadFold,
+  previous: ThreadFold | null | undefined,
+  activeTurnId: string | null,
+): { approvals: Record<string, ApprovalRequest>; userInputs: Record<string, UserInputRequest> } {
+  const complete = load.pendingComplete !== false;
+  const approvals: Record<string, ApprovalRequest> = complete ? {} : { ...previous?.approvals };
+  const userInputs: Record<string, UserInputRequest> = complete ? {} : { ...previous?.userInputs };
+  if (!complete && activeTurnId) {
+    // A capped page can hold a request whose answer lies past its end, so only the running turn's count as open.
+    const running = (request: { turnId?: string; itemId?: string }) =>
+      (request.turnId ?? (request.itemId ? fold.items[request.itemId]?.turnId : undefined)) === activeTurnId;
+    for (const request of Object.values(snapshot.approvals)) {
+      if (running(request)) approvals[request.approvalId] ??= request;
+    }
+    for (const request of Object.values(snapshot.userInputs)) {
+      if (running(request)) userInputs[request.userInputId] ??= request;
+    }
+  }
+  for (const approval of load.pending.approvals) {
+    approvals[approval.approvalId] = approval;
+  }
+  for (const input of load.pending.userInputs) {
+    userInputs[input.userInputId] = input;
+  }
+  if (!complete) {
+    for (const id of Object.keys(approvals)) {
+      if (fold.resolved[id] || previous?.resolved[id]) delete approvals[id];
+    }
+    for (const id of Object.keys(userInputs)) {
+      if (fold.settled[id] || previous?.settled[id]) delete userInputs[id];
+    }
+  }
+  return { approvals, userInputs };
+}
+
+/** Build a fold from a resume response. */
 export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null): ThreadFold {
   const partial = load.historyUnavailable || load.viewHealth?.status === "unavailable";
   const snapshot = applyEvents(emptyFold(), load.events);
@@ -844,11 +1024,12 @@ export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null)
         }
       }
     }
-    fold = applyEvents(previous, merged);
+    fold = applyBatch(previous, merged, true);
     const before = previous.meta.tokenTotals;
     const after = snapshot.meta.tokenTotals;
     fold = {
       ...fold,
+      order: fold.order.length > previous.order.length ? mergedOrder(previous.order, snapshot.order, fold.order) : fold.order,
       activeTurnId: previous.activeTurnId && !fold.turns[previous.activeTurnId]?.terminal ? previous.activeTurnId : null,
       meta: {
         ...fold.meta,
@@ -865,20 +1046,18 @@ export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null)
     };
   }
   fold = carriedWorkflowLabels(fold, previous);
-  const approvals: Record<string, ApprovalRequest> = load.pendingComplete === false ? { ...previous?.approvals } : {};
-  for (const approval of load.pending.approvals) {
-    approvals[approval.approvalId] = approval;
+  if (partial && previous) {
+    // The page's own older revision can hold the labels a newer status-only one on screen lacks.
+    fold = carriedWorkflowLabels(fold, snapshot);
   }
-  const userInputs: Record<string, UserInputRequest> = load.pendingComplete === false ? { ...previous?.userInputs } : {};
-  for (const input of load.pending.userInputs) {
-    userInputs[input.userInputId] = input;
-  }
+  const activeTurnId = load.msp ? load.msp.activeTurnId : fold.activeTurnId;
+  const { approvals, userInputs } = pendingRequests(load, fold, snapshot, previous, activeTurnId);
   fold = {
     ...fold,
     approvals,
     userInputs,
-    activeTurnId: load.msp ? load.msp.activeTurnId : fold.activeTurnId,
-    echoes: carriedEchoes(fold, previous?.echoes ?? []),
+    activeTurnId,
+    echoes: carriedEchoes({ ...fold, activeTurnId }, previous?.echoes ?? []),
     meta: {
       ...fold.meta,
       // History pages carry no context readings; the session's own fill in until the next live one.
@@ -894,7 +1073,16 @@ export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null)
 }
 
 export function addEcho(fold: ThreadFold, echo: LocalEcho): ThreadFold {
-  return { ...fold, echoes: [...fold.echoes, echo] };
+  // A prompt already in the thread is an earlier send, however alike it reads.
+  const text = normalizeText(echo.text);
+  const earlier = text
+    ? fold.order.filter((id) => {
+        const item = fold.items[id];
+        return item?.kind === "userMessage" && promptTexts(item).has(text);
+      })
+    : [];
+  const added = earlier.length > 0 ? { ...echo, excluded: [...(echo.excluded ?? []), ...earlier] } : echo;
+  return { ...fold, echoes: [...fold.echoes, added] };
 }
 
 export function updateEcho(fold: ThreadFold, localId: string, patch: Partial<LocalEcho>): ThreadFold {
@@ -902,17 +1090,16 @@ export function updateEcho(fold: ThreadFold, localId: string, patch: Partial<Loc
   if (index < 0) {
     return fold;
   }
-  const echo = { ...(fold.echoes[index] as LocalEcho), ...patch };
+  let echo = { ...(fold.echoes[index] as LocalEcho), ...patch };
   // The item (or even the completed turn) may have reached the stream before its HTTP ack.
   if (echo.turnId) {
     if (fold.turns[echo.turnId]?.terminal) return removeEcho(fold, localId);
-    const landed = fold.order.some((id) => {
-      const item = fold.items[id];
-      return item !== undefined && echoMatchesPrompt(echo, item);
-    });
+    const landed = landedItem(fold, echo);
     if (landed) {
-      return removeEcho(fold, localId);
+      const rest = removeEcho(fold, localId);
+      return { ...rest, echoes: claimedBy(rest.echoes, landed) };
     }
+    echo = started(fold, echo);
   }
   const echoes = [...fold.echoes];
   echoes[index] = echo;
