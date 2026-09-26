@@ -122,7 +122,8 @@ async function start(connection: FakeConnection, extra: Partial<ConstructorParam
     exec: async () => ({ stdout: "", exitCode: 127 }),
     ...extra,
   });
-  after(() => server.close());
+  // A test that closes the server itself (to restart it on the same data) is not failed by closing it again.
+  after(() => server.close().catch(() => undefined));
   const bound = await server.listen();
   return { server, base: `http://127.0.0.1:${bound.port}` };
 }
@@ -159,16 +160,16 @@ async function waitFor(cond: () => boolean | Promise<boolean>, what: string): Pr
 }
 
 /**
- * Opens the real `/api/events` SSE stream, waits for it to be live, runs `drive`, then counts how many
- * `plan-usage` events arrived. Uses the server's actual public event API rather than a test-only hook.
+ * Opens the real `/api/events` SSE stream, waits for it to be live, runs `drive`, then returns every payload of
+ * `type` that arrived. Uses the server's actual public event API rather than a test-only hook.
  */
-async function countPlanUsageEvents(base: string, drive: () => Promise<void>): Promise<number> {
+async function sseEvents(base: string, type: string, drive: () => Promise<void>): Promise<any[]> {
   const res = await fetch(`${base}/api/events`);
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let sawHello = false;
-  let planUsageCount = 0;
+  const payloads: any[] = [];
   let stop = false;
   const pump = (async () => {
     while (!stop) {
@@ -189,8 +190,8 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
         if (payload.type === "hello") {
           sawHello = true;
         }
-        if (payload.type === "plan-usage") {
-          planUsageCount += 1;
+        if (payload.type === type) {
+          payloads.push(payload);
         }
       }
     }
@@ -203,7 +204,11 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
   stop = true;
   await reader.cancel().catch(() => undefined);
   await pump.catch(() => undefined);
-  return planUsageCount;
+  return payloads;
+}
+
+async function countPlanUsageEvents(base: string, drive: () => Promise<void>): Promise<number> {
+  return (await sseEvents(base, "plan-usage", drive)).length;
 }
 
 const RANGE = { first: { id: "r", sequence: 1 }, last: { id: "r", sequence: 1 }, stream: { id: "s", kind: "session" } };
@@ -419,6 +424,306 @@ describe("read-only recovery of a silent Muse view", () => {
     const reply = await reading;
     assert.equal(reply.json.msp.activeTurnId, "t2");
     assert.equal(reply.json.session.live.activeTurnId, "t2");
+  });
+});
+
+describe("recovery after host loss, session closes and stale reads", () => {
+  const NOT_LOADED = { session: { sessionId: "s1", status: "notLoaded", activeTurnId: null }, history: { mode: "inline", items: [] }, pendingRequests: [] };
+  const IDLE = { session: { sessionId: "s1", status: "idle", activeTurnId: null } };
+  const started = (turnId: string) => ({ method: "turn/started", params: { sessionId: "s1", turnId } });
+  const ended = (turnId: string, terminal: string, extra: Record<string, unknown> = {}) =>
+    ({ method: "turn/completed", params: { sessionId: "s1", turnId, terminal, ...extra } });
+  const terminals = (reply: { json: any }) =>
+    reply.json.events.filter((e: any) => e.method === "turn/completed").map((e: any) => [e.params.turnId, e.params.terminal]);
+  const resumes = (connection: FakeConnection) => connection.calls.filter((c) => c.method === "session/resume").length;
+  const live = async (base: string) => (await get(base, "/api/sessions")).sessions[0].live;
+
+  /** A thread started and opened here (its session loaded on the host), then left idle. */
+  async function opened(extra: Partial<ConstructorParameters<typeof AncillaServer>[0]> = {}) {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/resume", IDLE);
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    const probe: FactoryProbe = { targets: [], exits: [] };
+    const { base, server } = await start(connection, { hostFactory: fakeFactory(connection, probe), ...extra });
+    await send(base, "/api/sessions", { cwd: "/work/recovery" });
+    assert.equal((await send(base, "/api/sessions/s1/resume", {})).json.readOnly, false);
+    return { connection, base, probe, server };
+  }
+
+  it("loads an idle thread again after its host exited, instead of calling it read-only", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", NOT_LOADED);
+    const before = resumes(connection);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(reply.json.msp.status, "idle");
+    assert.equal(resumes(connection), before + 1, "the session is loaded on the replacement host");
+    assert.equal(probe.targets.length, 2);
+    connection.replies.set("turn/start", { status: "accepted", disposition: "started", turnId: "t1" });
+    assert.equal((await send(base, "/api/turns", { sessionId: "s1", text: "Carry on" })).status, 200, "and the next prompt goes through");
+    assert.equal((await live(base)).activeTurnId, "t1");
+  });
+
+  it("loads an idle thread again after a settings change restarted its host", async () => {
+    const { connection, base, probe } = await opened();
+    assert.equal((await send(base, "/api/sandbox-settings", { disabled: true }, "PATCH")).status, 200);
+    connection.replies.set("session/read", NOT_LOADED);
+    const before = resumes(connection);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(resumes(connection), before + 1);
+    assert.ok(probe.targets.at(-1)?.args.includes("--disable-sandbox"), "on a host carrying the new setting");
+  });
+
+  it("loads an idle thread again after the server itself restarted on the same data", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ancilla-restart-"));
+    const first = new FakeConnection();
+    first.replies.set("session/start", { session: { sessionId: "s1" } });
+    first.replies.set("session/resume", IDLE);
+    first.replies.set("view/page", { events: [], nextCursor: null });
+    const { base, server } = await start(first, { dataDir });
+    await send(base, "/api/sessions", { cwd: "/work/recovery" });
+    await send(base, "/api/sessions/s1/resume", {});
+    await server.close();
+
+    const second = new FakeConnection();
+    second.replies.set("session/read", NOT_LOADED);
+    second.replies.set("session/resume", IDLE);
+    second.replies.set("view/page", { events: [], nextCursor: null });
+    const { base: base2 } = await start(second, { dataDir });
+    const reply = await send(base2, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(resumes(second), 1, "a server that knows of nothing running loads the session");
+  });
+
+  it("stays read-only, with the other client's reason, only while another Muse client holds the lease", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("session/resume", new MspTestError("session is loaded by another host", "sessionInUse"));
+    const held = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(held.status, 200);
+    assert.equal(held.json.readOnly, true);
+    assert.match(held.json.readOnlyReason, /another host/);
+    connection.replies.set("session/resume", new MspTestError("", "sessionInUse"));
+    const unexplained = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(unexplained.json.readOnly, true);
+    assert.equal(unexplained.json.readOnlyReason, "Another Muse session has this thread open.", "read-only always says why");
+    connection.replies.set("session/resume", IDLE);
+    const released = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(released.json.readOnly, false);
+    assert.equal(released.json.readOnlyReason, null);
+  });
+
+  it("never loads a session that is waiting on the user, or whose turn this server still knows to be running", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", { ...NOT_LOADED, pendingRequests: [{ kind: "approval", approvalId: "a1" }] });
+    const before = resumes(connection);
+    const waiting = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(waiting.status, 200);
+    assert.equal(waiting.json.readOnly, false, "unloaded is not read-only either");
+    assert.equal(resumes(connection), before, "a question the log still holds is for opening the thread to bring back");
+
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const running = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(running.json.msp.activeTurnId, "t1");
+    assert.equal(resumes(connection), before, "a running turn is never reattached by a refresh");
+  });
+
+  it("does not bring back a turn that session/closed ended while a read was in flight", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const { started: reading, finish } = holdReads(connection);
+    const refresh = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(reading, "read in flight");
+    connection.notify("session/closed", { sessionId: "s1" });
+    assert.equal((await live(base)).activeTurnId, null);
+    finish({ session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "inline", items: [] } });
+    const reply = await refresh;
+    assert.equal(reply.json.msp.activeTurnId, null, "the older snapshot is not applied");
+    assert.equal(reply.json.pendingComplete, false);
+    assert.equal((await live(base)).activeTurnId, null);
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "failed", { reason: "incomplete" })], nextCursor: null });
+    const later = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(later.json.msp.activeTurnId, null);
+    assert.equal((await send(base, "/api/sessions/s1", { settled: true }, "PATCH")).status, 200, "nothing is left running to block settling");
+  });
+
+  it("ends a turn whose host exits while its read is still in flight, keeping the host's failure", async () => {
+    const { connection, base, probe } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "inline", items: [] } });
+    let fail!: (error: Error) => void;
+    connection.replies.set("approval/listPending", () => new Promise((_, reject) => { fail = reject; }));
+    const refresh = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(fail), "listPending in flight");
+    probe.exits[0]?.({ code: 1, signal: null });
+    fail(new Error("connection closed"));
+    const reply = await refresh;
+    assert.equal(reply.json.msp.activeTurnId, null);
+    const state = await live(base);
+    assert.equal(state.activeTurnId, null);
+    assert.equal(state.lastTerminal, "failed");
+    assert.match(state.lastError, /host exited/);
+  });
+
+  it("does not lend a stopped turn an older turn's outcome from a partial prefix", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", { events: [
+      started("t0"), ended("t0", "failed", { error: { message: "rate limited" } }), started("t1"),
+    ], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, null);
+    assert.equal(reply.json.historyUnavailable, true);
+    assert.equal(reply.json.session.live.lastTerminal, null, "t1's outcome is unknown, not t0's");
+    assert.equal(reply.json.session.live.lastError, null);
+    assert.deepEqual(terminals(reply), [["t0", "failed"]], "t0's real failure stays in the transcript");
+
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t2" });
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "completed")], nextCursor: null });
+    const reverse = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reverse.json.session.live.lastTerminal, null, "nor is t1's completion t2's outcome");
+  });
+
+  it("takes neither outcome nor failure from a read that does not have the session loaded", async () => {
+    const { connection, base } = await opened();
+    connection.replies.set("session/resume", new MspTestError("held by the TUI", "sessionInUse"));
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("view/page", { events: [started("t9"), ended("t9", "failed", { reason: "incomplete" })], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, true);
+    assert.equal(reply.json.readOnlyReason, "held by the TUI");
+    assert.equal(reply.json.msp.activeTurnId, null);
+    assert.equal(reply.json.session.live.lastTerminal, null, "a run going elsewhere is not a failure here");
+    assert.equal(reply.json.session.live.lastError, null);
+  });
+
+  it("drops a frozen prefix's stand-in for a run that has since stopped, until the projection says how it ended", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const frozen = { events: [started("t1"), ended("t1", "failed", { reason: "incomplete" })], nextCursor: null };
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", frozen);
+    const running = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.deepEqual(terminals(running), [], "the open run's stand-in is not a failure");
+
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    const stopped = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(stopped.json.msp.activeTurnId, null);
+    assert.deepEqual(terminals(stopped), [], "the frozen prefix still says nothing about the outcome");
+    assert.equal(stopped.json.session.live.lastTerminal, null);
+    assert.equal(stopped.json.session.live.lastError, null);
+
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "inline", items: [] } });
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "failed", { error: { message: "The provider refused" } })], nextCursor: null });
+    const known = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.deepEqual(terminals(known), [["t1", "failed"]], "a real failure, once served, is shown");
+    assert.equal(known.json.session.live.lastTerminal, "failed");
+    assert.equal(known.json.session.live.lastError, "The provider refused");
+  });
+
+  it("recognises a turn that started while the pages were read, and holds its stand-in back", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const page = { events: [started("t1"), ended("t1", "completed"), started("t2"), ended("t2", "failed", { reason: "incomplete" })], nextCursor: null };
+    connection.replies.set("view/page", page);
+    connection.replies.set("session/read", (params: Record<string, unknown>) => ({
+      session: { sessionId: "s1", status: "running", activeTurnId: params["excludeItems"] ? "t2" : "t1" },
+      history: { mode: "none", noneReason: "projectionUnavailable" },
+    }));
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, "t2", "the status read after paging is the newer one");
+    assert.equal(reply.json.session.live.activeTurnId, "t2");
+    assert.deepEqual(terminals(reply), [["t1", "completed"]]);
+    assert.equal(reply.json.session.live.lastTerminal, null, "a run under way has no outcome yet");
+
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", (params: Record<string, unknown>) => {
+      if (params["excludeItems"]) {
+        throw new MspTestError("busy", "internal");
+      }
+      return { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "none", noneReason: "projectionUnavailable" } };
+    });
+    const unread = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(unread.status, 200, "a failed second read keeps the first");
+    assert.equal(unread.json.msp.activeTurnId, "t1");
+    assert.deepEqual(terminals(unread), [], "a turn the page shows starting after the one read as running may be open too");
+  });
+
+  it("keeps a newer live goal over an older one from a stale prefix", async () => {
+    const { connection, base } = await opened();
+    const goal = (status: string, percentComplete: number, viewCursor: string) =>
+      ({ method: "session/goalChanged", params: { sessionId: "s1", goal: { objective: "Ship v2", status, percentComplete }, viewCursor } });
+    connection.notify("session/goalChanged", { sessionId: "s1", goal: { objective: "Ship v2", status: "complete", percentComplete: 100 }, viewCursor: "v:s1:9", sourceRange: RANGE });
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", { events: [goal("active", 10, "v:s1:3")], nextCursor: null });
+    const stale = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(stale.json.session.live.goal.status, "complete");
+    assert.equal(stale.json.session.live.goal.percentComplete, 100);
+    connection.replies.set("view/page", { events: [goal("active", 60, "v:s1:12")], nextCursor: null });
+    const newer = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(newer.json.session.live.goal.percentComplete, 60, "a prefix that reaches past the live goal counts");
+  });
+
+  it("clears an unavailable view on an idle thread when Muse says it is healthy, and tells the clients", async () => {
+    const { connection, base } = await opened();
+    const unavailable = { status: "unavailable", reason: "projectionUnavailable" };
+    const statuses = await sseEvents(base, "session-status", async () => {
+      connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+      assert.deepEqual((await live(base)).viewHealth, unavailable);
+      connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "healthy" });
+    });
+    assert.equal((await live(base)).viewHealth, null);
+    assert.deepEqual(statuses.map((status) => status.live.viewHealth), [unavailable, null]);
+  });
+
+  it("clears an unavailable view on an idle thread on any durable record, or on served history", async () => {
+    const { connection, base } = await opened();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.notify("session/modelChanged", { sessionId: "s1", modelId: "m1", viewCursor: "v:9", sourceRange: RANGE });
+    assert.equal((await live(base)).viewHealth, null, "with no turn running, any durable record means the view is written again");
+
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.replies.set("session/resume", new MspTestError("held by the TUI", "sessionInUse"));
+    connection.replies.set("session/read", NOT_LOADED);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, true);
+    assert.equal(reply.json.viewHealth, null, "served history means the projection works, loaded here or not");
+  });
+
+  it("opens a thread whose fallback read fails as incomplete rather than failed", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/resume", { session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 0 } });
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    connection.replies.set("session/read", new MspTestError("read failed", "internal"));
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work/proj" });
+    const fresh = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.json.msp.status, "idle");
+    assert.equal(fresh.json.historyUnavailable, true);
+    assert.equal(fresh.json.readOnly, false);
+
+    connection.replies.set("session/resume", new MspTestError("in use by the TUI", "sessionInUse"));
+    connection.replies.set("view/page", new MspTestError("in use", "sessionInUse"));
+    const held = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(held.status, 200);
+    assert.equal(held.json.readOnly, true);
+    assert.equal(held.json.readOnlyReason, "in use by the TUI");
+    assert.equal(held.json.historyUnavailable, true);
   });
 });
 
