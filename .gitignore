@@ -49,3 +49,6 @@ apps/desktop/.cache/
 
 # vercel
 .vercel
+
+# Worktrees Claude Code makes for its own agents inside the checkout.
+.claude/worktrees/
