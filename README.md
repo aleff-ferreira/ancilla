@@ -52,19 +52,27 @@ panel for native subagents and workflows, and fixes for Windows and WSL; see [NO
 - **Session recovery that never resends work.** When Muse's live feed stalls, Ancilla keeps the thread moving by reading
   its saved progress, and says so in the thread. It never resends a prompt, never resumes a running turn and never
   restarts delegation to catch up. [How it works](docs/muse-recovery.md)
-- **An Agents panel in every thread** for native Muse subagents and workflow children: how many there are, which are
-  working, waiting, done or failed, with their tasks and metrics when Muse reports them.
-  [Details](docs/agent-activity.md)
+- **A Swarm card in every thread** that runs native Muse subagents, workflow children or background tasks. One line
+  answers whether everything is fine, what needs you and how far along the run is; the rows that need attention
+  (waiting on you, failed, no update) carry the reason and the action; each agent has its own mark. A docked
+  **Swarm panel** adds a timeline of the run, a filterable roster, an inspector per agent and keyboard navigation;
+  a cross-thread **Activity** drawer (Ctrl+Shift+A) lists everything running and everything waiting on you; a
+  finished run becomes a report with highlights and where the time went. Nothing is inferred: what Muse does not
+  report says so. [Details](docs/agent-activity.md)
 - **No duplicate prompt bubbles.** A prompt with attachments shows once, not once for Muse's saved copy and once for the
   local preview. [Details](docs/prompt-echo-reconciliation.md)
-- **Local thread titles.** An opt-in `runtime.json` option keeps titles in Ancilla's database instead of sending them to
-  Muse, which works around a Muse 1.4.0 bug that breaks a later workflow's event log.
+- **Thread titles stay local.** Titles live in Ancilla's database and are not sent to Muse, which works around a Muse
+  1.4.0 bug where a renamed session breaks a later workflow's event log; sharing them is a `runtime.json` opt-in.
   [Configuration](docs/muse-recovery.md#local-thread-titles)
 - **Windows and WSL fixes:** projects opened from `\\wsl.localhost\<distro>\...`, an existing `muse login` recognised
   on Windows and in WSL, and a per-machine `runtime.json` that pins the runtime, the distro and the `muse` path and
   forwards environment variables into WSL (for example a file-based credential store).
 
-![The Agents panel: a native Muse workflow with agents working, waiting and finished, above the workflow card](docs/assets/agents.png)
+![The Swarm card: a native Muse workflow with ten agents in four phases, the rows that need attention first, and the approval it is waiting on](docs/assets/agents.png)
+
+![The Swarm panel beside the thread: the run's timeline, filters, the phase-grouped roster and an agent's inspector](docs/assets/swarm-panel.png)
+
+![A finished run: the report with its highlights and where the time went](docs/assets/swarm-done.png)
 
 ![Starting a thread: recent work per project above the composer](docs/assets/home.png)
 
