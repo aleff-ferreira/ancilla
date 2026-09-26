@@ -82,12 +82,47 @@ export interface Platform {
 }
 
 const PREFS_KEY = "ancilla.prefs.v1";
+const DRAFT_PREFIX = "ancilla.draft.";
+/**
+ * Helicon, which Ancilla is a fork of, kept the same things under `helicon.*` keys. A browser that ran it on this
+ * origin starts from them: a key Ancilla has not written yet falls back to Helicon's, which is only ever read.
+ */
+const LEGACY_PREFS_KEY = "helicon.prefs.v1";
+const LEGACY_DRAFT_PREFIX = "helicon.draft.";
+
+function readStored(key: string, legacyKey: string): string | null {
+  return window.localStorage.getItem(key) ?? window.localStorage.getItem(legacyKey);
+}
+
+/** The composer draft kept for `key`, or empty when there is none or storage is unavailable. */
+export function loadDraft(key: string): string {
+  try {
+    return readStored(DRAFT_PREFIX + key, LEGACY_DRAFT_PREFIX + key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Keeps a composer draft, best effort. A cleared draft Helicon also had stays as an empty one, so Helicon's cannot come back. */
+export function saveDraft(key: string, value: string): void {
+  try {
+    if (value) {
+      window.localStorage.setItem(DRAFT_PREFIX + key, value);
+    } else if (window.localStorage.getItem(LEGACY_DRAFT_PREFIX + key) !== null) {
+      window.localStorage.setItem(DRAFT_PREFIX + key, "");
+    } else {
+      window.localStorage.removeItem(DRAFT_PREFIX + key);
+    }
+  } catch {
+    /* drafts are best effort */
+  }
+}
 
 export function browserPlatform(): Platform {
   return {
     loadPrefs: () => {
       try {
-        const raw = window.localStorage.getItem(PREFS_KEY);
+        const raw = readStored(PREFS_KEY, LEGACY_PREFS_KEY);
         return raw ? (JSON.parse(raw) as unknown) : null;
       } catch {
         return null;

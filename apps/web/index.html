@@ -17,7 +17,10 @@
         var theme = dark ? "dark" : "light";
         var zoom = 1;
         try {
-          var prefs = JSON.parse(localStorage.getItem("ancilla.prefs.v1") || "{}");
+          // Until Ancilla saves its own, a browser that ran Helicon here starts from Helicon's (read, never written).
+          var stored = localStorage.getItem("ancilla.prefs.v1");
+          if (stored === null) stored = localStorage.getItem("helicon.prefs.v1");
+          var prefs = JSON.parse(stored || "{}");
           if (prefs.theme === "light" || prefs.theme === "dark") theme = prefs.theme;
           if (typeof prefs.zoom === "number" && isFinite(prefs.zoom)) zoom = prefs.zoom;
         } catch (e) {}

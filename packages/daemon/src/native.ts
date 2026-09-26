@@ -133,7 +133,7 @@ export function refreshNativeMuse(muse: NativeMuse, env: NodeJS.ProcessEnv = pro
   }
 }
 
-/** Parses `--runtime` / `ANCILLA_MUSE_RUNTIME`. Anything unrecognised means `auto`. */
+/** Parses `--runtime` / `ANCILLA_MUSE_RUNTIME` (or Helicon's `HELICON_MUSE_RUNTIME`). Anything unrecognised means `auto`. */
 export function parseRuntimePreference(value: string | null | undefined): RuntimePreference {
   const lower = value?.trim().toLowerCase();
   return lower === "native" || lower === "windows" ? "native" : lower === "wsl" ? "wsl" : "auto";

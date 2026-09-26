@@ -17,6 +17,7 @@ import { CostMeter } from "./CostPanel.js";
 import { Popover, Slider, Switch } from "radix-ui";
 import { shallowEqual, useApp, useController } from "../../app/context.js";
 import { useSampled } from "../../app/sampled.js";
+import { loadDraft, saveDraft } from "../../model/controller.js";
 import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
 import type { SkillsState } from "../../model/store.js";
@@ -29,35 +30,17 @@ import { ContextMeter } from "./ContextPanel.js";
 import { SlashMenu, slashOptionId, type SlashMenuState } from "./SlashMenu.js";
 import { SwapIcon } from "../ui/sourced.js";
 
-const DRAFT_PREFIX = "ancilla.draft.";
-
-function readDraft(key: string): string {
-  try {
-    return window.localStorage.getItem(DRAFT_PREFIX + key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
 /** A composer draft that survives switching threads and reloads. */
 function useDraft(key: string): [string, (value: string) => void] {
-  const [state, setState] = useState(() => ({ key, value: readDraft(key) }));
-  const value = state.key === key ? state.value : readDraft(key);
+  const [state, setState] = useState(() => ({ key, value: loadDraft(key) }));
+  const value = state.key === key ? state.value : loadDraft(key);
   if (state.key !== key) {
     setState({ key, value });
   }
   const set = useCallback(
     (next: string) => {
       setState({ key, value: next });
-      try {
-        if (next) {
-          window.localStorage.setItem(DRAFT_PREFIX + key, next);
-        } else {
-          window.localStorage.removeItem(DRAFT_PREFIX + key);
-        }
-      } catch {
-        /* drafts are best effort */
-      }
+      saveDraft(key, next);
     },
     [key],
   );

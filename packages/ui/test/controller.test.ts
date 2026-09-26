@@ -1834,8 +1834,9 @@ describe("AncillaController", () => {
     stop();
   });
 
-  for (const transcriptFirst of [true, false]) {
-    it(`reconciles one PDF and image send when its transcript arrives ${transcriptFirst ? "before" : "after"} the ack`, async () => {
+  // Helicon mentioned `.helicon/attachments`; a Helicon-era thread still reconciles the same way.
+  for (const [transcriptFirst, folder] of [[true, ".ancilla"], [false, ".ancilla"], [true, ".helicon"], [false, ".helicon"]] as const) {
+    it(`reconciles one PDF and image send when its transcript (${folder}) arrives ${transcriptFirst ? "before" : "after"} the ack`, async () => {
       const client = new FakeClient();
       let acknowledge!: (ack: { turnId: string | null; disposition: string | null }) => void;
       client.sendResult = () => new Promise((resolve) => { acknowledge = resolve; });
@@ -1850,7 +1851,7 @@ describe("AncillaController", () => {
           type: "msp", sessionId: "s1", method: "item/completed", at: 2,
           params: { sessionId: "s1", item: {
             itemId: "u9", kind: "userMessage", status: "completed", revision: 1,
-            turnId: "t9", commandId: "t9", text: `${text}\n\n@.ancilla/attachments/report.pdf[Image #1]`,
+            turnId: "t9", commandId: "t9", text: `${text}\n\n@${folder}/attachments/report.pdf[Image #1]`,
           } },
         });
         controller.flush();
