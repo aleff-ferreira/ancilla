@@ -12,6 +12,7 @@ import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
 import { Modal } from "../ui/overlays.js";
 import { TopBar } from "../chrome.js";
 import { Button, IconButton, MOD, cn } from "../ui/primitives.js";
+import { About } from "./About.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
 function Pick<T extends string | null>(props: {
@@ -650,6 +651,10 @@ export function SettingsPage() {
           ) : null}
           <Fact label="Muse" value={env?.musePath ?? (env?.museFound ? "Found" : "Not found")} />
           <Fact label="Sessions" value={env?.persistent ? "Kept on disk" : "In memory only"} />
+        </Section>
+
+        <Section title="About">
+          <About version={env?.version ?? null} />
         </Section>
       </div>
       </div>
