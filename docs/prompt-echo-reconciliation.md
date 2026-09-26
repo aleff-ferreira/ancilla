@@ -1,30 +1,39 @@
-# Duplicate attachment prompt preview
+# One bubble per prompt
 
-The reported PDF/image prompt was saved once in Muse's history. The second bubble
-marked **Sent** was Helicon's temporary local preview. The persisted message had
-attachment references appended to its text, so exact text matching never removed
-that preview while the turn was running.
+When you send a prompt, Ancilla shows it straight away as a local preview marked **Sent**, and replaces that preview
+with Muse's saved copy once Muse has recorded it. With attachments this used to go wrong: a prompt with a PDF or an
+image could show twice while the turn ran, once as Muse's saved message and once as the leftover **Sent** preview.
 
-The UI now reconciles an acknowledged normal or queued send using its turn/command
-identity, including when the streamed message arrives before the HTTP response.
-Steers share a running turn and still require a matching steered message and text.
-An acknowledged repeat from another turn cannot match an older message revision.
-When a turn finishes, all of its acknowledged previews are cleared. A completion
-that arrives before its acknowledgement also leaves no stale Sent bubble.
+The prompt was only ever saved once. Muse appends attachment references to the text of the saved message, so matching
+the preview to the saved message by exact text never succeeded, and the preview stayed until the turn ended.
 
-For future attachment sends, Helicon supplies the original wording as displayText.
-The prepared model input still includes the uploaded files and images. Explicit
-display text from slash commands retains precedence. The fix does not resend,
-rewrite, or delete saved prompts, and does not alter delegation or permissions.
+## How Ancilla matches them now
 
-Validation includes both acknowledgement/event orders, PDF plus image, image-only
-prompts, rewritten commands, reloads, intentional repeated prompts, queued
-follow-ups, steering and completion races. Replaying the actual reported message
-produced one saved message plus one local preview before the fix, and one saved
-message with no local preview after it. The full UI suite passed 290 tests; web
-transport and startup checks passed another 11.
+- A normal or queued send is matched to Muse's message by its turn and command identity, not by text. This works in
+  either order: when the streamed message arrives before the send's HTTP response, and when it arrives after.
+- Steering shares a running turn, so a steer still needs a matching steered message with matching text.
+- A repeated prompt acknowledged in another turn cannot match an older revision of an earlier message, so sending the
+  same words twice on purpose still shows two messages.
+- When a turn finishes, every acknowledged preview for it is cleared, including when the completion arrives before the
+  acknowledgement. No stale **Sent** bubble is left behind.
 
-The frontend update can be loaded by refreshing the Helicon window. The local
-backend need not restart. This addresses the demonstrated display bug; it does
-not add an HTTP idempotency protocol for manual resubmission after an ambiguous
-network timeout.
+For attachment sends, Ancilla also passes your original wording to Muse as `displayText`, so the thread shows the prompt
+the way you typed it. The model still receives the uploaded files and images. Slash commands that set their own display
+text keep it.
+
+None of this resends, rewrites or deletes saved prompts, and it does not change delegation or permissions.
+
+## Verifying it
+
+`packages/ui/test/echo-reconciliation.test.ts` (run by `npm test`) covers both acknowledgement and event orders, a PDF
+plus an image, image-only prompts, rewritten commands, reloads, intentionally repeated prompts, queued follow-ups,
+steering, and completion races. Replaying a real affected message gave one saved message plus one leftover preview
+before the fix, and one saved message with no preview after it.
+
+To check it yourself, attach a PDF or an image to a prompt and send it: the thread should show one bubble for it
+throughout the turn, and one after reopening the thread.
+
+## Limits
+
+This fixes a display problem. It does not add an idempotency protocol for resubmitting a prompt by hand after an
+ambiguous network timeout.

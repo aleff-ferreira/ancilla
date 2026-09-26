@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest something Ancilla should do.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work. Mockups or examples from other tools are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: Anything you have tried or considered.
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup
+      description: Optional. OS, desktop or web, and native Windows or WSL if it matters.
