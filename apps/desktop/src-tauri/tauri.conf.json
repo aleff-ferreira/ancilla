@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ancilla",
+  "version": "0.18.0",
+  "identifier": "app.ancilla.desktop",
+  "build": {
+    "frontendDist": "../../web/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run fetch:node --workspace ancilla-desktop && npm run dev --workspace @ancilla/web",
+    "beforeBuildCommand": "npm run build --workspace @ancilla/web && npm run bundle:server --workspace ancilla-desktop && npm run fetch:node --workspace ancilla-desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ancilla",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 880,
+        "minHeight": 560,
+        "dragDropEnabled": false,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' http://127.0.0.1:*; connect-src http://127.0.0.1:*; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.png"],
+    "resources": ["resources/server.cjs", "resources/frontend", "resources/legal"],
+    "externalBin": ["binaries/node"],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc0NEJBNzA3OThCNTRDN0IKUldSN1RMV1lCNmRMZER4SDViQTNKVXlQYlpmR3l0RE9MMy9LWjU5c3ZYT0J4ZVlhdU1IZGNXNDkK",
+      "endpoints": ["https://github.com/aleff-ferreira/ancilla/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
+  }
+}

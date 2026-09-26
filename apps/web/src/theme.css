@@ -1,0 +1,2572 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "@fontsource-variable/newsreader/opsz.css";
+
+@source "../../../packages/ui/src";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/*
+ * Ancilla tokens. Restrained palette: cool-tinted neutrals (hue 255) plus one blue accent,
+ * the blue of the app icon, reserved for action, live state and focus. Every text token
+ * clears 4.5:1 on every surface in both themes (checked with a WCAG script).
+ */
+:root {
+  color-scheme: light;
+  --bg: oklch(0.992 0.002 255);
+  --bg-sidebar: oklch(0.967 0.004 255);
+  --bg-raised: oklch(1 0 0);
+  --bg-sunken: oklch(0.962 0.004 255);
+  --bg-hover: oklch(0.25 0.02 255 / 0.05);
+  --bg-active: oklch(0.25 0.02 255 / 0.085);
+  --bg-inverse: oklch(0.22 0.01 255);
+  --fg-inverse: oklch(0.985 0.002 255);
+  --border: oklch(0.25 0.02 255 / 0.1);
+  --border-strong: oklch(0.25 0.02 255 / 0.2);
+  --fg: oklch(0.2 0.01 255);
+  --fg-muted: oklch(0.43 0.012 255);
+  --fg-subtle: oklch(0.5 0.012 255);
+  --accent: oklch(0.55 0.19 257);
+  --accent-hover: oklch(0.5 0.19 257);
+  --accent-fg: oklch(0.99 0 0);
+  --accent-text: oklch(0.5 0.18 257);
+  --accent-soft: oklch(0.55 0.19 257 / 0.1);
+  --warn: oklch(0.74 0.16 70);
+  --warn-text: oklch(0.5 0.12 65);
+  --warn-soft: oklch(0.82 0.15 80 / 0.18);
+  --warn-line: oklch(0.7 0.15 70 / 0.45);
+  --danger: oklch(0.58 0.21 27);
+  --danger-text: oklch(0.52 0.19 27);
+  --danger-soft: oklch(0.62 0.2 27 / 0.1);
+  --ok: oklch(0.62 0.15 150);
+  --ok-text: oklch(0.47 0.12 150);
+  --diff-add: oklch(0.7 0.15 150 / 0.16);
+  --diff-del: oklch(0.65 0.2 27 / 0.12);
+  --scrollbar: oklch(0.25 0.02 255 / 0.18);
+  --sh-class: oklch(0.5 0.14 300);
+  --sh-identifier: oklch(0.3 0.02 255);
+  --sh-sign: oklch(0.5 0.012 255);
+  --sh-property: oklch(0.45 0.12 240);
+  --sh-entity: oklch(0.48 0.13 200);
+  --sh-jsxliterals: oklch(0.45 0.12 300);
+  --sh-string: oklch(0.47 0.12 150);
+  --sh-keyword: oklch(0.5 0.17 20);
+  --sh-comment: oklch(0.55 0.01 255);
+  /* Elevation: a hairline ring plus a short layered shadow, never a wide blur. */
+  --elev-btn: 0 0 0 1px var(--border-strong), 0 1px 2px oklch(0.2 0.02 255 / 0.06);
+  --elev-card: 0 0 0 1px var(--border), 0 1px 2px oklch(0.2 0.02 255 / 0.04), 0 2px 6px oklch(0.2 0.02 255 / 0.04);
+  /* First-run folder art (Rare UI FolderComponent), in the accent family. */
+  --folder-back: oklch(0.7 0.13 250);
+  --folder-flap: oklch(0.6 0.15 254 / 0.55);
+  --folder-edge: oklch(0.84 0.08 245);
+  --folder-page: oklch(0.992 0 0);
+  --folder-page-edge: oklch(0.9 0.005 255);
+  --folder-line: oklch(0.87 0.006 255);
+  /* The Windows 11 caption close red, the same in both themes like the native button. */
+  --caption-close: oklch(0.536 0.191 30.1);
+  /* A thread waiting on the user's answer, T3 Code's indigo. */
+  --status-input: oklch(0.52 0.17 285);
+  /* Data colors for the context breakdown: distinct hues at even lightness. */
+  --chart-1: oklch(0.6 0.17 257);
+  --chart-2: oklch(0.64 0.13 170);
+  --chart-3: oklch(0.72 0.15 75);
+  --chart-4: oklch(0.6 0.17 305);
+  --chart-5: oklch(0.64 0.17 40);
+  --chart-6: oklch(0.62 0.02 255);
+  /* Swarm (agents and tasks): mixes of the tokens above, no new hues. Cells, bars, lanes and the sigil's ink. */
+  --ok-soft: color-mix(in oklch, var(--ok) 14%, transparent);
+  --cell-done: color-mix(in oklch, var(--fg-subtle) 52%, transparent);
+  --cell-done-ok: color-mix(in oklch, var(--ok) 72%, transparent);
+  --bar-fill: color-mix(in oklch, var(--fg-subtle) 42%, transparent);
+  --lane-done: color-mix(in oklab, var(--ok) 55%, var(--bg-raised));
+  --hatch: color-mix(in oklch, var(--accent) 55%, transparent);
+  --hatch-fail: color-mix(in oklch, var(--danger) 45%, var(--bg-raised));
+  --accent-line: color-mix(in oklch, var(--accent) 25%, transparent);
+  --sigil-ink: var(--fg-muted);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: oklch(0.178 0.004 255);
+  --bg-sidebar: oklch(0.152 0.004 255);
+  --bg-raised: oklch(0.215 0.005 255);
+  --bg-sunken: oklch(0.148 0.004 255);
+  --bg-hover: oklch(0.98 0.005 255 / 0.05);
+  --bg-active: oklch(0.98 0.005 255 / 0.085);
+  --bg-inverse: oklch(0.95 0.003 255);
+  --fg-inverse: oklch(0.17 0.004 255);
+  --border: oklch(0.98 0.005 255 / 0.08);
+  --border-strong: oklch(0.98 0.005 255 / 0.15);
+  --fg: oklch(0.955 0.003 255);
+  --fg-muted: oklch(0.76 0.008 255);
+  --fg-subtle: oklch(0.66 0.009 255);
+  --accent: oklch(0.58 0.18 257);
+  --accent-hover: oklch(0.63 0.17 257);
+  --accent-fg: oklch(0.99 0 0);
+  --accent-text: oklch(0.76 0.12 252);
+  --accent-soft: oklch(0.62 0.17 257 / 0.16);
+  --warn: oklch(0.8 0.15 75);
+  --warn-text: oklch(0.83 0.13 80);
+  --warn-soft: oklch(0.8 0.15 75 / 0.12);
+  --warn-line: oklch(0.8 0.15 75 / 0.35);
+  --danger: oklch(0.68 0.19 25);
+  --danger-text: oklch(0.74 0.15 25);
+  --danger-soft: oklch(0.68 0.19 25 / 0.12);
+  --ok: oklch(0.74 0.15 155);
+  --ok-text: oklch(0.8 0.13 155);
+  --diff-add: oklch(0.7 0.14 150 / 0.14);
+  --diff-del: oklch(0.65 0.18 25 / 0.14);
+  --scrollbar: oklch(0.98 0.005 255 / 0.16);
+  --sh-class: oklch(0.78 0.11 300);
+  --sh-identifier: oklch(0.9 0.01 255);
+  --sh-sign: oklch(0.68 0.01 255);
+  --sh-property: oklch(0.8 0.1 235);
+  --sh-entity: oklch(0.8 0.1 200);
+  --sh-jsxliterals: oklch(0.78 0.11 300);
+  --sh-string: oklch(0.8 0.12 150);
+  --sh-keyword: oklch(0.76 0.13 20);
+  --sh-comment: oklch(0.62 0.01 255);
+  /* In dark mode the ring turns into a faint light edge that melts into the shadow. */
+  --elev-btn: 0 0 0 1px oklch(1 0 0 / 0.1), 0 1px 2px oklch(0 0 0 / 0.3);
+  --elev-card: 0 0 0 1px oklch(1 0 0 / 0.09), 0 1px 2px oklch(0 0 0 / 0.2), 0 2px 6px oklch(0 0 0 / 0.2);
+  --folder-back: oklch(0.52 0.14 256);
+  --folder-flap: oklch(0.42 0.13 256 / 0.6);
+  --folder-edge: oklch(0.68 0.11 250);
+  --folder-page: oklch(0.29 0.006 255);
+  --folder-page-edge: oklch(0.37 0.008 255);
+  --folder-line: oklch(0.44 0.01 255);
+  --status-input: oklch(0.76 0.12 285);
+  --chart-1: oklch(0.68 0.15 257);
+  --chart-2: oklch(0.72 0.12 170);
+  --chart-3: oklch(0.8 0.14 78);
+  --chart-4: oklch(0.7 0.15 305);
+  --chart-5: oklch(0.72 0.15 42);
+  --chart-6: oklch(0.62 0.015 255);
+  /* The one Swarm mix that differs in the dark: a finished lane sits a touch lower on the raised surface. */
+  --lane-done: color-mix(in oklab, var(--ok) 50%, var(--bg-raised));
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-sidebar: var(--bg-sidebar);
+  --color-raised: var(--bg-raised);
+  --color-sunken: var(--bg-sunken);
+  --color-hover: var(--bg-hover);
+  --color-active: var(--bg-active);
+  --color-inverse: var(--bg-inverse);
+  --color-inverse-fg: var(--fg-inverse);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-text: var(--accent-text);
+  --color-accent-soft: var(--accent-soft);
+  --color-warn: var(--warn);
+  --color-warn-text: var(--warn-text);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-line: var(--warn-line);
+  --color-danger: var(--danger);
+  --color-danger-text: var(--danger-text);
+  --color-danger-soft: var(--danger-soft);
+  --color-ok: var(--ok);
+  --color-ok-text: var(--ok-text);
+  --color-ok-soft: var(--ok-soft);
+  --color-diff-add: var(--diff-add);
+  --color-diff-del: var(--diff-del);
+  --color-caption-close: var(--caption-close);
+  --color-status-input: var(--status-input);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+
+  --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --font-display: "Newsreader Variable", "Newsreader", "Iowan Old Style", Georgia, serif;
+  /* Window caption glyphs, only drawn in the Windows desktop shell. */
+  --font-caption: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.375rem;
+  --text-md: 0.9375rem;
+  --text-md--line-height: 1.6;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.625rem;
+  --text-2xl--line-height: 2.125rem;
+  --text-3xl: 2.125rem;
+  --text-3xl--line-height: 2.5rem;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --shadow-pop: 0 0 0 1px var(--border-strong), 0 8px 12px -8px oklch(0 0 0 / 0.3), 0 2px 4px -1px oklch(0 0 0 / 0.12);
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.06), 0 0 0 1px var(--border);
+  --shadow-btn: var(--elev-btn);
+  --shadow-card: var(--elev-card);
+}
+
+/* Semantic stacking order; never ad hoc 999s. */
+:root {
+  --z-sticky: 10;
+  --z-resize: 20;
+  --z-dropdown: 50;
+  --z-overlay: 60;
+  --z-modal: 70;
+  --z-titlebar: 75;
+  --z-toast: 80;
+  --z-tooltip: 90;
+}
+
+/* The Swarm motion scale: glyph swaps, cell fills, the card fold, rolling digits, breathing sigils, the finale sheen. */
+:root {
+  --dur-micro: 120ms;
+  --dur-fill: 200ms;
+  --dur-collapse: 260ms;
+  --dur-digits: 320ms;
+  --dur-breathe: 2400ms;
+  --dur-sheen: 900ms;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    max-height: 100%;
+  }
+
+  html {
+    overflow: hidden;
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  button,
+  [role="button"] {
+    cursor: default;
+    user-select: none;
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--accent) 28%, transparent);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar) transparent;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+  }
+
+  input,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  textarea {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    field-sizing: fixed;
+  }
+
+  textarea::placeholder,
+  input::placeholder {
+    color: var(--fg-subtle);
+  }
+}
+
+@layer components {
+  /* Running indicator: a quarter ring that turns. Reduced motion keeps the ring, drops the turn. */
+  .spin-ring {
+    display: inline-block;
+    border-radius: 9999px;
+    border: 1.5px solid color-mix(in oklch, currentColor 22%, transparent);
+    border-top-color: currentColor;
+    animation: ancilla-spin 0.9s linear infinite;
+  }
+
+  /* Loading copy only ("Thinking", "Working"): a sheen that says the agent is mid-step. */
+  .shimmer {
+    background-image: linear-gradient(
+      90deg,
+      var(--fg-subtle) 0%,
+      var(--fg-subtle) 38%,
+      var(--fg) 50%,
+      var(--fg-subtle) 62%,
+      var(--fg-subtle) 100%
+    );
+    background-size: 280% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: ancilla-sheen 2.4s linear infinite;
+  }
+
+  .attention-pulse {
+    animation: ancilla-pulse 1.8s var(--ease-in-out) infinite;
+  }
+
+  /* Popovers grow from their trigger; tooltips after the first skip the animation.
+     Scale via the `scale` property so it never overrides Radix's position `transform`. */
+  .pop {
+    transform-origin: var(
+      --radix-dropdown-menu-content-transform-origin,
+      var(--radix-tooltip-content-transform-origin, var(--radix-popover-content-transform-origin, center))
+    );
+    animation: ancilla-pop-in 150ms var(--ease-out);
+  }
+  .pop[data-state="closed"] {
+    animation: ancilla-pop-out 110ms ease-in forwards;
+  }
+  .pop[data-state="instant-open"] {
+    animation: none;
+  }
+  .modal-pop {
+    animation: ancilla-modal-in 200ms var(--ease-out);
+  }
+  .modal-pop[data-state="closed"] {
+    animation: ancilla-pop-out 120ms ease-in forwards;
+  }
+  /* A panel off the right edge: it arrives from the side it lives on, and leaves the same way. */
+  .sheet-in {
+    animation: ancilla-sheet-in 220ms var(--ease-out);
+  }
+  .sheet-in[data-state="closed"] {
+    animation: ancilla-sheet-out 160ms ease-in forwards;
+  }
+  .overlay-fade {
+    animation: ancilla-fade-in 180ms var(--ease-out);
+  }
+  .overlay-fade[data-state="closed"] {
+    animation: ancilla-fade-out 120ms ease-in forwards;
+  }
+  .toast-in {
+    animation: ancilla-toast-in 260ms var(--ease-out);
+  }
+  /* Something new arrived in the transcript or dock. */
+  .enter-up {
+    animation: ancilla-enter-up 220ms var(--ease-out);
+  }
+
+  /* Each word of a streaming reply resolves as it lands, instead of snapping in. */
+  .prose-ancilla.streaming .tok {
+    display: inline-block;
+    animation: ancilla-token-in 180ms var(--ease-out) both;
+  }
+
+  /* Beautiful UI LoadingState "Drive": a chevron wavefront through a 3x3 pixel grid. */
+  .pixel-loader > span {
+    opacity: 0.15;
+    animation: ancilla-pixel 650ms ease-in-out infinite both;
+  }
+
+  /* A caret at the end of a reply that is still streaming (Beautiful UI StreamText). */
+  .prose-ancilla.streaming > :last-child:is(p, h1, h2, h3, h4, blockquote)::after,
+  .prose-ancilla.streaming > :is(ul, ol):last-child > li:last-child::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-inline-start: 2px;
+    border-radius: 1px;
+    background: currentColor;
+    vertical-align: text-bottom;
+    opacity: 0.75;
+  }
+
+  /* Agent prose. Product scale: 15px, 1.6 leading, measured column. */
+  .prose-ancilla {
+    font-size: var(--text-md);
+    line-height: 1.65;
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+  .prose-ancilla > :first-child {
+    margin-top: 0;
+  }
+  .prose-ancilla > :last-child {
+    margin-bottom: 0;
+  }
+  .prose-ancilla p {
+    margin: 0 0 0.75em;
+    text-wrap: pretty;
+  }
+  .prose-ancilla h1,
+  .prose-ancilla h2,
+  .prose-ancilla h3,
+  .prose-ancilla h4 {
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 1.25em 0 0.5em;
+    text-wrap: balance;
+    letter-spacing: -0.01em;
+  }
+  .prose-ancilla h1 {
+    font-size: 1.35em;
+  }
+  .prose-ancilla h2 {
+    font-size: 1.2em;
+  }
+  .prose-ancilla h3 {
+    font-size: 1.05em;
+  }
+  .prose-ancilla h4 {
+    font-size: 1em;
+    color: var(--fg-muted);
+  }
+  .prose-ancilla ul,
+  .prose-ancilla ol {
+    margin: 0 0 0.75em;
+    padding-inline-start: 1.35em;
+  }
+  .prose-ancilla ul {
+    list-style: disc;
+  }
+  .prose-ancilla ol {
+    list-style: decimal;
+  }
+  .prose-ancilla li {
+    margin: 0.2em 0;
+    padding-inline-start: 0.15em;
+  }
+  .prose-ancilla li::marker {
+    color: var(--fg-subtle);
+  }
+  .prose-ancilla a {
+    color: var(--accent-text);
+    text-decoration-line: underline;
+    text-decoration-thickness: from-font;
+    text-underline-offset: 2px;
+    text-decoration-color: color-mix(in oklch, var(--accent-text) 40%, transparent);
+  }
+  .prose-ancilla a:hover {
+    text-decoration-color: currentColor;
+  }
+  .prose-ancilla strong {
+    font-weight: 600;
+  }
+  .prose-ancilla blockquote {
+    margin: 0 0 0.75em;
+    padding: 0.25em 0 0.25em 0.9em;
+    border-inline-start: 1px solid var(--border-strong);
+    color: var(--fg-muted);
+  }
+  .prose-ancilla hr {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 1.25em 0;
+  }
+  .prose-ancilla :not(pre) > code {
+    font-size: 0.86em;
+    padding: 0.12em 0.36em;
+    border-radius: 5px;
+    background: var(--bg-active);
+    color: var(--fg);
+    overflow-wrap: anywhere;
+  }
+  .prose-ancilla table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+    margin: 0 0 0.9em;
+  }
+  .prose-ancilla th,
+  .prose-ancilla td {
+    border-bottom: 1px solid var(--border);
+    padding: 0.45em 0.6em;
+    text-align: start;
+    vertical-align: top;
+  }
+  .prose-ancilla th {
+    font-weight: 600;
+    color: var(--fg-muted);
+  }
+
+  .code-surface pre {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    tab-size: 2;
+  }
+
+  /* File viewer source: one block per line, numbered with a counter so copying the code leaves the numbers behind. */
+  .file-code {
+    counter-reset: line;
+    font-size: 12.5px;
+    line-height: 1.6;
+    tab-size: 2;
+  }
+  .file-code .sh__line {
+    display: block;
+    min-height: 1.6em;
+    padding-inline-end: 1rem;
+    white-space: pre;
+  }
+  .file-code.wrap .sh__line {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding-inline-start: 3.5rem;
+    text-indent: -3.5rem;
+  }
+  .file-code .sh__line::before {
+    counter-increment: line;
+    content: counter(line);
+    display: inline-block;
+    width: 3.5rem;
+    padding-inline-end: 1rem;
+    text-align: right;
+    text-indent: 0;
+    color: var(--fg-subtle);
+    opacity: 0.65;
+    user-select: none;
+  }
+  .file-code .sh__line[data-marked] {
+    background: color-mix(in oklch, var(--accent) 14%, transparent);
+  }
+  .file-code .sh__line[data-marked]::before {
+    color: var(--accent-text);
+    opacity: 1;
+  }
+
+  /* Behind transparent images, so their edges read against either theme. */
+  .file-checker {
+    background-color: var(--bg);
+    background-image: conic-gradient(var(--bg-sunken) 25%, transparent 0 50%, var(--bg-sunken) 0 75%, transparent 0);
+    background-size: 16px 16px;
+  }
+
+  /*
+   * Swarm: the agents-and-tasks surfaces. The strip draws one cell per agent, grouped by phase, sized through
+   * custom properties so a container query can shrink it in place; a phase past 48 agents is a proportional bar.
+   * Colour never stands alone: working is a rising fill, no update dashed, needs you a pill, failed split, planned
+   * dashed, queued hollow, skipped a neutral fill, an unreported outcome hatched.
+   */
+  .swarm-strip {
+    --cw: 6px;
+    --ch: 12px;
+    --cg: 2px;
+    --pg: 6px;
+    --cr: 1.5px;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--pg);
+  }
+  .swarm-strip.xs {
+    --cw: 3px;
+    --ch: 8px;
+    --cg: 1px;
+    --pg: 3px;
+    --cr: 1px;
+  }
+  .swarm-strip.md {
+    --cw: 8px;
+    --ch: 14px;
+    --cg: 2px;
+    --pg: 8px;
+    --cr: 2px;
+  }
+  .swarm-strip > .swarm-phase {
+    display: inline-flex;
+    gap: var(--cg);
+  }
+  .swarm-cell {
+    flex-shrink: 0;
+    width: var(--cw);
+    height: var(--ch);
+    border-radius: var(--cr);
+    transition: background-color var(--dur-fill) var(--ease-out);
+  }
+  .swarm-cell.done {
+    background: var(--cell-done);
+  }
+  .swarm-cell.work,
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, var(--accent) 0 55%, transparent 55%);
+    box-shadow: inset 0 0 0 1.25px var(--accent);
+  }
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, var(--accent) 0 85%, transparent 85%);
+  }
+  .swarm-cell.quiet {
+    border: 1.25px dashed var(--accent-text);
+  }
+  .swarm-cell.planned {
+    border: 1px dashed var(--border-strong);
+  }
+  .swarm-cell.pending {
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  .swarm-cell.fail {
+    background: linear-gradient(to bottom, var(--danger) 0 40%, transparent 40% 60%, var(--danger) 60%);
+  }
+  .swarm-cell.stop {
+    background: var(--bg-active);
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  .swarm-cell.need {
+    background: var(--warn);
+    border-radius: 3px;
+  }
+  .swarm-cell.unknown {
+    background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 3px);
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  /* The plan is unknown: the strip ends with a cell for the agents that may still start. */
+  .swarm-cell.more {
+    border: 1px dashed var(--fg-subtle);
+  }
+  /* Three pixels wide, a cell is a solid mark or a hairline. */
+  .swarm-strip.xs .swarm-cell.work,
+  .swarm-strip.xs .swarm-cell.finishing {
+    background: var(--accent);
+    box-shadow: none;
+  }
+  .swarm-strip.xs .swarm-cell.quiet,
+  .swarm-strip.xs .swarm-cell.planned {
+    border-width: 1px;
+  }
+  .swarm-strip.xs .swarm-cell.pending {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-strip.xs .swarm-cell.fail {
+    background: var(--danger);
+  }
+  .swarm-strip.xs .swarm-cell.need {
+    border-radius: 2px;
+  }
+  .swarm-strip.finale .swarm-cell.done {
+    background: var(--cell-done-ok);
+  }
+  /* A stale feed: the accent leaves, and what was live reads as last known. */
+  .swarm-strip .swarm-cell.stale.work,
+  .swarm-strip .swarm-cell.stale.finishing {
+    background: linear-gradient(to top, var(--cell-done) 0 55%, transparent 55%);
+    box-shadow: inset 0 0 0 1.25px var(--fg-subtle);
+  }
+  .swarm-strip .swarm-cell.stale.quiet {
+    border-color: var(--fg-subtle);
+  }
+  .swarm-strip .swarm-cell.stale.need {
+    background: var(--fg-subtle);
+  }
+
+  /* The phase rail: the strip stretched to its segment, 8 px tall, with fills running left to right. */
+  .swarm-rail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    align-items: flex-end;
+  }
+  .swarm-strip.rail {
+    --ch: 8px;
+    --cg: 3px;
+    --cr: 2px;
+    display: flex;
+    width: 100%;
+  }
+  .swarm-strip.rail > .swarm-phase {
+    flex: 1 1 0;
+    display: flex;
+    min-width: 0;
+  }
+  .swarm-strip.rail .swarm-cell {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+  .swarm-strip.rail .swarm-cell.work {
+    background: linear-gradient(to right, var(--accent) 0 55%, transparent 55%);
+  }
+  .swarm-strip.rail .swarm-cell.finishing {
+    background: linear-gradient(to right, var(--accent) 0 85%, transparent 85%);
+  }
+  .swarm-strip.rail .swarm-cell.fail {
+    background: linear-gradient(to right, var(--danger) 0 44%, transparent 44% 56%, var(--danger) 56%);
+  }
+  .swarm-strip.rail .swarm-cell.need {
+    border-radius: 4px;
+  }
+  .swarm-strip.rail .swarm-cell.stale.work,
+  .swarm-strip.rail .swarm-cell.stale.finishing {
+    background: linear-gradient(to right, var(--cell-done) 0 55%, transparent 55%);
+  }
+  .swarm-strip.rail .swarm-bin {
+    flex: 1 1 0;
+    width: auto;
+  }
+
+  /* A phase past 48 agents, or the sidebar past 24: a proportional bar of done, working, no update, needs you, failed, skipped, not reported, pending. */
+  .swarm-bin {
+    display: inline-flex;
+    flex-shrink: 0;
+    gap: 1px;
+    width: var(--bw, 72px);
+    height: var(--ch, 12px);
+    border-radius: var(--cr, 1.5px);
+    overflow: hidden;
+  }
+  .swarm-bin > span {
+    display: block;
+    height: 100%;
+    min-width: 2px;
+  }
+  .swarm-bin > .done {
+    background: var(--cell-done);
+  }
+  .swarm-bin > .work {
+    background: var(--accent);
+  }
+  .swarm-bin > .quiet {
+    background: repeating-linear-gradient(135deg, var(--accent) 0 2px, transparent 2px 4px);
+  }
+  .swarm-bin > .need {
+    background: var(--warn);
+  }
+  .swarm-bin > .fail {
+    background: var(--danger);
+  }
+  .swarm-bin > .stop {
+    background: var(--bg-active);
+  }
+  .swarm-bin > .unknown {
+    background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 3px);
+  }
+  .swarm-bin > .pending {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-strip.finale .swarm-bin > .done {
+    background: var(--cell-done-ok);
+  }
+  .swarm-bin.stale > .work {
+    background: var(--cell-done);
+  }
+  .swarm-bin.stale > .quiet {
+    background: repeating-linear-gradient(135deg, var(--fg-subtle) 0 2px, transparent 2px 4px);
+  }
+  .swarm-bin.stale > .need {
+    background: var(--fg-subtle);
+  }
+
+  /* The finale: one sheen along the done cells, once, and the ok tint stays. */
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    background-image: linear-gradient(90deg, var(--cell-done-ok) 0 40%, var(--ok) 50%, var(--cell-done-ok) 60% 100%);
+    background-size: 300% 100%;
+    animation: swarm-sheen var(--dur-sheen) var(--ease-out) 1;
+  }
+  /* A cell, chip or phase label that just settled lands in place; a working mark breathes. */
+  .swarm-settle {
+    animation: swarm-settle var(--dur-fill) var(--ease-out);
+  }
+  .swarm-breathe {
+    animation: swarm-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  }
+
+  /* Sigil: a 5×5 mirrored pixel mark per agent name. The tile carries the state; the ink never carries hue. */
+  .swarm-sigil {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: var(--bg-sunken);
+    box-shadow: inset 0 0 0 1px var(--border);
+    color: var(--sigil-ink);
+  }
+  .swarm-sigil > svg {
+    display: block;
+  }
+  .swarm-sigil rect {
+    fill: currentColor;
+  }
+  .swarm-sigil.s24 {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+  .swarm-sigil.s28 {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+  }
+  .swarm-sigil.s36 {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+  .swarm-sigil.work,
+  .swarm-sigil.finishing,
+  .swarm-sigil.quiet {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    box-shadow: inset 0 0 0 1px var(--accent-line);
+  }
+  .swarm-sigil.work > svg,
+  .swarm-sigil.finishing > svg {
+    animation: swarm-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  }
+  .swarm-sigil.quiet rect {
+    opacity: 0.5;
+  }
+  .swarm-sigil.need {
+    background: var(--warn-soft);
+    color: var(--warn-text);
+    box-shadow: inset 0 0 0 1px var(--warn-line);
+  }
+  .swarm-sigil.fail,
+  .swarm-sigil.stop,
+  .swarm-sigil.unknown {
+    color: var(--fg-subtle);
+  }
+  .swarm-sigil.fail rect {
+    opacity: 0.7;
+  }
+  .swarm-sigil.stop rect {
+    opacity: 0.6;
+  }
+  .swarm-sigil.unknown rect,
+  .swarm-sigil.planned rect,
+  .swarm-sigil.pending rect {
+    opacity: 0.5;
+  }
+  .swarm-sigil.planned,
+  .swarm-sigil.pending {
+    background: transparent;
+    box-shadow: none;
+    outline: 1px dashed var(--border-strong);
+    outline-offset: -1px;
+    color: var(--fg-subtle);
+  }
+  .swarm-sigil.pending {
+    outline-style: solid;
+  }
+  .swarm-sigil.stale {
+    background: transparent;
+    color: var(--fg-subtle);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-sigil.stale > svg {
+    animation: none;
+  }
+  /* The 13 px badge on a corner: a check in the inspector and drawer, a warning on a failure, a minus on a skip. */
+  .swarm-sigil .swarm-badge {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border-radius: 9999px;
+    background: var(--bg-raised);
+  }
+  .swarm-sigil .swarm-badge > span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 10px;
+    height: 10px;
+    border-radius: 9999px;
+  }
+  .swarm-sigil .swarm-badge.ok > span {
+    background: var(--ok);
+    color: var(--bg);
+  }
+  .swarm-sigil .swarm-badge.fail > span {
+    color: var(--danger);
+  }
+  .swarm-sigil .swarm-badge.need > span {
+    background: var(--warn);
+    color: var(--bg);
+  }
+  .swarm-sigil .swarm-badge.stop > span {
+    background: var(--fg-subtle);
+    color: var(--bg);
+  }
+  .swarm-sigil.s36 .swarm-badge {
+    right: -5px;
+    bottom: -5px;
+    width: 15px;
+    height: 15px;
+  }
+  .swarm-sigil.s36 .swarm-badge > span {
+    width: 12px;
+    height: 12px;
+  }
+
+  /* Lanes drawn in HTML (the fingerprint, legends, share bars); the SVG Timeline paints the same tokens as fills. */
+  .swarm-lane {
+    height: 8px;
+    border-radius: 2px;
+    background: var(--lane-done);
+  }
+  .swarm-lane.work {
+    background: var(--accent);
+  }
+  .swarm-lane.fail {
+    background: var(--danger);
+  }
+  .swarm-lane.need {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--warn);
+  }
+  .swarm-lane.planned {
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+  }
+  /* No update: a 135° hatch from where the silence began. A failed attempt: a 45° hatch. */
+  .swarm-lane.lane-quiet {
+    background: repeating-linear-gradient(135deg, var(--accent) 0 2px, color-mix(in oklab, var(--accent) 30%, var(--bg-raised)) 2px 4px);
+  }
+  .swarm-lane.lane-fail {
+    background: repeating-linear-gradient(45deg, var(--danger) 0 2px, var(--hatch-fail) 2px 4px);
+  }
+  /* A sigil kept still: out of view, over the breathing budget, or the feed is not live. */
+  .swarm-sigil.still > svg {
+    animation: none;
+  }
+
+  /*
+   * The Swarm card in the dock. One 44 px line per run or task while collapsed; a head, the phase rail, the
+   * attention list, one open phase, the task rows and a footer when expanded; the report once the run ends.
+   * Measurements follow the design's reference pixels; the container rules at the end of this layer adapt the
+   * card to the track it gets.
+   */
+  .swarm-g {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+  }
+  .swarm-g.work {
+    color: var(--accent-text);
+  }
+  .swarm-g.ok {
+    color: var(--ok);
+  }
+  .swarm-g.fail {
+    color: var(--danger);
+  }
+  .swarm-g.need {
+    color: var(--warn);
+  }
+  .swarm-g.mute {
+    color: var(--fg-subtle);
+  }
+  .swarm-g.input {
+    color: var(--status-input);
+  }
+  /* Queued and planned: a hollow ring, dashed while the agent is only planned. */
+  .swarm-g > .hollow {
+    width: 11px;
+    height: 11px;
+    border-radius: 9999px;
+    box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  }
+  .swarm-g > .hollow.dash {
+    box-shadow: none;
+    border: 1.25px dashed var(--border-strong);
+  }
+  .swarm-stale .spin-ring,
+  .swarm-line.stale .spin-ring {
+    animation: none;
+    border-color: var(--border-strong);
+    border-top-color: var(--fg-subtle);
+  }
+
+  .swarm-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    height: 44px;
+    padding: 0 8px 0 14px;
+    text-align: left;
+    white-space: nowrap;
+    transition: background-color 100ms;
+  }
+  .swarm-line:hover {
+    background: var(--bg-hover);
+  }
+  .swarm-line + .swarm-line,
+  .swarm-line + .swarm-expanded,
+  .swarm-expanded + .swarm-line.fold {
+    box-shadow: inset 0 1px 0 var(--border);
+  }
+  /* The lines an expanded card keeps folded away, for the narrowest container. */
+  .swarm-card > .swarm-line.fold {
+    display: none;
+  }
+  .swarm-line > .name {
+    flex: 0 1 auto;
+    min-width: 96px;
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-line > .prog {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-line > .prog b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-line > .cmd {
+    flex: 0 0 auto;
+    max-width: 46%;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 12px;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-line > .tail {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+  }
+  .swarm-line > .tail::before {
+    content: "\203A";
+    margin-right: 6px;
+    color: var(--fg-subtle);
+  }
+  .swarm-line > .tail.ok {
+    color: var(--ok-text);
+  }
+  .swarm-line > .tail.fail {
+    color: var(--danger-text);
+  }
+  .swarm-line > .car {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    color: var(--fg-subtle);
+  }
+  .swarm-line.more {
+    height: 36px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--fg-muted);
+  }
+  .swarm-el {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-el.ok {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--font-sans);
+    font-weight: 500;
+    color: var(--ok-text);
+  }
+  .swarm-chip {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 7px 0 6px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-chip.need {
+    background: var(--warn-soft);
+    color: var(--warn-text);
+  }
+  .swarm-chip.fail {
+    background: var(--danger-soft);
+    color: var(--danger-text);
+  }
+  .swarm-chip.quiet {
+    background: var(--bg-active);
+    color: var(--fg-muted);
+  }
+  .swarm-chip.ok {
+    background: var(--ok-soft);
+    color: var(--ok-text);
+  }
+  .swarm-chip.stale {
+    background: var(--bg-active);
+    color: var(--fg-subtle);
+  }
+  .swarm-tag {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 5px;
+    box-shadow: inset 0 0 0 1px var(--border);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--fg-muted);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 16px;
+    min-width: 16px;
+    padding: 0 4px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg-raised);
+    font: 500 10.5px/14px var(--font-sans);
+    color: var(--fg-muted);
+  }
+
+  .swarm-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 8px 8px 6px 14px;
+    white-space: nowrap;
+  }
+  .swarm-head > .toggle {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+  }
+  .swarm-tile {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+  }
+  .swarm-tile.ok {
+    background: var(--ok-soft);
+    color: var(--ok-text);
+  }
+  .swarm-tile.mute {
+    background: var(--bg-sunken);
+    color: var(--fg-subtle);
+  }
+  .swarm-head .tt {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+  }
+  .swarm-head .tt > .nm {
+    overflow: hidden;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-head .tt > .sub {
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-head .tt > .sub b {
+    font-weight: 500;
+    color: var(--fg-muted);
+  }
+  .swarm-head .tt > .sub.short {
+    display: none;
+  }
+  .swarm-body {
+    max-height: min(56dvh, 520px);
+    /* No bottom padding: a sticky footer pins to the content edge, so rows would show through it. */
+    padding: 2px 14px 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  .swarm-body:not(:has(.swarm-foot)) {
+    padding-bottom: 8px;
+  }
+  .swarm-body.compact {
+    max-height: min(40dvh, 400px);
+  }
+
+  /* The rail: equal-width segments, each a tab of the accordion; the open one sits on a plate with a pointer. */
+  .swarm-card .swarm-rail {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    margin: 4px 0 6px;
+    padding-top: 4px;
+    background: var(--bg-raised);
+  }
+  .swarm-seg {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    min-width: 96px;
+    flex-direction: column;
+    gap: 6px;
+    margin: -4px -6px -6px;
+    padding: 4px 6px 6px;
+    border-radius: 8px;
+    text-align: left;
+  }
+  .swarm-seg:hover {
+    background: var(--bg-hover);
+  }
+  .swarm-seg.open {
+    background: var(--bg-active);
+  }
+  .swarm-seg.open::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: -8px;
+    width: 8px;
+    height: 8px;
+    transform: translateX(-50%) rotate(45deg);
+    background: var(--bg-active);
+  }
+  .swarm-seg > .lbl {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    height: 18px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
+  .swarm-seg > .lbl > b {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-weight: 500;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-seg > .lbl > span {
+    flex-shrink: 0;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-seg.done > .lbl > b {
+    color: var(--fg-muted);
+  }
+  .swarm-seg.planned > .lbl > b {
+    color: var(--fg-subtle);
+  }
+  .swarm-seg.open > .lbl > b {
+    color: var(--fg);
+  }
+
+  .swarm-sec {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 18px;
+    font-weight: 500;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+  .swarm-sec > .n {
+    font-weight: 500;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-sec > .lnk {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 24px;
+    padding: 0 6px;
+    border-radius: 6px;
+    font-weight: 500;
+    color: var(--fg-subtle);
+  }
+  .swarm-sec > .lnk:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+
+  /* Attention rows: two lines, the reason and the action; a run-level request spans the sigil column. */
+  .swarm-att {
+    display: grid;
+    grid-template-columns: 16px 18px minmax(0, 1fr) auto;
+    column-gap: 8px;
+    row-gap: 2px;
+    align-items: center;
+    min-height: 40px;
+    margin: 0 -6px;
+    padding: 6px 6px 6px 8px;
+    border-radius: 8px;
+  }
+  .swarm-att:hover {
+    background: var(--bg-hover);
+  }
+  .swarm-att.sel {
+    background: var(--bg-active);
+  }
+  .swarm-att > .swarm-g {
+    grid-column: 1;
+    grid-row: 1;
+    align-self: start;
+    margin-top: 3px;
+  }
+  .swarm-att > .swarm-sigil {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    margin-top: 1px;
+  }
+  .swarm-att > .l1 {
+    grid-column: 3;
+    grid-row: 1;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .swarm-att > .l2 {
+    grid-column: 3;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .swarm-att > .l2.mono {
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    color: var(--danger-text);
+  }
+  .swarm-att > .acts {
+    grid-column: 4;
+    grid-row: 1 / 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .swarm-att.run > .l1,
+  .swarm-att.run > .l2 {
+    grid-column: 2 / 4;
+  }
+  .swarm-att > .l1 > .nm {
+    flex-shrink: 0;
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-att > .l1 > .what {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--fg-muted);
+    text-overflow: ellipsis;
+  }
+  .swarm-att > .l1 > .what > b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-att > .l1 > .what.need > b {
+    color: var(--warn-text);
+  }
+  .swarm-att > .l1 > .what.fail > b {
+    color: var(--danger-text);
+  }
+  .swarm-att > .l1 > .what.work > b {
+    color: var(--accent-text);
+  }
+  .swarm-att > .l1 > .chipm {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    height: 20px;
+    padding: 0 6px;
+    overflow: hidden;
+    border-radius: 5px;
+    background: var(--bg-sunken);
+    box-shadow: 0 0 0 1px var(--border);
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    font-weight: 400;
+    color: var(--fg);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .swarm-att > .acts > .go {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    color: var(--fg-subtle);
+  }
+  .swarm-att > .acts > .go:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .swarm-att > .acts > .confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .swarm-att > .acts > .confirm > b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  /* Compact rows: glyph · sigil · name · state · tokens · time · share. */
+  .swarm-ag {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    margin: 0 -6px;
+    padding: 0 6px 0 8px;
+    border-radius: 8px;
+    white-space: nowrap;
+  }
+  .swarm-ag:hover {
+    background: var(--bg-hover);
+  }
+  .swarm-ag.sel {
+    background: var(--bg-active);
+  }
+  .swarm-ag > .nm {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-nm > .pre,
+  .swarm-att > .l1 > .nm > .pre,
+  .swarm-ag > .nm > .pre {
+    color: var(--fg-subtle);
+  }
+  .swarm-ag > .st {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+  }
+  .swarm-ag > .st.fail {
+    color: var(--danger-text);
+  }
+  .swarm-ag > .st.need {
+    color: var(--warn-text);
+  }
+  .swarm-ag > .st.work {
+    color: var(--accent-text);
+  }
+  .swarm-ag > .st > .dim {
+    color: var(--fg-subtle);
+  }
+  .swarm-ag > .num {
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-ag > .acts {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .swarm-ag > .acts > .confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .swarm-ag > .acts > .confirm > b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-ag > .num.tok {
+    width: 44px;
+  }
+  .swarm-ag > .num.dur {
+    width: 56px;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+  }
+  .swarm-share {
+    position: relative;
+    flex-shrink: 0;
+    width: 44px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 9px;
+    background: var(--bg-active);
+  }
+  .swarm-share > span {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 9px;
+    background: var(--bar-fill);
+    transition: width var(--dur-fill) var(--ease-out);
+  }
+  .swarm-share > .fail {
+    background: var(--danger);
+  }
+  .swarm-share > .work {
+    background: var(--accent);
+  }
+  .swarm-share > .ok {
+    background: var(--cell-done-ok);
+  }
+  .swarm-share > .over {
+    background: repeating-linear-gradient(135deg, var(--hatch) 0 2px, transparent 2px 4px);
+  }
+
+  /* Background task rows: the command, who sent it there, the last output line, and the controls. */
+  .swarm-task {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    column-gap: 8px;
+    row-gap: 2px;
+    align-items: center;
+    min-height: 40px;
+    margin: 0 -6px;
+    padding: 6px 6px 6px 8px;
+    border-radius: 8px;
+  }
+  .swarm-task:hover {
+    background: var(--bg-hover);
+  }
+  .swarm-task.sel {
+    background: var(--bg-active);
+  }
+  .swarm-task > .swarm-g {
+    align-self: start;
+    margin-top: 3px;
+  }
+  .swarm-task > .l1 {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .swarm-task > .l1 > .cmd {
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 12.5px;
+    color: var(--fg);
+    text-overflow: ellipsis;
+  }
+  .swarm-task > .l2 {
+    grid-column: 2;
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .swarm-task > .l2 > .out {
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    color: var(--fg-muted);
+    text-overflow: ellipsis;
+  }
+  .swarm-task > .l2 > .out::before {
+    content: "\203A";
+    margin-right: 6px;
+    color: var(--fg-subtle);
+  }
+  .swarm-task > .l2 > .out.ok {
+    color: var(--ok-text);
+  }
+  .swarm-task > .l2 > .out.fail {
+    color: var(--danger-text);
+  }
+  .swarm-task > .acts {
+    grid-column: 3;
+    grid-row: 1 / 3;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .swarm-task > .acts > .swarm-el {
+    margin-right: 4px;
+  }
+
+  .swarm-card .swarm-foot {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 36px;
+    margin-top: 4px;
+    /* The body's bottom padding lives here, under the footer, where scrolled rows cannot show through. */
+    padding: 6px 0 8px;
+    background: var(--bg-raised);
+    box-shadow: inset 0 1px 0 var(--border);
+    white-space: nowrap;
+  }
+  .swarm-foot > .meta {
+    padding: 0 4px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 4px 0 2px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: var(--bg-sunken);
+    box-shadow: inset 0 0 0 1px var(--border);
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--fg-muted);
+  }
+  .swarm-note > svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--fg-subtle);
+  }
+  .swarm-note b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  /* The completion report: a serif headline, the finale rail, four stats, the highlights, the fingerprint, the excerpt. */
+  .swarm-landed {
+    padding: 4px 0 2px;
+  }
+  .swarm-landed > h2 {
+    margin: 6px 0 2px;
+    font-family: var(--font-display);
+    font-size: 26px;
+    line-height: 34px;
+    font-weight: 400;
+    letter-spacing: -0.005em;
+    color: var(--fg);
+    text-wrap: balance;
+  }
+  .swarm-landed > .sub {
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-landed > .sub b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: 12px 0 0;
+  }
+  .swarm-stat > .v {
+    font-size: 20px;
+    line-height: 26px;
+    font-weight: 600;
+    letter-spacing: -0.015em;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-stat > .k {
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--fg-subtle);
+  }
+  .swarm-facts {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 2px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--fg-muted);
+  }
+  .swarm-facts > li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 24px;
+  }
+  .swarm-facts > li > svg {
+    flex-shrink: 0;
+    color: var(--fg-subtle);
+  }
+  .swarm-facts b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-facts > li > .r {
+    margin-left: auto;
+    padding-left: 12px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-fp {
+    position: relative;
+    margin-top: 6px;
+    padding: 10px 10px 8px;
+    border-radius: 10px;
+    background: var(--bg-sunken);
+    box-shadow: 0 0 0 1px var(--border);
+  }
+  .swarm-fp > .lanes {
+    position: relative;
+    height: 64px;
+  }
+  .swarm-fp .bar {
+    position: absolute;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--cell-done-ok);
+  }
+  .swarm-fp .bar.f {
+    background: var(--danger);
+  }
+  .swarm-fp .band {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-left: 1px dashed var(--border-strong);
+  }
+  .swarm-fp .lab {
+    position: absolute;
+    top: -1px;
+    font-size: 10.5px;
+    line-height: 14px;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+  .swarm-fp > .axis {
+    position: relative;
+    height: 14px;
+    margin-top: 4px;
+    font-size: 10.5px;
+    line-height: 14px;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-fp > .axis > span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  .swarm-fp > .partial {
+    margin-top: 4px;
+    font-size: 10.5px;
+    color: var(--fg-subtle);
+  }
+  .swarm-excerpt {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--bg-sunken);
+    box-shadow: 0 0 0 1px var(--border);
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--fg);
+  }
+  .swarm-excerpt > .src {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+  }
+  .swarm-excerpt .prose-ancilla {
+    font-size: 13px;
+    line-height: 20px;
+  }
+  .swarm-recap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 10px 0 12px;
+    border-radius: 10px;
+    background: var(--bg-sunken);
+    box-shadow: 0 0 0 1px var(--border);
+    font-size: 12px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .swarm-recap > svg {
+    flex-shrink: 0;
+    color: var(--fg-subtle);
+  }
+  .swarm-recap > span {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .swarm-recap b {
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  /* The peek: what a row would say in the inspector, beside the row, without moving focus. */
+  .swarm-peek {
+    position: absolute;
+    left: 32px;
+    top: 100%;
+    z-index: var(--z-overlay);
+    width: 316px;
+    max-width: calc(100% - 32px);
+    padding: 12px 12px 10px;
+    border-radius: 12px;
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-pop);
+    white-space: normal;
+    animation: ancilla-pop-in 150ms var(--ease-out);
+  }
+  .swarm-peek > .who {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .swarm-peek > .who > .nm {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .swarm-peek > .sub {
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+  }
+  .swarm-peek > .task {
+    display: -webkit-box;
+    margin-top: 8px;
+    overflow: hidden;
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--fg);
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .swarm-peek > dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 12px;
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 18px;
+  }
+  .swarm-peek dt {
+    color: var(--fg-subtle);
+  }
+  .swarm-peek dd {
+    margin: 0;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-peek dd.nr {
+    color: var(--fg-subtle);
+  }
+  .swarm-peek > .hint {
+    display: flex;
+    gap: 10px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--fg-subtle);
+  }
+  .swarm-peek > .hint > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  /* The thread header: the needs-you chip, the status word and the Swarm toggle's count. */
+  .swarm-need-chip {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    margin: 0 4px;
+    padding: 0 8px 0 6px;
+    border-radius: 6px;
+    background: var(--warn-soft);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--warn-text);
+    white-space: nowrap;
+  }
+  .swarm-need-chip:hover {
+    background: color-mix(in oklch, var(--warn-soft) 100%, var(--warn) 8%);
+  }
+  .swarm-status {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 7px;
+    margin: 0 6px;
+    font-size: 13px;
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .swarm-status > .t {
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+  .swarm-status.warn {
+    color: var(--warn-text);
+  }
+  .swarm-status.ok {
+    color: var(--ok-text);
+  }
+  .swarm-status > .wdot {
+    width: 7px;
+    height: 7px;
+    border-radius: 9999px;
+    background: var(--warn);
+  }
+  .swarm-tog {
+    position: relative;
+  }
+  .swarm-tog > .n {
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    border-radius: 7px;
+    background: var(--bg-inverse);
+    font-size: 9.5px;
+    line-height: 14px;
+    font-weight: 600;
+    color: var(--fg-inverse);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  /* Review on a need row lands on the request panel: its ring flashes once. */
+  .swarm-flash {
+    animation: swarm-flash 150ms var(--ease-out) 2 alternate;
+  }
+
+  /* The transcript's work-log row for a run: the same grammar as the other rows, with the dock link at the right. */
+  .swarm-anchor {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 32px;
+    margin: 0 -6px;
+    padding: 0 6px;
+    border-radius: 8px;
+    white-space: nowrap;
+  }
+  .swarm-anchor > svg {
+    flex-shrink: 0;
+    color: var(--fg-subtle);
+  }
+  .swarm-anchor > .verb {
+    flex-shrink: 0;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .swarm-anchor > .txt {
+    min-width: 0;
+    overflow: hidden;
+    font-size: 13px;
+    color: var(--fg-muted);
+    text-overflow: ellipsis;
+  }
+  .swarm-anchor > .right {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    padding: 0 4px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+  }
+  .swarm-anchor > .right.live {
+    color: var(--accent-text);
+  }
+  .swarm-anchor > button.right:hover {
+    background: var(--bg-hover);
+  }
+
+  /* The card adapts to the track it gets (SPEC §3.2): words leave before numbers, the strip shrinks before it goes. */
+  @container (max-width: 700px) {
+    .swarm-line > .prog > .word {
+      display: none;
+    }
+  }
+  @container (max-width: 660px) {
+    .swarm-att > .l1 > .what > .opt,
+    .swarm-head .tt > .sub .opt {
+      display: none;
+    }
+  }
+  @container (max-width: 620px) {
+    .swarm-line > .swarm-strip {
+      --cw: 3px;
+      --ch: 8px;
+      --cg: 1px;
+      --pg: 3px;
+      --cr: 1px;
+    }
+    .swarm-line > .swarm-strip .swarm-cell.work,
+    .swarm-line > .swarm-strip .swarm-cell.finishing {
+      background: var(--accent);
+      box-shadow: none;
+    }
+    .swarm-line > .swarm-strip .swarm-cell.fail {
+      background: var(--danger);
+    }
+  }
+  @container (max-width: 560px) {
+    .swarm-ag > .swarm-share {
+      display: none;
+    }
+    .swarm-seg {
+      min-width: 40%;
+    }
+    .swarm-stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @container (max-width: 440px) {
+    .swarm-line > .swarm-strip,
+    .swarm-chip > .lbl,
+    .swarm-att > .acts .lbl,
+    .swarm-task > .acts .lbl,
+    .swarm-foot .lbl {
+      display: none;
+    }
+    .swarm-chip {
+      padding: 0 6px;
+    }
+    .swarm-head .tt > .sub.long {
+      display: none;
+    }
+    .swarm-head .tt > .sub.short {
+      display: block;
+    }
+  }
+  @container (max-width: 360px) {
+    .swarm-card > .swarm-expanded {
+      display: none;
+    }
+    .swarm-card > .swarm-line.fold {
+      display: flex;
+    }
+  }
+}
+
+@keyframes ancilla-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ancilla-sheen {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes ancilla-pop-in {
+  from {
+    opacity: 0;
+    scale: 0.96;
+  }
+}
+
+@keyframes ancilla-pop-out {
+  to {
+    opacity: 0;
+    scale: 0.97;
+  }
+}
+
+/* Tailwind 4 centers with the `translate` property, so only `transform` moves here. */
+@keyframes ancilla-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+@keyframes ancilla-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes ancilla-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+}
+
+@keyframes ancilla-sheet-out {
+  to {
+    opacity: 0;
+    transform: translateX(18px);
+  }
+}
+
+@keyframes ancilla-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ancilla-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+@keyframes ancilla-enter-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* The swatch beside each code theme in the picker: its keyword colour, so the menu shows what it changes. */
+.code-swatch-ancilla {
+  background: oklch(0.5 0.17 20);
+}
+.code-swatch-ayu {
+  background: #ff8f40;
+}
+.code-swatch-github {
+  background: #cf222e;
+}
+.code-swatch-vercel {
+  background: #ff0080;
+}
+.code-swatch-cursor {
+  background: #c586c0;
+}
+.code-swatch-catppuccin {
+  background: #cba6f7;
+}
+
+/*
+ * Code themes. Each sets sugar-high's token colours and nothing else, so a code theme is free to differ from
+ * the app's own light or dark theme. The dark block carries more attributes, so it wins under a dark UI.
+ */
+:root[data-code-theme="ayu"] {
+  --sh-keyword: #fa8d3e;
+  --sh-string: #86b300;
+  --sh-entity: #f2ae49;
+  --sh-property: #399ee6;
+  --sh-class: #55b4d4;
+  --sh-jsxliterals: #a37acc;
+  --sh-identifier: #5c6166;
+  --sh-sign: #8a9199;
+  --sh-comment: #abb0b6;
+}
+:root[data-theme="dark"][data-code-theme="ayu"] {
+  --sh-keyword: #ff8f40;
+  --sh-string: #aad94c;
+  --sh-entity: #ffb454;
+  --sh-property: #59c2ff;
+  --sh-class: #39bae6;
+  --sh-jsxliterals: #d2a6ff;
+  --sh-identifier: #bfbdb6;
+  --sh-sign: #8a9199;
+  --sh-comment: #7b8288;
+}
+
+:root[data-code-theme="github"] {
+  --sh-keyword: #cf222e;
+  --sh-string: #0a3069;
+  --sh-entity: #8250df;
+  --sh-property: #0550ae;
+  --sh-class: #953800;
+  --sh-jsxliterals: #0a3069;
+  --sh-identifier: #24292f;
+  --sh-sign: #57606a;
+  --sh-comment: #6e7781;
+}
+:root[data-theme="dark"][data-code-theme="github"] {
+  --sh-keyword: #ff7b72;
+  --sh-string: #a5d6ff;
+  --sh-entity: #d2a8ff;
+  --sh-property: #79c0ff;
+  --sh-class: #ffa657;
+  --sh-jsxliterals: #a5d6ff;
+  --sh-identifier: #c9d1d9;
+  --sh-sign: #8b949e;
+  --sh-comment: #8b949e;
+}
+
+:root[data-code-theme="vercel"] {
+  --sh-keyword: #d3268a;
+  --sh-string: #0f8a7e;
+  --sh-entity: #0068d6;
+  --sh-property: #7343d8;
+  --sh-class: #0068d6;
+  --sh-jsxliterals: #7343d8;
+  --sh-identifier: #171717;
+  --sh-sign: #666666;
+  --sh-comment: #8f8f8f;
+}
+:root[data-theme="dark"][data-code-theme="vercel"] {
+  --sh-keyword: #ff0080;
+  --sh-string: #50e3c2;
+  --sh-entity: #52a8ff;
+  --sh-property: #bd8cff;
+  --sh-class: #52a8ff;
+  --sh-jsxliterals: #bd8cff;
+  --sh-identifier: #ededed;
+  --sh-sign: #a1a1a1;
+  --sh-comment: #8f8f8f;
+}
+
+:root[data-code-theme="cursor"] {
+  --sh-keyword: #af00db;
+  --sh-string: #a31515;
+  --sh-entity: #795e26;
+  --sh-property: #0070c1;
+  --sh-class: #267f99;
+  --sh-jsxliterals: #0000ff;
+  --sh-identifier: #1f1f1f;
+  --sh-sign: #575757;
+  --sh-comment: #008000;
+}
+:root[data-theme="dark"][data-code-theme="cursor"] {
+  --sh-keyword: #c586c0;
+  --sh-string: #ce9178;
+  --sh-entity: #dcdcaa;
+  --sh-property: #9cdcfe;
+  --sh-class: #4ec9b0;
+  --sh-jsxliterals: #569cd6;
+  --sh-identifier: #d4d4d4;
+  --sh-sign: #969696;
+  --sh-comment: #6a9955;
+}
+
+:root[data-code-theme="catppuccin"] {
+  --sh-keyword: #8839ef;
+  --sh-string: #40a02b;
+  --sh-entity: #1e66f5;
+  --sh-property: #179299;
+  --sh-class: #df8e1d;
+  --sh-jsxliterals: #ea76cb;
+  --sh-identifier: #4c4f69;
+  --sh-sign: #7c7f93;
+  --sh-comment: #8c8fa1;
+}
+:root[data-theme="dark"][data-code-theme="catppuccin"] {
+  --sh-keyword: #cba6f7;
+  --sh-string: #a6e3a1;
+  --sh-entity: #89b4fa;
+  --sh-property: #94e2d5;
+  --sh-class: #f9e2af;
+  --sh-jsxliterals: #f5c2e7;
+  --sh-identifier: #cdd6f4;
+  --sh-sign: #9399b2;
+  --sh-comment: #7f849c;
+}
+
+@keyframes ancilla-token-in {
+  from {
+    opacity: 0;
+    filter: blur(3px);
+  }
+}
+
+@keyframes ancilla-pixel {
+  0%,
+  100% {
+    opacity: 0.15;
+  }
+  18%,
+  42% {
+    opacity: 1;
+  }
+  62% {
+    opacity: 0.15;
+  }
+}
+
+@keyframes ancilla-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* Swarm motion: a working sigil breathes, the finale sheen sweeps the strip once, a settled cell lands. */
+@keyframes swarm-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes swarm-sheen {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+@keyframes swarm-settle {
+  from {
+    opacity: 0.4;
+    scale: 0.96;
+  }
+}
+
+/* Review lands on the request panel: its warm ring brightens once. */
+@keyframes swarm-flash {
+  to {
+    box-shadow: 0 0 0 2px var(--warn), 0 2px 8px -4px oklch(0 0 0 / 0.18);
+  }
+}
+
+/* The effort slider's thumb and fill glide between stops instead of jumping. */
+.effort-slider > span:has(> [role="slider"]) {
+  transition: left 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.effort-range {
+  transition: right 140ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .effort-slider > span:has(> [role="slider"]),
+  .effort-range {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin-ring,
+  .attention-pulse,
+  .sheet-in,
+  /* The exit rule carries an attribute, so it outranks a bare .sheet-in here. */
+  .sheet-in[data-state="closed"],
+  .prose-ancilla.streaming .tok {
+    animation: none;
+  }
+  .pixel-loader > span {
+    animation: none;
+    opacity: 0.45;
+  }
+  .shimmer {
+    animation: none;
+    background: none;
+    color: var(--fg-muted);
+  }
+  /* Swarm: sigils hold still, the finale keeps its tint without the sweep, cells change colour at once. */
+  .swarm-sigil.work > svg,
+  .swarm-sigil.finishing > svg,
+  .swarm-breathe,
+  .swarm-settle,
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    animation: none;
+  }
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    background-image: none;
+  }
+  .swarm-cell {
+    transition: none;
+  }
+  .swarm-share > span {
+    transition: none;
+  }
+  .swarm-peek,
+  .swarm-flash {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Forced colours: cells are outlined shapes in the text colour, told apart by shape alone. */
+@media (forced-colors: active) {
+  .swarm-cell,
+  .swarm-bin > span {
+    forced-color-adjust: none;
+    background: transparent;
+    border: 1px solid currentColor;
+    box-shadow: none;
+  }
+  .swarm-cell.done,
+  .swarm-cell.need,
+  .swarm-bin > .done {
+    background: currentColor;
+  }
+  .swarm-cell.work,
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, currentColor 0 55%, transparent 55%);
+  }
+  .swarm-cell.fail {
+    background: linear-gradient(to bottom, currentColor 0 40%, transparent 40% 60%, currentColor 60%);
+  }
+  .swarm-bin > .work,
+  .swarm-bin > .quiet {
+    background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 4px);
+  }
+  .swarm-cell.quiet,
+  .swarm-cell.planned,
+  .swarm-cell.more {
+    border-style: dashed;
+  }
+}

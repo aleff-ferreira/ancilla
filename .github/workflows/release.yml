@@ -1,0 +1,241 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Rebuilds and republishes an existing tag: `gh workflow run release.yml --ref vX.Y.Z`. It runs the workflow file as
+  # it is at that tag, so it works for tags made after this line was added.
+  workflow_dispatch:
+
+# Every job merges its platform into the release's latest.json, so two runs for one tag would clobber each other.
+# A second run waits for the first rather than cancelling it half-published.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The GitHub release page. tauri-action also copies it into latest.json as the update's notes.
+  RELEASE_BODY: |
+    Ancilla ${{ github.ref_name }} for Windows, macOS and Linux. What changed is in the [changelog](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md).
+
+    **What you need.** Ancilla bundles Node.js, so the only thing to install is Meta's Muse Code CLI, signed in once with `muse login`: Muse for Windows natively, or Muse inside WSL2.
+
+    **Which file.** Windows: the `x64-setup.exe` installer. macOS, Apple Silicon and Intel alike: the `universal.dmg`. Linux: the `amd64.AppImage`; mark it executable, then run it. From then on Ancilla updates itself from these releases, and refuses any update that is not signed with its key.
+
+    **Unsigned installers.** The Windows installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app: choose More info, then Run anyway. The macOS app is not notarized by Apple yet, so its first launch needs a right-click on the app, then Open.
+
+    **Licenses.** Ancilla is free software under the [MIT License](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE). It is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon) by Harjot Singh Rana and contributors, also MIT: the license keeps Helicon's copyright notice, and [NOTICE.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/NOTICE.md) says what Ancilla changed. The third-party software each build bundles, Node.js among it, is listed with its licenses in [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md), which also ships inside the app.
+
+jobs:
+  desktop-windows:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      # First, so a missing key fails in seconds instead of after a full build that could not be signed.
+      - name: Check the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      # The tag names the release, and the files decide the version the updater compares, so they must agree.
+      # Only here: the other jobs wait for this one.
+      - name: Check the tag matches the version
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error title=Not a tag::Run this workflow on a vX.Y.Z tag (gh workflow run release.yml --ref vX.Y.Z), not on $GITHUB_REF_NAME."
+            exit 1
+          fi
+          node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      # The first check only sees that the key is there. This one signs a scratch file the way the build signs the
+      # installer, so a damaged key, or one that needs a password the secrets do not give, fails here within a
+      # minute rather than after the whole Windows build. Only here, like the tag check: the other jobs wait for it.
+      # The same check runs on its own, without a release, from .github/workflows/check-signing-key.yml.
+      - name: Check the updater signing key opens
+        shell: bash
+        # A backstop: nothing here should wait for input, but a prompt on a runner would wait for hours.
+        timeout-minutes: 5
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/check-signing-key.mjs
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
+          ANCILLA_NODE_TARGET: x86_64-pc-windows-msvc
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installer for the in-app updater, which also publishes latest.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # The key has no password, so this secret is normally absent. The bundler then signs with an empty password
+          # either way: it takes this variable when it is set, even to nothing, and when it is not, falls back to empty
+          # because CI is set, as on every runner (tauri-cli's sign_updaters). Set the secret only for a key with one.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Ancilla ${{ github.ref_name }}"
+          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseDraft: false
+          # A full release, so the updater's releases/latest/download/latest.json always points at it.
+          prerelease: false
+          # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
+          retryAttempts: 3
+          args: --target x86_64-pc-windows-msvc
+
+  desktop-macos:
+    permissions:
+      contents: write
+    # After Windows, not beside it: both jobs merge their platform into the release's latest.json,
+    # which is a read-modify-write that concurrent jobs could clobber, silently dropping a platform
+    # from auto-update.
+    needs: desktop-windows
+    runs-on: macos-latest
+    steps:
+      - name: Check the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # universal-apple-darwin needs both halves installed; aarch64 is already the runner default.
+          targets: x86_64-apple-darwin
+      - run: npm ci
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
+          ANCILLA_NODE_TARGET: universal-apple-darwin
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installer for the in-app updater, which also publishes latest.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Empty unless the key has a password; see the Windows job.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Ancilla ${{ github.ref_name }}"
+          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseDraft: false
+          # A full release, so the updater's releases/latest/download/latest.json always points at it.
+          prerelease: false
+          # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
+          retryAttempts: 3
+          # One universal binary for Apple Silicon and Intel; the macOS bundles come from tauri.macos.conf.json.
+          args: --target universal-apple-darwin
+
+  desktop-linux:
+    permissions:
+      contents: write
+    needs: desktop-macos
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check the updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools
+      - run: npm ci
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
+          ANCILLA_NODE_TARGET: x86_64-unknown-linux-gnu
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installer for the in-app updater, which also publishes latest.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Empty unless the key has a password; see the Windows job.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Ancilla ${{ github.ref_name }}"
+          releaseBody: ${{ env.RELEASE_BODY }}
+          releaseDraft: false
+          # A full release, so the updater's releases/latest/download/latest.json always points at it.
+          prerelease: false
+          # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
+          retryAttempts: 3
+          args: --target x86_64-unknown-linux-gnu
+      # linuxdeploy bundles Ubuntu 22.04's libwayland-*. Newer host Mesa fails EGL init
+      # against the stale copy, so WebKitGTK aborts with EGL_BAD_ALLOC before the window
+      # opens (tauri-apps/tauri#15665). Repack without those libraries so the AppImage
+      # uses the host ones, then re-sign and republish it.
+      - name: Strip bundled Wayland libraries from AppImage
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # `tauri signer sign` reads an unset password as "ask on the terminal", which CI does not have, and fails.
+          # Set but empty is what opens a key made without a password.
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          cd "$work"
+          # gh infers the repository from the git remote, and $work is not a checkout.
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "*.AppImage" --clobber
+          shopt -s nullglob
+          found=(Ancilla_*_amd64.AppImage)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::Expected one Ancilla_*_amd64.AppImage in the $RELEASE_TAG release, found ${#found[@]}: $(ls)"
+            exit 1
+          fi
+          appimage="${found[0]}"
+          # A downloaded release asset does not keep its executable bit.
+          chmod +x "$appimage"
+          "./$appimage" --appimage-extract
+          rm -f squashfs-root/usr/lib/libwayland-client.so.0 squashfs-root/usr/lib/libwayland-cursor.so.0 \
+            squashfs-root/usr/lib/libwayland-egl.so.1 squashfs-root/usr/lib/libwayland-server.so.0
+          curl -sSL --fail -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum --check
+          chmod +x appimagetool
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run squashfs-root "$appimage"
+          "${{ github.workspace }}/node_modules/.bin/tauri" signer sign "$appimage"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "latest.json" --clobber
+          SIG_FILE="$appimage.sig" node -e '
+            const fs = require("fs");
+            const latest = JSON.parse(fs.readFileSync("latest.json", "utf8"));
+            const signature = fs.readFileSync(process.env.SIG_FILE, "utf8").trim();
+            for (const platform of ["linux-x86_64", "linux-x86_64-appimage"]) {
+              latest.platforms[platform].signature = signature;
+            }
+            fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));
+          '
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$appimage" "$appimage.sig" latest.json --clobber

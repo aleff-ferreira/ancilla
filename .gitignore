@@ -1,0 +1,54 @@
+# Node
+node_modules/
+dist/
+dist-test/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Rust / Tauri
+**/target/
+**/src-tauri/gen/
+**/src-tauri/resources/
+
+# Env / secrets — never commit real keys
+.env
+.env.*
+*.pem
+*.key
+.opencode/
+auth.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Browser automation output
+.playwright-mcp/
+*.png
+# Images the docs and the README deliberately show are the exception to the rule above.
+!docs/assets/*.png
+!docs/assets/**/*.png
+# So are the shipped brand images: desktop icons, web favicons, social assets.
+!apps/desktop/src-tauri/icons/**/*.png
+!apps/web/public/*.png
+!assets/brand/*.png
+
+# Marketing / CMO run — local-only strategy + logs, never commit to the public repo
+marketing/
+projects/
+.agents/product-marketing.md
+
+# Bundled Node.js sidecar (apps/desktop/scripts/fetch-node.mjs)
+**/src-tauri/binaries/
+apps/desktop/.cache/
+
+# vercel
+.vercel
+
+# Worktrees Claude Code makes for its own agents inside the checkout.
+.claude/worktrees/

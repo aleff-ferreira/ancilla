@@ -1,0 +1,111 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { applyEvent, emptyFold } from "../src/model/fold.js";
+import { groupByProject, groupByStatus, projectForCwd, settledEntries, threadStatus, type SidebarEntry } from "../src/model/status.js";
+import type { LiveView, ProjectView, SessionSummary } from "../src/types.js";
+
+const BASE = "2026-09-01T00:00:00.000Z";
+
+function session(id: string, patch: Partial<SessionSummary> = {}, live: Partial<LiveView> | null = null): SessionSummary {
+  return {
+    sessionId: id,
+    cwd: "/work/a",
+    title: id,
+    titleSource: "auto",
+    turnCount: 1,
+    modelId: null,
+    origin: "ancilla",
+    archived: false,
+    createdAt: BASE,
+    activityAt: "2026-09-02T00:00:00.000Z",
+    settled: false,
+    settledAt: null,
+    unsettledAt: null,
+    sandboxDisabled: false,
+    accountId: null,
+    live: live
+      ? { activeTurnId: null, turnStartedAt: null, pendingApprovals: 0, pendingInputs: 0, lastTerminal: null, lastError: null, ...live }
+      : null,
+    ...patch,
+  };
+}
+
+describe("threadStatus", () => {
+  it("ranks approval over input over running", () => {
+    const ctx = { baseline: BASE, active: false };
+    assert.equal(threadStatus(session("a", {}, { pendingApprovals: 1, pendingInputs: 1, activeTurnId: "t" }), ctx), "approval");
+    assert.equal(threadStatus(session("a", {}, { pendingInputs: 1, activeTurnId: "t" }), ctx), "input");
+    assert.equal(threadStatus(session("a", {}, { activeTurnId: "t" }), ctx), "running");
+  });
+
+  it("marks finished work unread until the user has seen it", () => {
+    const s = session("a", {}, { lastTerminal: "completed" });
+    assert.equal(threadStatus(s, { baseline: BASE, active: false }), "unread");
+    assert.equal(threadStatus(s, { baseline: BASE, lastSeen: "2026-09-03T00:00:00.000Z", active: false }), "idle");
+    assert.equal(threadStatus(s, { baseline: "2026-09-05T00:00:00.000Z", active: false }), "idle", "history from before first run is not unread");
+    assert.equal(threadStatus(s, { baseline: BASE, active: true }), "idle");
+    const failed = session("b", {}, { lastTerminal: "failed" });
+    assert.equal(threadStatus(failed, { baseline: BASE, active: false }), "failed");
+  });
+
+  it("prefers the live fold over the server summary once a thread is open", () => {
+    const s = session("a", {}, { activeTurnId: "t-old" });
+    const fold = applyEvent(emptyFold(), { method: "turn/completed", params: { turnId: "t-old", terminal: "completed" } });
+    assert.equal(threadStatus(s, { fold, baseline: "2026-09-05T00:00:00.000Z", active: false }), "idle");
+  });
+});
+
+describe("sidebar grouping", () => {
+  const projects: ProjectView[] = [
+    { cwd: "/work/a", displayName: "a", pinned: false, activityAt: BASE, defaultAccountId: null, folders: [{ cwd: "/work/a", displayName: "a" }] },
+    {
+      cwd: "/work/b",
+      displayName: "b",
+      pinned: false,
+      activityAt: BASE,
+      defaultAccountId: null,
+      folders: [{ cwd: "/work/b", displayName: "b" }, { cwd: "/work/b-docs", displayName: "b-docs" }],
+    },
+  ];
+  const entries: SidebarEntry[] = [
+    { session: session("old", { createdAt: "2026-09-01T01:00:00.000Z", activityAt: "2026-09-09T00:00:00.000Z" }), status: "idle" },
+    { session: session("new", { createdAt: "2026-09-04T00:00:00.000Z" }), status: "unread" },
+    { session: session("busy", { createdAt: "2026-09-01T00:30:00.000Z" }), status: "running" },
+    { session: session("back", { createdAt: "2026-08-01T00:00:00.000Z", unsettledAt: "2026-09-05T00:00:00.000Z" }), status: "idle" },
+    { session: session("shelved", { settled: true, settledAt: "2026-09-03T00:00:00.000Z" }), status: "idle" },
+    { session: session("shelved-earlier", { settled: true, settledAt: "2026-09-02T00:00:00.000Z" }), status: "idle" },
+    { session: session("woken", { settled: true, settledAt: "2026-09-02T00:00:00.000Z" }, { pendingApprovals: 1 }), status: "approval" },
+    { session: session("other", { cwd: "/work/b" }), status: "idle" },
+    { session: session("in-second-folder", { cwd: "/work/b-docs", createdAt: "2026-09-05T00:00:00.000Z" }), status: "running" },
+    { session: session("hidden-project", { cwd: "/work/hidden" }), status: "idle" },
+  ];
+
+  it("keeps active threads in a stable order and shelves settled ones", () => {
+    const groups = groupByProject(projects, entries);
+    assert.deepEqual(groups.map((g) => g.project.cwd), ["/work/a", "/work/b"]);
+    // Newest by start or return, never by activity: "old" keeps its place though it was busy last.
+    assert.deepEqual(groups[0]?.entries.map((e) => e.session.sessionId), ["back", "new", "old", "busy", "woken"]);
+    assert.deepEqual(groups[0]?.settled.map((e) => e.session.sessionId), ["shelved", "shelved-earlier"]);
+    assert.equal(groups[0]?.attention, 1);
+    assert.equal(groups[0]?.running, 1);
+    // A thread in a project's second folder is the project's thread, counted with the rest.
+    assert.deepEqual(groups[1]?.entries.map((e) => e.session.sessionId), ["in-second-folder", "other"]);
+    assert.equal(groups[1]?.running, 1);
+  });
+
+  it("finds the project that owns a folder, its own or an added one", () => {
+    assert.equal(projectForCwd(projects, "/work/b-docs")?.cwd, "/work/b");
+    assert.equal(projectForCwd(projects, "/work/b")?.cwd, "/work/b");
+    assert.equal(projectForCwd(projects, "/work/a")?.cwd, "/work/a");
+    assert.equal(projectForCwd(projects, "/work/hidden"), null);
+    assert.equal(projectForCwd(projects, null), null);
+  });
+
+  it("groups active threads by status and lists settled ones apart", () => {
+    const groups = groupByStatus(entries.filter((e) => e.status !== "running"));
+    assert.deepEqual(groups.map((g) => g.id), ["attention", "review", "idle"]);
+    assert.deepEqual(groups[0]?.entries.map((e) => e.session.sessionId), ["woken"]);
+    assert.deepEqual(groups[2]?.entries.map((e) => e.session.sessionId), ["back", "old", "other", "hidden-project"]);
+    assert.deepEqual(settledEntries(entries).map((e) => e.session.sessionId), ["shelved", "shelved-earlier"]);
+  });
+});

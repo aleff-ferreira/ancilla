@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  Demo mode: the real Ancilla UI on fictional sample data (src/demo). Development only: served by
+  `npm run demo`, and never part of `vite build`, whose only entry is index.html.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FBFCFE" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#101113" />
+    <title>Ancilla</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <script>
+      // Resolve the theme and zoom before first paint, from ?theme= and ?zoom= rather than saved prefs.
+      (function () {
+        var params = new URLSearchParams(window.location.search);
+        var theme = params.get("theme");
+        if (theme !== "light" && theme !== "dark") {
+          theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+        document.documentElement.dataset.theme = theme;
+        var zoom = Number(params.get("zoom"));
+        if (isFinite(zoom) && zoom > 0 && zoom !== 1) document.documentElement.style.zoom = String(zoom);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/demo/main.tsx"></script>
+  </body>
+</html>
