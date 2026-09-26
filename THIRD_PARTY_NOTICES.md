@@ -2442,7 +2442,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### framer-motion 13.2.0
 
 - License: MIT
-- Source: <https://github.com/motiondivision/motion/>
+- Source: <https://github.com/motiondivision/motion>
 - Shipped in: the interface (`resources/frontend`)
 
 `LICENSE.md`:
@@ -4802,7 +4802,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ### use-callback-ref 1.3.3
 
 - License: MIT
-- Source: <https://github.com/theKashey/use-callback-ref/>
+- Source: <https://github.com/theKashey/use-callback-ref>
 - Shipped in: the interface (`resources/frontend`)
 
 `LICENSE`:
