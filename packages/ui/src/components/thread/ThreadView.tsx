@@ -5,7 +5,7 @@ import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
 import { basename, formatDuration } from "../../model/format.js";
 import { backgroundTasks } from "../../model/plan.js";
 import { goalView } from "../../model/goal.js";
-import { agentActivityView } from "../../model/agents.js";
+import { agentActivityView, agentFeedRecovered, agentNumbers, markAgentFeed, type AgentFeedMark } from "../../model/agents.js";
 import type { ThreadState } from "../../model/store.js";
 import type { SessionSummary } from "../../types.js";
 import { SidebarToggle, TrafficLightSpacer } from "../chrome.js";
@@ -25,19 +25,33 @@ export function ThreadView(props: { sessionId: string }) {
   const thread = useApp((s) => s.threads[props.sessionId] ?? null);
   const filesOpen = useApp((s) => s.prefs.filesOpen);
   const connection = useApp((s) => s.connection);
-  const agents = useMemo(() => thread ? agentActivityView(thread.fold) : null,
-    [thread?.fold.agentItems ?? thread?.fold.items, thread?.fold.activeTurnId]);
+  const agentItems = thread ? thread.fold.agentItems ?? thread.fold.items : null;
+  const agents = useMemo(() => thread ? agentActivityView(thread.fold, agentNumbers(props.sessionId)) : null,
+    [props.sessionId, agentItems, thread?.fold.activeTurnId]);
+  // Remember the agent items as they were when the live view went unavailable, to tell later agent progress apart.
+  const viewUnavailable = session?.live?.viewHealth?.status === "unavailable";
+  const [feedMark, setFeedMark] = useState<AgentFeedMark | null>(null);
+  const nextFeedMark = markAgentFeed(feedMark, props.sessionId, viewUnavailable, thread?.load === "ready" ? agentItems : null);
+  if (nextFeedMark !== feedMark) {
+    setFeedMark(nextFeedMark);
+  }
   if (!session) {
     return <MissingThread />;
   }
   const running = thread ? thread.fold.activeTurnId !== null : Boolean(session.live?.activeTurnId);
+  // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
+  const agentLoad = !thread || thread.fold.order.length > 0 || thread.load === "ready" ? "ready"
+    : thread.load === "error" ? "failed" : "loading";
+  const agentsStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly)
+    || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
       <ThreadHeader session={session} thread={thread} running={running} />
       <div className="flex min-h-0 flex-1">
         <div className="@container flex min-w-0 flex-1 flex-col">
-          {agents ? <AgentPanel key={props.sessionId} sessionId={props.sessionId} view={agents} leadRunning={running}
-            stale={Boolean(connection !== "open" || thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || session.live?.viewHealth?.status === "unavailable")} /> : null}
+          {agents ? <AgentPanel key={props.sessionId} sessionId={props.sessionId} view={agents}
+            leadRunning={agentLoad === "loading" ? Boolean(session.live?.activeTurnId) : running}
+            stale={agentsStale} load={agentLoad} partial={Boolean(thread?.truncated)} /> : null}
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
           <Dock session={session} thread={thread} running={running} />
         </div>

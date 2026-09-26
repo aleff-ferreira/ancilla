@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { agentActivityView } from "../src/model/agents.js";
+import { agentActivityView, agentFeedRecovered, agentNumbers, markAgentFeed, type AgentNumbers } from "../src/model/agents.js";
 import { applyEvents, emptyFold, foldFromLoad } from "../src/model/fold.js";
 import type { MspItem, TranscriptLoad, WorkflowChild } from "../src/types.js";
 
@@ -281,6 +281,118 @@ describe("agentActivityView", () => {
     assert.equal(view.failed, 1);
     assert.equal(view.stopped, 1);
     assert.equal(view.working, 0);
+  });
+
+  it("never shows a child of a settled run as still queued or running", () => {
+    for (const status of ["cancelled", "failed", "completed", "timedOut", "futureTerminal"]) {
+      const view = agentActivityView(fold(workflow([
+        child("stale", "started", { label: "Stale child", phase: "Reading" }), child("queued", "scheduled"),
+        child("done", "terminal", { terminal: "completed" }), child("failed", "terminal", { terminal: "failed" }),
+      ], { status, revision: 9 })));
+      assert.deepEqual(view.agents.map((agent) => [agent.id, agent.status]).sort(), [["done", "completed"], ["failed", "failed"], ["queued", "unknown"], ["stale", "unknown"]], status);
+      assert.equal(view.working + view.waiting, 0, status);
+      assert.equal(view.agents.find((agent) => agent.id === "stale")?.activity, null, status);
+    }
+    // A later revision that only settles the run still settles what the panel says about its children.
+    const progressed = agentActivityView(fold(
+      workflow([child("one", "started", { label: "read-a" })], { revision: 3 }),
+      workflow([child("one", "started")], { revision: 4, status: "cancelled" }),
+    ));
+    assert.deepEqual(progressed.agents.map((agent) => [agent.name, agent.status]), [["Read a", "unknown"]]);
+    // While the run is open its children's own lifecycle stands.
+    assert.equal(agentActivityView(fold(workflow([child("one", "started")]))).working, 1);
+  });
+
+  it("treats any settled standalone item status as terminal, and unrecognized ones as terminal-unknown", () => {
+    const view = agentActivityView(fold(
+      subagent("abandoned", { status: "abandoned", controlStatus: "running" }),
+      subagent("interrupted", { status: "interrupted", controlStatus: "running" }),
+      subagent("idle", { status: "interrupted" }),
+      subagent("rejected", { status: "rejected", controlStatus: "running" }),
+      subagent("timed-out", { status: "timedOut", controlStatus: "running" }),
+      subagent("cancelled", { status: "cancelled", controlStatus: "paused" }),
+      subagent("open", { controlStatus: "running" }),
+      subagent("awaiting", { controlStatus: "awaitingApproval" }),
+    ));
+    const status = Object.fromEntries(view.agents.map((agent) => [agent.id, agent.status]));
+    assert.deepEqual(status, {
+      abandoned: "unknown", interrupted: "unknown", idle: "unknown", rejected: "failed", "timed-out": "failed",
+      cancelled: "stopped", open: "working", awaiting: "waiting",
+    });
+    // A reported terminal outcome is terminal even when this version does not know its name.
+    const child = agentActivityView(fold(workflow([{ childId: "odd", attempt: 1, status: "terminal", terminal: "interrupted" }])));
+    assert.equal(child.agents[0].status, "unknown");
+  });
+
+  it("keeps each anonymous agent's number when runs gain children or older history is dropped", () => {
+    const numbers: AgentNumbers = new Map();
+    const names = (view: ReturnType<typeof agentActivityView>) => Object.fromEntries(view.agents.map((agent) => [agent.id, agent.name]));
+    const first = workflow([child("a", "started"), child("b", "started")], { itemId: "w1" });
+    const second = workflow([child("c", "started"), child("named", "started", { label: "read-alpha" })], { itemId: "w2", turnId: "turn-2" });
+    assert.deepEqual(names(agentActivityView(fold(first, second), numbers)), { a: "Agent 1", b: "Agent 2", c: "Agent 3", named: "Read alpha" });
+    const grown = workflow([child("a", "started"), child("b", "started"), child("d", "scheduled")], { itemId: "w1", revision: 2 });
+    assert.deepEqual(names(agentActivityView(fold(first, second, grown), numbers)), { a: "Agent 1", b: "Agent 2", c: "Agent 3", d: "Agent 4", named: "Read alpha" });
+    // A capped reload that no longer holds the first run.
+    assert.deepEqual(names(agentActivityView(fold(second), numbers)), { c: "Agent 3", named: "Read alpha" });
+    // A retry is the same agent, and a label reported later names it without renumbering anyone else.
+    const later = workflow([child("c", "started", { attempt: 2 }), child("e", "started")], { itemId: "w2", revision: 5, turnId: "turn-2" });
+    assert.deepEqual(names(agentActivityView(fold(second, later), numbers)), { c: "Agent 3", e: "Agent 5" });
+    const labelled = workflow([child("c", "started", { attempt: 2, label: "verify-beta" }), child("e", "started")], { itemId: "w2", revision: 6, turnId: "turn-2" });
+    assert.deepEqual(names(agentActivityView(fold(labelled), numbers)), { c: "Verify beta", e: "Agent 5" });
+  });
+
+  it("keeps a thread's agent numbers across views and apart from other threads", () => {
+    const numbers = agentNumbers("thread-numbers-a");
+    assert.equal(agentNumbers("thread-numbers-a"), numbers);
+    assert.notEqual(agentNumbers("thread-numbers-b"), numbers);
+    agentActivityView(fold(workflow([child("x", "started"), child("y", "started")])), numbers);
+    assert.equal(agentActivityView(fold(workflow([child("y", "started")])), agentNumbers("thread-numbers-a")).agents[0].name, "Agent 2");
+    assert.equal(agentActivityView(fold(workflow([child("y", "started")])), agentNumbers("thread-numbers-b")).agents[0].name, "Agent 1");
+  });
+
+  it("parses a run's reconciliation once per revision, not on every recompute", () => {
+    let reads = 0;
+    const base = fold(workflow([], { status: "completed" }));
+    const message = payload([{ agent: "one", tool_calls: 1 }]);
+    // The fold keeps this object until a newer revision replaces it.
+    Object.defineProperty(base.agentItems!["workflow-1"], "message", { enumerable: true, get: () => { reads++; return message; } });
+    assert.equal(agentActivityView(base).completed, 1);
+    const after = applyEvents(base, [{ method: "item/updated", params: { item: subagent("other") } }]);
+    assert.equal(agentActivityView(after).total, 2);
+    assert.equal(agentActivityView(after).total, 2);
+    assert.equal(reads, 1);
+  });
+
+  it("counts agent progress after the live view went unavailable as recovery only while the lead is idle", () => {
+    const loaded = fold(workflow([child("bg", "started", { label: "Background" })], { turnId: "finished" }));
+    const items = () => loaded.agentItems!;
+    // Not loaded yet: nothing to compare against, and the first load is not progress.
+    let mark = markAgentFeed(null, "s1", true, null);
+    assert.equal(markAgentFeed(mark, "s1", true, null), mark);
+    assert.equal(agentFeedRecovered(mark, "s1", items(), true), false);
+    mark = markAgentFeed(mark, "s1", true, items());
+    assert.equal(mark?.items, items());
+    assert.equal(markAgentFeed(mark, "s1", true, items()), mark);
+    assert.equal(agentFeedRecovered(mark, "s1", items(), true), false);
+    // Unrelated items, or an agent item's replay at the same revision, are not progress.
+    const replay = applyEvents(loaded, [
+      { method: "item/updated", params: { item: { itemId: "note", kind: "agentMessage", revision: 1, status: "completed", text: "hi" } } },
+      { method: "item/updated", params: { item: workflow([child("bg", "started")], { turnId: "finished" }) } },
+    ]);
+    assert.equal(agentFeedRecovered(markAgentFeed(mark, "s1", true, replay.agentItems!), "s1", replay.agentItems!, true), false);
+    const progressed = applyEvents(loaded, [{ method: "item/updated", params: { item: workflow([child("bg", "terminal", { terminal: "completed" })], { turnId: "finished", revision: 2, status: "completed" }) } }]);
+    const kept = markAgentFeed(mark, "s1", true, progressed.agentItems!);
+    assert.equal(kept, mark);
+    assert.equal(agentFeedRecovered(kept, "s1", progressed.agentItems!, true), true);
+    assert.equal(agentFeedRecovered(kept, "s1", progressed.agentItems!, false), false);
+    assert.equal(agentFeedRecovered(kept, "other", progressed.agentItems!, true), false);
+    // A new standalone agent is progress too.
+    const spawned = applyEvents(loaded, [{ method: "item/updated", params: { item: subagent("late", { turnId: "finished" }) } }]);
+    assert.equal(agentFeedRecovered(mark, "s1", spawned.agentItems!, true), true);
+    // Once the view recovers, the next outage starts from what the thread holds then.
+    assert.equal(markAgentFeed(kept, "s1", false, progressed.agentItems!), null);
+    assert.equal(markAgentFeed(null, "s1", true, progressed.agentItems!)?.items, progressed.agentItems);
+    assert.equal(markAgentFeed(kept, "s2", true, spawned.agentItems!)?.sessionId, "s2");
   });
 
   it("ignores malformed reconciliation and invalid measurements", () => {
