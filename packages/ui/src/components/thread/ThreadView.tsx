@@ -43,7 +43,7 @@ export function ThreadView(props: { sessionId: string }) {
   // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
   const agentLoad = !thread || thread.fold.order.length > 0 || thread.load === "ready" ? "ready"
     : thread.load === "error" ? "failed" : "loading";
-  const agentsStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly)
+  const agentsStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
     || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
