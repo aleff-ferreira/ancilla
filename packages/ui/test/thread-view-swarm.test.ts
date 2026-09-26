@@ -104,10 +104,11 @@ describe("ThreadView with the Swarm card", () => {
     assert.match(card(markup), /class="swarm-body compact"/, "the body's cap drops with a request panel present");
   });
 
-  it("switches the slot beside the thread: files, the Swarm panel's place, or nothing", () => {
+  it("switches the slot beside the thread: files, the Swarm panel, or nothing", () => {
     const state = { threads: { s1: thread({ fold: running() }) } };
     assert.match(render(state, { sidePanel: "files", filesOpen: true }), /<aside/);
-    assert.doesNotMatch(render(state, { sidePanel: "swarm" }), /<aside/);
+    assert.doesNotMatch(render(state, { sidePanel: "files", filesOpen: true }), /aria-label="Swarm"/);
+    assert.match(render(state, { sidePanel: "swarm" }), /<aside[^>]*aria-label="Swarm"/);
     assert.doesNotMatch(render(state, { sidePanel: "none" }), /<aside/);
     assert.match(render(state, { sidePanel: "swarm" }), /aria-label="Hide the Swarm panel"/);
   });

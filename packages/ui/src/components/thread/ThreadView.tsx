@@ -16,6 +16,7 @@ import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
 import { NeedsYouChip, SwarmStatus, SwarmToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../swarm/HeaderChips.js";
 import { SwarmDockCard } from "../swarm/SwarmCard.js";
+import { SwarmPanel } from "../swarm/SwarmPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, MOD } from "../ui/primitives.js";
 import { FilesPanel } from "../files/FilesPanel.js";
@@ -65,8 +66,8 @@ export function ThreadView(props: { sessionId: string }) {
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
           <Dock session={session} thread={thread} running={running} swarm={swarm} swarmStale={swarmStale} />
         </div>
-        {sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
-        {/* The Swarm panel (workstream C) mounts here; wired at integration. */}
+        {sidePanel === "swarm" ? <SwarmPanel sessionId={props.sessionId} />
+          : sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
       </div>
     </div>
   );

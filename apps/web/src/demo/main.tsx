@@ -57,6 +57,9 @@ if (view !== null && view in VIEWS) {
 
 const theme = params.get("theme");
 const zoom = Number(params.get("zoom"));
+// `panel=swarm|files` opens that side panel from the start, for shots of it; `files=1` is the older spelling.
+const panel = params.get("panel");
+const sidePanel: "none" | "files" | "swarm" = panel === "swarm" ? "swarm" : panel === "files" || params.get("files") === "1" ? "files" : "none";
 const prefs = {
   theme: theme === "light" || theme === "dark" ? theme : "system",
   lastProject: PROJECTS.atlas,
@@ -64,7 +67,8 @@ const prefs = {
   // Threads that finished in the last 20 minutes and were never opened read as unread.
   baseline: new Date(Date.now() - 20 * MIN).toISOString(),
   sidebarCollapsed: params.get("sidebar") === "0",
-  filesOpen: params.get("files") === "1",
+  sidePanel,
+  filesOpen: sidePanel === "files",
   showTelemetry: params.get("telemetry") === "1",
   ...(Number.isFinite(zoom) && zoom > 0 ? { zoom } : {}),
 };
@@ -83,11 +87,15 @@ if (params.get("workflow") === "done") {
 // Handy from the console while setting up a shot, e.g. `ancillaDemo.finishAudit()`.
 (window as unknown as { ancillaDemo?: DemoAncillaClient }).ancillaDemo = client;
 
-if (openPalette) {
+// The app's own shortcuts; both modifiers so they work whichever one this platform uses.
+const chords: KeyboardEventInit[] = [];
+if (openPalette) chords.push({ key: "k", metaKey: true, ctrlKey: true, bubbles: true });
+// `activity=1` opens the Activity drawer, for shots of it.
+if (params.get("activity") === "1") chords.push({ key: "A", metaKey: true, ctrlKey: true, shiftKey: true, bubbles: true });
+if (chords.length > 0) {
   void client.whenListed().then(() => {
     window.setTimeout(() => {
-      // The app's own shortcut; both modifiers so it works whichever one this platform uses.
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: true, bubbles: true }));
+      for (const chord of chords) window.dispatchEvent(new KeyboardEvent("keydown", chord));
     }, 400);
   });
 }
