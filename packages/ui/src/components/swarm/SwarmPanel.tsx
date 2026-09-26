@@ -50,12 +50,12 @@ export function panelRun(runs: readonly RunVM[]): RunVM | null {
 
 /**
  * Where a request panel is in the document, so Review can bring it into view: by its request id when the panel
- * carries one, else the first request panel in the dock.
+ * carries one, else the first approval or question panel in the dock (Requests.tsx names them so).
  */
 function reviewRequest(requestId: string | null): void {
   if (typeof document === "undefined") return;
   const own = requestId ? document.querySelector<HTMLElement>(`[data-request-id="${CSS.escape(requestId)}"]`) : null;
-  const target = own ?? document.querySelector<HTMLElement>('[data-request-panel], section[aria-label="Approval request"], section[aria-label="Question"]');
+  const target = own ?? document.querySelector<HTMLElement>('[data-request-panel], section[aria-label="Approval needed"], section[aria-label="Muse has a question"]');
   if (!target) return;
   target.scrollIntoView({ block: "center" });
   const button = target.querySelector<HTMLElement>("button, [tabindex]");
@@ -560,7 +560,7 @@ export function SwarmPanel(props: { sessionId: string }) {
       data-layout={split ? "split" : narrow ? "narrow" : "regular"}
       style={style}
       className={cn(
-        "flex h-full shrink-0 flex-col outline-none",
+        "@container flex h-full shrink-0 flex-col outline-none",
         overlay ? "overlay absolute inset-y-0 right-0 z-[var(--z-overlay)] bg-raised shadow-pop" : "relative border-l border-line bg-bg",
         narrow && "narrow",
         split && "split",

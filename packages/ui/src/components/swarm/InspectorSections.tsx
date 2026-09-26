@@ -236,7 +236,7 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
 
 export function FactsList(props: { facts: Fact[] }) {
   return (
-    <dl className="m-0 mt-0.5 grid grid-cols-[96px_1fr] gap-x-3 gap-y-[5px] text-[12.5px] leading-[19px]">
+    <dl className="m-0 mt-0.5 grid grid-cols-[104px_1fr] gap-x-3 gap-y-[5px] text-[12.5px] leading-[19px]">
       {props.facts.map((fact) => (
         <div key={fact.key} className="contents" data-fact={fact.key}>
           <dt className="text-subtle">{fact.label}</dt>
@@ -265,7 +265,7 @@ export function Section(props: { title: string; aside?: ReactNode; children: Rea
 export function Identity(props: { agent: AgentVM; stale: boolean }) {
   const { agent } = props;
   const tone = { fail: "text-danger-text", need: "text-warn-text", work: "text-accent-text", ok: "text-ok-text", mute: "text-subtle" }[stateTone(agent)];
-  const running = agent.runningMs !== null && agent.state !== "failed" && agent.pending === null ? ` · ${durationText(agent.runningMs)}` : "";
+  const running = agent.runningMs !== null && agent.state !== "failed" && agent.pending === null ? ` · running ${durationText(agent.runningMs)}` : "";
   return (
     <div className="flex items-start gap-3 px-4 pt-3.5 pb-2.5">
       <Sigil name={agent.name} size={36} state={agent.state} stale={props.stale} badge />

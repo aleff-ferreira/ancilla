@@ -168,21 +168,26 @@ export interface RosterOptions {
   subagents?: readonly AgentVM[];
 }
 
-/** A phase opens by default while it is current or holds a failure; a planned one stays closed. The user's toggle flips that. */
+/**
+ * A phase opens by default while it is live (the current one, or any that still has an agent going) or holds a
+ * failure, and every one does once the run has no current phase left; a planned one stays closed. The user's
+ * toggle flips that.
+ */
 export function phaseOpen(phase: PhaseVM, current: string | null, openPhases: readonly string[]): boolean {
-  const byDefault = phase.state !== "planned" && (phase.name === current || phase.counts.failed > 0);
+  const byDefault = phase.state !== "planned" && (current === null || phase.name === current || phase.state === "live" || phase.counts.failed > 0);
   return openPhases.includes(phase.name) ? !byDefault : byDefault;
 }
 
 /**
- * The roster as a flat list of rows: run-level requests first, then every phase in run order with its agents, then
- * the thread's background tasks and subagents as phases of their own. A filter or query opens every phase that
- * matches and drops the ones that do not; a phase with many finished agents folds them behind one row.
+ * The roster as a flat list of rows: every phase in run order with its agents, then the thread's background tasks
+ * and subagents as phases of their own. A filter or query opens every phase that matches and drops the ones that
+ * do not; a phase with many finished agents folds them behind one row. The run-level requests (which no agent can
+ * be named for) live in the summary and on the Timeline; the Needs you filter lists them as rows.
  */
 export function rosterEntries(run: RunVM | null, opts: RosterOptions): RosterEntry[] {
   const out: RosterEntry[] = [];
   const filtering = opts.filter !== "all" || opts.query.trim() !== "";
-  if (run && (opts.filter === "all" || opts.filter === "needs") && opts.query.trim() === "") {
+  if (run && opts.filter === "needs" && opts.query.trim() === "") {
     for (const need of run.runNeeds) out.push({ kind: "need", id: `need:${need.requestId}`, need });
   }
   const extra: PhaseVM[] = [

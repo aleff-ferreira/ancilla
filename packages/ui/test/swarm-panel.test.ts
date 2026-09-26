@@ -165,14 +165,21 @@ describe("SwarmPanel", () => {
     assert.deepEqual(entries.filter((entry) => entry.kind === "phase").map((entry) => (entry.kind === "phase" ? [entry.phase.name, entry.open, entry.current] : null)), [
       ["Research", false, false], ["Design", true, false], ["Judge", true, true], ["Synthesize", false, false],
     ]);
+    const finished = rosterEntries(lanternRun(S(46, 0), [], lanternDone()), { filter: "all", query: "", openPhases: [], sort: "time", unfolded: new Set() });
+    assert.deepEqual(finished.filter((entry) => entry.kind === "phase").map((entry) => (entry.kind === "phase" ? entry.open : null)), [true, true, true, true], "a finished run opens every phase");
+    assert.equal(finished.filter((entry) => entry.kind === "agent").length, 10);
   });
 
-  it("heads the roster with a run-level request the run cannot attribute", () => {
-    const markup = renderPanel({ fold: lanternFold(NOW, [approvalAt(S(39, 36))]) });
-    assert.equal(rows(markup)[0], "need:ap-1");
-    const text = textOf(markup);
-    assert.match(text, /Waiting for you Muse wants to run npm test -- --run conflict Asked 1m 40s ago, during Judge\. Muse does not say which agent asked\./);
-    assert.match(markup, /data-marker="approval"/, "and the Timeline marks it");
+  it("lists a run-level request under the Needs you filter, and keeps it out of the roster otherwise", () => {
+    const fold = lanternFold(NOW, [approvalAt(S(39, 36))]);
+    const all = renderPanel({ fold });
+    assert.equal(rows(all)[0], "phase:Research", "the roster starts with the phases, as in F3");
+    assert.match(textOf(all), /1 needs you/, "the summary carries it");
+    assert.match(all, /data-marker="approval"/, "and the Timeline marks it");
+    const needs = renderPanel({ fold, panel: { filter: "needs" } });
+    assert.deepEqual(rows(needs), ["need:ap-1"]);
+    assert.match(textOf(needs), /Waiting for you Muse wants to run npm test -- --run conflict Asked 1m 40s ago, during Judge\. Muse does not say which agent asked\./);
+    assert.match(needs, /Review/);
   });
 
   it("folds finished agents behind one row past twelve in a phase", () => {

@@ -13,8 +13,10 @@ const AXIS_H = 18;
 const LANE_H = 8;
 const LANE_GAP = 2.5;
 const PHASE_GAP = 8;
-/** A tick label this close to the now label is dropped. */
+/** A tick label this close to the now label is dropped (the mock's 84 px, for `now 41m 16s`); a longer end label clears more. */
 const TICK_CLEARANCE = 84;
+const END_LABEL_CHARS = "now 41m 16s".length;
+const CHAR_PX = 6;
 
 export type LaneFill = "done" | "work" | "fail" | "quiet" | "neutral" | "stale";
 
@@ -54,6 +56,8 @@ export interface Band {
 
 export interface PhaseBlock {
   name: string;
+  /** The name as the 74 px gutter shows it; the roster has it in full. */
+  label: string;
   planned: boolean;
   y: number;
   height: number;
@@ -101,6 +105,13 @@ export interface LayoutOptions {
   bands?: ReadonlySet<string>;
 }
 
+/** What fits in the gutter at 11 px medium: about eleven characters. */
+const GUTTER_CHARS = 11;
+
+function gutterLabel(name: string): string {
+  return name.length <= GUTTER_CHARS ? name : `${name.slice(0, GUTTER_CHARS - 1).trimEnd()}…`;
+}
+
 function tickStep(totalMs: number): number {
   const minutes = totalMs / 60_000;
   if (minutes <= 90) return 10;
@@ -120,11 +131,14 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
   const X = (ms: number) => GUTTER + Math.max(0, ms - start) * scale;
   const endX = X(clock);
 
+  const elapsed = durationText(total);
+  const endLabel = run.stale ? `last known ${elapsed}` : finished ? `finished ${elapsed}` : `now ${elapsed}`;
+  const clearance = TICK_CLEARANCE + Math.max(0, endLabel.length - END_LABEL_CHARS) * CHAR_PX;
   const ticks: Tick[] = [];
   const step = tickStep(total);
   for (let m = 0; m * 60_000 <= total; m += step) {
     const x = X(start + m * 60_000);
-    ticks.push({ x, label: Math.abs(endX - x) < TICK_CLEARANCE ? null : m === 0 ? "0" : `${m}m` });
+    ticks.push({ x, label: Math.abs(endX - x) < clearance ? null : m === 0 ? "0" : `${m}m` });
   }
 
   let y = AXIS_H + 6;
@@ -148,7 +162,7 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
         lanes += 1;
       });
     }
-    phases.push({ name: phase.name, planned, y, height, rows });
+    phases.push({ name: phase.name, label: gutterLabel(phase.name), planned, y, height, rows });
     y += height + PHASE_GAP;
   }
   const height = Math.max(AXIS_H + 6 + LANE_H + 4, y - PHASE_GAP + 4);
@@ -159,7 +173,6 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
     markers.push({ x: X(need.askedAt), kind: need.kind, requestId: need.requestId });
   }
 
-  const elapsed = durationText(total);
   return {
     width,
     height,
@@ -167,7 +180,7 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
     axisHeight: AXIS_H,
     laneHeight: LANE_H,
     endX,
-    endLabel: run.stale ? `last known ${elapsed}` : finished ? `finished ${elapsed}` : `now ${elapsed}`,
+    endLabel,
     finished,
     stale: run.stale,
     ticks,
@@ -192,9 +205,14 @@ function laneOf(agent: AgentVM, run: RunVM, start: number, clock: number, X: (ms
     if (to === null) return;
     spans.push({ from: attempt.startedAt, to, last, outcome: attempt.outcome });
   });
+  const outcome = agent.state === "done" ? "done" : agent.state === "failed" ? "failed" : agent.state === "skipped" ? "skipped" : agent.state === "unknown" ? "unknown" : null;
   if (spans.length === 0 && agent.startedAt !== null) {
-    const ended = agent.endedAt ?? (agent.state === "done" || agent.state === "failed" || agent.state === "skipped" || agent.state === "unknown" ? null : clock);
-    if (ended !== null) spans.push({ from: agent.startedAt, to: ended, last: true, outcome: agent.state === "done" ? "done" : agent.state === "failed" ? "failed" : agent.state === "skipped" ? "skipped" : agent.state === "unknown" ? "unknown" : null });
+    const ended = agent.endedAt ?? (outcome === null ? clock : null);
+    if (ended !== null) spans.push({ from: agent.startedAt, to: ended, last: true, outcome });
+  }
+  // A start never seen (the agent went from queued to its end within one revision): Muse's own duration, back from the end seen.
+  if (spans.length === 0 && outcome !== null && agent.endedAt !== null && agent.durationMs !== null) {
+    spans.push({ from: agent.endedAt - agent.durationMs, to: agent.endedAt, last: true, outcome });
   }
   if (spans.length === 0) return { ...base, placeholder: agent.state === "scheduled" ? "scheduled" : null };
   const liveStates = new Set<AgentVM["state"]>(["working", "finishing", "no-update", "waiting-on-you"]);
@@ -379,7 +397,10 @@ function TimelineSvg(props: { run: RunVM; layout: TimelineLayout; selectedId: st
       ))}
       {layout.phases.map((phase) => (
         <g key={phase.name} data-phase={phase.name}>
-          <text x={0} y={phase.y + Math.min(phase.height, 16) / 2 + 4} fontSize={11} fontWeight={500} fill={phase.planned ? "var(--fg-subtle)" : "var(--fg-muted)"}>{phase.name}</text>
+          <text x={0} y={phase.y + Math.min(phase.height, 16) / 2 + 4} fontSize={11} fontWeight={500} fill={phase.planned ? "var(--fg-subtle)" : "var(--fg-muted)"}>
+            {phase.label !== phase.name ? <title>{phase.name}</title> : null}
+            {phase.label}
+          </text>
           {phase.rows.map((row) =>
             row.kind === "band" ? (
               <g key={row.id} data-band={row.name}>
@@ -514,7 +535,7 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
     for (const phase of layout.phases) {
       ctx.fillStyle = phase.planned ? colors.subtle : colors.muted;
       ctx.textAlign = "start";
-      ctx.fillText(phase.name, 0, phase.y + Math.min(phase.height, 16) / 2 + 4);
+      ctx.fillText(phase.label, 0, phase.y + Math.min(phase.height, 16) / 2 + 4);
       for (const row of phase.rows) {
         if (row.kind === "band") {
           for (const cell of row.cells) {

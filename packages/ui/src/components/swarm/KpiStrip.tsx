@@ -38,13 +38,14 @@ export function KpiStrip(props: KpiStripProps) {
   const cells: Cell[] = live ? runningCells(run) : finishedCells(run);
   return (
     <div
-      className={cn("mt-2 grid gap-px overflow-hidden rounded-[10px] bg-line shadow-[0_0_0_1px_var(--border)]", props.className)}
+      className={cn("mt-2 grid gap-px overflow-hidden rounded-[10px] shadow-[0_0_0_1px_var(--border)]", props.className)}
       style={{ gridTemplateColumns: "repeat(auto-fit, minmax(126px, 1fr))" }}
       role="list"
       aria-label="Run figures"
     >
       {cells.map((cell) => (
-        <div key={cell.key} role="listitem" data-kpi={cell.key} className="min-w-0 bg-[var(--pane-bg)] px-2.5 pt-[7px] pb-2">
+        // Each cell draws its own hairline ring into the 1 px gaps, so an unfilled slot stays the pane's colour.
+        <div key={cell.key} role="listitem" data-kpi={cell.key} className="min-w-0 bg-[var(--pane-bg)] px-2.5 pt-[7px] pb-2 shadow-[0_0_0_1px_var(--border)]">
           <div className="flex items-center gap-1.5 truncate text-2xs text-subtle">{cell.label}</div>
           <div className="mt-px flex h-6 items-baseline gap-1 whitespace-nowrap text-[17px] leading-6 font-semibold tracking-[-0.01em] tabular-nums">
             {cell.figure ?? (

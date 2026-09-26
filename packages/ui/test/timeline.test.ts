@@ -126,6 +126,7 @@ describe("Timeline layout", () => {
     const layout = layoutOf(lanternRun(NOW, [], lantern(), { stale: true, staleAt: NOW }));
     assert.equal(layout.stale, true);
     assert.equal(layout.endLabel, "last known 41m 12s");
+    assert.deepEqual(layout.ticks.map((tick) => tick.label), ["0", "10m", "20m", null, null], "a longer end label clears the 30m tick too");
     assert.deepEqual(lane(layout, "judge:correctness").segments.map((segment) => segment.fill), ["stale"]);
     assert.equal(lane(layout, "judge:perf").quiet, null, "nothing is promoted to no update while stale");
   });
