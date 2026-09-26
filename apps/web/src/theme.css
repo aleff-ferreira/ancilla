@@ -74,6 +74,16 @@
   --chart-4: oklch(0.6 0.17 305);
   --chart-5: oklch(0.64 0.17 40);
   --chart-6: oklch(0.62 0.02 255);
+  /* Swarm (agents and tasks): mixes of the tokens above, no new hues. Cells, bars, lanes and the sigil's ink. */
+  --ok-soft: color-mix(in oklch, var(--ok) 14%, transparent);
+  --cell-done: color-mix(in oklch, var(--fg-subtle) 52%, transparent);
+  --cell-done-ok: color-mix(in oklch, var(--ok) 72%, transparent);
+  --bar-fill: color-mix(in oklch, var(--fg-subtle) 42%, transparent);
+  --lane-done: color-mix(in oklab, var(--ok) 55%, var(--bg-raised));
+  --hatch: color-mix(in oklch, var(--accent) 55%, transparent);
+  --hatch-fail: color-mix(in oklch, var(--danger) 45%, var(--bg-raised));
+  --accent-line: color-mix(in oklch, var(--accent) 25%, transparent);
+  --sigil-ink: var(--fg-muted);
 }
 
 :root[data-theme="dark"] {
@@ -133,6 +143,8 @@
   --chart-4: oklch(0.7 0.15 305);
   --chart-5: oklch(0.72 0.15 42);
   --chart-6: oklch(0.62 0.015 255);
+  /* The one Swarm mix that differs in the dark: a finished lane sits a touch lower on the raised surface. */
+  --lane-done: color-mix(in oklab, var(--ok) 50%, var(--bg-raised));
 }
 
 @theme inline {
@@ -163,6 +175,7 @@
   --color-danger-soft: var(--danger-soft);
   --color-ok: var(--ok);
   --color-ok-text: var(--ok-text);
+  --color-ok-soft: var(--ok-soft);
   --color-diff-add: var(--diff-add);
   --color-diff-del: var(--diff-del);
   --color-caption-close: var(--caption-close);
@@ -219,6 +232,16 @@
   --z-titlebar: 75;
   --z-toast: 80;
   --z-tooltip: 90;
+}
+
+/* The Swarm motion scale: glyph swaps, cell fills, the card fold, rolling digits, breathing sigils, the finale sheen. */
+:root {
+  --dur-micro: 120ms;
+  --dur-fill: 200ms;
+  --dur-collapse: 260ms;
+  --dur-digits: 320ms;
+  --dur-breathe: 2400ms;
+  --dur-sheen: 900ms;
 }
 
 @layer base {
@@ -553,6 +576,398 @@
     background-image: conic-gradient(var(--bg-sunken) 25%, transparent 0 50%, var(--bg-sunken) 0 75%, transparent 0);
     background-size: 16px 16px;
   }
+
+  /*
+   * Swarm: the agents-and-tasks surfaces. The strip draws one cell per agent, grouped by phase, sized through
+   * custom properties so a container query can shrink it in place; a phase past 48 agents is a proportional bar.
+   * Colour never stands alone: working is a rising fill, no update dashed, needs you a pill, failed split, planned
+   * dashed, queued hollow, skipped a neutral fill, an unreported outcome hatched.
+   */
+  .swarm-strip {
+    --cw: 6px;
+    --ch: 12px;
+    --cg: 2px;
+    --pg: 6px;
+    --cr: 1.5px;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: var(--pg);
+  }
+  .swarm-strip.xs {
+    --cw: 3px;
+    --ch: 8px;
+    --cg: 1px;
+    --pg: 3px;
+    --cr: 1px;
+  }
+  .swarm-strip.md {
+    --cw: 8px;
+    --ch: 14px;
+    --cg: 2px;
+    --pg: 8px;
+    --cr: 2px;
+  }
+  .swarm-strip > .swarm-phase {
+    display: inline-flex;
+    gap: var(--cg);
+  }
+  .swarm-cell {
+    flex-shrink: 0;
+    width: var(--cw);
+    height: var(--ch);
+    border-radius: var(--cr);
+    transition: background-color var(--dur-fill) var(--ease-out);
+  }
+  .swarm-cell.done {
+    background: var(--cell-done);
+  }
+  .swarm-cell.work,
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, var(--accent) 0 55%, transparent 55%);
+    box-shadow: inset 0 0 0 1.25px var(--accent);
+  }
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, var(--accent) 0 85%, transparent 85%);
+  }
+  .swarm-cell.quiet {
+    border: 1.25px dashed var(--accent-text);
+  }
+  .swarm-cell.planned {
+    border: 1px dashed var(--border-strong);
+  }
+  .swarm-cell.pending {
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  .swarm-cell.fail {
+    background: linear-gradient(to bottom, var(--danger) 0 40%, transparent 40% 60%, var(--danger) 60%);
+  }
+  .swarm-cell.stop {
+    background: var(--bg-active);
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  .swarm-cell.need {
+    background: var(--warn);
+    border-radius: 3px;
+  }
+  .swarm-cell.unknown {
+    background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 3px);
+    box-shadow: inset 0 0 0 1.25px var(--border-strong);
+  }
+  /* The plan is unknown: the strip ends with a cell for the agents that may still start. */
+  .swarm-cell.more {
+    border: 1px dashed var(--fg-subtle);
+  }
+  /* Three pixels wide, a cell is a solid mark or a hairline. */
+  .swarm-strip.xs .swarm-cell.work,
+  .swarm-strip.xs .swarm-cell.finishing {
+    background: var(--accent);
+    box-shadow: none;
+  }
+  .swarm-strip.xs .swarm-cell.quiet,
+  .swarm-strip.xs .swarm-cell.planned {
+    border-width: 1px;
+  }
+  .swarm-strip.xs .swarm-cell.pending {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-strip.xs .swarm-cell.fail {
+    background: var(--danger);
+  }
+  .swarm-strip.xs .swarm-cell.need {
+    border-radius: 2px;
+  }
+  .swarm-strip.finale .swarm-cell.done {
+    background: var(--cell-done-ok);
+  }
+  /* A stale feed: the accent leaves, and what was live reads as last known. */
+  .swarm-strip .swarm-cell.stale.work,
+  .swarm-strip .swarm-cell.stale.finishing {
+    background: linear-gradient(to top, var(--cell-done) 0 55%, transparent 55%);
+    box-shadow: inset 0 0 0 1.25px var(--fg-subtle);
+  }
+  .swarm-strip .swarm-cell.stale.quiet {
+    border-color: var(--fg-subtle);
+  }
+  .swarm-strip .swarm-cell.stale.need {
+    background: var(--fg-subtle);
+  }
+
+  /* The phase rail: the strip stretched to its segment, 8 px tall, with fills running left to right. */
+  .swarm-rail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    align-items: flex-end;
+  }
+  .swarm-strip.rail {
+    --ch: 8px;
+    --cg: 3px;
+    --cr: 2px;
+    display: flex;
+    width: 100%;
+  }
+  .swarm-strip.rail > .swarm-phase {
+    flex: 1 1 0;
+    display: flex;
+    min-width: 0;
+  }
+  .swarm-strip.rail .swarm-cell {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+  }
+  .swarm-strip.rail .swarm-cell.work {
+    background: linear-gradient(to right, var(--accent) 0 55%, transparent 55%);
+  }
+  .swarm-strip.rail .swarm-cell.finishing {
+    background: linear-gradient(to right, var(--accent) 0 85%, transparent 85%);
+  }
+  .swarm-strip.rail .swarm-cell.fail {
+    background: linear-gradient(to right, var(--danger) 0 44%, transparent 44% 56%, var(--danger) 56%);
+  }
+  .swarm-strip.rail .swarm-cell.need {
+    border-radius: 4px;
+  }
+  .swarm-strip.rail .swarm-cell.stale.work,
+  .swarm-strip.rail .swarm-cell.stale.finishing {
+    background: linear-gradient(to right, var(--cell-done) 0 55%, transparent 55%);
+  }
+  .swarm-strip.rail .swarm-bin {
+    flex: 1 1 0;
+    width: auto;
+  }
+
+  /* A phase past 48 agents, or the sidebar past 24: a proportional bar of done, working, no update, needs you, failed, skipped, not reported, pending. */
+  .swarm-bin {
+    display: inline-flex;
+    flex-shrink: 0;
+    gap: 1px;
+    width: var(--bw, 72px);
+    height: var(--ch, 12px);
+    border-radius: var(--cr, 1.5px);
+    overflow: hidden;
+  }
+  .swarm-bin > span {
+    display: block;
+    height: 100%;
+    min-width: 2px;
+  }
+  .swarm-bin > .done {
+    background: var(--cell-done);
+  }
+  .swarm-bin > .work {
+    background: var(--accent);
+  }
+  .swarm-bin > .quiet {
+    background: repeating-linear-gradient(135deg, var(--accent) 0 2px, transparent 2px 4px);
+  }
+  .swarm-bin > .need {
+    background: var(--warn);
+  }
+  .swarm-bin > .fail {
+    background: var(--danger);
+  }
+  .swarm-bin > .stop {
+    background: var(--bg-active);
+  }
+  .swarm-bin > .unknown {
+    background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 3px);
+  }
+  .swarm-bin > .pending {
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-strip.finale .swarm-bin > .done {
+    background: var(--cell-done-ok);
+  }
+  .swarm-bin.stale > .work {
+    background: var(--cell-done);
+  }
+  .swarm-bin.stale > .quiet {
+    background: repeating-linear-gradient(135deg, var(--fg-subtle) 0 2px, transparent 2px 4px);
+  }
+  .swarm-bin.stale > .need {
+    background: var(--fg-subtle);
+  }
+
+  /* The finale: one sheen along the done cells, once, and the ok tint stays. */
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    background-image: linear-gradient(90deg, var(--cell-done-ok) 0 40%, var(--ok) 50%, var(--cell-done-ok) 60% 100%);
+    background-size: 300% 100%;
+    animation: swarm-sheen var(--dur-sheen) var(--ease-out) 1;
+  }
+  /* A cell, chip or phase label that just settled lands in place; a working mark breathes. */
+  .swarm-settle {
+    animation: swarm-settle var(--dur-fill) var(--ease-out);
+  }
+  .swarm-breathe {
+    animation: swarm-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  }
+
+  /* Sigil: a 5×5 mirrored pixel mark per agent name. The tile carries the state; the ink never carries hue. */
+  .swarm-sigil {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: var(--bg-sunken);
+    box-shadow: inset 0 0 0 1px var(--border);
+    color: var(--sigil-ink);
+  }
+  .swarm-sigil > svg {
+    display: block;
+  }
+  .swarm-sigil rect {
+    fill: currentColor;
+  }
+  .swarm-sigil.s24 {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+  }
+  .swarm-sigil.s28 {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+  }
+  .swarm-sigil.s36 {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+  .swarm-sigil.work,
+  .swarm-sigil.finishing,
+  .swarm-sigil.quiet {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+    box-shadow: inset 0 0 0 1px var(--accent-line);
+  }
+  .swarm-sigil.work > svg,
+  .swarm-sigil.finishing > svg {
+    animation: swarm-breathe var(--dur-breathe) var(--ease-in-out) infinite;
+  }
+  .swarm-sigil.quiet rect {
+    opacity: 0.5;
+  }
+  .swarm-sigil.need {
+    background: var(--warn-soft);
+    color: var(--warn-text);
+    box-shadow: inset 0 0 0 1px var(--warn-line);
+  }
+  .swarm-sigil.fail,
+  .swarm-sigil.stop,
+  .swarm-sigil.unknown {
+    color: var(--fg-subtle);
+  }
+  .swarm-sigil.fail rect {
+    opacity: 0.7;
+  }
+  .swarm-sigil.stop rect {
+    opacity: 0.6;
+  }
+  .swarm-sigil.unknown rect,
+  .swarm-sigil.planned rect,
+  .swarm-sigil.pending rect {
+    opacity: 0.5;
+  }
+  .swarm-sigil.planned,
+  .swarm-sigil.pending {
+    background: transparent;
+    box-shadow: none;
+    outline: 1px dashed var(--border-strong);
+    outline-offset: -1px;
+    color: var(--fg-subtle);
+  }
+  .swarm-sigil.pending {
+    outline-style: solid;
+  }
+  .swarm-sigil.stale {
+    background: transparent;
+    color: var(--fg-subtle);
+    box-shadow: inset 0 0 0 1px var(--border-strong);
+  }
+  .swarm-sigil.stale > svg {
+    animation: none;
+  }
+  /* The 13 px badge on a corner: a check in the inspector and drawer, a warning on a failure, a minus on a skip. */
+  .swarm-sigil .swarm-badge {
+    position: absolute;
+    right: -4px;
+    bottom: -4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border-radius: 9999px;
+    background: var(--bg-raised);
+  }
+  .swarm-sigil .swarm-badge > span {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 10px;
+    height: 10px;
+    border-radius: 9999px;
+  }
+  .swarm-sigil .swarm-badge.ok > span {
+    background: var(--ok);
+    color: var(--bg);
+  }
+  .swarm-sigil .swarm-badge.fail > span {
+    color: var(--danger);
+  }
+  .swarm-sigil .swarm-badge.need > span {
+    background: var(--warn);
+    color: var(--bg);
+  }
+  .swarm-sigil .swarm-badge.stop > span {
+    background: var(--fg-subtle);
+    color: var(--bg);
+  }
+  .swarm-sigil.s36 .swarm-badge {
+    right: -5px;
+    bottom: -5px;
+    width: 15px;
+    height: 15px;
+  }
+  .swarm-sigil.s36 .swarm-badge > span {
+    width: 12px;
+    height: 12px;
+  }
+
+  /* Lanes drawn in HTML (the fingerprint, legends, share bars); the SVG Timeline paints the same tokens as fills. */
+  .swarm-lane {
+    height: 8px;
+    border-radius: 2px;
+    background: var(--lane-done);
+  }
+  .swarm-lane.work {
+    background: var(--accent);
+  }
+  .swarm-lane.fail {
+    background: var(--danger);
+  }
+  .swarm-lane.need {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--warn);
+  }
+  .swarm-lane.planned {
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+  }
+  /* No update: a 135° hatch from where the silence began. A failed attempt: a 45° hatch. */
+  .swarm-lane.lane-quiet {
+    background: repeating-linear-gradient(135deg, var(--accent) 0 2px, color-mix(in oklab, var(--accent) 30%, var(--bg-raised)) 2px 4px);
+  }
+  .swarm-lane.lane-fail {
+    background: repeating-linear-gradient(45deg, var(--danger) 0 2px, var(--hatch-fail) 2px 4px);
+  }
 }
 
 @keyframes ancilla-spin {
@@ -802,6 +1217,33 @@
   }
 }
 
+/* Swarm motion: a working sigil breathes, the finale sheen sweeps the strip once, a settled cell lands. */
+@keyframes swarm-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes swarm-sheen {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+@keyframes swarm-settle {
+  from {
+    opacity: 0.4;
+    scale: 0.96;
+  }
+}
+
 /* The effort slider's thumb and fill glide between stops instead of jumping. */
 .effort-slider > span:has(> [role="slider"]) {
   transition: left 140ms cubic-bezier(0.23, 1, 0.32, 1);
@@ -834,10 +1276,58 @@
     background: none;
     color: var(--fg-muted);
   }
+  /* Swarm: sigils hold still, the finale keeps its tint without the sweep, cells change colour at once. */
+  .swarm-sigil.work > svg,
+  .swarm-sigil.finishing > svg,
+  .swarm-breathe,
+  .swarm-settle,
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    animation: none;
+  }
+  .swarm-strip.finale.swarm-sheen .swarm-cell.done,
+  .swarm-strip.finale.swarm-sheen .swarm-bin > .done {
+    background-image: none;
+  }
+  .swarm-cell {
+    transition: none;
+  }
   *,
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+/* Forced colours: cells are outlined shapes in the text colour, told apart by shape alone. */
+@media (forced-colors: active) {
+  .swarm-cell,
+  .swarm-bin > span {
+    forced-color-adjust: none;
+    background: transparent;
+    border: 1px solid currentColor;
+    box-shadow: none;
+  }
+  .swarm-cell.done,
+  .swarm-cell.need,
+  .swarm-bin > .done {
+    background: currentColor;
+  }
+  .swarm-cell.work,
+  .swarm-cell.finishing {
+    background: linear-gradient(to top, currentColor 0 55%, transparent 55%);
+  }
+  .swarm-cell.fail {
+    background: linear-gradient(to bottom, currentColor 0 40%, transparent 40% 60%, currentColor 60%);
+  }
+  .swarm-bin > .work,
+  .swarm-bin > .quiet {
+    background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 4px);
+  }
+  .swarm-cell.quiet,
+  .swarm-cell.planned,
+  .swarm-cell.more {
+    border-style: dashed;
   }
 }
