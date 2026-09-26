@@ -429,6 +429,9 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
   const [open, setOpen] = useState(failed);
   const duration = turnDuration(turn);
   const summary = summarize(turn.entries);
+  // A run's row stays out of the fold, like the diff chips: the report it points at is still in the dock.
+  const runs = turn.entries.filter((item) => item.kind === "workflow");
+  const entries = runs.length > 0 ? turn.entries.filter((item) => item.kind !== "workflow") : turn.entries;
   return (
     <div>
       <button
@@ -454,7 +457,7 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
       </button>
       <Collapse open={open}>
         <div className="mt-1 ml-[7px] flex flex-col gap-1 border-l border-line pl-4">
-          {turn.entries.map((item) => (
+          {entries.map((item) => (
             <Entry
               key={item.itemId}
               item={item}
@@ -465,6 +468,9 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
           ))}
         </div>
       </Collapse>
+      {runs.map((item) => (
+        <SwarmAnchorRow key={item.itemId} item={item} sessionId={props.sessionId} />
+      ))}
       <DiffChips entries={turn.entries} className="mt-2" sessionId={props.sessionId} />
     </div>
   );

@@ -50,8 +50,8 @@ export function ThreadView(props: { sessionId: string }) {
   const loaded = !thread || thread.fold.order.length > 0 || thread.load === "ready";
   const swarm = useMemo<SwarmVM | null>(
     () => (fold && loaded ? swarmView(fold, session, now, { stale: swarmStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId) }) : null),
-    // The view reads the agent items, the requests and the trace; streamed reply text changes none of them.
-    [fold?.agentItems, fold?.items, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId],
+    // The view reads the agent items, the item order, the requests and the trace; streamed reply text changes none of them.
+    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId],
   );
   if (!session) {
     return <MissingThread />;
