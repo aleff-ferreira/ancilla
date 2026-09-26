@@ -1,5 +1,6 @@
 import type { MspItem } from "../types.js";
 import type { ThreadFold } from "./fold.js";
+import type { ThreadState } from "./store.js";
 import { reconciled } from "./workflow.js";
 
 export type AgentActivityStatus = "working" | "waiting" | "completed" | "failed" | "stopped" | "unknown";
@@ -319,17 +320,27 @@ export function agentActivityView(fold: ThreadFold, numbers: AgentNumbers = new 
   return result;
 }
 
-/** The thread's agent items when its live view last reported itself unavailable; null until the thread has loaded. */
+/** The thread's agent items as its last completed history read left them, kept while the live view is unavailable. */
 export interface AgentFeedMark {
   sessionId: string;
+  /** Null until a read has landed, so nothing that arrived before the thread loaded counts as live. */
   items: Record<string, MspItem> | null;
+  /** A history read is in flight. What it brings back is history, not agents reporting in live. */
+  reading: boolean;
 }
 
-/** Keeps the first loaded snapshot for as long as the live view stays unavailable, and forgets it once it recovers. */
-export function markAgentFeed(mark: AgentFeedMark | null, sessionId: string, unavailable: boolean, loaded: Record<string, MspItem> | null): AgentFeedMark | null {
+/**
+ * Keeps the agent items as they stood after the latest completed read for as long as the live view stays
+ * unavailable, and forgets them once it recovers. A read that lands while the view is unavailable can bring
+ * runs a capped load never had, or revisions the feed missed before the outage; only what arrives after it
+ * proves the feed is alive again. A read that fails changes nothing, so the earlier baseline stands.
+ */
+export function markAgentFeed(mark: AgentFeedMark | null, sessionId: string, unavailable: boolean, load: ThreadState["load"], items: Record<string, MspItem> | null): AgentFeedMark | null {
   if (!unavailable) return null;
-  if (mark?.sessionId === sessionId && (mark.items !== null || loaded === null)) return mark;
-  return { sessionId, items: loaded };
+  const reading = load === "idle" || load === "loading";
+  if (mark?.sessionId !== sessionId) return { sessionId, items: reading ? null : items, reading };
+  if (reading === mark.reading) return mark;
+  return reading ? { ...mark, reading: true } : { sessionId, items: load === "ready" ? items : mark.items, reading: false };
 }
 
 /**
@@ -338,7 +349,7 @@ export function markAgentFeed(mark: AgentFeedMark | null, sessionId: string, una
  * panel shows is current rather than last known. While a turn runs, the lead's own recovery decides.
  */
 export function agentFeedRecovered(mark: AgentFeedMark | null, sessionId: string, items: Record<string, MspItem> | null, idle: boolean): boolean {
-  if (!idle || !items || mark?.sessionId !== sessionId || !mark.items || mark.items === items) return false;
+  if (!idle || !items || mark?.sessionId !== sessionId || !mark.items || mark.reading || mark.items === items) return false;
   for (const [id, item] of Object.entries(items)) {
     if (item.kind !== "workflow" && item.kind !== "subagent") continue;
     const before = mark.items[id];

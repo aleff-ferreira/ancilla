@@ -28,10 +28,11 @@ export function ThreadView(props: { sessionId: string }) {
   const agentItems = thread ? thread.fold.agentItems ?? thread.fold.items : null;
   const agents = useMemo(() => thread ? agentActivityView(thread.fold, agentNumbers(props.sessionId)) : null,
     [props.sessionId, agentItems, thread?.fold.activeTurnId]);
-  // Remember the agent items as they were when the live view went unavailable, to tell later agent progress apart.
+  // Remember the agent items as the last history read left them while the live view is unavailable, to tell
+  // agent progress arriving live after it apart from what a read brings back.
   const viewUnavailable = session?.live?.viewHealth?.status === "unavailable";
   const [feedMark, setFeedMark] = useState<AgentFeedMark | null>(null);
-  const nextFeedMark = markAgentFeed(feedMark, props.sessionId, viewUnavailable, thread?.load === "ready" ? agentItems : null);
+  const nextFeedMark = markAgentFeed(feedMark, props.sessionId, viewUnavailable, thread?.load ?? "idle", agentItems);
   if (nextFeedMark !== feedMark) {
     setFeedMark(nextFeedMark);
   }
