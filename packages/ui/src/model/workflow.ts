@@ -4,11 +4,11 @@ import type { ThreadFold } from "./fold.js";
 /**
  * What a workflow run tells us about itself. Muse reports the run as one item that is revised as it
  * goes (one real run produced 72 revisions), carrying its children, and a reconciliation payload
- * wrapped in a tag inside `message`. Tokens and cost appear nowhere in any of it, per agent or per
- * run, so nothing here invents them.
+ * wrapped in a tag inside `message`. Since Muse 1.4.0 a child carries its tokens on one revision,
+ * which the fold latches; nothing else about cost is on the wire, so nothing here invents it.
  */
 
-/** One agent the workflow fanned out to. */
+/** @deprecated One row of the WorkflowCard; `AgentVM` in `swarm.ts` replaces it once the card goes. */
 export interface WorkflowAgent {
   id: string;
   attempt: number;
@@ -21,6 +21,7 @@ export interface WorkflowAgent {
   toolCalls: number | null;
 }
 
+/** @deprecated The WorkflowCard's view; `RunVM` in `swarm.ts` replaces it once the card goes. */
 export interface WorkflowView {
   runId: string | null;
   scriptId: string | null;
@@ -90,6 +91,9 @@ function text(value: unknown): string | null {
 /**
  * The objective, which lives in the launching tool call rather than the run. Its arguments carry
  * another JSON document as a string, and the key inside has been seen as both `goal` and `objective`.
+ *
+ * @deprecated Real launches carry `{name, script}` and no objective; only the WorkflowCard reads this, and it
+ * goes with the card. `readPlan` in `swarm.ts` reads the script instead.
  */
 export function objectiveOf(args: string | undefined): string | null {
   if (!args) {
@@ -160,7 +164,12 @@ function sum(values: (number | null)[]): number | null {
   return known.length > 0 ? known.reduce((total, value) => total + value, 0) : null;
 }
 
-/** Everything the card and the sheet show, from one workflow item and the thread it sits in. */
+/**
+ * Everything the card and the sheet show, from one workflow item and the thread it sits in.
+ *
+ * @deprecated Only the WorkflowCard reads this; `swarmView` in `swarm.ts` is the model behind the Swarm card, and
+ * this goes with the card.
+ */
 export function workflowView(item: MspItem, fold: ThreadFold | null): WorkflowView {
   const payload = reconciled(item.message);
   const running = item.status === "inProgress";

@@ -3,8 +3,10 @@ import type { ThreadFold } from "./fold.js";
 import type { ThreadState } from "./store.js";
 import { reconciled } from "./workflow.js";
 
+/** @deprecated The Agents panel's status word; `swarm.ts` has the states the Swarm card shows. */
 export type AgentActivityStatus = "working" | "waiting" | "completed" | "failed" | "stopped" | "unknown";
 
+/** @deprecated One row of the Agents panel; `AgentVM` in `swarm.ts` replaces it once the panel goes. */
 export interface AgentActivity {
   id: string;
   name: string;
@@ -20,6 +22,7 @@ export interface AgentActivity {
   childSessionId: string | null;
 }
 
+/** @deprecated The Agents panel's view; `swarmView` in `swarm.ts` replaces it once the panel goes. */
 export interface AgentActivityView {
   agents: AgentActivity[];
   total: number;
@@ -255,6 +258,9 @@ export function agentNumbers(sessionId: string): AgentNumbers {
 /**
  * The thread's reported children. The parent turn ending never settles a child that is still working.
  * Without `numbers`, anonymous agents are numbered by their position in this fold alone.
+ *
+ * @deprecated Only the Agents panel reads this; `swarmView` in `swarm.ts` is the model behind the Swarm card, and
+ * this goes with the panel.
  */
 export function agentActivityView(fold: ThreadFold, numbers: AgentNumbers = new Map()): AgentActivityView {
   const entries: Entry[] = [];
