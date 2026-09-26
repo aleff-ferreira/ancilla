@@ -75,7 +75,10 @@ async function nodeFor(triple) {
     await writeFile(archive, bytes);
   }
   // bsdtar reads zip as well as tar.gz, and ships with Windows 10+ and macOS; Linux uses GNU tar for tar.gz.
-  execFileSync("tar", ["-xf", archive, "-C", cacheDir, `${dist.name}/${dist.member}`, `${dist.name}/LICENSE`], {
+  // On Windows it is named outright: from Git Bash, PATH finds GNU tar first, which cannot read a zip and takes
+  // the "D:" of a Windows path for a remote host.
+  const tar = process.platform === "win32" ? join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe") : "tar";
+  execFileSync(tar, ["-xf", archive, "-C", cacheDir, `${dist.name}/${dist.member}`, `${dist.name}/LICENSE`], {
     stdio: "inherit",
   });
   return { binary: extracted, license };
