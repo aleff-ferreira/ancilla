@@ -1321,10 +1321,11 @@ export class AncillaServer {
           if (!("model" in body)) {
             throw new HttpError(400, "model is required.");
           }
-          await manager.setSessionModel(sessionId, body["model"]);
+          await manager.setSessionModel(sessionId, await this.modelSelection(manager, sessionId, body["model"]));
           const modelId = str(asRecord(body["model"])?.["modelId"]);
           if (modelId) {
-            this.store.updateSession(sessionId, { modelId });
+            // The user's pick, kept apart from what Muse reports: a resume that comes back on another model restores it.
+            this.store.updateSession(sessionId, { modelId, chosenModelId: modelId });
           }
           this.json(res, 200, { ok: true });
           return true;
@@ -2337,6 +2338,60 @@ export class AncillaServer {
     return this.summary(record, found.cwd);
   }
 
+  /**
+   * The selection `session/setModel` gets for a model id: the catalog's own entry for it, provider and profile
+   * included, the way a picker in Muse's client would send it. A bare id is what the UI knows; whether Muse keeps a
+   * selection that names no provider across a restart is not something to rely on. The catalog is a request away,
+   * so the id alone still goes out when the catalog cannot be read or does not list it.
+   */
+  private async modelSelection(manager: SessionManager, sessionId: string, model: unknown): Promise<unknown> {
+    const given = asRecord(model);
+    const modelId = str(given?.["modelId"]);
+    if (!given || !modelId || (given["providerId"] !== undefined && given["profileId"] !== undefined)) {
+      return model;
+    }
+    try {
+      const list = asRecord(await manager.listModels(sessionId))?.["models"];
+      const entry = Array.isArray(list) ? list.map(asRecord).find((m) => m && str(m["modelId"]) === modelId) : null;
+      if (!entry) {
+        return model;
+      }
+      const selection: Record<string, unknown> = { ...given };
+      for (const key of ["providerId", "profileId", "displayLabel"]) {
+        if (selection[key] === undefined && (typeof entry[key] === "string" || entry[key] === null)) {
+          selection[key] = entry[key];
+        }
+      }
+      return selection;
+    } catch {
+      return model;
+    }
+  }
+
+  /**
+   * A resumed session that reports a model other than the one the user picked gets the pick set again, and is
+   * reported as being on it. A host that comes back after a restart can answer with the model the session started
+   * on, and nothing in the durable history the client folds need say otherwise. Only a pick is restored: a thread
+   * whose model was never chosen follows the host.
+   */
+  private async restoreChosenModel(
+    manager: SessionManager,
+    sessionId: string,
+    chosen: string | null,
+    msp: Record<string, unknown> | null,
+  ): Promise<Record<string, unknown> | null> {
+    if (!msp || !chosen || str(msp["modelId"]) === chosen) {
+      return msp;
+    }
+    try {
+      await manager.setSessionModel(sessionId, await this.modelSelection(manager, sessionId, { modelId: chosen }));
+      return { ...msp, modelId: chosen };
+    } catch (error) {
+      this.log(`could not put ${sessionId} back on ${chosen}: ${errorInfo(error).message}`);
+      return msp;
+    }
+  }
+
   private async startSession(
     cwd: string,
     approvalMode?: ApprovalMode,
@@ -2357,6 +2412,7 @@ export class AncillaServer {
       projectId: project.id,
       origin: "ancilla",
       modelId: raw ? str(raw["modelId"]) : null,
+      chosenModelId: modelId ?? null,
       createdAt: normalizeIso(raw?.["createdAt"]),
       // The creating host's own flags, not the live switch: a flip's restart may still be closing the old host.
       sandboxDisabled: host.target.args.includes("--disable-sandbox"),
@@ -2666,6 +2722,7 @@ export class AncillaServer {
           this.sessionHosts.set(sessionId, host.key);
         }
         this.liveFor(sessionId).readOnlyReason = null;
+        msp = await this.restoreChosenModel(manager, sessionId, found?.session.chosenModelId ?? null, msp);
       } catch (error) {
         const info = errorInfo(error);
         if (info.kind === "sessionInUse") {
@@ -3647,7 +3704,8 @@ export class AncillaServer {
       case "session/modelChanged": {
         const modelId = str(params["modelId"]);
         if (modelId) {
-          this.store.updateSession(sessionId, { modelId });
+          // A change the user made, here or in another Muse client, is their pick; a default or a policy is not.
+          this.store.updateSession(sessionId, params["source"] === "user" ? { modelId, chosenModelId: modelId } : { modelId });
         }
         break;
       }

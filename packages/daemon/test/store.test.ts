@@ -198,6 +198,21 @@ describe("AncillaStore", () => {
     assert.equal(unknown.sandboxDisabled, null, "sessions recorded before tracking stay unknown");
   });
 
+  it("keeps the model the user chose apart from the one Muse reports", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    const project = store.upsertProject("/work/proj");
+    const started = store.recordSession({ id: "s1", projectId: project.id, modelId: "muse-spark-1.3", chosenModelId: "muse-spark-1.3-contributor" });
+    assert.equal(started.chosenModelId, "muse-spark-1.3-contributor");
+    // Discovery and resume report what Muse says and leave the pick alone.
+    const touched = store.recordSession({ id: "s1", projectId: project.id, modelId: "muse-spark-1.3" });
+    assert.equal(touched.modelId, "muse-spark-1.3");
+    assert.equal(touched.chosenModelId, "muse-spark-1.3-contributor");
+    store.updateSession("s1", { modelId: "muse-spark-1.2", chosenModelId: "muse-spark-1.2" });
+    assert.equal(store.getSession("s1")?.chosenModelId, "muse-spark-1.2");
+    assert.equal(store.recordSession({ id: "s2", projectId: project.id }).chosenModelId, null);
+  });
+
   it("records a session's account and reads it back, defaulting to null", () => {
     const store = new AncillaStore();
     after(() => store.close());

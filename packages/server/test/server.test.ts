@@ -1070,6 +1070,61 @@ describe("AncillaServer", () => {
     assert.deepEqual(pages.map((p) => p.params?.["direction"]), ["backward", "backward"]);
   });
 
+  it("puts a resumed session back on the model the user chose", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1", modelId: "muse-spark-1.3" } });
+    connection.replies.set("model/list", {
+      models: [
+        { modelId: "muse-spark-1.3", providerId: "meta", profileId: "tbh" },
+        { modelId: "muse-spark-1.3-contributor", providerId: "meta", profileId: "tbh", displayLabel: "muse-spark-1.3-contributor" },
+      ],
+    });
+    const idle = (modelId: string) => ({ session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 1, modelId } });
+    connection.replies.set("session/resume", idle("muse-spark-1.3"));
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    connection.replies.set("approval/listPending", { approvals: [], userInputs: [] });
+    const sets = () => connection.calls.filter((c) => c.method === "session/setModel");
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work/proj" });
+
+    // A thread whose model was never picked follows the host.
+    let loaded = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(loaded.json.msp.modelId, "muse-spark-1.3");
+    assert.equal(sets().length, 0);
+
+    // The pick goes to Muse as the catalog's whole entry, provider and profile included.
+    assert.equal((await send(base, "/api/sessions/s1/model", { model: { modelId: "muse-spark-1.3-contributor" } })).status, 200);
+    assert.deepEqual(sets()[0]?.params?.["model"], {
+      modelId: "muse-spark-1.3-contributor",
+      providerId: "meta",
+      profileId: "tbh",
+      displayLabel: "muse-spark-1.3-contributor",
+    });
+
+    // The host comes back on the starting model: the pick is set again, and the thread is reported on it.
+    loaded = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(loaded.json.msp.modelId, "muse-spark-1.3-contributor");
+    assert.equal(loaded.json.session.modelId, "muse-spark-1.3-contributor");
+    assert.equal(sets().length, 2);
+    assert.equal((sets()[1]?.params?.["model"] as Record<string, unknown>)["profileId"], "tbh");
+
+    // A host already on it is left alone.
+    connection.replies.set("session/resume", idle("muse-spark-1.3-contributor"));
+    await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(sets().length, 2);
+
+    // A change the user made in another Muse client is their pick; a default the host applied is not.
+    connection.notify("session/modelChanged", { sessionId: "s1", modelId: "muse-spark-1.2", source: "user", viewCursor: "v:1", sourceRange: RANGE });
+    connection.replies.set("session/resume", idle("muse-spark-1.3"));
+    loaded = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(loaded.json.msp.modelId, "muse-spark-1.2");
+    assert.equal(sets().length, 3);
+    connection.notify("session/modelChanged", { sessionId: "s1", modelId: "muse-spark-1.3", source: "default", viewCursor: "v:2", sourceRange: RANGE });
+    loaded = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(loaded.json.msp.modelId, "muse-spark-1.2");
+    assert.equal(sets().length, 4);
+  });
+
   it("falls back to a read-only transcript when another host holds the session", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });

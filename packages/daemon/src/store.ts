@@ -26,7 +26,13 @@ export interface SessionRecord {
   titleSource: TitleSource;
   status: string;
   turnCount: number;
+  /** The model Muse last reported for the session. */
   modelId: string | null;
+  /**
+   * The model the user picked for this thread, here or in Muse; null when nobody has. Discovery and resume
+   * never touch it, so a host that comes back reporting another model can be set right again.
+   */
+  chosenModelId: string | null;
   origin: string;
   archived: boolean;
   createdAt: string;
@@ -58,6 +64,8 @@ export interface RecordSessionInput {
   title?: string;
   titleSource?: TitleSource;
   modelId?: string | null;
+  /** The model the thread was asked to start on; later touches never overwrite it. */
+  chosenModelId?: string | null;
   origin?: string;
   turnCount?: number;
   createdAt?: string;
@@ -73,6 +81,7 @@ export interface SessionPatch {
   titleSource?: TitleSource;
   archived?: boolean;
   modelId?: string | null;
+  chosenModelId?: string | null;
   turnCount?: number;
   activityAt?: string;
   status?: string;
@@ -219,6 +228,8 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   // NULL = the default Muse login, i.e. today's behaviour; only sessions started under a profile carry an id.
   { table: "sessions", column: "account_id", ddl: "ALTER TABLE sessions ADD COLUMN account_id TEXT" },
   { table: "projects", column: "default_account_id", ddl: "ALTER TABLE projects ADD COLUMN default_account_id TEXT" },
+  // NULL until the user picks a model for the thread; model_id alone is whatever Muse last reported.
+  { table: "sessions", column: "chosen_model_id", ddl: "ALTER TABLE sessions ADD COLUMN chosen_model_id TEXT" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -614,9 +625,9 @@ export class AncillaStore {
       const titleSource = input.titleSource ?? (input.title ? "auto" : "placeholder");
       this.db
         .prepare(
-          `INSERT INTO sessions (id, project_id, title, title_source, status, turn_count, model_id, origin,
+          `INSERT INTO sessions (id, project_id, title, title_source, status, turn_count, model_id, chosen_model_id, origin,
              archived, sandbox_disabled, account_id, created_at, updated_at, activity_at)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.id,
@@ -625,6 +636,7 @@ export class AncillaStore {
           titleSource,
           input.turnCount ?? 0,
           input.modelId ?? null,
+          input.chosenModelId ?? null,
           input.origin ?? "ancilla",
           input.sandboxDisabled === undefined || input.sandboxDisabled === null ? null : input.sandboxDisabled ? 1 : 0,
           input.accountId ?? null,
@@ -699,6 +711,10 @@ export class AncillaStore {
     if (patch.modelId !== undefined) {
       sets.push("model_id = ?");
       values.push(patch.modelId);
+    }
+    if (patch.chosenModelId !== undefined) {
+      sets.push("chosen_model_id = ?");
+      values.push(patch.chosenModelId);
     }
     if (patch.turnCount !== undefined) {
       sets.push("turn_count = ?");
@@ -813,6 +829,7 @@ export class AncillaStore {
       status: String(row["status"]),
       turnCount: Number(row["turn_count"]),
       modelId: row["model_id"] === null ? null : String(row["model_id"]),
+      chosenModelId: row["chosen_model_id"] === null || row["chosen_model_id"] === undefined ? null : String(row["chosen_model_id"]),
       origin: String(row["origin"]),
       archived: Number(row["archived"] ?? 0) === 1,
       createdAt: String(row["created_at"]),
