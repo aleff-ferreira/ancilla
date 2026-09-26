@@ -85,7 +85,7 @@ export function ApprovalPanel(props: { request: ApprovalRequest; primary: boolea
 
   const stageCount = request.subject?.stages?.length ?? 0;
   return (
-    <section aria-label="Approval needed" className={PANEL}>
+    <section aria-label="Approval needed" data-request-id={request.approvalId} className={PANEL}>
       <div className="flex items-start gap-3 px-4 pt-3.5">
         <span className="mt-px flex size-7 shrink-0 items-center justify-center rounded-lg bg-warn-soft text-warn-text">
           <ShieldWarningIcon size={15} />
@@ -302,7 +302,7 @@ export function QuestionPanel(props: { request: UserInputRequest; keyboard: bool
   const multiple = question.selection.mode === "multiple";
   const answered = isAnswered(question, picks, custom);
   return (
-    <section aria-label="Muse has a question" className={PANEL}>
+    <section aria-label="Muse has a question" data-request-id={request.userInputId} className={PANEL}>
       <div className="flex items-start gap-3 px-4 pt-3.5">
         <span className="mt-px flex size-7 shrink-0 items-center justify-center rounded-lg bg-warn-soft text-warn-text">
           <ChatCircleDotsIcon size={15} />

@@ -625,7 +625,7 @@ export function SwarmDockCard(props: SwarmDockCardProps) {
       const agent = agentOf(id);
       if (!agent) return;
       if (action === "review" || action === "answer") {
-        focusRequestPanel();
+        focusRequestPanel(agent.needs?.requestId ?? null);
         return;
       }
       // Stop on a workflow agent is a skip: the run goes on without it.
@@ -685,7 +685,7 @@ export function SwarmDockCard(props: SwarmDockCardProps) {
           setRecap(null);
           controller.dismissRecap(sessionId);
         }}
-        onReview={() => focusRequestPanel()}
+        onReview={(requestId) => focusRequestPanel(requestId)}
         onOpenTranscript={run ? () => document.querySelector(`[data-swarm-anchor="${CSS.escape(run.itemId)}"]`)?.scrollIntoView({ block: "center" }) : undefined}
       />
     </>

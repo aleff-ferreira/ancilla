@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ControllerProvider } from "../src/app/context.js";
+import { focusRequestPanel } from "../src/components/swarm/HeaderChips.js";
 import { ThreadView } from "../src/components/thread/ThreadView.js";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
 import type { AncillaController } from "../src/model/controller.js";
@@ -101,6 +102,7 @@ describe("ThreadView with the Swarm card", () => {
     assert.match(card(markup), /class="swarm-att run"/);
     assert.match(text(card(markup)), /Muse does not say which agent asked/);
     assert.ok(markup.indexOf('aria-label="Agents and tasks"') < markup.indexOf('aria-label="Approval needed"'), "the card sits above the request panel");
+    assert.match(markup, /<section aria-label="Approval needed" data-request-id="ap1"/, "the panel carries its request id, so Review can find it");
     assert.match(card(markup), /class="swarm-body compact"/, "the body's cap drops with a request panel present");
   });
 
@@ -132,5 +134,52 @@ describe("ThreadView with the Swarm card", () => {
     const section = card(markup);
     assert.match(section, /class="swarm-line stale"|swarm-stale/);
     assert.doesNotMatch(section, /spin-ring/);
+  });
+});
+
+/** A request panel as `focusRequestPanel` handles it: scrolled into view, its button focused, its ring flashed. */
+class FakePanel {
+  scrolled = false;
+  focused = false;
+  flashed = false;
+  readonly offsetWidth = 0;
+  readonly classList = {
+    add: (name: string) => { if (name === "swarm-flash") this.flashed = true; },
+    remove: () => undefined,
+  };
+  constructor(readonly id: string) {}
+  scrollIntoView(): void { this.scrolled = true; }
+  querySelector(): { focus(): void } { return { focus: () => { this.focused = true; } }; }
+}
+
+describe("focusRequestPanel", () => {
+  it("brings the panel carrying the request id into view, else the first request panel", () => {
+    const approval = new FakePanel("ap1");
+    const question = new FakePanel("q1");
+    const scope = globalThis as { document?: unknown; window?: unknown; CSS?: unknown };
+    const previous = { document: scope.document, window: scope.window, CSS: scope.CSS };
+    // The dock as the two lookups see it: a panel by its id, or the first one in order.
+    scope.document = {
+      querySelector: (selector: string) => (selector.startsWith("[data-request-id=") ? [approval, question].find((panel) => selector.includes(`"${panel.id}"`)) ?? null : approval),
+    };
+    scope.window = { setTimeout: () => 0 };
+    scope.CSS = { escape: (value: string) => value };
+    try {
+      assert.equal(focusRequestPanel("q1"), true);
+      assert.ok(question.scrolled && question.focused && question.flashed, "the question panel, found by its id");
+      assert.equal(approval.scrolled, false, "not the first panel");
+      assert.equal(focusRequestPanel("gone"), true);
+      assert.ok(approval.scrolled && approval.focused, "an id no panel carries falls back to the first");
+      approval.focused = false;
+      assert.equal(focusRequestPanel(), true);
+      assert.ok(approval.focused, "as does asking with no id");
+      scope.document = { querySelector: () => null };
+      assert.equal(focusRequestPanel("q1"), false, "false when no panel is in the document");
+    } finally {
+      for (const key of ["document", "window", "CSS"] as const) {
+        if (previous[key] === undefined) delete scope[key];
+        else scope[key] = previous[key];
+      }
+    }
   });
 });
