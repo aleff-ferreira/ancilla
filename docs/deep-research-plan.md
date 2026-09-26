@@ -1,6 +1,6 @@
 # DeepResearch for Ancilla: implementation plan
 
-Status: plan only, nothing implemented. Written 2026-09-26 against Ancilla `main` at 5342262 (0.18.0) and Deep Dog 2 at `fc7981a` (2.0.1, 2026-09-15). Every statement below is either **verified** in source (file and line given) or marked **ASSUMPTION**. Assumptions that block implementation are collected in section 11.
+Status: implemented through stage 2 (see "Implementation notes" at the end for where the build departed from this plan). Written 2026-09-26 against Ancilla `main` at 5342262 (0.18.0) and Deep Dog 2 at `fc7981a` (2.0.1, 2026-09-15). Every statement below is either **verified** in source (file and line given) or marked **ASSUMPTION**. Assumptions that block implementation are collected in section 10.
 
 ## 0. Summary of the decision
 
@@ -357,3 +357,12 @@ Non-blocking but to settle during stage 0: exact `--json` event names for `muse 
 - Worker sessions never appear in the sidebar or the palette; their token usage appears on the Usage page under the project.
 - No provider keys, no Python, no new runtime dependency; `NOTICE.md` and `UPSTREAM.md` attribute Deep Dog 2 and ThinkDepth.
 - Test suites: engine ≥ 40 tests offline; server integration covering start, progress, stop, restart, idempotency, and provenance exclusion; UI rendering and controller tests; demo scenario folded; CI green on Windows, macOS and Linux.
+
+## 12. Implementation notes (what the build changed)
+
+- **Engine location.** The engine lives in `packages/daemon/src/research/` and is exported from `@ancilla/daemon`, not in a new `packages/research` workspace: same isolation (the folder imports nothing outside itself and no `node:` module), without a new entry in the version-bump script, six CI build lines and the lockfile. `UPSTREAM.md` in that folder pins the Deep Dog 2 commit and maps each ported file.
+- **Two transports for tool-less model calls.** The supervisor prompt alone is about 28 000 characters, which is already over what a Windows command line carries, so `muse exec` cannot be the only path. The model client sends a prompt through `muse exec` when it fits the platform's argument limit and otherwise as one turn in a dedicated, archived "research control" session on the thread's host, with the model told to answer without tools. The engine also budgets prompt material (per-note cap, oldest-first compaction, excerpts dropped when over budget) so prompts stay bounded whatever the transport.
+- **Stop and write.** An explicit stop with a report request writes whenever anything was found; the time fraction only gates the automatic salvage of an aborted loop. The engine exposes `ResearchInput.stopWritesReport` and `ResearchDeps.hardStop` so the host can end a salvage write on a second stop or at shutdown.
+- **Approvals in worker sessions** are decided by the runner with Muse's real choice vocabulary (`approved*` / `denied*`, once before session scope, feedback only where accepted); a request it cannot decide interrupts the worker rather than pending for the user. `userInput/requested` in a worker is cancelled and the worker interrupted.
+- **Budgets.** Only the tool-call cap and the wall time interrupt a worker; searches, reads and saves over their soft caps are counted and reported. Sub-agent prompts still state every cap.
+- **Resume** is stored (typed state with the loop exit) but the route answers 501 until stage 3.
