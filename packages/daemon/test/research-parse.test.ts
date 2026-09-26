@@ -110,3 +110,16 @@ describe("parseFindings", () => {
     assert.equal(parseFindings('{"findings": "x", "saved": {}}').ok, false);
   });
 });
+
+describe("parseFindings leniency", () => {
+  it("takes a bare string as a URL and drops entries that are not http(s) URLs", () => {
+    const parsed = parseFindings('```json\n{"findings": "x", "saved": ["https://a.example/p", {"url": "not a url"}, {"url": "ftp://b.example"}, {"url": "https://c.example", "title": "C"}]}\n```');
+    assert.equal(parsed.ok, true);
+    if (parsed.ok) {
+      assert.deepEqual(
+        parsed.value.saved.map((s) => s.url),
+        ["https://a.example/p", "https://c.example"],
+      );
+    }
+  });
+});

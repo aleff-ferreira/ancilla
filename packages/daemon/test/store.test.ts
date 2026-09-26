@@ -390,6 +390,7 @@ describe("AncillaStore", () => {
       return {
         version: 1,
         runId,
+        eventSeq: 0,
         question: "q",
         config: DEFAULT_RESEARCH_CONFIG,
         phase: "researching",

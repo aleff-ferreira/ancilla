@@ -12,6 +12,7 @@ import {
   type WorkerSink,
   type WorkerStatus,
   type WorkerTask,
+  parseFindings as parseEngineFindings,
 } from "@ancilla/daemon";
 
 /** A worker session the host started for one task: its id and the manager of the host it lives on. */
@@ -217,6 +218,16 @@ function savedOf(value: unknown): SavedSource[] {
  * is the findings and nothing was saved; the engine then falls back to what the worker fetched.
  */
 export function parseFindings(text: string): ParsedFindings {
+  // The worker prompt asks for a closing fenced JSON block with `findings` and `saved`; the engine's parser reads
+  // that form (the last fenced block, whatever its tag). Prose around the block still counts as findings when the
+  // block carries none of its own.
+  const contract = parseEngineFindings(text);
+  if (contract.ok) {
+    const fences = [...text.matchAll(/```[ \t]*[A-Za-z0-9_-]*[ \t]*\r?\n[\s\S]*?```/g)];
+    const last = fences[fences.length - 1];
+    const outside = last && last.index !== undefined ? (text.slice(0, last.index) + text.slice(last.index + last[0].length)).trim() : "";
+    return { findings: contract.value.findings || outside, saved: contract.value.saved };
+  }
   const match = /```findings[^\n]*\n([\s\S]*?)```/i.exec(text) ?? /<findings>([\s\S]*?)<\/findings>/i.exec(text);
   if (!match) {
     return { findings: text.trim(), saved: [] };

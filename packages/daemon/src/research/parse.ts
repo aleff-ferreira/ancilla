@@ -71,6 +71,15 @@ export function extractJsonObject(text: string): ParseResult<Record<string, unkn
   return { ok: false, reason: "no JSON object found" };
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function optionalString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -139,10 +148,12 @@ export function parseFindings(text: string): ParseResult<ParsedFindings> {
   const raw = object.value.saved;
   if (raw !== undefined && raw !== null && !Array.isArray(raw)) return { ok: false, reason: "saved must be an array" };
   const saved: SavedSource[] = [];
-  for (const item of Array.isArray(raw) ? raw : []) {
+  for (const raw_item of Array.isArray(raw) ? raw : []) {
+    // A bare string is taken as the URL; anything that is not an http(s) URL can never be verified, so it is dropped.
+    const item = typeof raw_item === "string" ? { url: raw_item } : raw_item;
     if (!isRecord(item)) continue;
     const url = optionalString(item.url);
-    if (!url) continue;
+    if (!url || !isHttpUrl(url)) continue;
     saved.push({
       url,
       title: optionalString(item.title),

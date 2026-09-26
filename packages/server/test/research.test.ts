@@ -42,6 +42,7 @@ function stateFor(input: ResearchInput, config: ResearchConfig, patch: Partial<R
   return {
     version: 1,
     runId: input.runId,
+    eventSeq: 0,
     question: input.question,
     config,
     phase: "researching",
@@ -801,6 +802,16 @@ describe("MuseSessionWorkerRunner", () => {
     assert.equal(classifyTool("webget"), "fetch");
     assert.equal(classifyTool("bash"), "other");
     assert.deepEqual(parseFindings("Just prose."), { findings: "Just prose.", saved: [] });
+    // The form the worker prompt asks for: a closing ```json block with findings and saved.
+    const contract = parseFindings(
+      'Searched three venues.\n\n```json\n{"findings": "**Findings**: A rose 4% [1].", "saved": [{"url": "https://a.example/x", "title": "A", "reason": "primary", "excerpt": null}]}\n```',
+    );
+    assert.equal(contract.findings, "**Findings**: A rose 4% [1].");
+    assert.deepEqual(contract.saved, [{ url: "https://a.example/x", title: "A", reason: "primary", excerpt: null }]);
+    // A block without its own findings text takes the prose around it.
+    const around = parseFindings('Read two pages, nothing conclusive.\n```json\n{"saved": [{"url": "https://b.example", "reason": "context"}]}\n```');
+    assert.equal(around.findings, "Read two pages, nothing conclusive.");
+    assert.equal(around.saved.length, 1);
     const tagged = parseFindings("Notes here.\n<findings>{\"sources\": [{\"url\": \"https://a.example\", \"why\": \"good\"}]}</findings>");
     assert.equal(tagged.findings, "Notes here.");
     assert.deepEqual(tagged.saved, [{ url: "https://a.example", title: null, reason: "good", excerpt: null }]);

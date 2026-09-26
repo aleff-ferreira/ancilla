@@ -59,9 +59,9 @@ export interface ResearchStopRequest {
   writeReport: boolean;
 }
 
-/** The engine's input plus the stop flag the engine may read when the signal fires. */
+/** The engine's input; `stopWritesReport` is set just before the abort so the engine can read it at cancellation. */
 export interface ResearchJobInput extends ResearchInput {
-  writeReportOnStop: boolean;
+  stopWritesReport: boolean;
 }
 
 export type ResearchEngine = typeof runResearch;
@@ -237,7 +237,7 @@ export class ResearchJobManager {
       runId: record.id,
       thread,
       controller,
-      input: { runId: record.id, question: record.question, writeReportOnStop: false },
+      input: { runId: record.id, question: record.question, stopWritesReport: false },
       live: { phase: null, round: null, workers: new Map() },
       done: Promise.resolve(),
       timer: null,
@@ -259,7 +259,7 @@ export class ResearchJobManager {
     if (!job || job.controller.signal.aborted) {
       return false;
     }
-    job.input.writeReportOnStop = writeReport;
+    job.input.stopWritesReport = writeReport;
     const reason: ResearchStopRequest = { type: "stop", writeReport };
     this.options.log?.(`research: run ${runId} stop requested (writeReport=${writeReport}).`);
     job.controller.abort(reason);
