@@ -161,6 +161,11 @@ export interface GoalBlock {
 interface LiveState {
   activeTurnId: string | null;
   turnStartedAt: string | null;
+  /**
+   * The host whose own feed, reply or read showed the active turn running there. Null when only a session listing
+   * said so, which cannot tell this server's hosts from another Muse client.
+   */
+  turnHost: string | null;
   pendingApprovals: Set<string>;
   pendingInputs: Set<string>;
   lastTerminal: string | null;
@@ -168,8 +173,32 @@ interface LiveState {
   goal: GoalBlock | null;
   /** Bumped on every live goal change, so a slow transcript load never writes an older goal over a newer one. */
   goalSeq: number;
+  /** The view cursor of the goal held, so a stale history prefix cannot put an older goal back. */
+  goalCursor: string | null;
+  /**
+   * Bumped by anything newer than a read in flight: live lifecycle and request changes, current-turn progress, view
+   * health, a host going away, the session closing, a listing that shows it running. A load that sees it move applies
+   * nothing it read.
+   */
   activityRevision: number;
   viewHealth: { status: string; reason: string | null } | null;
+  /** Why another Muse client was last found holding the session; null once it loaded, or read as loaded, here. */
+  readOnlyReason: string | null;
+  /**
+   * Terminal records history held for a turn while a fresh read said that turn was still running: the stand-ins
+   * Muse's projection writes for an open run. A stale prefix that still carries one says nothing about the outcome.
+   */
+  provisional: Set<string>;
+}
+
+/** Stand-in terminal records kept per session; enough for the runs a stalled projection can be behind by. */
+const PROVISIONAL_LIMIT = 64;
+
+/** Whether view cursor `a` comes after `b`. Only the v:<session>:<sequence> form has an order. */
+function cursorAfter(a: string | null, b: string | null): boolean {
+  const after = a?.match(/^(v:.+):(\d+)$/);
+  const before = b?.match(/^(v:.+):(\d+)$/);
+  return Boolean(after && before && after[1] === before[1] && BigInt(after[2]!) > BigInt(before[2]!));
 }
 
 export interface LiveView {
@@ -1587,7 +1616,8 @@ export class AncillaServer {
       if (effort !== undefined && effort !== null && !isReasoningEffort(effort)) {
         throw new HttpError(400, "Unknown reasoningEffort.");
       }
-      const manager = await this.managerForSession(sessionId);
+      const managed = await this.hostForSession(sessionId);
+      const manager = managed.manager;
       if (typeof effort === "string") {
         await this.applyEffort(manager, sessionId, effort);
       }
@@ -1601,10 +1631,15 @@ export class AncillaServer {
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
       });
+      // A host that took the turn has the session loaded.
+      if (this.hosts.get(managed.key) === managed) {
+        this.sessionHosts.set(sessionId, managed.key);
+      }
       if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
         live.activityRevision += 1;
         live.activeTurnId = ack.turnId;
         live.turnStartedAt = nowIso();
+        live.turnHost = managed.key;
         live.lastTerminal = null;
         live.lastError = null;
         this.emitStatus(sessionId);
@@ -1827,14 +1862,18 @@ export class AncillaServer {
       state = {
         activeTurnId: null,
         turnStartedAt: null,
+        turnHost: null,
         pendingApprovals: new Set(),
         pendingInputs: new Set(),
         lastTerminal: null,
         lastError: null,
         goal: null,
         goalSeq: 0,
+        goalCursor: null,
         activityRevision: 0,
         viewHealth: null,
+        readOnlyReason: null,
+        provisional: new Set(),
       };
       this.live.set(sessionId, state);
     }
@@ -2500,6 +2539,12 @@ export class AncillaServer {
     };
   }
 
+  /**
+   * A thread's transcript, status and pending requests. Opening a thread loads (resumes) the session on its host.
+   * A refresh only reads, since a quiet turn can still be executing or waiting on a question and reading must never
+   * reattach it; but a refresh that finds the session unloaded, with nothing this server could reattach, loads it
+   * as opening does. Read-only is only ever another Muse client's lease, reported with that client's reason.
+   */
   private async loadTranscript(sessionId: string, refresh = false): Promise<Record<string, unknown>> {
     // A goal change can land while this load is in flight; history must not then write the older goal back.
     const goalSeqAtStart = this.liveFor(sessionId).goalSeq;
@@ -2507,30 +2552,54 @@ export class AncillaServer {
     const host = await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
     const manager = host.manager;
     const activityAtStart = this.liveFor(sessionId).activityRevision;
-    let readOnly = false;
-    let readOnlyReason: string | null = null;
+    // The run believed to be going as the load began: the only one whose outcome the load may report.
+    const activeBefore = this.liveFor(sessionId).activeTurnId;
     let msp: Record<string, unknown> | null = null;
     let read: Record<string, unknown> | null = null;
-    try {
-      if (refresh) {
-        // A quiet turn can still be executing or waiting on a question. Reading must never reattach it.
-        read = asRecord(await manager.readSession(sessionId, false));
-        msp = asRecord(read?.["session"]);
-        readOnly = this.sessionHosts.get(sessionId) !== host.key;
-      } else {
-        const resumed = asRecord(await manager.resumeSession(sessionId, true));
-        msp = asRecord(resumed?.["session"]);
-        this.sessionHosts.set(sessionId, host.key);
-        read = resumed;
+    // Turns a read reported running. A terminal record the page holds for one may be the projection's stand-in.
+    const readActive = new Set<string>();
+    const noteActive = (session: Record<string, unknown> | null) => {
+      const active = session && session["status"] !== "notLoaded" ? str(session["activeTurnId"]) : null;
+      if (active) readActive.add(active);
+    };
+    let resume = !refresh;
+    if (refresh) {
+      read = asRecord(await manager.readSession(sessionId, false));
+      msp = asRecord(read?.["session"]);
+      noteActive(msp);
+      // Requests the durable log still holds wait on the user; only opening the thread brings them back.
+      const awaiting = Array.isArray(read?.["pendingRequests"]) && (read["pendingRequests"] as unknown[]).length > 0;
+      resume = msp?.["status"] === "notLoaded" && !awaiting && this.mayLoadUnloaded(sessionId, host);
+    }
+    let resumed = false;
+    if (resume) {
+      try {
+        const reply = asRecord(await manager.resumeSession(sessionId, true));
+        msp = asRecord(reply?.["session"]) ?? msp;
+        if (!refresh) {
+          read = reply;
+        }
+        resumed = true;
+        if (this.hosts.get(host.key) === host) {
+          this.sessionHosts.set(sessionId, host.key);
+        }
+        this.liveFor(sessionId).readOnlyReason = null;
+      } catch (error) {
+        const info = errorInfo(error);
+        if (info.kind === "sessionInUse") {
+          // Only another client holding the session makes it read-only here, and always with a reason to show.
+          this.liveFor(sessionId).readOnlyReason = info.message.trim() || "Another Muse session has this thread open.";
+          if (this.sessionHosts.get(sessionId) === host.key) {
+            this.sessionHosts.delete(sessionId);
+          }
+        } else if (!refresh) {
+          // Opening a thread that cannot load is a real failure and surfaces.
+          throw error;
+        } else {
+          // A refresh already has what it read; the next open or send loads the session, or reports why not.
+          this.log(`refresh of ${sessionId} could not load it on ${host.key}: ${info.message}`);
+        }
       }
-    } catch (error) {
-      const info = errorInfo(error);
-      // Only another host holding the session makes it read-only here; any other failure is real and surfaces.
-      if (info.kind !== "sessionInUse") {
-        throw error;
-      }
-      readOnly = true;
-      readOnlyReason = info.message;
     }
 
     let events: { method: string; params: Record<string, unknown> }[] = [];
@@ -2549,8 +2618,16 @@ export class AncillaServer {
 
     // The read can have newer item revisions than a partially available page. Append its item
     // records so the UI's revision fold selects the newest; usage remains owned by paged events.
+    let historyFailed = false;
     if (events.length === 0 && !refresh) {
-      read = asRecord(await manager.readSession(sessionId, false));
+      // A thread whose load went through (or that another client holds) still opens when this read fails: the
+      // response then says its history is incomplete rather than failing the whole thread.
+      const fallback = await manager.readSession(sessionId, false).then(asRecord, () => undefined);
+      if (fallback === undefined) {
+        historyFailed = true;
+      } else {
+        read = fallback;
+      }
     }
     if (!msp) msp = asRecord(read?.["session"]);
     events.push(...eventsFromHistory(read));
@@ -2559,47 +2636,126 @@ export class AncillaServer {
     const approvals = (pending?.approvals ?? []).map((a) => stripSource(asRecord(a) ?? {}));
     const userInputs = (pending?.userInputs ?? []).map((u) => stripSource(asRecord(u) ?? {}));
 
+    if (refresh && !resumed) {
+      // Read the status once more, now the pages are in: a turn that started or ended while they came is then
+      // known, and its record in the page is not taken for more than it is. A failed re-read keeps the first.
+      const later = asRecord(asRecord(await manager.readSession(sessionId, true).catch(() => null))?.["session"]);
+      if (later) {
+        msp = { ...(msp ?? {}), ...later, status: later["status"], activeTurnId: later["activeTurnId"] ?? null };
+      }
+    }
+
     const live = this.liveFor(sessionId);
     const superseded = live.activityRevision !== activityAtStart;
     // A different/new host reports notLoaded even while the owning host is still working.
     const statusKnown = msp !== null && msp["status"] !== "notLoaded";
+    noteActive(msp);
+    if (refresh && !resumed && statusKnown) {
+      // Read as loaded, the session is this host's own to write to. Read as unloaded, whatever was last found about
+      // another client's lease stands; a missing binding alone never makes a thread read-only.
+      if (this.hosts.get(host.key) === host) {
+        this.sessionHosts.set(sessionId, host.key);
+      }
+      live.readOnlyReason = null;
+    }
+    const readOnlyReason = live.readOnlyReason;
     const history = asRecord(read?.["history"]);
     const noneReason = str(history?.["noneReason"]);
+    // An unavailable projection serves an older prefix, which can end before what has since happened.
+    const partial = noneReason === "projectionUnavailable";
     const snapshotItems = asRecord(asRecord(history?.["snapshot"])?.["state"])?.["items"];
     const historyServed =
       (history?.["mode"] === "inline" && Array.isArray(history["items"])) ||
       (["snapshot", "anchoredSnapshot"].includes(String(history?.["mode"])) &&
         (Array.isArray(snapshotItems) || asRecord(snapshotItems) !== null));
     if (!superseded) {
-      if (noneReason === "projectionUnavailable") {
+      if (partial) {
         live.viewHealth = { status: "unavailable", reason: noneReason };
-      } else if (statusKnown && historyServed) {
+      } else if (historyServed) {
+        // Served history means the projection works, whether or not this host has the session loaded.
         live.viewHealth = null;
       }
     }
-    if (msp && statusKnown && !superseded) {
-      const active = str(msp["activeTurnId"]);
+
+    const terminalFor = (event: { method: string; params: Record<string, unknown> }) =>
+      event.method === "turn/completed" ? str(event.params["turnId"]) : null;
+    const failed = (event: { method: string; params: Record<string, unknown> }) => str(event.params["terminal"]) === "failed";
+    const fresh = statusKnown && !superseded;
+    if (fresh) {
+      const active = str(msp!["activeTurnId"]);
       if (active !== live.activeTurnId) {
         live.activeTurnId = active;
-        live.turnStartedAt = active ? (live.turnStartedAt ?? nowIso()) : null;
+        live.turnStartedAt = active ? nowIso() : null;
+      }
+      live.turnHost = active ? host.key : null;
+    } else if (!statusKnown && !superseded && live.activeTurnId) {
+      // Unloaded here, the session can still be running in another client. Only its own recorded end, which no
+      // projection stands in for, says that run is over.
+      const running = live.activeTurnId;
+      if (events.some((event) => terminalFor(event) === running && !failed(event))) {
+        live.activeTurnId = null;
+        live.turnStartedAt = null;
+        live.turnHost = null;
       }
     }
     if (pending && statusKnown && !superseded) {
       live.pendingApprovals = new Set(approvals.map((a) => str(a["approvalId"])).filter((id): id is string => id !== null));
       live.pendingInputs = new Set(userInputs.map((u) => str(u["userInputId"])).filter((id): id is string => id !== null));
     }
-    // Muse's history projection can synthesize failed/incomplete for an open run. The loaded
-    // session still owns that turn; do not present its unfinished snapshot as a real failure.
-    if (live.activeTurnId) {
-      events = events.filter((event) => !(event.method === "turn/completed" &&
-        event.params["terminal"] === "failed" && event.params["reason"] === "incomplete" &&
-        event.params["turnId"] === live.activeTurnId));
+    // Muse's history projection writes a failed terminal record for a run that is still open. A turn a fresh read
+    // says is running cannot have ended, so no terminal record for it is shown; a failed one is the stand-in, kept
+    // so that it is dropped again from any stale prefix that still carries it. A failed record for a turn only
+    // believed to be running, or that a read showed running while the page was taken, is held back as unconfirmed.
+    // Real failures of any other turn, and of that turn once it has stopped, stay visible.
+    const runningNow = fresh ? live.activeTurnId : null;
+    const unconfirmed = new Set(readActive);
+    if (!fresh && live.activeTurnId) unconfirmed.add(live.activeTurnId);
+    // A turn the page shows starting after one of those began after that read was taken, so it may be open as well.
+    const lastStart = events.findLastIndex((event) => event.method === "turn/started" && unconfirmed.has(str(event.params["turnId"]) ?? ""));
+    for (const event of lastStart === -1 ? [] : events.slice(lastStart + 1)) {
+      const turnId = event.method === "turn/started" ? str(event.params["turnId"]) : null;
+      if (turnId) unconfirmed.add(turnId);
     }
-    if (!superseded) {
-      const terminal = [...events].reverse().find((event) => event.method === "turn/completed");
-      if (terminal && !live.activeTurnId) {
-        live.lastTerminal = str(terminal.params["terminal"]);
-        live.lastError = live.lastTerminal === "failed" ? str(asRecord(terminal.params["error"])?.["message"]) ?? "The turn failed." : null;
+    events = events.filter((event) => {
+      const turnId = terminalFor(event);
+      if (!turnId) {
+        return true;
+      }
+      const signature = JSON.stringify(event.params);
+      if (turnId === runningNow) {
+        if (failed(event)) {
+          live.provisional.delete(signature);
+          live.provisional.add(signature);
+          if (live.provisional.size > PROVISIONAL_LIMIT) {
+            live.provisional.delete(live.provisional.values().next().value as string);
+          }
+        }
+        return false;
+      }
+      if (unconfirmed.has(turnId) && failed(event)) {
+        return false;
+      }
+      return !(partial && live.provisional.has(signature));
+    });
+    if (!superseded && activeBefore && live.activeTurnId !== activeBefore) {
+      // The run that was going has stopped. Its outcome is its own terminal record; without one, or with a failure
+      // from a stale prefix (which can be a stand-in for a run that went on), the outcome is unknown and nothing
+      // announces a result. A new run under way has no outcome yet either.
+      const own = [...events].reverse().find((event) => terminalFor(event) === activeBefore);
+      const terminal = own && live.activeTurnId === null ? (str(own.params["terminal"]) ?? "completed") : null;
+      const known = terminal !== null && !(terminal === "failed" && partial);
+      live.lastTerminal = known ? terminal : null;
+      live.lastError = known && terminal === "failed" ? (str(asRecord(own!.params["error"])?.["message"]) ?? "The turn failed.") : null;
+    } else if (!activeBefore && fresh && !partial && live.activeTurnId === null && live.lastTerminal === null) {
+      // Nothing seen here says how the last run ended (a thread opened after a restart, say). A complete history
+      // read from a session that is loaded and idle does, when its last record closes the last run it started.
+      const lastStart = events.findLastIndex((event) => event.method === "turn/started");
+      const last = events.findLastIndex((event) => event.method === "turn/completed");
+      const closing = last > lastStart ? events[last]! : null;
+      const startedId = lastStart === -1 ? null : str(events[lastStart]!.params["turnId"]);
+      if (closing && (startedId === null || terminalFor(closing) === startedId)) {
+        live.lastTerminal = str(closing.params["terminal"]) ?? "completed";
+        live.lastError = live.lastTerminal === "failed" ? (str(asRecord(closing.params["error"])?.["message"]) ?? "The turn failed.") : null;
       }
     }
     // Opening a thread backfills the usage page with the calls it made before this server ever ran.
@@ -2608,12 +2764,17 @@ export class AncillaServer {
         this.recordUsage(sessionId, event.params);
       }
     }
-    // The history's last goal change is the goal as of now, unless a live one arrived while this load ran.
+    // The history's last goal change is the goal as of now, unless a live one arrived while this load ran, or the
+    // history is a stale prefix whose goal is not newer than the one held.
     for (let index = events.length - 1; live.goalSeq === goalSeqAtStart && index >= 0; index -= 1) {
       const event = events[index];
       const goal = event?.method === "session/goalChanged" ? goalOf(event.params["goal"]) : undefined;
       if (goal !== undefined) {
-        live.goal = goal;
+        const cursor = str(event!.params["viewCursor"]);
+        if (!partial || live.goal === null || cursorAfter(cursor, live.goalCursor)) {
+          live.goal = goal;
+          live.goalCursor = cursor;
+        }
         break;
       }
     }
@@ -2661,9 +2822,10 @@ export class AncillaServer {
       pending: { approvals, userInputs },
       pendingComplete: pending !== null && statusKnown && !superseded,
       // A readable old prefix does not make an unavailable projection a complete replacement.
-      historyUnavailable: noneReason === "projectionUnavailable" || (noneReason !== null && events.length === 0),
+      historyUnavailable: partial || (noneReason !== null && events.length === 0) || historyFailed,
       viewHealth: live.viewHealth,
-      readOnly,
+      // Read-only always comes with the reason another client gave; never from a binding this server lost.
+      readOnly: readOnlyReason !== null,
       readOnlyReason,
     };
   }
@@ -2723,7 +2885,15 @@ export class AncillaServer {
       const running = str(session["status"]) === "running" && Boolean(str(session["activeTurnId"]));
       if (running) {
         const live = this.liveFor(sessionId);
-        live.activeTurnId = str(session["activeTurnId"]);
+        const listed = str(session["activeTurnId"]);
+        if (live.activeTurnId !== listed) {
+          // Newer than any read in flight, which must not then write an older state back over it.
+          live.activityRevision += 1;
+          live.activeTurnId = listed;
+          live.turnStartedAt = null;
+        }
+        // A host lists a session as running only while it has that session loaded; others list it notLoaded.
+        live.turnHost = host.key;
         live.turnStartedAt = live.turnStartedAt ?? nowIso();
         this.sessionHosts.set(sessionId, host.key);
       }
@@ -2875,13 +3045,32 @@ export class AncillaServer {
   }
 
   private async managerForSession(sessionId: string): Promise<SessionManager> {
+    return (await this.hostForSession(sessionId)).manager;
+  }
+
+  /** The host that has the session loaded, else the one its workspace and account start. */
+  private async hostForSession(sessionId: string): Promise<ManagedHost> {
     const key = this.sessionHosts.get(sessionId);
     const loaded = key ? this.hosts.get(key) : undefined;
     if (loaded) {
-      return loaded.manager;
+      return loaded;
     }
     const found = this.store.findSession(sessionId);
-    return (await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null)).manager;
+    return this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
+  }
+
+  /**
+   * Whether a refresh that found the session unloaded on its host may load it there, as opening the thread does.
+   * Only when this server knows of nothing it could reattach: no other live host of its own has the session, and no
+   * turn, approval or question is open. Another Muse client's lease still refuses the load, and that refusal (with
+   * its reason) is the one thing that makes a thread read-only.
+   */
+  private mayLoadUnloaded(sessionId: string, host: ManagedHost): boolean {
+    const mapped = this.sessionHosts.get(sessionId);
+    if (mapped !== undefined && mapped !== host.key && this.hosts.has(mapped)) {
+      return false;
+    }
+    return !this.isBusy(sessionId);
   }
 
   private async hostFor(cwd: string, accountId: string | null = null): Promise<ManagedHost> {
@@ -2968,16 +3157,35 @@ export class AncillaServer {
    */
   private forgetHost(managed: ManagedHost, lastError: string): void {
     this.hosts.delete(managed.key);
+    const affected = new Set<string>();
     for (const [sessionId, key] of this.sessionHosts) {
       if (key !== managed.key) {
         continue;
       }
       this.sessionHosts.delete(sessionId);
       this.effortApplied.delete(sessionId);
+      affected.add(sessionId);
+    }
+    // A turn this host was seen running is over too, even when the session's binding had already moved or lapsed.
+    for (const [sessionId, live] of this.live) {
+      if (live.turnHost === managed.key) {
+        affected.add(sessionId);
+      }
+    }
+    for (const sessionId of affected) {
       const live = this.live.get(sessionId);
-      if (live && (live.activeTurnId || live.pendingApprovals.size || live.pendingInputs.size)) {
+      if (!live) {
+        continue;
+      }
+      // A load that read the session from this host before it went must not write that state back afterwards.
+      live.activityRevision += 1;
+      if (live.turnHost === managed.key) {
+        live.turnHost = null;
+      }
+      if (live.activeTurnId || live.pendingApprovals.size || live.pendingInputs.size) {
         live.activeTurnId = null;
         live.turnStartedAt = null;
+        live.turnHost = null;
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         live.lastTerminal = "failed";
@@ -3208,7 +3416,7 @@ export class AncillaServer {
       }
       this.sessionHosts.set(event.sessionId, hostKey);
       this.noteNotification(event.sessionId, notification.method);
-      this.track(event.sessionId, notification.method, params);
+      this.track(event.sessionId, notification.method, params, hostKey);
       this.emit("ancilla", event);
     } catch (error) {
       this.forwardFailures += 1;
@@ -3240,7 +3448,7 @@ export class AncillaServer {
     process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
   }
 
-  private track(sessionId: string, method: string, params: Record<string, unknown>): void {
+  private track(sessionId: string, method: string, params: Record<string, unknown>, hostKey: string | null = null): void {
     const live = this.liveFor(sessionId);
     if (["approval/requested", "approval/resolved", "userInput/requested", "userInput/settled", "session/statusChanged"].includes(method)) {
       live.activityRevision += 1;
@@ -3250,7 +3458,8 @@ export class AncillaServer {
     const progressTurnId = str(item?.["turnId"]) ?? str(params["turnId"]);
     const currentProgress = progressTurnId !== null &&
       (progressTurnId === live.activeTurnId || (method === "turn/started" && live.activeTurnId === null));
-    const durableProgress = currentProgress && str(params["viewCursor"]) !== null && asRecord(params["sourceRange"]) !== null &&
+    const durable = str(params["viewCursor"]) !== null && asRecord(params["sourceRange"]) !== null;
+    const durableProgress = currentProgress && durable &&
       (["turn/started", "turn/completed"].includes(method) ||
         (["item/started", "item/updated", "item/completed"].includes(method) && str(item?.["itemId"]) !== null));
     if (durableProgress) {
@@ -3260,12 +3469,19 @@ export class AncillaServer {
         live.viewHealth = null;
         changed = true;
       }
+    } else if (durable && live.activeTurnId === null && live.viewHealth !== null && method !== "session/viewHealthChanged") {
+      // With no turn running there is no current-turn progress to wait for: any durable record means the view is
+      // being written again. The bump keeps a read that started before it from marking the view unavailable again.
+      live.activityRevision += 1;
+      live.viewHealth = null;
+      changed = true;
     }
     switch (method) {
       case "turn/started": {
         live.activityRevision += 1;
         live.activeTurnId = str(params["turnId"]);
         live.turnStartedAt = nowIso();
+        live.turnHost = hostKey;
         live.lastError = null;
         live.lastTerminal = null;
         changed = true;
@@ -3278,6 +3494,7 @@ export class AncillaServer {
         if (!live.activeTurnId || live.activeTurnId === turnId) {
           live.activeTurnId = null;
           live.turnStartedAt = null;
+          live.turnHost = null;
         }
         const terminal = str(params["terminal"]) ?? "completed";
         live.lastTerminal = terminal;
@@ -3296,8 +3513,15 @@ export class AncillaServer {
       }
       case "session/viewHealthChanged": {
         if (params["health"] === "unavailable") {
+          // Newer than any read in flight, which must not undo it.
           live.activityRevision += 1;
           live.viewHealth = { status: "unavailable", reason: str(params["noneReason"]) };
+          changed = true;
+        } else if (live.viewHealth !== null) {
+          // Any other health means the view is back, idle session or not, and every open window hears it. The bump
+          // keeps a read that found the view unavailable from marking it so again.
+          live.activityRevision += 1;
+          live.viewHealth = null;
           changed = true;
         }
         break;
@@ -3331,9 +3555,12 @@ export class AncillaServer {
         break;
       }
       case "session/closed": {
+        // A read taken before the close must not reopen the turn or requests the close ended.
+        live.activityRevision += 1;
         changed = live.activeTurnId !== null || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0;
         live.activeTurnId = null;
         live.turnStartedAt = null;
+        live.turnHost = null;
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         this.sessionHosts.delete(sessionId);
@@ -3356,6 +3583,7 @@ export class AncillaServer {
         if (goal !== undefined) {
           live.goal = goal;
           live.goalSeq += 1;
+          live.goalCursor = str(params["viewCursor"]);
           changed = true;
         }
         break;

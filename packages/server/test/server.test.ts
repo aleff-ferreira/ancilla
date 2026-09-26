@@ -208,6 +208,23 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
 
 const RANGE = { first: { id: "r", sequence: 1 }, last: { id: "r", sequence: 1 }, stream: { id: "s", kind: "session" } };
 
+/**
+ * Holds every `session/read` until `finish`, then answers all of them with the same snapshot: a refresh reads the
+ * status again after paging, and that read is no newer than the delayed one here.
+ */
+function holdReads(connection: FakeConnection): { started: () => boolean; finish: (value: unknown) => void } {
+  let release!: (value: unknown) => void;
+  const answer = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started = false;
+  connection.replies.set("session/read", () => {
+    started = true;
+    return answer;
+  });
+  return { started: () => started, finish: (value) => release(value) };
+}
+
 describe("read-only recovery of a silent Muse view", () => {
   async function running() {
     const connection = new FakeConnection();
@@ -257,10 +274,9 @@ describe("read-only recovery of a silent Muse view", () => {
   it("does not let a delayed unavailable read overwrite newer durable item progress", async () => {
     const { connection, base } = await running();
     connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "recovery read starts");
+    await waitFor(started, "recovery read starts");
     connection.notify("item/completed", { sessionId: "s1", viewCursor: "v:4", sourceRange: RANGE,
       item: { itemId: "reply", kind: "agentMessage", turnId: "t1", revision: 1, status: "completed", text: "Progress" } });
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null },
@@ -275,10 +291,9 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("does not let an older successful read clear a newer unavailable notification", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "history read starts");
+    await waitFor(started, "history read starts");
     connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
     finish({ session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
       history: { mode: "inline", items: [] } });
@@ -334,7 +349,8 @@ describe("read-only recovery of a silent Muse view", () => {
     assert.equal(result.json.viewHealth.status, "unavailable");
     assert.equal(result.json.historyUnavailable, true, "a nonempty prefix does not make an unavailable projection complete");
     assert.equal(connection.calls.some((call) => ["session/resume", "turn/start"].includes(call.method)), false);
-    assert.equal(connection.requests.filter((call) => call.method === "session/read").length, 1);
+    const reads = connection.requests.filter((call) => call.method === "session/read");
+    assert.deepEqual(reads.map((call) => call.params?.["excludeItems"]), [false, true], "history once, then the status after paging");
   });
 
   it("does not present the history projection's incomplete open run as a failed turn", async () => {
@@ -354,10 +370,9 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("does not clear a newer turn when a delayed read returns an old idle snapshot", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const result = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "read starts");
+    await waitFor(started, "read starts");
     connection.notify("turn/started", { sessionId: "s1", turnId: "t2" });
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 1 }, history: { items: [] } });
     const reply = await result;
@@ -395,10 +410,9 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("protects a newly accepted turn even when its started notification is missing", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "read starts");
+    await waitFor(started, "read starts");
     connection.replies.set("turn/start", { status: "accepted", disposition: "started", turnId: "t2" });
     assert.equal((await send(base, "/api/turns", { sessionId: "s1", text: "Next task" })).status, 200);
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null }, history: { items: [] } });
