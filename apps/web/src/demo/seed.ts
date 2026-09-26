@@ -7,7 +7,7 @@
  * phases (or two thousand in eight, or none and three background tasks), written out as the revisions
  * Muse sends, so the Swarm card, panel and drawer read the same wire here as against a real run.
  */
-import type { ApprovalRequest, LiveView, MspItem, SessionSummary, TokenUsage, ViewEvent, WorkflowChild } from "@ancilla/ui";
+import type { ApprovalRequest, LiveView, MspItem, ResearchConfig, ResearchRunView, SessionSummary, TokenUsage, ViewEvent, WorkflowChild } from "@ancilla/ui";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
 
 export const HOME = "/home/demo";
@@ -30,6 +30,13 @@ export const THREADS = {
   syncHang: "01a0ef41-9d2c-7b5e-8a3f-4c1e7b9d2a63",
   rateLimit: "01a0ed12-3f8b-7c1d-9e4a-6b2d8f1c3a95",
   vite: "01a0e8a7-7c1e-7f3b-b5d2-8e4a1c6f9b30",
+  research: "01a0f3e2-4b7d-7a1c-9e5f-3d8b6c2a4f19",
+} as const;
+
+/** The two research runs the research thread carries: the finished one and the one still out. */
+export const RESEARCH_RUNS = {
+  done: "01a0f3e3-1c2d-7e4f-8a6b-5d9c3e7f1b28",
+  running: "01a0f3e5-6d8e-7f1a-9b2c-7e4d1f8a3c56",
 } as const;
 
 /** The second account the settings page lists; orbit-cli's threads run under it. */
@@ -126,6 +133,8 @@ export interface Seed {
   threads: SeedThread[];
   audit: AuditRun | null;
   streams: TaskStream[];
+  /** DeepResearch runs the demo client serves and, for the one still running, carries on. */
+  research: ResearchRunView[];
 }
 
 interface Timed {
@@ -1296,12 +1305,162 @@ function viteThread(now: number): SeedThread {
   return thread(s, "Upgrade to Vite 6", 1, { live: null, settled: true, settledAt: iso(now - 4 * DAY) });
 }
 
+/** The defaults the demo's research settings answer with, and the config every demo run records. */
+export const RESEARCH_CONFIG: ResearchConfig = {
+  windowMinMinutes: 3,
+  windowMaxMinutes: 10,
+  maxRounds: 12,
+  maxParallel: 3,
+  workerMaxToolCalls: 25,
+  workerMaxSearches: 3,
+  workerMaxReads: 10,
+  workerMaxSaves: 10,
+  workerWallTimeMinutes: 10,
+  draftFirst: false,
+  salvageFraction: 0.6,
+  tokenSoftCap: null,
+  trace: false,
+  models: { supervisor: null, worker: null, writer: null },
+};
+
+/** The finished run's report: what it says is true of WCAG, and every citation is a page the workers read. */
+export const RESEARCH_REPORT = `# What muted text has to meet in dark mode
+
+**Short answer.** WCAG 2.1 asks the same of secondary text as of any other body text: a contrast ratio of at least 4.5:1 against its background, or 3:1 when the text is large, which the guideline defines as 18 point, or 14 point bold [1]. There is no lower bar for text that is meant to look secondary; the technique notes are explicit that de-emphasised text is still text [2]. The AAA level raises the body-text bar to 7:1 [3].
+
+## What the guideline says
+
+The minimum-contrast criterion (1.4.3) is a Level AA requirement and applies to the visual presentation of text and images of text. It exempts three things only: text that is part of an inactive user interface component, purely decorative text, and text inside a picture where the picture carries the meaning [1]. Placeholder and hint text are not on that list, and the Understanding document treats them as ordinary text [2].
+
+The ratio is computed from relative luminance, so it does not care which of the two colours is lighter. That is why a muted grey that passes on white can fail on a dark surface: the same grey sits closer in luminance to a dark canvas than to a light one [2].
+
+## What that means for a dark theme
+
+- Pick the muted colour per theme rather than sharing one hex value across both. A single value tuned for the light theme is the usual cause of a dark-mode failure [2].
+- Check the muted colour against every surface it sits on, not only the page background. Cards and sidebars in a dark theme are often a few steps lighter than the canvas, which lowers the ratio further [1].
+- Large text and non-text elements have their own, lower bar of 3:1 (1.4.11 for user interface components and graphical objects), which is the number to use for borders and icons, not for captions [4].
+
+## Open questions
+
+The guideline measures contrast with the WCAG 2 formula. The draft APCA model used in some design tools weights dark-on-light and light-on-dark text differently, and a colour that passes one can fail the other; nothing here settles which a product should follow, only that the shipping standard is the WCAG 2 ratio [1].
+
+## Sources
+
+[1] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.3 Contrast (Minimum) (https://www.w3.org/TR/WCAG21/#contrast-minimum)
+[2] Understanding Success Criterion 1.4.3: Contrast (Minimum) (https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html)
+[3] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.6 Contrast (Enhanced) (https://www.w3.org/TR/WCAG21/#contrast-enhanced)
+[4] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.11 Non-text Contrast (https://www.w3.org/TR/WCAG21/#non-text-contrast)
+`;
+
+/** A worker row as the server reports one; the counts are what it has done so far. */
+function researchWorker(
+  agentId: number,
+  round: number,
+  topic: string,
+  state: ResearchRunView["workers"][number]["state"],
+  counts: { searches: number; reads: number; saved: number },
+  startedAt: number,
+  endedAt: number | null,
+): ResearchRunView["workers"][number] {
+  return {
+    agentId,
+    round,
+    topic,
+    discovery: false,
+    state,
+    toolCalls: counts.searches + counts.reads + counts.saved,
+    ...counts,
+    startedAt: iso(startedAt),
+    endedAt: endedAt === null ? null : iso(endedAt),
+  };
+}
+
+/**
+ * The research thread: one short turn, then a run that finished, then one that is out now. The client carries
+ * the running one on from here, so on the page its workers keep counting and it writes its report.
+ */
+function researchThread(now: number): { thread: SeedThread; runs: ResearchRunView[] } {
+  const s = new Script(THREADS.research, PROJECTS.lumen, now - 52 * MIN, { branch: "fix/dark-contrast" });
+  s.begin("Before I touch the tokens: what does WCAG actually require of muted text in dark mode, and is there a lower bar for secondary text?");
+  s.say(
+    "From memory: WCAG AA wants 4.5:1 for body text and 3:1 for large text, with no exception for text that is merely de-emphasised. I would rather not answer this from memory when the tokens depend on it: a deep research run on the question will come back with the guideline's own wording and where each claim comes from.",
+  );
+  s.bill(9_800, 210);
+  s.end(14_000);
+  const built = thread(s, "What muted text has to meet in dark mode", 1, { live: null });
+  const doneCreated = now - 50 * MIN;
+  const doneStarted = doneCreated + 2_000;
+  const doneEnded = doneStarted + 7 * MIN + 41_000;
+  const done: ResearchRunView = {
+    runId: RESEARCH_RUNS.done,
+    sessionId: THREADS.research,
+    status: "completed",
+    phase: "done",
+    question: "What does WCAG require of muted or secondary text in dark mode, and is there a lower bar for de-emphasised text?",
+    brief: "Establish the contrast WCAG 2.1 requires of secondary text, whether de-emphasised text is exempt, and what changes on a dark surface.",
+    round: 3,
+    maxRounds: RESEARCH_CONFIG.maxRounds,
+    createdAt: iso(doneCreated),
+    startedAt: iso(doneStarted),
+    endedAt: iso(doneEnded),
+    researchDeadlineAt: iso(doneStarted + RESEARCH_CONFIG.windowMaxMinutes * MIN),
+    workers: [
+      researchWorker(1, 1, "the success criteria as written", "completed", { searches: 2, reads: 3, saved: 2 }, doneStarted + 24_000, doneStarted + 2 * MIN + 10_000),
+      researchWorker(2, 1, "exemptions for placeholder and de-emphasised text", "completed", { searches: 3, reads: 4, saved: 1 }, doneStarted + 24_000, doneStarted + 2 * MIN + 40_000),
+      researchWorker(3, 1, "how the ratio is measured", "completed", { searches: 2, reads: 2, saved: 1 }, doneStarted + 24_000, doneStarted + 1 * MIN + 55_000),
+      researchWorker(4, 2, "non-text contrast and large text", "completed", { searches: 2, reads: 3, saved: 1 }, doneStarted + 3 * MIN, doneStarted + 4 * MIN + 30_000),
+      researchWorker(5, 2, "APCA and the newer models", "completed", { searches: 3, reads: 3, saved: 0 }, doneStarted + 3 * MIN, doneStarted + 5 * MIN),
+    ],
+    sources: { registry: 14, verified: 11, curated: 4 },
+    usage: { inputTokens: 212_400, outputTokens: 9_850, cachedInputTokens: 96_200, totalTokens: 222_250 },
+    failure: null,
+    reportAvailable: true,
+    report: RESEARCH_REPORT,
+    reportPath: `${PROJECTS.lumen}/.ancilla/research/${RESEARCH_RUNS.done}/report.md`,
+    config: RESEARCH_CONFIG,
+  };
+  const runCreated = now - 3 * MIN - 20_000;
+  const runStarted = runCreated + 1_500;
+  const running: ResearchRunView = {
+    runId: RESEARCH_RUNS.running,
+    sessionId: THREADS.research,
+    status: "running",
+    phase: "researching",
+    question: "How do Radix Colors, GitHub Primer and Material 3 choose their muted text colours for dark themes, and what contrast do they land on?",
+    brief: "Compare how three design systems derive secondary text colours in dark themes and the contrast each documents.",
+    round: 2,
+    maxRounds: RESEARCH_CONFIG.maxRounds,
+    createdAt: iso(runCreated),
+    startedAt: iso(runStarted),
+    endedAt: null,
+    researchDeadlineAt: iso(runStarted + RESEARCH_CONFIG.windowMaxMinutes * MIN),
+    workers: [
+      researchWorker(1, 1, "Radix Colors dark scales", "completed", { searches: 2, reads: 3, saved: 2 }, runStarted + 20_000, runStarted + 1 * MIN + 30_000),
+      researchWorker(2, 1, "Primer's functional colour roles", "completed", { searches: 3, reads: 3, saved: 2 }, runStarted + 20_000, runStarted + 1 * MIN + 48_000),
+      researchWorker(3, 1, "Material 3 tonal palettes", "failed", { searches: 1, reads: 0, saved: 0 }, runStarted + 20_000, runStarted + 50_000),
+      researchWorker(4, 2, "Material 3 on-surface-variant", "working", { searches: 2, reads: 1, saved: 0 }, runStarted + 2 * MIN + 5_000, null),
+      researchWorker(5, 2, "documented contrast figures", "working", { searches: 1, reads: 0, saved: 0 }, runStarted + 2 * MIN + 5_000, null),
+      researchWorker(6, 2, "how the scales are generated", "queued", { searches: 0, reads: 0, saved: 0 }, runStarted + 2 * MIN + 5_000, null),
+    ],
+    sources: { registry: 9, verified: 7, curated: 0 },
+    usage: { inputTokens: 88_300, outputTokens: 3_120, cachedInputTokens: 40_100, totalTokens: 91_420 },
+    failure: null,
+    reportAvailable: false,
+    report: null,
+    reportPath: null,
+    config: RESEARCH_CONFIG,
+  };
+  return { thread: built, runs: [done, running] };
+}
+
 export function seed(now: number, scenario: Scenario = "running"): Seed {
   const first = scenario === "task" ? { ...tasksThread(now), run: null } : scenario === "big" ? bigThread(now) : auditThread(now, scenario);
+  const research = researchThread(now);
   return {
     threads: [
       first.thread,
       contrastThread(now),
+      research.thread,
       lazyChartsThread(now),
       paginationThread(now),
       statusJsonThread(now),
@@ -1311,6 +1470,7 @@ export function seed(now: number, scenario: Scenario = "running"): Seed {
     ],
     audit: first.run,
     streams: first.streams,
+    research: research.runs,
   };
 }
 

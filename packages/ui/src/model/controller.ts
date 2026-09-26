@@ -9,6 +9,8 @@ import type {
   OutgoingAttachment,
   OutputRange,
   ReasoningEffort,
+  ResearchConfig,
+  ResearchRunView,
   SessionSummary,
   SkillEntry,
   SubagentAction,
@@ -22,6 +24,7 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
+import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchLive } from "./research.js";
 import { projectForCwd } from "./status.js";
 import {
   INIT_PROMPT,
@@ -219,6 +222,7 @@ function blankThread(): ThreadState {
     fold: emptyFold(),
     attachments: [],
     shellRuns: [],
+    researchRuns: [],
     stalled: false,
   };
 }
@@ -525,6 +529,8 @@ export class AncillaController {
   private titleSettingsRev = 0;
   /** Bumped by every sandbox-settings request, so only the latest completion or rollback lands. */
   private sandboxSettingsRev = 0;
+  /** Bumped by every research-settings request, so only the latest completion or rollback lands. */
+  private researchSettingsRev = 0;
   /** Sandbox PATCHes queue behind each other so rapid opposite flips land in order. */
   private sandboxSettingsChain: Promise<void> = Promise.resolve();
   /** Bumped by every yolo-settings request, so only the latest completion or rollback lands. */
@@ -693,6 +699,7 @@ export class AncillaController {
       void this.loadTitleSettings();
       void this.loadSandboxSettings();
       void this.loadYoloSettings();
+      void this.loadResearchSettings();
       void this.loadPlanUsage();
       void this.loadAccounts();
     } catch (error) {
@@ -789,6 +796,18 @@ export class AncillaController {
       }
     } catch {
       /* opening Settings retries the load */
+    }
+  }
+
+  private async loadResearchSettings(): Promise<void> {
+    const rev = ++this.researchSettingsRev;
+    try {
+      const researchSettings = await this.client.getResearchSettings();
+      if (rev === this.researchSettingsRev) {
+        this.update((s) => ({ ...s, researchSettings }));
+      }
+    } catch {
+      /* a server without the feature answers 404: the trigger then stays as it is, and Settings retries */
     }
   }
 
@@ -916,6 +935,9 @@ export class AncillaController {
       if (this.state.yoloSettings === null) {
         void this.loadYoloSettings();
       }
+      if (this.state.researchSettings === null) {
+        void this.loadResearchSettings();
+      }
       if (this.state.accounts === null) {
         void this.loadAccounts();
       }
@@ -1041,6 +1063,7 @@ export class AncillaController {
             fold,
             attachments: (load.attachments ?? []).map((file) => this.stamp(file)),
             shellRuns: load.shellRuns ?? [],
+            researchRuns: load.researchRuns ?? [],
             // Saved progress is useful even when the live projection remains unavailable.
             // Keep that distinction in historySync instead of claiming the stream recovered.
             stalled,
@@ -1171,6 +1194,9 @@ export class AncillaController {
       }
       case "shell-run":
         this.addShellRun(event.sessionId, event.run);
+        break;
+      case "research-run":
+        this.mergeResearchRun(event.sessionId, event.run);
         break;
       case "sessions-changed":
         this.scheduleRefresh();
@@ -1610,6 +1636,7 @@ export class AncillaController {
             fold,
             attachments: [],
             shellRuns: [],
+            researchRuns: [],
             stalled: false,
           },
         },
@@ -2929,6 +2956,191 @@ export class AncillaController {
     });
   }
 
+  // ---------------------------------------------------------------- deep research
+
+  /**
+   * Starts a research run in the open thread, or in a new thread when the composer belongs to none. `bound` names
+   * the thread a retry or a slash command was typed in; without one the route decides, as `deliver` does.
+   */
+  research(question: string, config: Partial<ResearchConfig> | null = null, bound: string | null = null): Promise<boolean> {
+    const route = this.state.route;
+    const sessionId = bound ?? (route.kind === "thread" ? route.sessionId : null);
+    if (sessionId) {
+      return this.startResearch(sessionId, question, config);
+    }
+    const target = this.newThreadTarget();
+    if (!target) {
+      return Promise.resolve(false);
+    }
+    // The thread has no prompt of its own yet, so it keeps the folder's name until a prompt follows the report.
+    return this.startThread(target, `/research ${question}`, (fresh) => this.startResearch(fresh, question, config));
+  }
+
+  /**
+   * Posts a run for `sessionId` and shows it as queued at once, under a placeholder id, so the row is there before
+   * the server answers. The `commandId` is minted here so a retried POST returns the same run instead of a second one.
+   */
+  async startResearch(sessionId: string, question: string, config: Partial<ResearchConfig> | null = null): Promise<boolean> {
+    const trimmed = question.trim();
+    if (!trimmed) {
+      this.toast("info", "Type the question to research");
+      return false;
+    }
+    const thread = this.state.threads[sessionId];
+    if (thread?.readOnly) {
+      this.toast("info", "This thread is read-only here", thread.readOnlyReason ?? "Another Muse session has it open.");
+      return false;
+    }
+    if (this.state.researchSettings?.enabled === false) {
+      this.toast("info", "Deep research is off", "Switch it on in Settings to start a run.");
+      return false;
+    }
+    if (thread?.researchRuns.some(researchLive)) {
+      this.toast("info", "A research run is already going in this thread", "Stop it, or wait for its report, before starting another.");
+      return false;
+    }
+    const key = `research:${sessionId}`;
+    if (this.state.busy[key]) {
+      return false;
+    }
+    const commandId = mintCommandId(this.platform.now());
+    const placeholder = `pending:${commandId}`;
+    const defaults = this.state.researchSettings?.config ?? EMPTY_RESEARCH_CONFIG;
+    const optimistic: ResearchRunView = {
+      runId: placeholder,
+      sessionId,
+      status: "queued",
+      phase: "scoping",
+      question: trimmed,
+      brief: null,
+      round: 0,
+      maxRounds: config?.maxRounds ?? defaults.maxRounds,
+      createdAt: new Date(this.platform.now()).toISOString(),
+      startedAt: null,
+      endedAt: null,
+      researchDeadlineAt: null,
+      workers: [],
+      sources: { registry: 0, verified: 0, curated: 0 },
+      usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
+      failure: null,
+      reportAvailable: false,
+      report: null,
+      reportPath: null,
+      config: { ...defaults, ...(config ?? {}), models: { ...defaults.models, ...(config?.models ?? {}) } },
+    };
+    this.setBusy(key, true);
+    this.mergeResearchRun(sessionId, optimistic);
+    try {
+      const run = await this.client.startResearch(sessionId, trimmed, config, commandId);
+      this.dropResearchRun(sessionId, placeholder);
+      this.mergeResearchRun(sessionId, run);
+      return true;
+    } catch (error) {
+      this.dropResearchRun(sessionId, placeholder);
+      this.toast("error", "Could not start the research run", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  /** Stops a run; with `writeReport` the server still writes a report from what the workers found. */
+  async stopResearch(runId: string, writeReport: boolean): Promise<boolean> {
+    const key = `research-stop:${runId}`;
+    if (this.state.busy[key]) {
+      return false;
+    }
+    this.setBusy(key, true);
+    try {
+      const run = await this.client.stopResearch(runId, writeReport);
+      this.mergeResearchRun(run.sessionId, run);
+      return true;
+    } catch (error) {
+      this.toast("error", "Could not stop the research run", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  /** Reads a run with its report, which the stream and the transcript load leave out, and keeps it on the run. */
+  async openResearchReport(runId: string): Promise<boolean> {
+    const key = `research-report:${runId}`;
+    if (this.state.busy[key]) {
+      return false;
+    }
+    this.setBusy(key, true);
+    try {
+      const run = await this.client.getResearch(runId);
+      this.mergeResearchRun(run.sessionId, run);
+      return true;
+    } catch (error) {
+      this.toast("error", "Could not read the report", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  /** What Stop does on a research run from now on: the switch in the composer popover. */
+  setResearchStopWrites(writes: boolean): void {
+    this.update((s) => (s.researchStopWrites === writes ? s : { ...s, researchStopWrites: writes }));
+  }
+
+  /** Patches the server's research defaults, showing the change at once and taking it back if the server refuses. */
+  async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<void> {
+    const previous = this.state.researchSettings;
+    const rev = ++this.researchSettingsRev;
+    if (previous) {
+      const config: ResearchConfig = {
+        ...previous.config,
+        ...(patch.config ?? {}),
+        models: { ...previous.config.models, ...(patch.config?.models ?? {}) },
+      };
+      this.update((s) => ({ ...s, researchSettings: { enabled: patch.enabled ?? previous.enabled, config } }));
+    }
+    try {
+      const researchSettings = await this.client.setResearchSettings(patch);
+      if (rev === this.researchSettingsRev) {
+        this.update((s) => ({ ...s, researchSettings }));
+      }
+    } catch (error) {
+      if (rev === this.researchSettingsRev) {
+        this.update((s) => ({ ...s, researchSettings: previous }));
+        this.toast("error", "Could not change the research settings", errorMessage(error));
+      }
+    }
+  }
+
+  /**
+   * Keeps the newest state of a run in its thread, by `runId`. The stream's summaries carry no report, so a report
+   * already read stays on the run as long as the server still says one is available. A run for a thread this app
+   * has not opened is dropped: the thread reads its runs with its transcript when it is opened.
+   */
+  private mergeResearchRun(sessionId: string, run: ResearchRunView): void {
+    this.update((s) => {
+      const thread = s.threads[sessionId];
+      if (!thread) {
+        return s;
+      }
+      const index = thread.researchRuns.findIndex((existing) => existing.runId === run.runId);
+      const previous = index >= 0 ? thread.researchRuns[index] : undefined;
+      const kept = run.report === null && run.reportAvailable && previous?.report ? { ...run, report: previous.report } : run;
+      const researchRuns = index >= 0 ? thread.researchRuns.map((existing, i) => (i === index ? kept : existing)) : [...thread.researchRuns, kept];
+      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } } };
+    });
+  }
+
+  private dropResearchRun(sessionId: string, runId: string): void {
+    this.update((s) => {
+      const thread = s.threads[sessionId];
+      if (!thread || !thread.researchRuns.some((run) => run.runId === runId)) {
+        return s;
+      }
+      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns: thread.researchRuns.filter((run) => run.runId !== runId) } } };
+    });
+  }
+
   /** Hands a command's output to Muse as the next prompt, since Muse never saw it run. */
   sendShellOutput(sessionId: string, run: import("../types.js").ShellRun): Promise<boolean> {
     const fence = "`".repeat(Math.max(3, ...(run.output.match(/`+/g) ?? []).map((mark) => mark.length + 1)));
@@ -2999,6 +3211,13 @@ export class AncillaController {
           return false;
         }
         return this.startThread(target, typed, (fresh) => this.setGoal(fresh, args, typed, options));
+      }
+      case "research": {
+        if (!args) {
+          this.toast("info", "Add the question after /research", "For example: /research how do design systems pick muted text colors in dark mode");
+          return false;
+        }
+        return this.research(args, null, sessionId);
       }
       case "model": {
         if (!args) {

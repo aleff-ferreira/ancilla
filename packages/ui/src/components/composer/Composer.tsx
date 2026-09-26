@@ -1,4 +1,4 @@
-import { ArrowUpIcon, ArrowsInIcon, BrainIcon, CaretDownIcon, CpuIcon, FolderIcon, GitBranchIcon, LightningIcon, LockIcon, QuestionIcon, ShieldChevronIcon, ShieldIcon, ShieldWarningIcon, SquareIcon, TerminalWindowIcon, UserIcon } from "../ui/icons.js";
+import { ArrowUpIcon, ArrowsInIcon, BinocularsIcon, BrainIcon, CaretDownIcon, CpuIcon, FolderIcon, GitBranchIcon, LightningIcon, LockIcon, QuestionIcon, ShieldChevronIcon, ShieldIcon, ShieldWarningIcon, SquareIcon, TerminalWindowIcon, UserIcon } from "../ui/icons.js";
 import {
   forwardRef,
   useCallback,
@@ -20,10 +20,11 @@ import { useSampled } from "../../app/sampled.js";
 import { loadDraft, saveDraft } from "../../model/controller.js";
 import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
+import { researchLive } from "../../model/research.js";
 import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
-import type { ApprovalMode, ReasoningEffort } from "../../types.js";
+import type { ApprovalMode, ReasoningEffort, ResearchConfig } from "../../types.js";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Modal, Tip, FLOATING } from "../ui/overlays.js";
 import { Button, IconButton, MOD, Spinner, cn } from "../ui/primitives.js";
 import { PixelFlow } from "../ui/PixelFlow.js";
@@ -415,6 +416,16 @@ export function Composer(props: ComposerProps) {
         {/* The new-thread composer sits high, so its menus open downward; they still flip when there is no room. */}
         <AttachButton onFiles={(picked) => addFiles(Array.from(picked))} disabled={props.readOnly || files.length >= MAX_FILES} />
         <ModelPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
+        <ResearchTrigger
+          sessionId={props.sessionId}
+          side={props.variant === "home" ? "bottom" : "top"}
+          text={shell || slashing ? "" : text}
+          disabled={props.readOnly || starting}
+          onStarted={() => {
+            setText("");
+            consumedRef.current = null;
+          }}
+        />
         <EffortPicker side={props.variant === "home" ? "bottom" : "top"} />
         <AccessPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
         <AccountPicker sessionId={props.sessionId} cwd={props.cwd} variant={props.variant} />
@@ -578,6 +589,191 @@ function AccountPicker(props: { sessionId: string | null; cwd: string | null; va
         </MenuRadioGroup>
       </MenuContent>
     </Menu>
+  );
+}
+
+/** The knobs the popover offers per run; everything else comes from the Settings defaults. */
+const RESEARCH_WORKERS = [1, 2, 3, 4] as const;
+
+/**
+ * Starts a DeepResearch run on the composer's draft, or on a question typed in the popover when the draft is
+ * empty. The run is the thread's, so one at a time: the trigger says why it is off instead of going quiet.
+ */
+function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; text: string; disabled: boolean; onStarted: () => void }) {
+  const controller = useController();
+  const open = useApp((s) => s.picker === "research");
+  const settings = useApp((s) => s.researchSettings);
+  const stopWrites = useApp((s) => s.researchStopWrites);
+  const busy = useApp((s) => (props.sessionId ? Boolean(s.busy[`research:${props.sessionId}`]) : Boolean(s.busy["start"])));
+  const live = useApp((s) => (props.sessionId ? (s.threads[props.sessionId]?.researchRuns.some(researchLive) ?? false) : false));
+  const [question, setQuestion] = useState("");
+  const [windowMin, setWindowMin] = useState<string | null>(null);
+  const [windowMax, setWindowMax] = useState<string | null>(null);
+  const [parallel, setParallel] = useState<number | null>(null);
+  const questionId = useId();
+  const minId = useId();
+  const maxId = useId();
+  const switchId = useId();
+  const questionRef = useRef<HTMLTextAreaElement>(null);
+  const startRef = useRef<HTMLButtonElement>(null);
+  const defaults = settings?.config ?? null;
+  const drafted = props.text.trim();
+  const asked = (drafted || question).trim();
+  const min = Math.max(1, Math.round(Number(windowMin ?? defaults?.windowMinMinutes ?? 3)) || 1);
+  const max = Math.max(min, Math.round(Number(windowMax ?? defaults?.windowMaxMinutes ?? 10)) || min);
+  const workers = parallel ?? defaults?.maxParallel ?? 3;
+  const off = settings?.enabled === false;
+  const reason = off ? "Deep research is off in Settings" : live ? "A research run is already going in this thread" : null;
+  const disabled = props.disabled || reason !== null;
+  const start = async () => {
+    if (!asked || busy) {
+      return;
+    }
+    const config: Partial<ResearchConfig> = {};
+    if (min !== defaults?.windowMinMinutes) config.windowMinMinutes = min;
+    if (max !== defaults?.windowMaxMinutes) config.windowMaxMinutes = max;
+    if (workers !== defaults?.maxParallel) config.maxParallel = workers;
+    controller.closePicker("research");
+    const started = await controller.research(asked, Object.keys(config).length > 0 ? config : null, props.sessionId);
+    if (started) {
+      setQuestion("");
+      if (drafted) props.onStarted();
+    }
+  };
+  const trigger = (
+    <ToolbarTrigger
+      aria-label={reason ? `Deep research: ${reason}` : "Deep research"}
+      icon={<BinocularsIcon size={13} />}
+      label="Research"
+      disabled={disabled}
+      className="disabled:cursor-not-allowed disabled:opacity-50"
+    />
+  );
+  return (
+    <Popover.Root open={open && !disabled} onOpenChange={(next) => (next ? controller.setPicker("research") : controller.closePicker("research"))}>
+      {reason ? (
+        <Tip label={reason}>
+          <span tabIndex={0} className="inline-flex rounded-lg">
+            {trigger}
+          </span>
+        </Tip>
+      ) : (
+        <Tip label="Research a question on the web and get a cited report" shortcut={[MOD, "Shift", "R"]}>
+          <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+        </Tip>
+      )}
+      <Popover.Portal>
+        <Popover.Content
+          side={props.side}
+          align="start"
+          sideOffset={6}
+          {...FLOATING}
+          onOpenAutoFocus={(event) => {
+            // Straight to the question, or to Start when the draft is the question; the help button would show its tip.
+            event.preventDefault();
+            (questionRef.current ?? startRef.current)?.focus();
+          }}
+          className="pop z-[var(--z-dropdown)] w-[360px] max-w-[calc(100dvw-24px)] rounded-xl bg-raised p-3.5 text-fg shadow-pop outline-none"
+        >
+          <div className="flex items-center gap-2">
+            <BinocularsIcon size={14} className="text-muted" />
+            <span className="text-sm font-semibold text-fg">Deep research</span>
+            <span className="flex-1" />
+            <Tip label="Muse workers search the web in parallel, read what they find, and a writer turns their notes into a report whose citations only name pages a worker actually opened. Every model call and search runs through Muse on your plan.">
+              <button type="button" aria-label="What deep research does" className="-m-1 rounded-full p-1 text-subtle transition-colors duration-100 hover:text-fg">
+                <QuestionIcon size={15} />
+              </button>
+            </Tip>
+          </div>
+          {drafted ? (
+            <p className="mt-3 max-h-24 overflow-y-auto rounded-lg bg-sunken px-2.5 py-2 text-xs leading-relaxed text-fg whitespace-pre-wrap [overflow-wrap:anywhere]">{drafted}</p>
+          ) : (
+            <>
+              <label htmlFor={questionId} className="sr-only">
+                Question to research
+              </label>
+              <textarea
+                id={questionId}
+                ref={questionRef}
+                value={question}
+                rows={3}
+                placeholder="What should the workers find out?"
+                onChange={(event) => setQuestion(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void start();
+                  }
+                }}
+                className="mt-3 block w-full resize-none rounded-lg bg-sunken px-2.5 py-2 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-accent"
+              />
+            </>
+          )}
+          <div className="mt-3 grid grid-cols-[1fr_auto_auto] items-center gap-x-3 gap-y-2 text-sm">
+            <label htmlFor={minId} className="text-muted">
+              Research window, minutes
+            </label>
+            <input
+              id={minId}
+              type="number"
+              min={1}
+              max={60}
+              value={windowMin ?? String(defaults?.windowMinMinutes ?? 3)}
+              onChange={(event) => setWindowMin(event.currentTarget.value)}
+              aria-label="Window minimum, minutes"
+              className="h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            />
+            <input
+              id={maxId}
+              type="number"
+              min={1}
+              max={60}
+              value={windowMax ?? String(defaults?.windowMaxMinutes ?? 10)}
+              onChange={(event) => setWindowMax(event.currentTarget.value)}
+              aria-label="Window maximum, minutes"
+              className="h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            />
+            <span className="text-muted">Parallel workers</span>
+            <div className="col-span-2 flex items-center gap-0.5 rounded-lg bg-sunken p-0.5" role="radiogroup" aria-label="Parallel workers">
+              {RESEARCH_WORKERS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  role="radio"
+                  aria-checked={workers === n}
+                  onClick={() => setParallel(n)}
+                  className={cn(
+                    "h-6 w-8 rounded-md text-xs font-medium tabular-nums transition-colors duration-100",
+                    workers === n ? "bg-raised text-fg shadow-btn" : "text-muted hover:text-fg",
+                  )}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
+            <label htmlFor={switchId} className="min-w-0 flex-1 cursor-default text-sm text-fg">
+              Stop writes a report from what it has
+            </label>
+            <Switch.Root
+              id={switchId}
+              checked={stopWrites}
+              onCheckedChange={(on) => controller.setResearchStopWrites(on)}
+              className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent data-[state=checked]:bg-accent"
+            >
+              <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
+            </Switch.Root>
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-2">
+            <p className="text-xs text-subtle">Runs on your Muse plan; {props.sessionId ? "the report lands in this thread" : "starts a thread for the report"}.</p>
+            <Button ref={startRef} variant="primary" size="sm" disabled={!asked || busy} loading={busy} onClick={() => void start()}>
+              Start
+            </Button>
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 

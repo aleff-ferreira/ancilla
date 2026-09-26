@@ -4,7 +4,7 @@
  * /demo.html; the production build's only entry is index.html, so none of this ships.
  *
  * Query options, all optional:
- *   view=home|agents|diff|approval|usage|settings|palette   the screen to start on
+ *   view=home|agents|diff|approval|research|usage|settings|palette   the screen to start on
  *   swarm=running|stalled|failed|waiting|partial|reconnect|done|big|task
  *       what the audit thread's agents are doing; opens that thread unless view= says otherwise:
  *       running    the design's run 41m 16s in: ten agents in four phases, one failed after two attempts, one
@@ -35,6 +35,7 @@ const VIEWS: Record<string, string> = {
   agents: `#/t/${THREADS.audit}`,
   diff: `#/t/${THREADS.pagination}`,
   approval: `#/t/${THREADS.contrast}`,
+  research: `#/t/${THREADS.research}`,
   usage: "#/usage",
   settings: "#/settings",
   palette: "",

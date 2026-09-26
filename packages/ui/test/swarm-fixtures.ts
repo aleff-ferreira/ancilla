@@ -96,7 +96,7 @@ export function fold(events: ViewEvent[]): ThreadFold {
 }
 
 export function thread(f: ThreadFold, extra: Partial<ThreadState> = {}): ThreadState {
-  return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: f, attachments: [], shellRuns: [], stalled: false, ...extra };
+  return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: f, attachments: [], shellRuns: [], researchRuns: [], stalled: false, ...extra };
 }
 
 export function appState(extra: Partial<AppState> = {}): AppState {

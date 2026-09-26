@@ -1,4 +1,4 @@
-import { ArrowElbowDownLeftIcon, ArrowsInIcon, BookOpenIcon, BrainIcon, ClockCounterClockwiseIcon, CpuIcon, FileTextIcon, GitForkIcon, NotePencilIcon, ShieldIcon, TargetIcon } from "../ui/icons.js";
+import { ArrowElbowDownLeftIcon, ArrowsInIcon, BinocularsIcon, BookOpenIcon, BrainIcon, ClockCounterClockwiseIcon, CpuIcon, FileTextIcon, GitForkIcon, NotePencilIcon, ShieldIcon, TargetIcon } from "../ui/icons.js";
 import { useEffect, type ReactNode } from "react";
 import type { SlashAction, SlashCommand } from "../../model/slash.js";
 import { Spinner, cn } from "../ui/primitives.js";
@@ -20,6 +20,7 @@ const ACTION_ICONS: Record<SlashAction, ReactNode> = {
   init: <FileTextIcon size={14} />,
   skill: <BookOpenIcon size={14} />,
   goal: <TargetIcon size={14} />,
+  research: <BinocularsIcon size={14} />,
 };
 
 /** Where a skill comes from, for the ones not built into Muse. */

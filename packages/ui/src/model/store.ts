@@ -9,6 +9,8 @@ import type {
   ReasoningEffort,
   SandboxSettings,
   SessionSummary,
+  ResearchRunView,
+  ResearchSettings,
   ShellRun,
   SkillEntry,
   TitleSettings,
@@ -233,6 +235,8 @@ export interface ThreadState {
   attachments: AttachmentView[];
   /** `!` commands Ancilla ran itself, which Muse's transcript never sees. */
   shellRuns: ShellRun[];
+  /** DeepResearch runs started from this thread, newest state per run; the report rides only once asked for. */
+  researchRuns: ResearchRunView[];
   /**
    * The thread shows a turn running, but its stream went quiet and reloading from history did not
    * move it on. Set once the watchdog has spent its reloads, so the view can say so instead of
@@ -275,6 +279,10 @@ export interface AppState {
   sandboxSettings: SandboxSettings | null;
   /** Server-owned YOLO mode; null until the first boot load answers. */
   yoloSettings: YoloSettings | null;
+  /** Server-owned DeepResearch defaults and switch; null until the first boot load answers. */
+  researchSettings: ResearchSettings | null;
+  /** What Stop does on a research run: write a report from what it has, or drop it. Set from the composer popover. */
+  researchStopWrites: boolean;
   prefs: Prefs;
   toasts: Toast[];
   paletteOpen: boolean;
@@ -324,7 +332,7 @@ export interface AppState {
 }
 
 /** `confirmFullAccess` is the full-access confirmation, which `/permissions full` must still pass through. */
-export type ComposerPicker = "model" | "effort" | "permissions" | "confirmFullAccess" | "confirmBypass" | "confirmYolo" | "account";
+export type ComposerPicker = "model" | "effort" | "permissions" | "confirmFullAccess" | "confirmBypass" | "confirmYolo" | "account" | "research";
 
 /** The device-code login modal's state: a device prompt waiting or done, or a runtime fallback message. */
 export type AccountLoginState =
@@ -355,6 +363,8 @@ export function initialState(prefs: Prefs): AppState {
     titleSettings: null,
     sandboxSettings: null,
     yoloSettings: null,
+    researchSettings: null,
+    researchStopWrites: true,
     prefs,
     toasts: [],
     paletteOpen: false,

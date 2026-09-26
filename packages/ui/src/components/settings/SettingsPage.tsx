@@ -6,7 +6,7 @@ import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
 import type { AncillaController } from "../../model/controller.js";
 import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type AccountLoginState, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
-import type { AccountView, ApprovalMode, ReasoningEffort } from "../../types.js";
+import type { AccountView, ApprovalMode, ReasoningEffort, ResearchConfig, ResearchModelIds } from "../../types.js";
 import { LEVELS, MODES } from "../composer/Composer.js";
 import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
 import { Modal } from "../ui/overlays.js";
@@ -15,7 +15,7 @@ import { Button, IconButton, MOD, cn } from "../ui/primitives.js";
 import { About } from "./About.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
-function Pick<T extends string | null>(props: {
+function Pick<T extends string | number | null>(props: {
   value: T;
   options: readonly { value: T; label: string; hint?: string }[];
   onChange: (value: T) => void;
@@ -78,6 +78,100 @@ function Row(props: { label: ReactNode; description?: string; descriptionClassNa
       </div>
       {props.children ? <div className="min-w-0 w-full @min-[520px]:w-auto">{props.children}</div> : null}
     </div>
+  );
+}
+
+/**
+ * A row's control: a whole number in a small field. The value lands on blur or Enter, not on every keystroke, so a
+ * half-typed number never reaches the server; an empty or out-of-range field goes back to what it was.
+ */
+function Num(props: { value: number; min: number; max: number; unit?: string; label: string; onChange: (value: number) => void; disabled?: boolean }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const next = Math.round(Number(draft));
+    setDraft(null);
+    if (draft.trim() !== "" && Number.isFinite(next) && next >= props.min && next <= props.max && next !== props.value) {
+      props.onChange(next);
+    }
+  };
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-muted">
+      <input
+        type="number"
+        min={props.min}
+        max={props.max}
+        step={1}
+        value={draft ?? String(props.value)}
+        disabled={props.disabled}
+        aria-label={props.label}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commit();
+          }
+        }}
+        className="h-7 w-16 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
+      />
+      {props.unit ? <span>{props.unit}</span> : null}
+    </span>
+  );
+}
+
+const RESEARCH_PARALLEL: readonly { value: number; label: string }[] = [1, 2, 3, 4].map((n) => ({ value: n, label: String(n) }));
+const RESEARCH_ROUNDS: readonly { value: number; label: string }[] = [4, 8, 12, 16, 20].map((n) => ({ value: n, label: String(n) }));
+
+/** The research defaults a run starts from; the composer popover can change the window and the workers per run. */
+function ResearchRows(props: { config: ResearchConfig; models: { modelId: string; contributor?: boolean }[]; controller: AncillaController }) {
+  const { config, controller } = props;
+  const patch = (part: Partial<ResearchConfig>) => void controller.setResearchSettings({ config: part });
+  const modelRow = (role: keyof ResearchModelIds, label: string, description: string) => (
+    <Row label={label} description={description}>
+      {props.models.length === 0 ? (
+        <p className="text-xs text-subtle">No models loaded</p>
+      ) : (
+        <Pick<string | null>
+          value={config.models[role]}
+          options={[
+            { value: null, label: "Muse default" },
+            ...props.models.map((model) => ({
+              value: model.modelId as string | null,
+              label: model.contributor ? `${modelDisplayName(model.modelId)} · Contributor` : modelDisplayName(model.modelId),
+              hint: model.contributor ? "Contributor tier: prompts and outputs may be used for product improvement." : undefined,
+            })),
+          ]}
+          onChange={(value) => patch({ models: { ...config.models, [role]: value } })}
+        />
+      )}
+    </Row>
+  );
+  return (
+    <>
+      <Row label="Research window" description="How long the workers have before the writer takes over: no report before the minimum unless nothing is left to look up, and to the writer at the maximum.">
+        <div className="flex flex-wrap items-center gap-2">
+          <Num value={config.windowMinMinutes} min={1} max={config.windowMaxMinutes} unit="to" label="Window minimum, minutes" onChange={(value) => patch({ windowMinMinutes: value })} />
+          <Num value={config.windowMaxMinutes} min={config.windowMinMinutes} max={60} unit="minutes" label="Window maximum, minutes" onChange={(value) => patch({ windowMaxMinutes: value })} />
+        </div>
+      </Row>
+      <Row label="Parallel workers" description="How many Muse sessions research at once. Each is a session on your plan.">
+        <Pick value={config.maxParallel} options={RESEARCH_PARALLEL} onChange={(value) => patch({ maxParallel: value })} />
+      </Row>
+      <Row label="Supervisor rounds" description="How many times the supervisor may send workers out before it has to write.">
+        <Pick value={config.maxRounds} options={RESEARCH_ROUNDS} onChange={(value) => patch({ maxRounds: value })} />
+      </Row>
+      <Row label="Per worker" description="What one worker may do in one round: searches, pages read, and sources it may keep for the report.">
+        <div className="flex flex-wrap items-center gap-3">
+          <Num value={config.workerMaxSearches} min={1} max={20} unit="searches" label="Searches per worker" onChange={(value) => patch({ workerMaxSearches: value })} />
+          <Num value={config.workerMaxReads} min={1} max={50} unit="reads" label="Reads per worker" onChange={(value) => patch({ workerMaxReads: value })} />
+          <Num value={config.workerMaxSaves} min={1} max={50} unit="saves" label="Saves per worker" onChange={(value) => patch({ workerMaxSaves: value })} />
+        </div>
+      </Row>
+      {modelRow("supervisor", "Supervisor model", "Scopes the question and decides what to send the workers after. Muse default lets the CLI choose.")}
+      {modelRow("worker", "Worker model", "Runs the searches and reads the pages.")}
+      {modelRow("writer", "Writer model", "Turns the workers' notes into the report.")}
+    </>
   );
 }
 
@@ -322,6 +416,7 @@ export function SettingsPage() {
   const metaApiKeyInherited = useApp((s) => s.metaApiKeyInherited);
   const accountLogin = useApp((s) => s.accountLogin);
   const titleSettings = useApp((s) => s.titleSettings);
+  const researchSettings = useApp((s) => s.researchSettings);
   const sandboxSettings = useApp((s) => s.sandboxSettings);
   const env = useApp((s) => s.env);
   const updates = useApp((s) => s.updates);
@@ -531,6 +626,20 @@ export function SettingsPage() {
               )}
             </Row>
           ) : null}
+        </Section>
+
+        <Section title="Deep research">
+          <Row
+            label="Deep research"
+            description="A research trigger in the composer and /research: parallel Muse workers search the web and read what they find, and a writer turns their notes into a report whose citations only name pages a worker opened. Every model call and search runs through Muse on your plan."
+          >
+            {researchSettings ? (
+              <Toggle checked={researchSettings.enabled} label="Deep research" onChange={(on) => void controller.setResearchSettings({ enabled: on })} />
+            ) : (
+              <p className="text-xs text-subtle">Loading…</p>
+            )}
+          </Row>
+          {researchSettings?.enabled ? <ResearchRows config={researchSettings.config} models={models} controller={controller} /> : null}
         </Section>
 
         <Section title="Approvals">

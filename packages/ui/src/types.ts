@@ -577,6 +577,8 @@ export interface TranscriptLoad {
   attachments?: AttachmentView[];
   /** Every `!` command Ancilla ran itself for this thread. */
   shellRuns?: ShellRun[];
+  /** Every DeepResearch run started from this thread; optional so a server without the feature still loads. */
+  researchRuns?: ResearchRunView[];
   pending: { approvals: ApprovalRequest[]; userInputs: UserInputRequest[] };
   readOnly: boolean;
   readOnlyReason: string | null;

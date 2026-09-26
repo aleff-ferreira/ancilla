@@ -170,6 +170,10 @@ function GlobalShortcuts() {
       } else if (mod && event.shiftKey && !event.altKey && key === "e") {
         event.preventDefault();
         controller.toggleFiles();
+      } else if (mod && event.shiftKey && !event.altKey && key === "r") {
+        // Opens the composer's research popover; the composer decides whether a run can start from here.
+        event.preventDefault();
+        controller.setPicker(controller.store.get().picker === "research" ? null : "research");
       } else if (event.altKey && !mod && (event.key === "ArrowUp" || event.key === "ArrowDown") && !isTyping(event.target)) {
         const state = controller.store.get();
         const ordered = Object.values(state.sessions).sort((a, b) => (a.activityAt < b.activityAt ? 1 : -1));

@@ -71,6 +71,14 @@ panel for native subagents and workflows, and fixes for Windows and WSL; see [NO
   puts another folder under it, and a folder that was a project of its own moves in with its threads. Each thread
   still runs in exactly one folder, because Muse gives a session one workspace root; the project simply lists the
   threads of all its folders together, and the new-thread page lets you pick which folder to start in.
+- **Deep research.** A Research button beside the model picker, or `/research <question>`, sends parallel Muse
+  workers out to search the web and read what they find, round after round under a supervisor, until a writer turns
+  their notes into a Markdown report in the thread. The row in the transcript shows the phase, each worker's searches
+  and reads, the sources found and verified, the tokens spent and the time left in the window, with Stop that either
+  writes a report from what it has or drops the run. Every model call and every search runs through Muse on your
+  plan, so there is no key to add and the cost lands on the Usage page; a citation only ever names a page a worker
+  actually opened. First release: the report reads inline and lands in `.ancilla/research/` in the workspace, and a
+  run cut off by a restart stays interrupted until a later release can resume it.
 
 ![The Swarm card: a native Muse workflow with ten agents in four phases, the rows that need attention first, and the approval it is waiting on](docs/assets/agents.png)
 
