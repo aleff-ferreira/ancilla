@@ -36,8 +36,7 @@ Thumbs.db
 # So are the shipped brand images: desktop icons, web favicons, social assets.
 !apps/desktop/src-tauri/icons/**/*.png
 !apps/web/public/*.png
-!assets/social/*.png
-!assets/social/**/*.png
+!assets/brand/*.png
 
 # Marketing / CMO run — local-only strategy + logs, never commit to the public repo
 marketing/

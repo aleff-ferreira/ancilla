@@ -45,9 +45,9 @@ default is `http://127.0.0.1:3127`), Ancilla starts from Helicon's saved setting
 (theme, zoom and the rest) and composer drafts until it saves its own. Helicon's
 copies are only read. For a server started with `--token`, a `helicon_token`
 cookie the browser still holds for the same token is accepted as well; Ancilla
-itself only ever sets `ancilla_token`. The one exception is a server address and
-token saved with **Connect** (a remote or token-protected server): enter them
-once more in Ancilla. A page opened from the server's own address needs nothing.
+itself only ever sets `ancilla_token`. A server address and token saved with
+**Connect** (a remote or token-protected server) carry over the same way: read
+from Helicon's copy until Ancilla saves its own.
 
 ## Where Ancilla looks
 

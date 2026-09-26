@@ -31,6 +31,10 @@ jobs:
       # (scripts/bump-version.mjs), so a half-done bump never reaches a tag.
       - run: node scripts/bump-version.mjs --check
       - run: npm ci
+      # THIRD_PARTY_NOTICES.md follows the lockfiles; a dependency change has to regenerate it
+      # (npm run notices). Linux only: Windows runners check the file out with CRLF endings.
+      - if: runner.os == 'Linux'
+        run: npm run notices:check
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       - run: npm run test --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       - run: npm run build --workspace @ancilla/web

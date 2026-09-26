@@ -8,7 +8,7 @@ which is also under the MIT License. Helicon's copyright and permission notice i
 and covers the parts of Ancilla that come from Helicon.
 
 Desktop builds of Ancilla also redistribute the third-party components below, each under its own license.
-An installed copy carries this file, [LICENSE](LICENSE), the Node.js license and the Rust crates' license texts in its
+An installed copy carries this file, [LICENSE](LICENSE), [NOTICE.md](NOTICE.md), the Node.js license and the Rust crates' license texts in its
 `resources/legal` folder.
 
 - [JavaScript packages](#javascript-packages): 2 bundled into the local server, 133 into the interface

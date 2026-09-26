@@ -46,10 +46,12 @@ export interface Daemon {
 }
 
 const DAEMON_KEY = "ancilla:daemon";
+/** Where Helicon kept the same thing. Read until Ancilla saves its own, never written. */
+const LEGACY_DAEMON_KEY = "helicon:daemon";
 
 function stored(): Daemon | null {
   try {
-    const raw = window.localStorage.getItem(DAEMON_KEY);
+    const raw = window.localStorage.getItem(DAEMON_KEY) ?? window.localStorage.getItem(LEGACY_DAEMON_KEY);
     if (!raw) {
       return null;
     }

@@ -117,6 +117,30 @@ describe("web client", () => {
     assert.doesNotMatch(asset, /secret/);
   });
 
+  it("starts from the daemon Helicon saved, without writing Helicon's key", async () => {
+    const world = browser({
+      stored: { "helicon:daemon": JSON.stringify({ base: "https://box.example:3127", token: "secret" }) },
+    });
+    const { WebAncillaClient, currentDaemon } = await freshClient();
+
+    assert.deepEqual(currentDaemon(), { base: "https://box.example:3127", token: "secret" });
+    await new WebAncillaClient().listProjects();
+    assert.equal(world.calls.at(-1)?.url, "https://box.example:3127/api/projects");
+    assert.equal(world.storage["helicon:daemon"], JSON.stringify({ base: "https://box.example:3127", token: "secret" }));
+  });
+
+  it("prefers its own saved daemon over Helicon's", async () => {
+    browser({
+      stored: {
+        "ancilla:daemon": JSON.stringify({ base: "", token: "mine" }),
+        "helicon:daemon": JSON.stringify({ base: "https://old.example", token: "theirs" }),
+      },
+    });
+    const { currentDaemon } = await freshClient();
+
+    assert.deepEqual(currentDaemon(), { base: "", token: "mine" });
+  });
+
   it("earns the cookie before opening the stream", async () => {
     const world = browser({ stored: { "ancilla:daemon": JSON.stringify({ base: "", token: "secret" }) } });
     const { WebAncillaClient } = await freshClient();
