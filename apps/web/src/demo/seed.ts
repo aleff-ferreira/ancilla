@@ -15,6 +15,8 @@ export const HOME = "/home/demo";
 export const PROJECTS = {
   atlas: `${HOME}/code/atlas-api`,
   lumen: `${HOME}/code/lumen-web`,
+  /** A second folder of the lumen-web project, so the demo shows a project with several folders. */
+  lumenSite: `${HOME}/code/lumen-site`,
   orbit: `${HOME}/code/orbit-cli`,
 } as const;
 
@@ -1282,9 +1284,9 @@ function rateLimitThread(now: number): SeedThread {
   return thread(s, "Rate-limit the login endpoint", 1, { live: null });
 }
 
-/** Almost a week old and shelved, so it sits in the project's settled list. */
+/** Almost a week old and shelved, so it sits in the project's settled list; it ran in the project's second folder. */
 function viteThread(now: number): SeedThread {
-  const s = new Script(THREADS.vite, PROJECTS.lumen, now - 6 * DAY - 2 * HOUR, { branch: "main" });
+  const s = new Script(THREADS.vite, PROJECTS.lumenSite, now - 6 * DAY - 2 * HOUR, { branch: "main" });
   s.begin("Upgrade Vite to v6 and fix whatever breaks.");
   s.tool("bash", { command: "npm install -D vite@6 @vitejs/plugin-react@4", description: "Upgrade Vite" }, "\nchanged 14 packages, and audited 402 packages in 6s\n\nfound 0 vulnerabilities\n", 2200);
   s.tool("bash", { command: "npm run build", description: "Check the build" }, "vite v6.0.7 building for production...\n✓ 409 modules transformed.\n✓ built in 2.91s\n", 7400);

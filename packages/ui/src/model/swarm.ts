@@ -3,6 +3,7 @@ import { agentNumbers, type AgentNumbers } from "./agents.js";
 import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold } from "./fold.js";
 import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
 import { costOf, formatCost, listedPrice } from "./pricing.js";
+import { projectForCwd } from "./status.js";
 import type { AppState, ThreadState } from "./store.js";
 import { TERMINAL_FAILURES, reconciled } from "./workflow.js";
 
@@ -2120,7 +2121,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
   const threadsWorking = new Set<string>();
   const sessions = Object.values(state.sessions).sort((a, b) => (a.activityAt < b.activityAt ? 1 : a.activityAt > b.activityAt ? -1 : 0));
   for (const session of sessions) {
-    const project = state.projects.find((candidate) => candidate.cwd === session.cwd)?.displayName ?? session.cwd;
+    const project = projectForCwd(state.projects, session.cwd)?.displayName ?? session.cwd;
     const base = { sessionId: session.sessionId, project, thread: session.title };
     const thread: ThreadState | undefined = state.threads[session.sessionId];
     if (!thread || !foldIsLive(state, thread)) {

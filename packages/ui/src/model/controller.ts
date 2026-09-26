@@ -22,6 +22,7 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
+import { projectForCwd } from "./status.js";
 import {
   INIT_PROMPT,
   findModel,
@@ -864,7 +865,8 @@ export class AncillaController {
 
   newThread(cwd?: string | null): void {
     const target = cwd ?? this.state.prefs.lastProject ?? this.state.projects[0]?.cwd ?? null;
-    const known = target && this.state.projects.some((p) => p.cwd === target) ? target : (this.state.projects[0]?.cwd ?? null);
+    // Any folder of a project is a place to start; a folder no project has falls back to the first project.
+    const known = projectForCwd(this.state.projects, target) ? target : (this.state.projects[0]?.cwd ?? null);
     this.navigate({ kind: "new", cwd: known });
   }
 
@@ -1420,7 +1422,7 @@ export class AncillaController {
       return true;
     }
     const session = s.sessions[sessionId];
-    return session !== undefined && !session.archived && s.projects.some((p) => p.cwd === session.cwd);
+    return session !== undefined && !session.archived && projectForCwd(s.projects, session.cwd) !== null;
   }
 
   /** Stops recovering a thread that left the sidebar. Its fold is no longer kept current, so opening it reads it again. */
@@ -1581,7 +1583,8 @@ export class AncillaController {
       // YOLO owns every thread's posture while it is on, new or old: a stale default from before it
       // was armed must never seed a thread that asks when the rest of the app does not.
       const approvalMode: ApprovalMode = this.state.yoloSettings?.enabled === true ? "allowAll" : defaultMode;
-      const project = this.state.projects.find((p) => p.cwd === cwd);
+      // The account is the project's, whichever of its folders the thread starts in.
+      const project = projectForCwd(this.state.projects, cwd);
       const accountId = project?.defaultAccountId ?? null;
       const session = await this.client.startSession(cwd, {
         approvalMode,
@@ -2686,13 +2689,17 @@ export class AncillaController {
       return;
     }
     this.update((s) => ({ ...s, projects: s.projects.filter((p) => p.cwd !== cwd) }));
+    // Every folder of the project leaves with it, so what was open in any of them is no longer listed.
+    const folders = new Set(project.folders.map((folder) => folder.cwd));
+    folders.add(cwd);
     const route = this.state.route;
     const active = route.kind === "thread" ? this.state.sessions[route.sessionId] : null;
-    if ((route.kind === "new" && route.cwd === cwd) || active?.cwd === cwd) {
+    if ((route.kind === "new" && route.cwd !== null && folders.has(route.cwd)) || (active && folders.has(active.cwd))) {
       this.navigate({ kind: "home" });
     }
     for (const id of Object.keys(this.state.threads)) {
-      if (this.state.sessions[id]?.cwd === cwd) {
+      const session = this.state.sessions[id];
+      if (session && folders.has(session.cwd)) {
         this.forget(id);
       }
     }
@@ -2708,12 +2715,49 @@ export class AncillaController {
     }
   }
 
+  /** Asks Muse again for the threads in every folder of the project, since each folder is its own workspace. */
   async refreshProject(cwd: string): Promise<void> {
+    const project = this.state.projects.find((p) => p.cwd === cwd);
+    const folders = project ? project.folders.map((folder) => folder.cwd) : [cwd];
     try {
-      await this.client.discover(cwd);
+      for (const folder of folders) {
+        await this.client.discover(folder);
+      }
       await this.refresh();
     } catch (error) {
       this.toast("error", "Could not refresh that project", errorMessage(error));
+    }
+  }
+
+  /** Puts a folder inside a project. The server discovers its threads, and the list is read again to show them. */
+  async addProjectFolder(cwd: string, path: string): Promise<boolean> {
+    const folder = path.trim();
+    if (!folder || this.state.busy["addProject"]) {
+      return false;
+    }
+    this.setBusy("addProject", true);
+    try {
+      const project = await this.client.addProjectFolder(cwd, folder);
+      this.update((s) => ({ ...s, projects: s.projects.map((p) => (p.cwd === cwd ? project : p)) }));
+      this.setAddProjectOpen(false);
+      await this.refresh();
+      return true;
+    } catch (error) {
+      this.toast("error", "Could not add that folder", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy("addProject", false);
+    }
+  }
+
+  /** Takes a folder out of a project. It comes back as a project of its own, so the list is read again to show it. */
+  async removeProjectFolder(cwd: string, path: string): Promise<void> {
+    try {
+      const project = await this.client.removeProjectFolder(cwd, path);
+      this.update((s) => ({ ...s, projects: s.projects.map((p) => (p.cwd === cwd ? project : p)) }));
+      await this.refresh();
+    } catch (error) {
+      this.toast("error", "Could not remove that folder", errorMessage(error));
     }
   }
 
@@ -3735,7 +3779,8 @@ export class AncillaController {
     this.update((s) => (s.paletteOpen === open ? s : { ...s, paletteOpen: open }));
   }
 
-  setAddProjectOpen(open: boolean): void {
+  /** `{ folderFor }` opens the same picker to add a folder to that project instead of a new project. */
+  setAddProjectOpen(open: boolean | { folderFor: string }): void {
     this.update((s) => (s.addProjectOpen === open ? s : { ...s, addProjectOpen: open }));
   }
 

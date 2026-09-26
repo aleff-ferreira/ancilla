@@ -136,9 +136,20 @@ export class DemoAncillaClient implements AncillaClient {
     }
     this.streams = seeded.streams;
     this.projects = [
-      { cwd: PROJECTS.atlas, displayName: "atlas-api", pinned: true, activityAt: iso(this.now), defaultAccountId: null },
-      { cwd: PROJECTS.lumen, displayName: "lumen-web", pinned: false, activityAt: iso(this.now), defaultAccountId: null },
-      { cwd: PROJECTS.orbit, displayName: "orbit-cli", pinned: false, activityAt: iso(this.now), defaultAccountId: SIDE_ACCOUNT },
+      { cwd: PROJECTS.atlas, displayName: "atlas-api", pinned: true, activityAt: iso(this.now), defaultAccountId: null, folders: [{ cwd: PROJECTS.atlas, displayName: "atlas-api" }] },
+      {
+        cwd: PROJECTS.lumen,
+        displayName: "lumen-web",
+        pinned: false,
+        activityAt: iso(this.now),
+        defaultAccountId: null,
+        // Two folders: the web app and its marketing site, whose threads sit under one project.
+        folders: [
+          { cwd: PROJECTS.lumen, displayName: "lumen-web" },
+          { cwd: PROJECTS.lumenSite, displayName: "lumen-site" },
+        ],
+      },
+      { cwd: PROJECTS.orbit, displayName: "orbit-cli", pinned: false, activityAt: iso(this.now), defaultAccountId: SIDE_ACCOUNT, folders: [{ cwd: PROJECTS.orbit, displayName: "orbit-cli" }] },
     ];
     this.accounts = [
       { id: SIDE_ACCOUNT, name: "Side projects", hasLogin: true, email: "demo@example.com", lastUsedAt: iso(this.now - 3 * HOUR) },
@@ -407,7 +418,7 @@ export class DemoAncillaClient implements AncillaClient {
   async listProjects(): Promise<ProjectView[]> {
     return this.projects.map((project) => {
       const latest = [...this.threads.values()]
-        .filter((thread) => thread.summary.cwd === project.cwd && !thread.summary.archived)
+        .filter((thread) => project.folders.some((folder) => folder.cwd === thread.summary.cwd) && !thread.summary.archived)
         .map((thread) => thread.summary.activityAt)
         .sort()
         .pop();
@@ -415,13 +426,53 @@ export class DemoAncillaClient implements AncillaClient {
     });
   }
 
+  private cleanPath(path: string): string {
+    return path.replace(/^~(?=\/|$)/, HOME).replace(/\/+$/, "") || "/";
+  }
+
   async addProject(cwd: string): Promise<{ cwd: string; warning: string | null }> {
-    const clean = cwd.replace(/^~(?=\/|$)/, HOME).replace(/\/+$/, "") || "/";
-    if (!this.projects.some((project) => project.cwd === clean)) {
-      this.projects.push({ cwd: clean, displayName: basename(clean), pinned: false, activityAt: iso(Date.now()), defaultAccountId: null });
-      this.broadcast({ type: "sessions-changed" });
+    const clean = this.cleanPath(cwd);
+    // A folder already inside a project answers with that project, like the server does.
+    const owner = this.projects.find((project) => project.folders.some((folder) => folder.cwd === clean));
+    if (owner) {
+      return { cwd: owner.cwd, warning: null };
     }
+    this.projects.push({ cwd: clean, displayName: basename(clean), pinned: false, activityAt: iso(Date.now()), defaultAccountId: null, folders: [{ cwd: clean, displayName: basename(clean) }] });
+    this.broadcast({ type: "sessions-changed" });
     return { cwd: clean, warning: null };
+  }
+
+  async addProjectFolder(cwd: string, path: string): Promise<ProjectView> {
+    const clean = this.cleanPath(path);
+    const project = this.projects.find((candidate) => candidate.cwd === cwd);
+    if (!project) {
+      throw new Error("Unknown project.");
+    }
+    if (clean === cwd) {
+      throw new Error("A project cannot be a folder of itself.");
+    }
+    const standalone = this.projects.find((candidate) => candidate.cwd === clean);
+    if (standalone && standalone.folders.length > 1) {
+      throw new Error(`${standalone.displayName} is a project with folders of its own. Remove its folders first.`);
+    }
+    // A project of its own moves in whole; its threads keep their cwd, which is now one of this project's folders.
+    this.projects = this.projects.filter((candidate) => candidate.cwd !== clean);
+    if (!project.folders.some((folder) => folder.cwd === clean)) {
+      project.folders = [...project.folders, { cwd: clean, displayName: basename(clean) }];
+    }
+    this.broadcast({ type: "sessions-changed" });
+    return { ...project };
+  }
+
+  async removeProjectFolder(cwd: string, path: string): Promise<ProjectView> {
+    const project = this.projects.find((candidate) => candidate.cwd === cwd);
+    if (!project || !project.folders.some((folder, index) => index > 0 && folder.cwd === path)) {
+      throw new Error("That folder is not part of this project.");
+    }
+    project.folders = project.folders.filter((folder) => folder.cwd !== path);
+    this.projects.push({ cwd: path, displayName: basename(path), pinned: false, activityAt: iso(Date.now()), defaultAccountId: null, folders: [{ cwd: path, displayName: basename(path) }] });
+    this.broadcast({ type: "sessions-changed" });
+    return { ...project };
   }
 
   async cloneProject(_url: string, path: string): Promise<{ cwd: string; warning: string | null }> {
@@ -434,11 +485,11 @@ export class DemoAncillaClient implements AncillaClient {
       "/": ["home"],
       "/home": ["demo"],
       [HOME]: ["code", "notes"],
-      [`${HOME}/code`]: ["atlas-api", "lumen-web", "orbit-cli", "playground"],
+      [`${HOME}/code`]: ["atlas-api", "lumen-site", "lumen-web", "orbit-cli", "playground"],
     };
     const directory = (path.trim() || HOME).replace(/^~(?=\/|$)/, HOME).replace(/(.)\/+$/, "$1");
     const parent = directory === "/" ? null : directory.slice(0, directory.lastIndexOf("/")) || "/";
-    const known = directory in tree || this.projects.some((project) => project.cwd === directory);
+    const known = directory in tree || this.projects.some((project) => project.folders.some((folder) => folder.cwd === directory));
     return { directory, parent, separator: "/", exists: known, entries: (tree[directory] ?? []).map((name) => ({ name })) };
   }
 

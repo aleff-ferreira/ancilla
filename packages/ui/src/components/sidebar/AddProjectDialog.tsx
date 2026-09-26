@@ -25,27 +25,35 @@ const INPUT = "h-11 min-w-0 flex-1 bg-transparent text-[15px] text-fg outline-no
  */
 export function AddProjectDialog() {
   const controller = useController();
-  const open = useApp((s) => s.addProjectOpen);
+  const state = useApp((s) => s.addProjectOpen);
+  const open = state !== false;
+  // Opened for a project, the same picker adds a folder to it instead of a project.
+  const folderFor = typeof state === "object" ? state.folderFor : null;
   return (
     <Modal
       open={open}
       onOpenChange={(next) => controller.setAddProjectOpen(next)}
-      title="Add a project"
+      title={folderFor ? "Add a folder to the project" : "Add a project"}
       hideTitle
       bare
       className="top-[12vh] w-[min(640px,calc(100vw-32px))] overflow-hidden"
     >
-      {open ? <ProjectPicker /> : null}
+      {open ? <ProjectPicker folderFor={folderFor} /> : null}
     </Modal>
   );
 }
 
-function ProjectPicker() {
+function ProjectPicker(props: { folderFor: string | null }) {
   const projects = useApp((s) => s.projects);
-  const [view, setView] = useState<View>({ kind: "sources" });
-  // Browsing starts next to the most recent project; the very first project starts at home.
-  const [base] = useState(() => (projects[0] ? parentFolder(projects[0].cwd) : null) ?? "~/");
+  // A folder for a project is always a local folder, so that mode skips the sources step.
+  const [view, setView] = useState<View>(() => (props.folderFor ? { kind: "browse" } : { kind: "sources" }));
+  // Browsing starts next to the project a folder is for, else next to the most recent project; the very first
+  // project starts at home.
+  const [base] = useState(() => (props.folderFor ? parentFolder(props.folderFor) : projects[0] ? parentFolder(projects[0].cwd) : null) ?? "~/");
   const clone = (url: string) => setView({ kind: "destination", url, name: repoName(url) });
+  if (props.folderFor) {
+    return <FolderBrowser key="folder" initial={base} clone={null} folderFor={props.folderFor} />;
+  }
   if (view.kind === "sources") {
     return (
       <Sources
@@ -276,9 +284,12 @@ function useListing(directory: string): { data: DirectoryListing | null; error: 
   return { data: current ? state.data : null, error: current ? state.error : null, loading: Boolean(directory) && !current };
 }
 
-function FolderBrowser(props: { initial: string; clone: string | null; onBack: () => void }) {
+/** `folderFor` names the project a picked folder is added to; without it, the picked folder becomes a project. */
+function FolderBrowser(props: { initial: string; clone: string | null; folderFor?: string | null; onBack?: () => void }) {
   const controller = useController();
   const projects = useApp((s) => s.projects);
+  const folderFor = props.folderFor ?? null;
+  const owner = folderFor ? (projects.find((p) => p.cwd === folderFor) ?? null) : null;
   const platform = useApp((s) => s.env?.platform ?? "");
   const busy = useApp((s) => Boolean(s.busy[props.clone ? "cloneProject" : "addProject"]));
   const [input, setInput] = useState(props.initial);
@@ -315,7 +326,16 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
     return { path: withTrailingSeparator(data.directory, data.separator) + (match?.name ?? leaf), exists: Boolean(match) };
   }, [data, leaf, windows]);
 
-  const existing = !props.clone && target ? (projects.find((p) => sameFolder(p.cwd, target.path)) ?? null) : null;
+  // Adding a project: the folder may already be one, or be inside one, and then it is opened rather than added again.
+  // Adding a folder: only the same project's own folders are already there; a project of its own can still move in.
+  const existing =
+    !props.clone && target
+      ? folderFor
+        ? owner && owner.folders.some((f) => sameFolder(f.cwd, target.path))
+          ? owner
+          : null
+        : (projects.find((p) => p.folders.some((f) => sameFolder(f.cwd, target.path))) ?? null)
+      : null;
 
   // Typing carries on where it left off when the first step hands over a path.
   useEffect(() => {
@@ -349,9 +369,13 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
     }
     if (props.clone) {
       void controller.cloneProject(props.clone, target.path);
+    } else if (folderFor) {
+      if (!existing && target.exists) {
+        void controller.addProjectFolder(folderFor, target.path);
+      }
     } else if (existing) {
       controller.setAddProjectOpen(false);
-      controller.newThread(existing.cwd);
+      controller.newThread(existing.folders.find((f) => sameFolder(f.cwd, target.path))?.cwd ?? existing.cwd);
     } else {
       void controller.addProject(target.path, { create: !target.exists });
     }
@@ -382,13 +406,25 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
         event.preventDefault();
         openRow(row);
       }
-    } else if (event.key === "Backspace" && input === "") {
+    } else if (event.key === "Backspace" && input === "" && props.onBack) {
       event.preventDefault();
       props.onBack();
     }
   };
 
-  const action = props.clone ? "Clone" : existing ? "Open" : target && !target.exists ? "Create & Add" : "Add";
+  const action = props.clone
+    ? "Clone"
+    : folderFor
+      ? existing
+        ? "Already added"
+        : "Add folder"
+      : existing
+        ? "Open"
+        : target && !target.exists
+          ? "Create & Add"
+          : "Add";
+  // A folder joins a project only when it exists: the picker creates folders for new projects, not inside one.
+  const disabled = !target || (folderFor !== null && (Boolean(existing) || !target.exists));
   const highlighted = highlight >= 0;
   const reveal = windows ? "Open in File Explorer" : platform === "darwin" ? "Open in Finder" : "Open in Files";
 
@@ -403,13 +439,21 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
         <Spinner size={12} /> Loading folders
       </span>
     );
+  } else if (folderFor && existing) {
+    note = `This folder is already part of ${owner?.displayName ?? "the project"}.`;
   } else if (data && !data.exists) {
-    note = props.clone ? "This folder does not exist yet. Cloning creates it." : "This folder does not exist yet. Press Enter to create it and add it.";
+    note = props.clone
+      ? "This folder does not exist yet. Cloning creates it."
+      : folderFor
+        ? "This folder does not exist."
+        : "This folder does not exist yet. Press Enter to create it and add it.";
   } else if (data && rows.length === 0) {
     note = leaf
       ? props.clone
         ? `Cloning creates ${leaf} here.`
-        : `No folder starts with “${leaf}”. Press Enter to create it.`
+        : folderFor
+          ? `No folder starts with “${leaf}”.`
+          : `No folder starts with “${leaf}”. Press Enter to create it.`
       : "No folders here.";
   }
 
@@ -417,7 +461,8 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
     <>
       <Header
         onBack={props.onBack}
-        action={<ActionButton label={action} keys={highlighted ? [MOD, "Enter"] : ["Enter"]} busy={busy} disabled={!target} onClick={submit} />}
+        icon={<FolderPlusIcon size={17} />}
+        action={<ActionButton label={action} keys={highlighted ? [MOD, "Enter"] : ["Enter"]} busy={busy} disabled={disabled} onClick={submit} />}
       >
         <input
           ref={inputRef}
@@ -441,7 +486,9 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
         />
       </Header>
       <div className="h-[min(22rem,55vh)] overflow-y-auto p-1.5">
-        <p className="px-2.5 pt-1.5 pb-1 text-xs font-medium text-subtle">{props.clone ? "Clone into" : "Folders"}</p>
+        <p className="px-2.5 pt-1.5 pb-1 text-xs font-medium text-subtle">
+          {props.clone ? "Clone into" : owner ? `Add a folder to ${owner.displayName}` : "Folders"}
+        </p>
         <ul ref={listRef} id={listId} role="listbox" aria-label="Folders">
           {rows.map((row, index) => (
             <li
@@ -477,7 +524,7 @@ function FolderBrowser(props: { initial: string; clone: string | null; onBack: (
         hints={[
           { keys: ["↑", "↓"], label: "Navigate" },
           { keys: ["Enter"], label: highlighted ? "Open folder" : action },
-          { keys: ["Backspace"], label: "Back" },
+          ...(props.onBack ? [{ keys: ["Backspace"], label: "Back" }] : []),
           { keys: ["Esc"], label: "Close" },
         ]}
         right={

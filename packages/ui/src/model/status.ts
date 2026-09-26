@@ -99,13 +99,30 @@ export interface ProjectGroup {
   running: number;
 }
 
+/** The project a folder belongs to: the one whose folders include `cwd`, which is the project itself for its own folder. */
+export function projectForCwd(projects: ProjectView[], cwd: string | null | undefined): ProjectView | null {
+  if (!cwd) {
+    return null;
+  }
+  return projects.find((project) => project.cwd === cwd || project.folders.some((folder) => folder.cwd === cwd)) ?? null;
+}
+
 export function groupByProject(projects: ProjectView[], entries: SidebarEntry[]): ProjectGroup[] {
+  // A thread belongs to the project whose folders include the one it runs in, not only to a project's own folder.
   const buckets = new Map<string, SidebarEntry[]>();
+  const owners = new Map<string, string>();
   for (const project of projects) {
     buckets.set(project.cwd, []);
+    owners.set(project.cwd, project.cwd);
+    for (const folder of project.folders) {
+      owners.set(folder.cwd, project.cwd);
+    }
   }
   for (const entry of entries) {
-    buckets.get(entry.session.cwd)?.push(entry);
+    const owner = owners.get(entry.session.cwd);
+    if (owner !== undefined) {
+      buckets.get(owner)?.push(entry);
+    }
   }
   return projects.map((project) => {
     const all = buckets.get(project.cwd) ?? [];

@@ -18,7 +18,7 @@ import {
 import { CODE_THEMES, DEFAULT_SIDEBAR_WIDTH, type CodeTheme } from "../../model/store.js";
 import type { UpdateState } from "../../model/updates.js";
 import type { ProjectView, SessionSummary } from "../../types.js";
-import { Menu, MenuCheck, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
+import { Menu, MenuCheck, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, Logo, MOD, Shortcut, Spinner, cn, isMac } from "../ui/primitives.js";
 import { StatusGlyph } from "../ui/StatusGlyph.js";
 import type { SidebarSwarmSummary } from "../../model/swarm.js";
@@ -230,7 +230,7 @@ function ThreadList() {
   );
 }
 
-const ProjectSection = memo(function ProjectSection(props: {
+export const ProjectSection = memo(function ProjectSection(props: {
   group: ProjectGroup;
   collapsed: boolean;
   activeId: string | null;
@@ -333,7 +333,7 @@ const ProjectSection = memo(function ProjectSection(props: {
           aria-expanded={!props.collapsed}
           onClick={() => controller.toggleProjectCollapsed(project.cwd)}
           className="flex h-full min-w-0 flex-1 items-center gap-1.5 pl-1.5 text-left"
-          title={project.cwd}
+          title={project.folders.map((folder) => folder.cwd).join("\n")}
         >
           <CaretRightIcon
             size={13}
@@ -367,7 +367,14 @@ const ProjectSection = memo(function ProjectSection(props: {
       {props.collapsed ? null : (
         <ul className="flex flex-col gap-px pt-px">
           {visible.map((entry) => (
-            <ThreadRow key={entry.session.sessionId} entry={entry} active={entry.session.sessionId === props.activeId} now={props.now} />
+            // In a project with several folders, a thread outside the project's own folder says which one it is in.
+            <ThreadRow
+              key={entry.session.sessionId}
+              entry={entry}
+              active={entry.session.sessionId === props.activeId}
+              now={props.now}
+              showProject={project.folders.length > 1 && entry.session.cwd !== project.cwd}
+            />
           ))}
           {entries.length === 0 && props.group.settled.length === 0 ? (
             <li>
@@ -783,11 +790,54 @@ function ProjectMenu(props: { project: ProjectView }) {
           Refresh threads
         </MenuItem>
         <MenuSeparator />
+        <MenuItem icon={<FolderPlusIcon size={14} />} onSelect={() => controller.setAddProjectOpen({ folderFor: project.cwd })}>
+          Add folder…
+        </MenuItem>
+        {project.folders.length > 1 ? <FoldersMenu project={project} /> : null}
+        <MenuSeparator />
         <MenuItem icon={<XIcon size={14} />} tone="danger" onSelect={() => void controller.hideProject(project.cwd)}>
           Remove from sidebar
         </MenuItem>
       </MenuContent>
     </Menu>
+  );
+}
+
+/** Every folder of a project, each with its own actions. The project's own folder cannot be removed from it. */
+function FoldersMenu(props: { project: ProjectView }) {
+  const controller = useController();
+  const { project } = props;
+  return (
+    <MenuSub>
+      <MenuSubTrigger icon={<FolderIcon size={14} />} hint={String(project.folders.length)}>
+        Folders
+      </MenuSubTrigger>
+      <MenuSubContent>
+        {project.folders.map((folder, index) => (
+          <MenuSub key={folder.cwd}>
+            <MenuSubTrigger icon={index === 0 ? <FolderOpenIcon size={14} /> : <FolderIcon size={14} />} hint={index === 0 ? "main" : undefined}>
+              {folder.displayName}
+            </MenuSubTrigger>
+            <MenuSubContent>
+              <MenuItem icon={<FolderOpenIcon size={14} />} onSelect={() => void controller.openFolder(folder.cwd, "files")}>
+                {revealLabel()}
+              </MenuItem>
+              <MenuItem icon={<CopyIcon size={14} />} onSelect={() => void navigator.clipboard?.writeText(folder.cwd)}>
+                Copy path
+              </MenuItem>
+              {index > 0 ? (
+                <>
+                  <MenuSeparator />
+                  <MenuItem icon={<XIcon size={14} />} tone="danger" onSelect={() => void controller.removeProjectFolder(project.cwd, folder.cwd)}>
+                    Remove from project
+                  </MenuItem>
+                </>
+              ) : null}
+            </MenuSubContent>
+          </MenuSub>
+        ))}
+      </MenuSubContent>
+    </MenuSub>
   );
 }
 

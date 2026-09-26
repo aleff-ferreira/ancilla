@@ -278,7 +278,8 @@ export interface AppState {
   prefs: Prefs;
   toasts: Toast[];
   paletteOpen: boolean;
-  addProjectOpen: boolean;
+  /** The add-project dialog: open, or open to add a folder to the project named. */
+  addProjectOpen: boolean | { folderFor: string };
   /** The release notes were asked for, rather than shown because the version changed. */
   whatsNewOpen: boolean;
   /** Keys of in-flight user actions, for disabling buttons: `send:<id>`, `approval:<id>`... */

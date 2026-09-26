@@ -32,10 +32,12 @@ import {
   FALLBACK_DISTRO,
   toWslPath,
   toWindowsPath,
+  ProjectFolderError,
   type ApprovalMode,
   type AttachmentRecord,
   type CommandConnection,
   type ExecFn,
+  type Project,
   type ServeTarget,
   type ReasoningEffort,
   type SessionRecord,
@@ -430,7 +432,7 @@ function errorInfo(error: unknown): { status: number; message: string; kind: str
   }
   const kind = typeof (error as { kind?: unknown })?.kind === "string" ? ((error as { kind: string }).kind) : null;
   const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof PathError) {
+  if (error instanceof PathError || error instanceof ProjectFolderError) {
     return { status: 400, message, kind: null };
   }
   if (error instanceof FileError) {
@@ -1084,15 +1086,7 @@ export class AncillaServer {
       return true;
     }
     if (method === "GET" && path === "/api/projects") {
-      this.json(res, 200, {
-        projects: this.store.listProjects().map((p) => ({
-          cwd: p.cwd,
-          displayName: p.displayName,
-          pinned: p.pinned,
-          activityAt: p.activityAt,
-          defaultAccountId: p.defaultAccountId,
-        })),
-      });
+      this.json(res, 200, { projects: this.store.listProjects().map((p) => this.projectView(p)) });
       return true;
     }
     if (method === "POST" && path === "/api/projects") {
@@ -1103,6 +1097,41 @@ export class AncillaServer {
       }
       const cwd = await this.canonicalCwd(raw, body["create"] === true);
       this.json(res, 200, await this.addProjectFolder(cwd));
+      return true;
+    }
+    if (method === "POST" && path === "/api/projects/folders") {
+      const body = await this.readBody(req);
+      const cwd = str(body["cwd"]);
+      const raw = str(body["path"]);
+      if (!cwd || !raw || !raw.trim()) {
+        throw new HttpError(400, "cwd and path are required.");
+      }
+      const projectCwd = normalizeCwd(cwd);
+      if (!this.store.getProject(projectCwd)) {
+        throw new HttpError(404, "Unknown project folder.");
+      }
+      const folder = await this.canonicalCwd(raw, false);
+      const project = this.store.addProjectFolder(projectCwd, folder);
+      // Threads Muse already ran in that folder show up under the project right away, or the warning says why not.
+      let warning: string | null = null;
+      try {
+        await this.discover(folder);
+      } catch (error) {
+        warning = errorInfo(error).message;
+      }
+      this.sessionsChanged();
+      this.json(res, 200, { project: this.projectView(this.store.getProject(projectCwd) ?? project), warning });
+      return true;
+    }
+    if (method === "DELETE" && path === "/api/projects/folders") {
+      const cwd = url.searchParams.get("cwd");
+      const folder = url.searchParams.get("path");
+      if (!cwd || !folder) {
+        throw new HttpError(400, "cwd and path are required.");
+      }
+      const project = this.store.removeProjectFolder(normalizeCwd(cwd), normalizeCwd(folder));
+      this.sessionsChanged();
+      this.json(res, 200, { project: this.projectView(project) });
       return true;
     }
     if (method === "POST" && path === "/api/projects/clone") {
@@ -1192,9 +1221,10 @@ export class AncillaServer {
     if (method === "GET" && path === "/api/sessions") {
       const cwd = url.searchParams.get("cwd");
       const includeArchived = url.searchParams.get("archived") === "1";
+      // Every folder, not only every project: a thread in a project's second folder belongs to that folder's row.
       const projects = cwd
         ? [this.store.getProject(cwd)].filter((p): p is NonNullable<typeof p> => p !== null)
-        : this.store.listProjects();
+        : this.store.listFolders();
       const sessions = projects.flatMap((project) =>
         this.store
           .listSessionsByProject(project.id, { includeArchived })
@@ -2121,7 +2151,7 @@ export class AncillaServer {
 
   private storePathFor(remoteRoot: string): string {
     if (this.options.platform === "win32" && isWslAbs(remoteRoot)) {
-      const existing = this.store.listProjects().find((project) => {
+      const existing = this.store.listFolders().find((project) => {
         try { return this.hostPathFor(project.cwd) === remoteRoot; } catch { return false; }
       });
       if (existing) return existing.cwd;
@@ -2178,9 +2208,26 @@ export class AncillaServer {
     }
   }
 
+  /** What `/api/projects` says about a project: its folders included, its own first. */
+  private projectView(project: Project): Record<string, unknown> {
+    return {
+      cwd: project.cwd,
+      displayName: project.displayName,
+      pinned: project.pinned,
+      activityAt: project.activityAt,
+      defaultAccountId: project.defaultAccountId,
+      folders: project.folders,
+    };
+  }
+
+  /**
+   * Adds a folder as a project, or brings a hidden one back. A folder that already sits inside a project is not
+   * made a project of its own again: its project comes back instead, with every folder, and is what is returned.
+   */
   private async addProjectFolder(cwd: string): Promise<Record<string, unknown>> {
     this.store.upsertProject(cwd);
-    this.store.setHidden(cwd, false);
+    const owner = this.store.projectForFolder(cwd)?.cwd ?? cwd;
+    this.store.setHidden(owner, false);
     let warning: string | null = null;
     let sessions: Record<string, unknown>[] = [];
     try {
@@ -2189,7 +2236,8 @@ export class AncillaServer {
       warning = errorInfo(error).message;
     }
     this.sessionsChanged();
-    return { project: { cwd, displayName: this.store.getProject(cwd)?.displayName ?? cwd }, sessions, warning };
+    const project = this.store.getProject(owner);
+    return { project: project ? this.projectView(project) : { cwd, displayName: cwd, folders: [] }, sessions, warning };
   }
 
   private async cloneRepository(remote: string, target: string): Promise<string> {
@@ -2399,7 +2447,8 @@ export class AncillaServer {
     accountId: string | null = null,
   ): Promise<Record<string, unknown>> {
     const project = this.store.upsertProject(cwd);
-    this.store.setHidden(cwd, false);
+    // The thread must be visible where it lands: the owning project when the folder is one of a project's folders.
+    this.store.setHidden(this.store.projectForFolder(cwd)?.cwd ?? cwd, false);
     const host = await this.hostFor(cwd, accountId);
     const started = await host.manager.startSession({
       workspaceRoot: this.hostPathFor(cwd),

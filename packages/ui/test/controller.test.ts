@@ -59,13 +59,35 @@ class FakeClient implements AncillaClient {
     return { platform: "linux", wslAvailable: false, defaultDistro: null, museFound: true, musePath: "/usr/bin/muse", version: "0.2.0", persistent: true };
   }
   projects: import("../src/types.js").ProjectView[] = [
-    { cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null },
+    { cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd: "/work/app", displayName: "app" }] },
   ];
   async listProjects() {
     return [...this.projects];
   }
   async addProject(cwd: string) {
     return { cwd, warning: null };
+  }
+  folderCalls: string[] = [];
+  /** Moves the folder in or out like the server would, so a refresh after the call lists the new shape. */
+  async addProjectFolder(cwd: string, path: string) {
+    this.folderCalls.push(`add ${cwd} ${path}`);
+    const project = this.projects.find((p) => p.cwd === cwd);
+    if (!project) {
+      throw new Error("Unknown project.");
+    }
+    const next = { ...project, folders: [...project.folders, { cwd: path, displayName: path.slice(path.lastIndexOf("/") + 1) }] };
+    this.projects = this.projects.filter((p) => p.cwd !== path).map((p) => (p.cwd === cwd ? next : p));
+    return next;
+  }
+  async removeProjectFolder(cwd: string, path: string) {
+    this.folderCalls.push(`remove ${cwd} ${path}`);
+    const project = this.projects.find((p) => p.cwd === cwd);
+    if (!project) {
+      throw new Error("Unknown project.");
+    }
+    const next = { ...project, folders: project.folders.filter((f) => f.cwd !== path) };
+    this.projects = [...this.projects.map((p) => (p.cwd === cwd ? next : p)), { ...next, cwd: path, displayName: "docs", folders: [{ cwd: path, displayName: "docs" }] }];
+    return next;
   }
   async cloneProject(_url: string, path: string) {
     return { cwd: path, warning: null };
@@ -82,7 +104,10 @@ class FakeClient implements AncillaClient {
   async listSessions() {
     return [SESSION];
   }
-  async discover() {}
+  discovered: (string | undefined)[] = [];
+  async discover(cwd?: string) {
+    this.discovered.push(cwd);
+  }
   startCalls: { cwd: string; approvalMode?: string; modelId?: string; accountId: string | null }[] = [];
   async startSession(cwd: string, options?: { approvalMode?: string; modelId?: string; accountId?: string | null }) {
     this.startCalls.push({ cwd, approvalMode: options?.approvalMode, modelId: options?.modelId, accountId: options?.accountId ?? null });
@@ -1707,7 +1732,7 @@ describe("AncillaController", () => {
 
   it("sets a project's default account optimistically, and rolls back on failure", async () => {
     const client = new FakeClient();
-    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null }];
+    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd: "/work/app", displayName: "app" }] }];
     const { controller, stop } = await started(client);
 
     await controller.setProjectDefaultAccount("/work/app", "work");
@@ -1729,7 +1754,7 @@ describe("AncillaController", () => {
 
   it("does not let a stale rollback clobber a newer overlapping default-account write", async () => {
     const client = new FakeClient();
-    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null }];
+    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd: "/work/app", displayName: "app" }] }];
     const { controller, stop } = await started(client);
 
     client.setProjectDefaultAccountError = new Error("nope");
@@ -1754,7 +1779,7 @@ describe("AncillaController", () => {
 
   it("starts a new thread on the project's default account", async () => {
     const client = new FakeClient();
-    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: "work" }];
+    client.projects = [{ cwd: "/work/app", displayName: "app", pinned: false, activityAt: SESSION.activityAt, defaultAccountId: "work", folders: [{ cwd: "/work/app", displayName: "app" }] }];
     const { controller, stop } = await started(client, "");
     controller.newThread("/work/app");
     assert.equal(await controller.send("hello"), true);
@@ -1763,6 +1788,78 @@ describe("AncillaController", () => {
     assert.equal(route.kind, "thread");
     const sessionId = route.kind === "thread" ? route.sessionId : "";
     assert.equal(controller.store.get().sessions[sessionId]?.accountId, "work", "the seeded session carries the account the server confirmed");
+    stop();
+  });
+
+  it("starts a thread in a project's second folder on that project's default account", async () => {
+    const client = new FakeClient();
+    client.projects = [
+      {
+        cwd: "/work/app",
+        displayName: "app",
+        pinned: false,
+        activityAt: SESSION.activityAt,
+        defaultAccountId: "work",
+        folders: [{ cwd: "/work/app", displayName: "app" }, { cwd: "/work/docs", displayName: "docs" }],
+      },
+    ];
+    const { controller, stop } = await started(client, "");
+    controller.newThread("/work/docs");
+    assert.deepEqual(controller.store.get().route, { kind: "new", cwd: "/work/docs" }, "a project's folder is a place to start");
+    assert.equal(await controller.send("hello"), true);
+    assert.equal(client.startCalls.at(-1)?.cwd, "/work/docs", "the thread runs in the folder picked");
+    assert.equal(client.startCalls.at(-1)?.accountId, "work", "on the owning project's account");
+    controller.newThread("/work/elsewhere");
+    assert.deepEqual(controller.store.get().route, { kind: "new", cwd: "/work/app" }, "a folder no project has falls back to the first project");
+    stop();
+  });
+
+  it("adds and removes a project's folders, and refreshes every folder of a project", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client, "");
+    assert.equal(await controller.addProjectFolder("/work/app", "/work/docs"), true);
+    assert.deepEqual(client.folderCalls, ["add /work/app /work/docs"]);
+    const project = () => controller.store.get().projects.find((p) => p.cwd === "/work/app");
+    assert.deepEqual(project()?.folders.map((f) => f.cwd), ["/work/app", "/work/docs"]);
+    assert.equal(controller.store.get().addProjectOpen, false, "the picker closes once the folder is in");
+
+    client.discovered = [];
+    await controller.refreshProject("/work/app");
+    assert.deepEqual(client.discovered, ["/work/app", "/work/docs"], "each folder is its own Muse workspace");
+
+    await controller.removeProjectFolder("/work/app", "/work/docs");
+    assert.deepEqual(client.folderCalls.at(-1), "remove /work/app /work/docs");
+    assert.deepEqual(project()?.folders.map((f) => f.cwd), ["/work/app"]);
+    assert.deepEqual(
+      controller.store.get().projects.map((p) => p.cwd),
+      ["/work/app", "/work/docs"],
+      "the folder comes back as a project of its own",
+    );
+
+    client.addProjectFolder = async () => {
+      throw new Error("nope");
+    };
+    assert.equal(await controller.addProjectFolder("/work/app", "/work/other"), false);
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not add that folder");
+    stop();
+  });
+
+  it("takes a project's folders out of view with it", async () => {
+    const client = new FakeClient();
+    client.projects = [
+      {
+        cwd: "/work/other",
+        displayName: "other",
+        pinned: false,
+        activityAt: SESSION.activityAt,
+        defaultAccountId: null,
+        folders: [{ cwd: "/work/other", displayName: "other" }, { cwd: "/work/app", displayName: "app" }],
+      },
+    ];
+    const { controller, stop } = await started(client);
+    assert.deepEqual(controller.store.get().route, { kind: "thread", sessionId: "s1" }, "a thread in the second folder is listed and open");
+    await controller.hideProject("/work/other");
+    assert.deepEqual(controller.store.get().route, { kind: "home" }, "hiding the project closes a thread in any of its folders");
     stop();
   });
 
@@ -1947,7 +2044,7 @@ describe("AncillaController", () => {
 
   it("reorders projects by drag, and puts them back when the server refuses", async () => {
     const client = new FakeClient();
-    const project = (cwd: string) => ({ cwd, displayName: cwd.slice(6), pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null });
+    const project = (cwd: string) => ({ cwd, displayName: cwd.slice(6), pinned: false, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd, displayName: cwd.slice(6) }] });
     client.listProjects = async () => [project("/work/a"), project("/work/b"), project("/work/c")];
     const { controller, stop } = await started(client);
     const order = () => controller.store.get().projects.map((p) => p.cwd);

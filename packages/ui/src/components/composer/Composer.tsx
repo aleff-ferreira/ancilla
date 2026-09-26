@@ -20,6 +20,7 @@ import { useSampled } from "../../app/sampled.js";
 import { loadDraft, saveDraft } from "../../model/controller.js";
 import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
+import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
 import type { ApprovalMode, ReasoningEffort } from "../../types.js";
@@ -552,8 +553,10 @@ function AccountPicker(props: { sessionId: string | null; cwd: string | null; va
   const controller = useController();
   const accounts = useApp((s) => s.accounts);
   const open = useApp((s) => s.picker === "account");
-  const current = useApp((s) => s.projects.find((p) => p.cwd === props.cwd)?.defaultAccountId ?? null);
-  if (props.sessionId !== null || !props.cwd || !(accounts && accounts.length > 0)) {
+  // The thread may start in any folder of a project; the account is the project's.
+  const project = useApp((s) => projectForCwd(s.projects, props.cwd));
+  const current = project?.defaultAccountId ?? null;
+  if (props.sessionId !== null || !project || !(accounts && accounts.length > 0)) {
     return null;
   }
   const label = accounts.find((a) => a.id === current)?.name ?? "Default login";
@@ -566,7 +569,7 @@ function AccountPicker(props: { sessionId: string | null; cwd: string | null; va
         <MenuLabel>Account</MenuLabel>
         <MenuRadioGroup
           value={current ?? ""}
-          onValueChange={(value) => void controller.setProjectDefaultAccount(props.cwd as string, value || null)}
+          onValueChange={(value) => void controller.setProjectDefaultAccount(project.cwd, value || null)}
         >
           <MenuOption value="" label="Default login" />
           {accounts.map((a) => (

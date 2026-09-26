@@ -67,6 +67,10 @@ panel for native subagents and workflows, and fixes for Windows and WSL; see [NO
 - **Windows and WSL fixes:** projects opened from `\\wsl.localhost\<distro>\...`, an existing `muse login` recognised
   on Windows and in WSL, and a per-machine `runtime.json` that pins the runtime, the distro and the `muse` path and
   forwards environment variables into WSL (for example a file-based credential store).
+- **Projects with several folders.** A project can group more than one folder: "Add folder…" in a project's menu
+  puts another folder under it, and a folder that was a project of its own moves in with its threads. Each thread
+  still runs in exactly one folder, because Muse gives a session one workspace root; the project simply lists the
+  threads of all its folders together, and the new-thread page lets you pick which folder to start in.
 
 ![The Swarm card: a native Muse workflow with ten agents in four phases, the rows that need attention first, and the approval it is waiting on](docs/assets/agents.png)
 
