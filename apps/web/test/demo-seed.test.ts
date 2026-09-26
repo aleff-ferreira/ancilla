@@ -373,15 +373,29 @@ describe("the demo client", () => {
     const { client } = clientFor("failed");
     client.finishAudit();
     mock.timers.tick(6_000);
-    const { vm } = await reload(client);
+    const { vm, fold } = await reload(client);
     const run = vm.runs[0] as RunVM;
+    assert.deepEqual(Object.keys(fold.approvals), [], "the turn's end takes its open requests with it");
     assert.equal(run.status, "finished-with-failures");
     assert.equal(run.counts.total, 10);
     assert.equal(agent(run, "report:release-notes").state, "done");
     assert.equal(agent(run, "verify:migration-replay").failure?.text, REPLAY_FAILURE);
     assert.equal(run.report?.failure, REPLAY_FAILURE);
     assert.equal(completionView(run)?.headline, "Nine of ten landed, one failed.");
-    assert.equal((await client.loadTranscript(THREADS.audit)).session?.live?.activeTurnId, null);
+    const load = await client.loadTranscript(THREADS.audit);
+    assert.equal(load.session?.live?.activeTurnId, null);
+    assert.equal(load.pending.approvals.length, 0);
+
+    // The scenario with a request open: finishing resolves it, so nothing waits on a turn that ended.
+    mock.timers.reset();
+    mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: NOW });
+    const waiting = new DemoAncillaClient("waiting");
+    waiting.finishAudit();
+    mock.timers.tick(6_000);
+    const after = await reload(waiting);
+    assert.deepEqual(Object.keys(after.fold.approvals), []);
+    assert.equal(after.load.session?.live?.pendingApprovals, 0);
+    assert.equal(after.vm.tasks[0]?.state, "working", "the background task outlives the turn and goes on printing");
   });
 
   it("keeps one heartbeat revision in history and streams the background task's output", async () => {

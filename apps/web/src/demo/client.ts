@@ -988,6 +988,14 @@ export class DemoAncillaClient implements AncillaClient {
       this.emit(sessionId, "item/completed", {
         item: { itemId: sampleId(`reply:${run.runId}`), kind: "agentMessage", status: "completed", revision: 1, text: run.report, turnId: run.turnId, recordedAt: iso(at) },
       });
+      // The turn ends, and takes the requests it left open with it, as an interrupted turn does.
+      for (const request of thread?.approvals.splice(0) ?? []) {
+        this.emit(sessionId, "approval/resolved", { approvalId: request.approvalId, decision: "cancelled", resolvedBy: "system" });
+        const item = thread && request.itemId ? this.findItem(thread, request.itemId) : null;
+        if (item && item.background !== true) {
+          this.emit(sessionId, "item/completed", { item: { ...item, status: "cancelled", revision: item.revision + 1, recordedAt: iso(at) } });
+        }
+      }
       const startedAt = Date.parse(thread?.summary.live?.turnStartedAt ?? iso(at));
       this.emit(sessionId, "turn/completed", { turnId: run.turnId, terminal: "completed", durationMs: at - startedAt, timeToFirstTokenMs: 1600 });
       this.setLive(sessionId, idle());
