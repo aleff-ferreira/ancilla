@@ -2121,6 +2121,110 @@ describe("AncillaController", () => {
       stop();
     });
 
+    it("says a run is stopping until the stream reports how it ended, and lets no stale answer undo that", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      const runs = () => controller.store.get().threads["s1"]?.researchRuns ?? [];
+      const stopping = () => controller.store.get().researchStopping;
+      assert.equal(await controller.startResearch("s1", "first"), true);
+      const first = client.researchRuns[0]!;
+      // The stop route answers with the run as it was when the stop was taken: still running.
+      client.stopResearch = async (runId, writeReport) => {
+        client.researchStops.push({ runId, writeReport });
+        return { ...first, status: "running" };
+      };
+      const pending = controller.stopResearch(first.runId, false);
+      await flushMicrotasks();
+      assert.equal(stopping()[first.runId], "now", "the row says it is stopping as soon as the stop is asked for");
+      assert.equal(await pending, true);
+      assert.equal(runs()[0]?.status, "running");
+      assert.equal(stopping()[first.runId], "now", "a snapshot from before the run acted does not answer the stop");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: { ...first, status: "cancelled", phase: "done" } });
+      assert.equal(runs()[0]?.status, "cancelled");
+      assert.equal(stopping()[first.runId], undefined, "the outcome on the stream answers it");
+      // The route's answer can also land after the stream has said how the run ended.
+      assert.equal(await controller.startResearch("s1", "second"), true);
+      const second = client.researchRuns[1]!;
+      client.stopResearch = async (runId, writeReport) => {
+        client.researchStops.push({ runId, writeReport });
+        client.handler?.({ type: "research-run", sessionId: "s1", run: { ...second, status: "cancelled", phase: "done" } });
+        return { ...second, status: "running" };
+      };
+      assert.equal(await controller.stopResearch(second.runId, true), true);
+      assert.equal(runs()[1]?.status, "cancelled", "the stream's cancelled outlives the route's stale running");
+      assert.equal(stopping()[second.runId], undefined);
+      // A stop the server refused leaves the run as it was, with its Stop back.
+      client.handler?.({ type: "research-run", sessionId: "s1", run: { ...second, runId: "r-third" } });
+      client.stopResearch = async () => {
+        throw new AncillaError("No such research run.", 404);
+      };
+      assert.equal(await controller.stopResearch("r-third", false), false);
+      assert.equal(stopping()["r-third"], undefined);
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not stop the research run");
+      // A stop the stream never answered, because the connection dropped, is answered when the thread reloads.
+      controller.store.set((s) => ({ ...s, researchStopping: { "r-third": "now" } }));
+      client.transcript = async () => load({ researchRuns: [fakeResearchRun({ runId: "r-third", status: "cancelled", phase: "done" })] });
+      await controller.loadThread("s1");
+      assert.equal(stopping()["r-third"], undefined);
+      assert.equal(runs()[0]?.status, "cancelled");
+      stop();
+    });
+
+    it("keeps the more advanced picture of a live run whichever arrives last, and an ending over any live one", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      const run = () => controller.store.get().threads["s1"]?.researchRuns[0];
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3 }) });
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 2 }) });
+      assert.equal(run()?.round, 3, "a stale event does not take the row back a round");
+      client.researchRuns.push(fakeResearchRun({ runId: "r1", round: 2, brief: "stale" }));
+      assert.equal(await controller.openResearchReport("r1"), true);
+      assert.equal(run()?.round, 3, "nor does a stale read");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3, brief: "fresher" }) });
+      assert.equal(run()?.brief, "fresher", "level on progress, the later arrival wins");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3, status: "cancelled", phase: "done" }) });
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3, phase: "writing" }) });
+      assert.equal(run()?.status, "cancelled", "nothing said afterwards reopens a run that has ended");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", round: 3, status: "partial", phase: "done", reportAvailable: true }) });
+      assert.equal(run()?.status, "partial", "one ending can still correct another");
+      stop();
+    });
+
+    it("opens the research picker from the shortcut only where a composer would show it, and drops it on leaving", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      const picker = () => controller.store.get().picker;
+      controller.toggleResearchPicker();
+      assert.equal(picker(), "research");
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "the chord closes what it opened");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1" }) });
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "not while a run is going in the thread");
+      client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", status: "completed", phase: "done" }) });
+      controller.store.set((s) => ({ ...s, researchSettings: { enabled: false, config: fakeResearchRun({}).config } }));
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "not with the feature off");
+      controller.store.set((s) => ({ ...s, researchSettings: { enabled: true, config: fakeResearchRun({}).config } }));
+      controller.store.set((s) => ({ ...s, threads: { ...s.threads, s1: { ...s.threads["s1"]!, readOnly: true, readOnlyReason: "Another Muse session has it open." } } }));
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "not in a read-only thread");
+      controller.store.set((s) => ({ ...s, threads: { ...s.threads, s1: { ...s.threads["s1"]!, readOnly: false, readOnlyReason: null } } }));
+      controller.toggleResearchPicker();
+      assert.equal(picker(), "research");
+      controller.navigate({ kind: "settings" });
+      assert.equal(picker(), null, "leaving the composer drops its picker");
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "the settings page has no composer");
+      controller.newThread("/work/app");
+      controller.toggleResearchPicker();
+      assert.equal(picker(), "research", "the new-thread composer has the trigger too");
+      controller.store.set((s) => ({ ...s, picker: null, projects: [] }));
+      controller.toggleResearchPicker();
+      assert.equal(picker(), null, "without a project there is no composer yet");
+      stop();
+    });
+
     it("routes /research to a run in the open thread, and starts a thread for it from the new-thread screen", async () => {
       const client = new FakeClient();
       const { controller, stop } = await started(client);

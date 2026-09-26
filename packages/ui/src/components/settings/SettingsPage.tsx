@@ -1,17 +1,17 @@
 import { ArrowClockwiseIcon, ArrowLeftIcon, ArrowLineDownIcon, ArrowSquareOutIcon, ArrowsClockwiseIcon, CheckCircleIcon, MinusIcon, PencilSimpleIcon, PlusIcon, ScrollIcon, SignInIcon, TrashIcon, WarningIcon } from "../ui/icons.js";
-import { Switch } from "radix-ui";
 import { useEffect, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
 import type { AncillaController } from "../../model/controller.js";
+import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber } from "../../model/research.js";
 import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type AccountLoginState, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
 import type { AccountView, ApprovalMode, ReasoningEffort, ResearchConfig, ResearchModelIds } from "../../types.js";
 import { LEVELS, MODES } from "../composer/Composer.js";
 import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
 import { Modal } from "../ui/overlays.js";
 import { TopBar } from "../chrome.js";
-import { Button, IconButton, MOD, cn } from "../ui/primitives.js";
+import { Button, IconButton, MOD, Toggle, cn } from "../ui/primitives.js";
 import { About } from "./About.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
@@ -43,20 +43,6 @@ function Pick<T extends string | number | null>(props: {
   );
 }
 
-function Toggle(props: { checked: boolean; onChange: (on: boolean) => void; label: string; disabled?: boolean }) {
-  return (
-    <Switch.Root
-      checked={props.checked}
-      onCheckedChange={props.onChange}
-      disabled={props.disabled}
-      aria-label={props.label}
-      className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent"
-    >
-      <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
-    </Switch.Root>
-  );
-}
-
 function Section(props: { title: string; children: ReactNode }) {
   return (
     <section className="mt-6">
@@ -82,16 +68,17 @@ function Row(props: { label: ReactNode; description?: string; descriptionClassNa
 }
 
 /**
- * A row's control: a whole number in a small field. The value lands on blur or Enter, not on every keystroke, so a
- * half-typed number never reaches the server; an empty or out-of-range field goes back to what it was.
+ * A row's control: a number in a small field, whole unless `step` says finer. The value lands on blur or Enter,
+ * not on every keystroke, so a half-typed number never reaches the server; one past the range lands on its edge,
+ * which is where the server would put it, and an empty field goes back to what it was.
  */
-function Num(props: { value: number; min: number; max: number; unit?: string; label: string; onChange: (value: number) => void; disabled?: boolean }) {
+function Num(props: { value: number; min: number; max: number; step?: number; unit?: string; label: string; onChange: (value: number) => void; disabled?: boolean }) {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft === null) return;
-    const next = Math.round(Number(draft));
+    const next = clampResearchNumber(draft, { min: props.min, max: props.max }, props.step ?? 1);
     setDraft(null);
-    if (draft.trim() !== "" && Number.isFinite(next) && next >= props.min && next <= props.max && next !== props.value) {
+    if (next !== null && next !== props.value) {
       props.onChange(next);
     }
   };
@@ -101,7 +88,7 @@ function Num(props: { value: number; min: number; max: number; unit?: string; la
         type="number"
         min={props.min}
         max={props.max}
-        step={1}
+        step={props.step ?? 1}
         value={draft ?? String(props.value)}
         disabled={props.disabled}
         aria-label={props.label}
@@ -120,13 +107,14 @@ function Num(props: { value: number; min: number; max: number; unit?: string; la
   );
 }
 
-const RESEARCH_PARALLEL: readonly { value: number; label: string }[] = [1, 2, 3, 4].map((n) => ({ value: n, label: String(n) }));
-const RESEARCH_ROUNDS: readonly { value: number; label: string }[] = [4, 8, 12, 16, 20].map((n) => ({ value: n, label: String(n) }));
-
-/** The research defaults a run starts from; the composer popover can change the window and the workers per run. */
+/**
+ * The research defaults a run starts from; the composer popover can change the window and the workers per run.
+ * Every field takes the daemon's own limits, so whatever the server holds renders and whatever is typed stays.
+ */
 function ResearchRows(props: { config: ResearchConfig; models: { modelId: string; contributor?: boolean }[]; controller: AncillaController }) {
   const { config, controller } = props;
   const patch = (part: Partial<ResearchConfig>) => void controller.setResearchSettings({ config: part });
+  const limits = RESEARCH_LIMITS;
   const modelRow = (role: keyof ResearchModelIds, label: string, description: string) => (
     <Row label={label} description={description}>
       {props.models.length === 0 ? (
@@ -150,22 +138,39 @@ function ResearchRows(props: { config: ResearchConfig; models: { modelId: string
   return (
     <>
       <Row label="Research window" description="How long the workers have before the writer takes over: no report before the minimum unless nothing is left to look up, and to the writer at the maximum.">
+        {/* A minimum raised past the maximum takes the maximum with it, as the server would do on its own; a maximum lowered under the minimum brings the minimum down, which the server would not, lifting the maximum back instead. */}
         <div className="flex flex-wrap items-center gap-2">
-          <Num value={config.windowMinMinutes} min={1} max={config.windowMaxMinutes} unit="to" label="Window minimum, minutes" onChange={(value) => patch({ windowMinMinutes: value })} />
-          <Num value={config.windowMaxMinutes} min={config.windowMinMinutes} max={60} unit="minutes" label="Window maximum, minutes" onChange={(value) => patch({ windowMaxMinutes: value })} />
+          <Num
+            value={config.windowMinMinutes}
+            min={limits.windowMinutes.min}
+            max={limits.windowMinutes.max}
+            step={WINDOW_STEP}
+            unit="to"
+            label="Window minimum, minutes"
+            onChange={(value) => patch(value > config.windowMaxMinutes ? { windowMinMinutes: value, windowMaxMinutes: value } : { windowMinMinutes: value })}
+          />
+          <Num
+            value={config.windowMaxMinutes}
+            min={limits.windowMinutes.min}
+            max={limits.windowMinutes.max}
+            step={WINDOW_STEP}
+            unit="minutes"
+            label="Window maximum, minutes"
+            onChange={(value) => patch(value < config.windowMinMinutes ? { windowMaxMinutes: value, windowMinMinutes: value } : { windowMaxMinutes: value })}
+          />
         </div>
       </Row>
-      <Row label="Parallel workers" description="How many Muse sessions research at once. Each is a session on your plan.">
-        <Pick value={config.maxParallel} options={RESEARCH_PARALLEL} onChange={(value) => patch({ maxParallel: value })} />
+      <Row label="Parallel workers" description={`How many Muse sessions research at once, up to ${limits.parallel.max}. Each is a session on your plan.`}>
+        <Num value={config.maxParallel} min={limits.parallel.min} max={limits.parallel.max} unit="workers" label="Parallel workers" onChange={(value) => patch({ maxParallel: value })} />
       </Row>
-      <Row label="Supervisor rounds" description="How many times the supervisor may send workers out before it has to write.">
-        <Pick value={config.maxRounds} options={RESEARCH_ROUNDS} onChange={(value) => patch({ maxRounds: value })} />
+      <Row label="Supervisor rounds" description={`How many times the supervisor may send workers out before it has to write, up to ${limits.rounds.max}.`}>
+        <Num value={config.maxRounds} min={limits.rounds.min} max={limits.rounds.max} unit="rounds" label="Supervisor rounds" onChange={(value) => patch({ maxRounds: value })} />
       </Row>
       <Row label="Per worker" description="What one worker may do in one round: searches, pages read, and sources it may keep for the report.">
         <div className="flex flex-wrap items-center gap-3">
-          <Num value={config.workerMaxSearches} min={1} max={20} unit="searches" label="Searches per worker" onChange={(value) => patch({ workerMaxSearches: value })} />
-          <Num value={config.workerMaxReads} min={1} max={50} unit="reads" label="Reads per worker" onChange={(value) => patch({ workerMaxReads: value })} />
-          <Num value={config.workerMaxSaves} min={1} max={50} unit="saves" label="Saves per worker" onChange={(value) => patch({ workerMaxSaves: value })} />
+          <Num value={config.workerMaxSearches} min={limits.workerSearches.min} max={limits.workerSearches.max} unit="searches" label="Searches per worker" onChange={(value) => patch({ workerMaxSearches: value })} />
+          <Num value={config.workerMaxReads} min={limits.workerReads.min} max={limits.workerReads.max} unit="reads" label="Reads per worker" onChange={(value) => patch({ workerMaxReads: value })} />
+          <Num value={config.workerMaxSaves} min={limits.workerSaves.min} max={limits.workerSaves.max} unit="saves" label="Saves per worker" onChange={(value) => patch({ workerMaxSaves: value })} />
         </div>
       </Row>
       {modelRow("supervisor", "Supervisor model", "Scopes the question and decides what to send the workers after. Muse default lets the CLI choose.")}

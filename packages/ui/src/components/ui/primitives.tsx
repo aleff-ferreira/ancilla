@@ -1,4 +1,5 @@
 import { clsx, type ClassValue } from "clsx";
+import { Switch } from "radix-ui";
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 export function cn(...inputs: ClassValue[]): string {
@@ -48,6 +49,28 @@ export function Spinner(props: { size?: number; className?: string; label?: stri
 
 export function Shimmer(props: { children: ReactNode; className?: string }) {
   return <span className={cn("shimmer", props.className)}>{props.children}</span>;
+}
+
+/**
+ * A switch. `label` names it for assistive tech, since the text beside it is often a description rather than a
+ * label; `id` lets a visible label point at it as well.
+ */
+export function Toggle(props: { checked: boolean; onChange: (on: boolean) => void; label: string; disabled?: boolean; id?: string; className?: string }) {
+  return (
+    <Switch.Root
+      id={props.id}
+      checked={props.checked}
+      onCheckedChange={props.onChange}
+      disabled={props.disabled}
+      aria-label={props.label}
+      className={cn(
+        "relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent",
+        props.className,
+      )}
+    >
+      <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
+    </Switch.Root>
+  );
 }
 
 type ButtonVariant = "primary" | "accent" | "secondary" | "ghost" | "danger";

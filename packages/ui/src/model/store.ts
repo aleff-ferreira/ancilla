@@ -17,6 +17,7 @@ import type {
   YoloSettings,
 } from "../types.js";
 import type { EchoAttachment, ThreadFold } from "./fold.js";
+import type { ResearchStopAction } from "./research.js";
 import type { UpdateState } from "./updates.js";
 
 /** A tiny external store: immutable snapshots plus change listeners, read through useSyncExternalStore-style hooks. */
@@ -283,6 +284,12 @@ export interface AppState {
   researchSettings: ResearchSettings | null;
   /** What Stop does on a research run: write a report from what it has, or drop it. Set from the composer popover. */
   researchStopWrites: boolean;
+  /**
+   * Stops asked for and not yet answered by the run, by run id: the row says it is stopping and takes its Stop away
+   * until a final status arrives on the stream. The stop route's own answer is a snapshot from before the run acted
+   * on it, so it cannot clear this on its own.
+   */
+  researchStopping: Record<string, ResearchStopAction>;
   prefs: Prefs;
   toasts: Toast[];
   paletteOpen: boolean;
@@ -365,6 +372,7 @@ export function initialState(prefs: Prefs): AppState {
     yoloSettings: null,
     researchSettings: null,
     researchStopWrites: true,
+    researchStopping: {},
     prefs,
     toasts: [],
     paletteOpen: false,

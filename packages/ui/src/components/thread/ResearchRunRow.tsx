@@ -1,7 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { formatTokens } from "../../model/format.js";
-import { phaseLine, researchClock, researchLive, researchReported, sourcesLine, STATUS_WORD, WORKER_STATE_WORD, workerChip } from "../../model/research.js";
+import {
+  phaseLine,
+  preferredStopAction,
+  reportView,
+  researchClock,
+  researchLive,
+  researchReported,
+  sourcesLine,
+  STATUS_WORD,
+  STOP_ACTION_ORDER,
+  STOP_ACTIONS,
+  STOPPING_LINE,
+  WORKER_STATE_WORD,
+  workerChip,
+  type ResearchStopAction,
+} from "../../model/research.js";
 import { durationText } from "../../model/swarm.js";
 import type { ResearchRunView, ResearchWorkerView } from "../../types.js";
 import { BinocularsIcon, CaretDownIcon, CheckCircleIcon, CircleDashedIcon, ClockIcon, StopCircleIcon, WarningCircleIcon } from "../ui/icons.js";
@@ -15,9 +30,10 @@ const FOLD_LINES = 14;
 /**
  * A DeepResearch run in the transcript, between the turns it sits among by time. While it runs: the phase, the
  * clocks, a chip per worker and the counts; once it ends: the report, or why there is none. Muse never saw the run
- * from inside the thread, so the row is the only trace of it here.
+ * from inside the thread, so the row is the only trace of it here. `latest` marks the newest finished run in the
+ * thread, the one that reads its report on sight; an older one offers to.
  */
-export function ResearchRunRow(props: { run: ResearchRunView; sessionId: string }) {
+export function ResearchRunRow(props: { run: ResearchRunView; sessionId: string; latest: boolean }) {
   const { run } = props;
   const live = researchLive(run);
   const reported = researchReported(run);
@@ -35,7 +51,7 @@ export function ResearchRunRow(props: { run: ResearchRunView; sessionId: string 
       </div>
       <p className="text-md leading-relaxed font-medium text-fg [overflow-wrap:anywhere]">{run.question}</p>
       {live ? <Progress run={run} /> : null}
-      {reported ? <Report run={run} sessionId={props.sessionId} /> : null}
+      {reported ? <Report run={run} sessionId={props.sessionId} latest={props.latest} /> : null}
       {!live && !reported ? <Ended run={run} /> : null}
     </section>
   );
@@ -55,12 +71,15 @@ function Heading(props: { run: ResearchRunView; live: boolean }) {
   );
 }
 
-/** What a running run is doing: phase and time left, then the workers, then the counts and Stop. */
+/**
+ * What a running run is doing: phase and time left, then the workers, then the counts and Stop. Once a stop is
+ * asked for, the phase line says so and Stop goes away until the stream says how the run ended.
+ */
 function Progress(props: { run: ResearchRunView }) {
   const { run } = props;
   const controller = useController();
   const stopWrites = useApp((s) => s.researchStopWrites);
-  const stopping = useApp((s) => Boolean(s.busy[`research-stop:${run.runId}`]));
+  const stopping = useApp((s) => s.researchStopping[run.runId] ?? null);
   const now = useNow(1000);
   const clock = researchClock(run, now);
   const sources = sourcesLine(run.sources);
@@ -68,8 +87,8 @@ function Progress(props: { run: ResearchRunView }) {
   return (
     <div className="flex flex-col gap-2">
       <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-        <span data-research-phase>{phaseLine(run)}</span>
-        {clock.remainingMs !== null ? (
+        <span data-research-phase>{stopping ? STOPPING_LINE[stopping] : phaseLine(run)}</span>
+        {clock.remainingMs !== null && !stopping ? (
           <span className="text-subtle tabular-nums">{clock.remainingMs > 0 ? `${durationText(clock.remainingMs)} left in the window` : "Window spent, wrapping up"}</span>
         ) : null}
       </p>
@@ -85,26 +104,56 @@ function Progress(props: { run: ResearchRunView }) {
         {run.usage.totalTokens > 0 ? <span className="text-xs text-subtle tabular-nums">{formatTokens(run.usage.totalTokens)} tokens</span> : null}
         <span className="min-w-0 flex-1" />
         {pending ? null : (
-          <Menu>
-            <MenuTrigger asChild>
-              <Button size="sm" variant="secondary" disabled={stopping} aria-label="Stop the research run">
-                {stopping ? <Spinner size={11} /> : null}
-                Stop
-                <CaretDownIcon size={11} className="ml-1 opacity-60" />
-              </Button>
-            </MenuTrigger>
-            <MenuContent side="top" align="end" className="w-[300px]">
-              <MenuItem hint={stopWrites ? "Default" : undefined} onSelect={() => void controller.stopResearch(run.runId, true)}>
-                Stop and write from what it has
-              </MenuItem>
-              <MenuItem hint={stopWrites ? undefined : "Default"} onSelect={() => void controller.stopResearch(run.runId, false)}>
-                Stop now, no report
-              </MenuItem>
-            </MenuContent>
-          </Menu>
+          <StopControl
+            preferred={preferredStopAction(stopWrites)}
+            disabled={stopping !== null}
+            onStop={(action) => void controller.stopResearch(run.runId, action === "write")}
+          />
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Stop as a split button: the button does what the switch in the composer popover prefers, and the chevron
+ * offers both ways with the preferred one marked. One ring around both halves, so it reads as one control.
+ */
+function StopControl(props: { preferred: ResearchStopAction; disabled: boolean; onStop: (action: ResearchStopAction) => void }) {
+  const chosen = STOP_ACTIONS[props.preferred];
+  return (
+    <span className={cn("inline-flex h-7 items-stretch overflow-hidden rounded-md bg-raised shadow-btn", props.disabled && "opacity-45")}>
+      <button
+        type="button"
+        disabled={props.disabled}
+        aria-label="Stop the research run"
+        title={chosen.title}
+        data-stop-action={props.preferred}
+        onClick={() => props.onStop(props.preferred)}
+        className="inline-flex items-center px-2.5 text-sm font-medium text-fg transition-colors duration-150 ease-out hover:bg-hover disabled:pointer-events-none"
+      >
+        Stop
+      </button>
+      <Menu>
+        <MenuTrigger asChild>
+          <button
+            type="button"
+            disabled={props.disabled}
+            aria-label="Other ways to stop"
+            className="inline-flex w-6 items-center justify-center border-l border-line text-muted transition-colors duration-150 ease-out hover:bg-hover hover:text-fg disabled:pointer-events-none"
+          >
+            <CaretDownIcon size={11} />
+          </button>
+        </MenuTrigger>
+        <MenuContent side="top" align="end" className="w-[300px]">
+          {STOP_ACTION_ORDER.map((action) => (
+            <MenuItem key={action} hint={action === props.preferred ? "Default" : undefined} onSelect={() => props.onStop(action)}>
+              {STOP_ACTIONS[action].label}
+            </MenuItem>
+          ))}
+        </MenuContent>
+      </Menu>
+    </span>
   );
 }
 
@@ -144,18 +193,37 @@ function WorkerGlyph(props: { state: ResearchWorkerView["state"] }) {
   }
 }
 
-/** The report, read on first sight since the stream does not carry it, folded past a screen's worth. */
-function Report(props: { run: ResearchRunView; sessionId: string }) {
+/**
+ * The report, which the stream does not carry: the newest finished run reads it on sight, an older one when asked,
+ * and a read that fails leaves a button rather than a spinner. Folded past a screen's worth.
+ */
+function Report(props: { run: ResearchRunView; sessionId: string; latest: boolean }) {
   const { run } = props;
   const controller = useController();
+  const reading = useApp((s) => Boolean(s.busy[`research-report:${run.runId}`]));
   const [expanded, setExpanded] = useState(false);
+  const [failed, setFailed] = useState(false);
   const asked = useRef<string | null>(null);
-  useEffect(() => {
-    if (run.report === null && run.reportAvailable && asked.current !== run.runId) {
-      asked.current = run.runId;
-      void controller.openResearchReport(run.runId);
+  const read = useCallback(() => {
+    if (controller.store.get().busy[`research-report:${run.runId}`]) {
+      return;
     }
-  }, [controller, run.runId, run.report, run.reportAvailable]);
+    asked.current = run.runId;
+    setFailed(false);
+    void controller.openResearchReport(run.runId).then((ok) => {
+      // A read that failed frees the run to be asked for again, from the button that takes the spinner's place.
+      if (!ok) {
+        asked.current = null;
+        setFailed(true);
+      }
+    });
+  }, [controller, run.runId]);
+  useEffect(() => {
+    if (props.latest && run.report === null && run.reportAvailable && asked.current !== run.runId) {
+      read();
+    }
+  }, [props.latest, read, run.report, run.reportAvailable, run.runId]);
+  const view = reportView(run, { latest: props.latest, reading, failed });
   const lines = run.report ? run.report.split("\n").length : 0;
   const long = lines > FOLD_LINES;
   const open = () => {
@@ -172,15 +240,22 @@ function Report(props: { run: ResearchRunView; sessionId: string }) {
           <span>Written from what the workers had found: {run.failure}</span>
         </p>
       ) : null}
-      {run.report ? (
+      {view === "report" && run.report ? (
         <div className={cn("relative", long && !expanded && "max-h-[300px] overflow-hidden")}>
           <Markdown text={run.report} />
           {long && !expanded ? <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-raised to-transparent" /> : null}
         </div>
-      ) : run.reportAvailable ? (
+      ) : view === "reading" ? (
         <p className="flex items-center gap-1.5 text-xs text-subtle">
           <Spinner size={10} /> Reading the report
         </p>
+      ) : view === "read" ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <p className={cn("text-xs", failed ? "text-danger-text" : "text-subtle")}>{failed ? "Could not read the report." : "The report is ready to read."}</p>
+          <Button size="sm" variant="secondary" onClick={read}>
+            Read the report
+          </Button>
+        </div>
       ) : (
         <p className="text-xs text-subtle">The run ended without a report to show.</p>
       )}

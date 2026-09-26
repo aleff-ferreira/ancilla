@@ -20,13 +20,13 @@ import { useSampled } from "../../app/sampled.js";
 import { loadDraft, saveDraft } from "../../model/controller.js";
 import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
-import { researchLive } from "../../model/research.js";
+import { NOTHING_TYPED, RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, researchLive, type ResearchRange, type ResearchTyped } from "../../model/research.js";
 import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
-import type { ApprovalMode, ReasoningEffort, ResearchConfig } from "../../types.js";
+import type { ApprovalMode, ReasoningEffort } from "../../types.js";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Modal, Tip, FLOATING } from "../ui/overlays.js";
-import { Button, IconButton, MOD, Spinner, cn } from "../ui/primitives.js";
+import { Button, IconButton, MOD, Spinner, Toggle, cn } from "../ui/primitives.js";
 import { PixelFlow } from "../ui/PixelFlow.js";
 import { ContextMeter } from "./ContextPanel.js";
 import { SlashMenu, slashOptionId, type SlashMenuState } from "./SlashMenu.js";
@@ -592,12 +592,14 @@ function AccountPicker(props: { sessionId: string | null; cwd: string | null; va
   );
 }
 
-/** The knobs the popover offers per run; everything else comes from the Settings defaults. */
-const RESEARCH_WORKERS = [1, 2, 3, 4] as const;
+/** The popover's number fields: the same small box as the Settings rows, right-aligned so the digits line up. */
+const RESEARCH_FIELD = "h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-accent";
 
 /**
  * Starts a DeepResearch run on the composer's draft, or on a question typed in the popover when the draft is
- * empty. The run is the thread's, so one at a time: the trigger says why it is off instead of going quiet.
+ * empty. The run is the thread's, so one at a time: the trigger says why it is off instead of going quiet. The
+ * knobs offered per run show the Settings defaults and post only what was typed over them, inside the daemon's
+ * limits; everything else is the server's to fill in.
  */
 function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; text: string; disabled: boolean; onStarted: () => void }) {
   const controller = useController();
@@ -607,34 +609,38 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; te
   const busy = useApp((s) => (props.sessionId ? Boolean(s.busy[`research:${props.sessionId}`]) : Boolean(s.busy["start"])));
   const live = useApp((s) => (props.sessionId ? (s.threads[props.sessionId]?.researchRuns.some(researchLive) ?? false) : false));
   const [question, setQuestion] = useState("");
-  const [windowMin, setWindowMin] = useState<string | null>(null);
-  const [windowMax, setWindowMax] = useState<string | null>(null);
-  const [parallel, setParallel] = useState<number | null>(null);
+  const [typed, setTyped] = useState<ResearchTyped>(NOTHING_TYPED);
   const questionId = useId();
   const minId = useId();
   const maxId = useId();
+  const parallelId = useId();
   const switchId = useId();
   const questionRef = useRef<HTMLTextAreaElement>(null);
   const startRef = useRef<HTMLButtonElement>(null);
   const defaults = settings?.config ?? null;
   const drafted = props.text.trim();
   const asked = (drafted || question).trim();
-  const min = Math.max(1, Math.round(Number(windowMin ?? defaults?.windowMinMinutes ?? 3)) || 1);
-  const max = Math.max(min, Math.round(Number(windowMax ?? defaults?.windowMaxMinutes ?? 10)) || min);
-  const workers = parallel ?? defaults?.maxParallel ?? 3;
   const off = settings?.enabled === false;
   const reason = off ? "Deep research is off in Settings" : live ? "A research run is already going in this thread" : null;
   const disabled = props.disabled || reason !== null;
+  // An untouched field shows the loaded default, and nothing until the settings have loaded: a number made up here
+  // would go out as an override.
+  const shown = (field: keyof ResearchTyped, fallback: number | undefined) => typed[field] ?? (fallback === undefined ? "" : String(fallback));
+  const type = (field: keyof ResearchTyped, value: string) => setTyped((current) => ({ ...current, [field]: value }));
+  // Leaving a field settles it inside the daemon's limits, where the server would put it anyway; emptied, it shows
+  // the default again and sends nothing.
+  const settle = (field: keyof ResearchTyped, range: ResearchRange, step = 1) =>
+    setTyped((current) => {
+      if (current[field] === null) return current;
+      const value = clampResearchNumber(current[field], range, step);
+      return { ...current, [field]: value === null ? null : String(value) };
+    });
   const start = async () => {
     if (!asked || busy) {
       return;
     }
-    const config: Partial<ResearchConfig> = {};
-    if (min !== defaults?.windowMinMinutes) config.windowMinMinutes = min;
-    if (max !== defaults?.windowMaxMinutes) config.windowMaxMinutes = max;
-    if (workers !== defaults?.maxParallel) config.maxParallel = workers;
     controller.closePicker("research");
-    const started = await controller.research(asked, Object.keys(config).length > 0 ? config : null, props.sessionId);
+    const started = await controller.research(asked, popoverOverrides(typed, defaults), props.sessionId);
     if (started) {
       setQuestion("");
       if (drafted) props.onStarted();
@@ -716,54 +722,51 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; te
             <input
               id={minId}
               type="number"
-              min={1}
-              max={60}
-              value={windowMin ?? String(defaults?.windowMinMinutes ?? 3)}
-              onChange={(event) => setWindowMin(event.currentTarget.value)}
+              min={RESEARCH_LIMITS.windowMinutes.min}
+              max={RESEARCH_LIMITS.windowMinutes.max}
+              step={WINDOW_STEP}
+              value={shown("windowMin", defaults?.windowMinMinutes)}
+              placeholder={defaults ? undefined : "…"}
+              onChange={(event) => type("windowMin", event.currentTarget.value)}
+              onBlur={() => settle("windowMin", RESEARCH_LIMITS.windowMinutes, WINDOW_STEP)}
               aria-label="Window minimum, minutes"
-              className="h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className={RESEARCH_FIELD}
             />
             <input
               id={maxId}
               type="number"
-              min={1}
-              max={60}
-              value={windowMax ?? String(defaults?.windowMaxMinutes ?? 10)}
-              onChange={(event) => setWindowMax(event.currentTarget.value)}
+              min={RESEARCH_LIMITS.windowMinutes.min}
+              max={RESEARCH_LIMITS.windowMinutes.max}
+              step={WINDOW_STEP}
+              value={shown("windowMax", defaults?.windowMaxMinutes)}
+              placeholder={defaults ? undefined : "…"}
+              onChange={(event) => type("windowMax", event.currentTarget.value)}
+              onBlur={() => settle("windowMax", RESEARCH_LIMITS.windowMinutes, WINDOW_STEP)}
               aria-label="Window maximum, minutes"
-              className="h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              className={RESEARCH_FIELD}
             />
-            <span className="text-muted">Parallel workers</span>
-            <div className="col-span-2 flex items-center gap-0.5 rounded-lg bg-sunken p-0.5" role="radiogroup" aria-label="Parallel workers">
-              {RESEARCH_WORKERS.map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  role="radio"
-                  aria-checked={workers === n}
-                  onClick={() => setParallel(n)}
-                  className={cn(
-                    "h-6 w-8 rounded-md text-xs font-medium tabular-nums transition-colors duration-100",
-                    workers === n ? "bg-raised text-fg shadow-btn" : "text-muted hover:text-fg",
-                  )}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
+            <label htmlFor={parallelId} className="text-muted">
+              Parallel workers
+            </label>
+            <input
+              id={parallelId}
+              type="number"
+              min={RESEARCH_LIMITS.parallel.min}
+              max={RESEARCH_LIMITS.parallel.max}
+              step={1}
+              value={shown("parallel", defaults?.maxParallel)}
+              placeholder={defaults ? undefined : "…"}
+              onChange={(event) => type("parallel", event.currentTarget.value)}
+              onBlur={() => settle("parallel", RESEARCH_LIMITS.parallel)}
+              aria-label="Parallel workers"
+              className={cn(RESEARCH_FIELD, "col-span-2 justify-self-end")}
+            />
           </div>
           <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
             <label htmlFor={switchId} className="min-w-0 flex-1 cursor-default text-sm text-fg">
               Stop writes a report from what it has
             </label>
-            <Switch.Root
-              id={switchId}
-              checked={stopWrites}
-              onCheckedChange={(on) => controller.setResearchStopWrites(on)}
-              className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent data-[state=checked]:bg-accent"
-            >
-              <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
-            </Switch.Root>
+            <Toggle id={switchId} checked={stopWrites} label="Stop writes a report from what it has" onChange={(on) => controller.setResearchStopWrites(on)} />
           </div>
           <div className="mt-3 flex items-center justify-between gap-2">
             <p className="text-xs text-subtle">Runs on your Muse plan; {props.sessionId ? "the report lands in this thread" : "starts a thread for the report"}.</p>

@@ -21,6 +21,7 @@ import type { ThreadState } from "../../model/store.js";
 import type { AttachmentView, MspItem, OutgoingAttachment, ShellRun, UserInputAnswer } from "../../types.js";
 import { CodeBlock, FileLinksContext, type FileLinks } from "../ui/Markdown.js";
 import { fileTarget } from "../../model/files.js";
+import { newestReportedRun } from "../../model/research.js";
 import { SentAttachments, refetchAttachments, toOutgoing, toPreview } from "../composer/attachments.js";
 import { CopyButton } from "../ui/Markdown.js";
 import { Tip } from "../ui/overlays.js";
@@ -108,6 +109,9 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
     const research = (thread.researchRuns ?? []).map((run) => ({ kind: "research" as const, at: Date.parse(run.createdAt) || 0, run }));
     return [...blocks, ...runs, ...research].sort((a, b) => a.at - b.at);
   }, [turns, thread.shellRuns, thread.researchRuns]);
+  // Only the newest report is read on sight; an older one waits for its button, so opening a thread with a history
+  // of runs is not a burst of reads.
+  const newestReport = useMemo(() => newestReportedRun(thread.researchRuns ?? []), [thread.researchRuns]);
   // The latest turn is the one shown last, which is what carries a failure's full notice and its Retry.
   const latestKey = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index -= 1) {
@@ -156,7 +160,9 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
     return () => observer.disconnect();
   }, [scrollRef, scrollToBottom]);
 
-  const empty = turns.length === 0 && echoes.length === 0;
+  // Nothing on the timeline and nothing on its way: a thread whose only content so far is a research run or a
+  // command's output is not a clean slate.
+  const empty = timeline.length === 0 && echoes.length === 0;
   return (
     <FileLinksContext.Provider value={links}>
       <div className="relative min-h-0 flex-1">
@@ -184,7 +190,7 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
               ) : entry.kind === "run" ? (
                 <ShellRunRow key={entry.run.id} run={entry.run} sessionId={props.sessionId} />
               ) : (
-                <ResearchRunRow key={entry.run.runId} run={entry.run} sessionId={props.sessionId} />
+                <ResearchRunRow key={entry.run.runId} run={entry.run} sessionId={props.sessionId} latest={entry.run.runId === newestReport} />
               ),
             )}
             {echoes.map((echo) => (
