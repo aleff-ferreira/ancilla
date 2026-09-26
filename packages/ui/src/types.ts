@@ -33,6 +33,7 @@ export interface LiveView {
   pendingInputs: number;
   lastTerminal: string | null;
   lastError: string | null;
+  viewHealth?: { status: string; reason: string | null } | null;
   /** The session's goal as the server last saw it, for threads the UI has not opened. */
   goal?: Goal | null;
 }
@@ -478,6 +479,10 @@ export interface TranscriptLoad {
   pending: { approvals: ApprovalRequest[]; userInputs: UserInputRequest[] };
   readOnly: boolean;
   readOnlyReason: string | null;
+  /** A failed history read must not replace the transcript already on screen with an empty one. */
+  historyUnavailable?: boolean;
+  pendingComplete?: boolean;
+  viewHealth?: { status: string; reason: string | null } | null;
 }
 
 export type HeliconEvent =

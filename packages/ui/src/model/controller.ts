@@ -200,7 +200,11 @@ const TOAST_MS = { info: 5000, success: 4000, error: 9000 } as const;
 const SKILLS_FRESH_MS = 60_000;
 const SKILLS_RETRY_MS = 10_000;
 /** How often loaded threads are checked for a stream that went silent. */
-const STALE_CHECK_MS = 30_000;
+const STALE_CHECK_MS = 15_000;
+/** Readable fallback history is checked frequently only in the selected thread. */
+const HISTORY_SYNC_MS = 15_000;
+/** Unavailable history and failed reads get a slower retry before the longer backoff. */
+const RECOVERY_RETRY_MS = 30_000;
 /** How often an in-progress device-code login checks whether the account has signed in. */
 const LOGIN_POLL_MS = 2_000;
 /** Gives up polling after this many attempts (two minutes at `LOGIN_POLL_MS`); the modal stays open. */
@@ -216,6 +220,8 @@ const QUIET_TURN_MS = 90_000;
  * sessions this watchdog exists for.
  */
 const STALE_RELOAD_LIMIT = 2;
+/** After the first attempts, continue read-only recovery slowly instead of leaving a permanent spinner. */
+const STALE_BACKOFF_MS = 120_000;
 
 /** Why a loaded thread needs reloading from history: its ending never landed, or its stream went quiet mid-turn. */
 export type StaleThreadReason = "diverged" | "quiet";
@@ -239,6 +245,32 @@ export function staleThreadReason(
     return now - lastAppliedAt > DIVERGED_GRACE_MS ? "diverged" : null;
   }
   return now - lastAppliedAt > QUIET_TURN_MS ? "quiet" : null;
+}
+
+/** Only new work for the current turn counts; replayed items and session metadata do not heal a stale view. */
+function freshViewProgress(previous: ThreadFold, next: ThreadFold, events: readonly ViewEvent[]): boolean {
+  const turns = new Set([previous.activeTurnId, next.activeTurnId].filter((id): id is string => id !== null));
+  for (const event of events) {
+    const turnId = typeof event.params["turnId"] === "string" ? event.params["turnId"] : null;
+    if (event.method === "turn/completed" && turnId && turns.has(turnId)
+      && next.turns[turnId]?.terminal && !previous.turns[turnId]?.terminal) return true;
+    if (event.method === "turn/started" && turnId && turns.has(turnId)
+      && !previous.turns[turnId]?.terminal
+      && (!previous.turns[turnId] || previous.turns[turnId]?.startedAt === undefined && next.turns[turnId]?.startedAt !== undefined)) return true;
+    if (!event.method.startsWith("item/")) continue;
+    const raw = event.params["item"];
+    const itemId = typeof event.params["itemId"] === "string" ? event.params["itemId"]
+      : raw && typeof raw === "object" && "itemId" in raw && typeof raw.itemId === "string" ? raw.itemId : null;
+    if (!itemId) continue;
+    const item = next.items[itemId];
+    const before = previous.items[itemId];
+    if (!item || !turns.has(item.turnId ?? turnId ?? "") || item === before) continue;
+    if (!before || item.revision > before.revision || item.status !== before.status
+      || (item.text?.length ?? 0) > (before.text?.length ?? 0)
+      || (item.visibleOutput?.length ?? 0) > (before.visibleOutput?.length ?? 0)
+      || (item.summary?.join("").length ?? 0) > (before.summary?.join("").length ?? 0)) return true;
+  }
+  return false;
 }
 
 /**
@@ -275,8 +307,11 @@ export class HeliconController {
   private disposed = false;
   /** When stream events were last applied per session, so a thread that went silent can be noticed. */
   private readonly appliedAt = new Map<string, number>();
-  /** Reloads already spent on a thread's current stuck turn, so a hopeless one is not refetched forever. */
+  /** Recovery attempts on the current turn, used to back off after the initial quick reads. */
   private readonly staleReloads = new Map<string, { turnId: string; count: number }>();
+  private readonly recoveryAt = new Map<string, number>();
+  /** A successful fallback returned usable history; failed/empty reads use the slower recovery path. */
+  private readonly readableHistory = new Set<string>();
   private refreshing: Promise<void> | null = null;
   private refreshQueued = false;
   private toastSeq = 0;
@@ -678,6 +713,7 @@ export class HeliconController {
    */
   retryStalledThread(sessionId: string): Promise<void> {
     this.staleReloads.delete(sessionId);
+    this.recoveryAt.set(sessionId, this.platform.now());
     return this.loadThread(sessionId);
   }
 
@@ -699,16 +735,43 @@ export class HeliconController {
   }
 
   private async reloadThread(sessionId: string): Promise<void> {
+    const readStartedAt = this.platform.now();
     const existing = this.state.threads[sessionId];
     this.loading.set(sessionId, []);
     this.setThread(sessionId, { ...(existing ?? blankThread()), load: "loading", error: null });
     try {
-      const load = await this.client.loadTranscript(sessionId);
+      // A fresh browser has no fold yet, but the server may already own a running turn.
+      // Read its current view without resuming that session in the middle of its work.
+      const running = Boolean(existing?.fold.activeTurnId || this.state.sessions[sessionId]?.live?.activeTurnId);
+      const refresh = running || this.recoveryAt.has(sessionId) ||
+        (existing && !existing.readOnly && existing.load === "ready");
+      const load = await this.client.loadTranscript(sessionId, refresh ? { refresh: true } : undefined);
       const buffered = this.loading.get(sessionId) ?? [];
       this.loading.delete(sessionId);
-      const fold = applyEvents(foldFromLoad(load, existing?.fold ?? null), buffered);
-      this.appliedAt.set(sessionId, this.platform.now());
-      const wasStalled = existing?.stalled ?? false;
+      const current = this.state.threads[sessionId] ?? existing;
+      const previous = current?.fold ?? emptyFold();
+      const saved = foldFromLoad(load, previous);
+      const fold = applyEvents(saved, buffered);
+      const checkedAt = this.platform.now();
+      const savedProgress = freshViewProgress(previous, saved, load.events);
+      const liveProgress = buffered.length > 0 && freshViewProgress(previous, applyEvents(previous, buffered), buffered);
+      const progressed = savedProgress || liveProgress;
+      if (progressed) this.staleReloads.delete(sessionId);
+      this.appliedAt.set(sessionId, checkedAt);
+      const unavailable = load.historyUnavailable === true || load.viewHealth?.status === "unavailable";
+      const historySync = fold.activeTurnId !== null && !liveProgress && (unavailable || current?.historySync)
+        ? { checkedAt, progressAt: savedProgress ? checkedAt : current?.historySync?.progressAt ?? null }
+        : undefined;
+      const readable = load.events.some((event) => {
+        if (!event.method.startsWith("item/")) return false;
+        const raw = event.params["item"];
+        const itemId = typeof event.params["itemId"] === "string" ? event.params["itemId"]
+          : raw && typeof raw === "object" && "itemId" in raw && typeof raw.itemId === "string" ? raw.itemId : null;
+        return itemId !== null && saved.items[itemId]?.turnId === fold.activeTurnId;
+      });
+      if (historySync && readable) this.readableHistory.add(sessionId);
+      else this.readableHistory.delete(sessionId);
+      if (historySync) this.recoveryAt.set(sessionId, readStartedAt);
       this.update((s) => ({
         ...s,
         threads: {
@@ -722,8 +785,10 @@ export class HeliconController {
             fold,
             attachments: (load.attachments ?? []).map((file) => this.stamp(file)),
             shellRuns: load.shellRuns ?? [],
-            // History moved the turn on, so the notice goes; a turn still running keeps it.
-            stalled: wasStalled && fold.activeTurnId !== null,
+            // Saved progress is useful even when the live projection remains unavailable.
+            // Keep that distinction in historySync instead of claiming the stream recovered.
+            stalled: fold.activeTurnId !== null && !progressed && (unavailable || current?.stalled === true),
+            ...(historySync ? { historySync } : {}),
           },
         },
         sessions: load.session ? { ...s.sessions, [sessionId]: load.session } : s.sessions,
@@ -732,11 +797,25 @@ export class HeliconController {
       this.autoAllow([sessionId]);
       this.convergeThread(sessionId);
     } catch (error) {
+      const buffered = this.loading.get(sessionId) ?? [];
       this.loading.delete(sessionId);
+      const current = this.state.threads[sessionId] ?? existing ?? blankThread();
+      const fold = applyEvents(current.fold, buffered);
+      const progressed = freshViewProgress(current.fold, fold, buffered);
+      const usable = fold.order.length > 0 || fold.activeTurnId !== null;
+      this.readableHistory.delete(sessionId);
+      this.recoveryAt.set(sessionId, this.platform.now());
+      if (progressed) {
+        this.staleReloads.delete(sessionId);
+        this.appliedAt.set(sessionId, this.platform.now());
+      }
       this.setThread(sessionId, {
-        ...(this.state.threads[sessionId] ?? blankThread()),
-        load: "error",
+        ...current,
+        fold,
+        load: usable ? "ready" : "error",
         error: errorMessage(error),
+        stalled: fold.activeTurnId !== null && !progressed,
+        ...(progressed ? { historySync: undefined } : {}),
       });
     }
   }
@@ -768,6 +847,18 @@ export class HeliconController {
       case "msp":
         if (event.method === "skill/changed") {
           this.refreshSkillsFor(event.sessionId);
+        }
+        if (event.method === "session/viewHealthChanged" && event.params["health"] === "unavailable") {
+          const thread = this.state.threads[event.sessionId];
+          if (thread) {
+            this.setThread(event.sessionId, { ...thread, stalled: thread.fold.activeTurnId !== null });
+            const now = this.platform.now();
+            const selected = this.state.route.kind === "thread" && this.state.route.sessionId === event.sessionId;
+            if (now - (this.recoveryAt.get(event.sessionId) ?? -Infinity) >= (selected ? RECOVERY_RETRY_MS : STALE_BACKOFF_MS)) {
+              this.recoveryAt.set(event.sessionId, now);
+              void this.loadThread(event.sessionId);
+            }
+          }
         }
         this.queueEvent(event.sessionId, { method: event.method, params: event.params, at: event.at });
         break;
@@ -844,15 +935,20 @@ export class HeliconController {
     const batches = [...this.pending];
     this.pending.clear();
     const appliedNow = this.platform.now();
-    for (const [id] of batches) {
-      this.appliedAt.set(id, appliedNow);
-    }
     this.update((s) => {
       const threads = { ...s.threads };
       for (const [id, events] of batches) {
         const thread = threads[id];
         if (thread) {
-          threads[id] = { ...thread, fold: applyEvents(thread.fold, events) };
+          const fold = applyEvents(thread.fold, events);
+          const progressed = freshViewProgress(thread.fold, fold, events);
+          if (progressed) {
+            this.appliedAt.set(id, appliedNow);
+            this.staleReloads.delete(id);
+            this.recoveryAt.delete(id);
+            this.readableHistory.delete(id);
+          }
+          threads[id] = { ...thread, fold, ...(progressed ? { stalled: false, historySync: undefined, error: null } : {}) };
         }
       }
       return { ...s, threads };
@@ -900,36 +996,48 @@ export class HeliconController {
         continue;
       }
       // A turn waiting on the user is quiet because it should be, not because the stream died (#54).
-      // Reloading it sends session/resume into a live session mid-question, which is how a turn that
-      // was fine came to be reported failed. Treat the wait as activity, so the grace period starts
-      // over once the answer goes in rather than firing the moment it does.
+      // Treat that wait as activity, so the grace period starts over once the answer goes in
+      // rather than repeatedly reading a session whose silence is expected.
       const live = this.state.sessions[id]?.live;
+      const unavailable = live?.viewHealth?.status === "unavailable" || thread.historySync !== undefined;
       const waiting =
         Object.keys(thread.fold.userInputs).length > 0 ||
         Object.keys(thread.fold.approvals).length > 0 ||
         (live?.pendingInputs ?? 0) > 0 ||
         (live?.pendingApprovals ?? 0) > 0;
-      if (waiting) {
+      if (waiting && !unavailable && !thread.error) {
         this.appliedAt.set(id, now);
-        this.staleReloads.delete(id);
-        if (thread.stalled) {
-          this.setThread(id, { ...thread, stalled: false });
-        }
         continue;
       }
-      if (staleThreadReason(turnId, live?.activeTurnId ?? null, applied, now) === null) {
+      const selected = this.state.route.kind === "thread" && this.state.route.sessionId === id;
+      const historyInterval = selected ? HISTORY_SYNC_MS : STALE_BACKOFF_MS;
+      if (thread.historySync && this.readableHistory.has(id) && !thread.error) {
+        // Measure request cadence from its start. Response latency must not turn every
+        // 15-second check into a 30-second interval on the shared watchdog timer.
+        if (now - (this.recoveryAt.get(id) ?? thread.historySync.checkedAt) < historyInterval) continue;
+        const spent = this.staleReloads.get(id);
+        this.staleReloads.set(id, { turnId, count: spent?.turnId === turnId ? spent.count + 1 : 1 });
+        this.recoveryAt.set(id, now);
+        void this.loadThread(id);
+        continue;
+      }
+      if (!unavailable && !thread.error && staleThreadReason(turnId, live?.activeTurnId ?? null, applied, now) === null) {
         continue;
       }
       const spent = this.staleReloads.get(id);
       const count = spent && spent.turnId === turnId ? spent.count : 0;
       if (count >= STALE_RELOAD_LIMIT) {
-        // Out of reloads and the turn still has not moved. Say so: a spinner that will never
-        // resolve reads as the app working, and the user waits for nothing (#42).
+        // Initial reads did not move the turn. Explain the unavailable live view and continue
+        // less frequent reads instead of leaving a permanent spinner (#42).
         if (!thread.stalled) {
           this.setThread(id, { ...thread, stalled: true });
         }
+      }
+      const delay = count >= STALE_RELOAD_LIMIT || thread.historySync && !selected ? STALE_BACKOFF_MS : RECOVERY_RETRY_MS;
+      if ((count >= STALE_RELOAD_LIMIT || unavailable || thread.error) && now - (this.recoveryAt.get(id) ?? applied) < delay) {
         continue;
       }
+      this.recoveryAt.set(id, now);
       this.staleReloads.set(id, { turnId, count: count + 1 });
       void this.loadThread(id);
     }
@@ -1149,7 +1257,8 @@ export class HeliconController {
       const ack = await this.client.sendTurn(sessionId, text, {
         ifBusy: running ? (options.steer ? "steer" : "queue") : undefined,
         reasoningEffort: this.state.prefs.effort ?? undefined,
-        displayText: options.displayText,
+        // Attachment paths and image markers belong to the model input, not the shown prompt.
+        displayText: options.displayText ?? (options.attachments?.length ? text : undefined),
         attachments: options.attachments,
       });
       const disposition: LocalEcho["disposition"] =

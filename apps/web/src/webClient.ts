@@ -236,8 +236,8 @@ export class WebHeliconClient implements HeliconClient {
     return result.session;
   }
 
-  loadTranscript(sessionId: string): Promise<TranscriptLoad> {
-    return call<TranscriptLoad>("POST", `/api/sessions/${enc(sessionId)}/resume`, {});
+  loadTranscript(sessionId: string, options?: { refresh?: boolean }): Promise<TranscriptLoad> {
+    return call<TranscriptLoad>("POST", `/api/sessions/${enc(sessionId)}/resume`, options ?? {});
   }
 
   async updateSession(sessionId: string, patch: { title?: string; archived?: boolean }): Promise<SessionSummary | null> {

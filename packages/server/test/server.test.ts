@@ -208,6 +208,206 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
 
 const RANGE = { first: { id: "r", sequence: 1 }, last: { id: "r", sequence: 1 }, stream: { id: "s", kind: "session" } };
 
+describe("read-only recovery of a silent Muse view", () => {
+  async function running() {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work/recovery" });
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    return { connection, base };
+  }
+
+  it("records unavailable live updates without declaring the running turn failed", async () => {
+    const { connection, base } = await running();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    const session = (await get(base, "/api/sessions")).sessions[0];
+    assert.equal(session.live.activeTurnId, "t1");
+    assert.equal(session.live.lastError, null);
+    assert.equal(session.live.lastTerminal, null);
+    assert.deepEqual(session.live.viewHealth, { status: "unavailable", reason: "projectionUnavailable" });
+  });
+
+  it("clears unavailable health only when durable progress belongs to the active turn", async () => {
+    const { connection, base } = await running();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    const health = async () => (await get(base, "/api/sessions")).sessions[0].live.viewHealth;
+    connection.notify("session/modelChanged", { sessionId: "s1", modelId: "m1", viewCursor: "v:1", sourceRange: RANGE });
+    connection.notify("item/updated", { sessionId: "s1", viewCursor: "v:2", sourceRange: RANGE,
+      item: { itemId: "old", kind: "toolCall", turnId: "older-turn", revision: 2, status: "completed" } });
+    connection.notify("item/delta", { sessionId: "s1", turnId: "t1", itemId: "reply", field: "text", delta: "working" });
+    assert.equal((await health()).status, "unavailable", "metadata, old turns and ephemeral text do not certify the durable projection");
+    connection.notify("item/updated", { sessionId: "s1", viewCursor: "v:3", sourceRange: RANGE,
+      item: { itemId: "work", kind: "toolCall", turnId: "t1", revision: 2, status: "completed" } });
+    assert.equal(await health(), null);
+    assert.equal((await get(base, "/api/sessions")).sessions[0].live.activeTurnId, "t1");
+  });
+
+  it("clears unavailable health when the active turn durably completes", async () => {
+    const { connection, base } = await running();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.notify("turn/completed", { sessionId: "s1", turnId: "t1", terminal: "completed", viewCursor: "v:3", sourceRange: RANGE });
+    const live = (await get(base, "/api/sessions")).sessions[0].live;
+    assert.equal(live.viewHealth, null);
+    assert.equal(live.activeTurnId, null);
+    assert.equal(live.lastTerminal, "completed");
+  });
+
+  it("does not let a delayed unavailable read overwrite newer durable item progress", async () => {
+    const { connection, base } = await running();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    let finish!: (value: unknown) => void;
+    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(finish), "recovery read starts");
+    connection.notify("item/completed", { sessionId: "s1", viewCursor: "v:4", sourceRange: RANGE,
+      item: { itemId: "reply", kind: "agentMessage", turnId: "t1", revision: 1, status: "completed", text: "Progress" } });
+    finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null },
+      history: { mode: "none", noneReason: "projectionUnavailable" } });
+    const reply = await reading;
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.viewHealth, null);
+    assert.equal(reply.json.msp.activeTurnId, "t1");
+    assert.equal(reply.json.historyUnavailable, true, "the old response remains partial even though live progress recovered");
+    assert.equal(reply.json.pendingComplete, false);
+  });
+
+  it("does not let an older successful read clear a newer unavailable notification", async () => {
+    const { connection, base } = await running();
+    let finish!: (value: unknown) => void;
+    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(finish), "history read starts");
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    finish({ session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
+      history: { mode: "inline", items: [] } });
+    const reply = await reading;
+    assert.deepEqual(reply.json.viewHealth, { status: "unavailable", reason: "projectionUnavailable" });
+  });
+
+  it("clears unavailable health after a successful read serves known history", async () => {
+    const { connection, base } = await running();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.replies.set("session/read", {
+      session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
+      history: { mode: "inline", items: [{ itemId: "reply", kind: "agentMessage", turnId: "t1", revision: 1, status: "inProgress", text: "Progress" }] },
+    });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.viewHealth, null);
+    assert.equal(reply.json.historyUnavailable, false);
+    assert.equal(reply.json.msp.activeTurnId, "t1");
+    assert.equal(connection.calls.some((call) => ["session/resume", "turn/start"].includes(call.method)), false);
+  });
+
+  it("includes newer snapshot items alongside paged history without duplicating usage", async () => {
+    const { connection, base } = await running();
+    const earlier = { itemId: "reply", kind: "agentMessage", turnId: "t1", revision: 1, status: "inProgress", text: "Earlier" };
+    const latest = { ...earlier, revision: 2, status: "completed", text: "Latest" };
+    connection.replies.set("session/read", {
+      session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
+      history: { mode: "snapshot", snapshot: { state: { items: [latest], tokenUsage: { totalTokens: 10 } } } },
+    });
+    connection.replies.set("view/page", { events: [
+      { method: "item/updated", params: { sessionId: "s1", item: earlier } },
+      { method: "session/tokenUsage", params: { sessionId: "s1", turnId: "t1", viewCursor: "v:2", promptTokens: 8, totalTokens: 10 } },
+    ], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.deepEqual(reply.json.events.filter((event: any) => event.params.item).map((event: any) => event.params.item), [earlier, latest]);
+    assert.equal(reply.json.events.filter((event: any) => event.method === "session/tokenUsage").length, 1);
+    assert.equal(connection.calls.some((call) => ["session/resume", "turn/start"].includes(call.method)), false);
+  });
+
+  it("recovers a missed completion through read and history, without resume or another turn", async () => {
+    const { connection, base } = await running();
+    connection.replies.set("session/read", {
+      session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 1 },
+      history: { mode: "none", noneReason: "projectionUnavailable" },
+    });
+    connection.replies.set("view/page", { events: [
+      { method: "turn/completed", params: { sessionId: "s1", turnId: "t1", terminal: "completed" } },
+    ], nextCursor: null });
+    const result = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(result.status, 200);
+    assert.equal(result.json.msp.activeTurnId, null);
+    assert.equal(result.json.session.live.lastTerminal, "completed");
+    assert.equal(result.json.viewHealth.status, "unavailable");
+    assert.equal(result.json.historyUnavailable, true, "a nonempty prefix does not make an unavailable projection complete");
+    assert.equal(connection.calls.some((call) => ["session/resume", "turn/start"].includes(call.method)), false);
+    assert.equal(connection.requests.filter((call) => call.method === "session/read").length, 1);
+  });
+
+  it("does not present the history projection's incomplete open run as a failed turn", async () => {
+    const { connection, base } = await running();
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "running", activeTurnId: "t1" } });
+    const priorFailure = { method: "turn/completed", params: { sessionId: "s1", turnId: "t0", terminal: "failed", reason: "incomplete" } };
+    const openRun = { method: "turn/completed", params: { sessionId: "s1", turnId: "t1", terminal: "failed", reason: "incomplete" } };
+    connection.replies.set("view/page", { events: [priorFailure, openRun], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, "t1");
+    assert.deepEqual(reply.json.events, [priorFailure], "only the still-open run's synthetic failure is omitted");
+    assert.equal(reply.json.session.live.lastError, null);
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "idle", activeTurnId: null } });
+    const stopped = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(stopped.json.events.length, 2, "an idle incomplete run remains a visible failure");
+  });
+
+  it("does not clear a newer turn when a delayed read returns an old idle snapshot", async () => {
+    const { connection, base } = await running();
+    let finish!: (value: unknown) => void;
+    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const result = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(finish), "read starts");
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t2" });
+    finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 1 }, history: { items: [] } });
+    const reply = await result;
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.msp.activeTurnId, "t2");
+    assert.equal(reply.json.session.live.activeTurnId, "t2");
+    assert.equal(reply.json.pendingComplete, false);
+  });
+
+  it("does not interpret another host's notLoaded snapshot as an idle turn", async () => {
+    const { connection, base } = await running();
+    connection.notify("approval/requested", { sessionId: "s1", approvalId: "a1" });
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "notLoaded", activeTurnId: null } });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, "t1");
+    assert.equal(reply.json.session.live.activeTurnId, "t1");
+    assert.equal(reply.json.session.live.pendingApprovals, 1);
+    assert.equal(reply.json.pendingComplete, false);
+  });
+
+  it("keeps the last pending state when its read fails, and marks missing history explicitly", async () => {
+    const { connection, base } = await running();
+    connection.notify("approval/requested", { sessionId: "s1", approvalId: "a1" });
+    connection.replies.set("approval/listPending", new Error("temporarily unavailable"));
+    connection.replies.set("session/read", {
+      session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
+      history: { mode: "none", noneReason: "projectionUnavailable" },
+    });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.historyUnavailable, true);
+    assert.equal(reply.json.pendingComplete, false);
+    assert.equal(reply.json.session.live.pendingApprovals, 1);
+  });
+
+  it("protects a newly accepted turn even when its started notification is missing", async () => {
+    const { connection, base } = await running();
+    let finish!: (value: unknown) => void;
+    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(finish), "read starts");
+    connection.replies.set("turn/start", { status: "accepted", disposition: "started", turnId: "t2" });
+    assert.equal((await send(base, "/api/turns", { sessionId: "s1", text: "Next task" })).status, 200);
+    finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null }, history: { items: [] } });
+    const reply = await reading;
+    assert.equal(reply.json.msp.activeTurnId, "t2");
+    assert.equal(reply.json.session.live.activeTurnId, "t2");
+  });
+});
+
 describe("HeliconServer", () => {
   it("serves health, projects, sessions and turns", async () => {
     const connection = new FakeConnection();
@@ -875,6 +1075,32 @@ describe("HeliconServer", () => {
     assert.equal(connection.calls.filter((c) => c.method === "session/rename").length, renames, "an unchanged title is not sent again");
     session = await read();
     assert.equal(session.title, "Local only");
+  });
+
+  it("can keep generated and typed titles local without writing rename records to Muse", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const exec: ExecFn = async () => ({
+      stdout: JSON.stringify({ payload_type: "run.terminal.completed", payload: { kind: "run_terminal", terminal: "completed", text: "Parallel code investigation" } }),
+      exitCode: 0,
+    });
+    const { base } = await start(connection, { syncSessionNames: false, exec });
+    await send(base, "/api/sessions", { cwd: "/work/proj" });
+    const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
+    connection.notify("item/completed", {
+      sessionId: "s1",
+      item: { itemId: "i1", kind: "userMessage", revision: 1, status: "completed", text: "Investigate these independent components with native agents" },
+    });
+    await waitFor(async () => (await titleOf()) === "Parallel code investigation", "the generated local title");
+    connection.notify("session/nameChanged", { sessionId: "s1", name: "native-name", viewCursor: "c", sourceRange: RANGE });
+    connection.replies.set("session/list", {
+      sessions: [{ sessionId: "s1", workspaceRoot: "/work/proj", name: "native-name" }], nextCursor: null,
+    });
+    await send(base, "/api/discover", {});
+    assert.equal(await titleOf(), "Parallel code investigation", "the unsynchronized host name cannot undo a local title");
+    await send(base, "/api/sessions/s1", { title: "My investigation" }, "PATCH");
+    assert.equal(await titleOf(), "My investigation");
+    assert.equal(connection.calls.filter((c) => c.method === "session/rename").length, 0);
   });
 
   it("keeps thread-title settings behind a switch and a model choice", async () => {

@@ -119,6 +119,8 @@ export interface ServerOptions {
   aonia?: Aonia;
   /** On Windows: `native` runs Windows Muse, `wsl` runs Muse in WSL, `auto` (the default) prefers native once installed. */
   runtime?: RuntimePreference;
+  /** Keep titles local when a host's session/rename corrupts workflow replay (observed with Muse 1.4.0). */
+  syncSessionNames?: boolean;
   /** Finds native Windows Muse; the real install folders by default. */
   findNativeMuse?: () => NativeMuse | null;
   hostFactory?: HostFactory;
@@ -165,6 +167,8 @@ interface LiveState {
   goal: GoalBlock | null;
   /** Bumped on every live goal change, so a slow transcript load never writes an older goal over a newer one. */
   goalSeq: number;
+  activityRevision: number;
+  viewHealth: { status: string; reason: string | null } | null;
 }
 
 export interface LiveView {
@@ -175,6 +179,7 @@ export interface LiveView {
   lastTerminal: string | null;
   lastError: string | null;
   goal: GoalBlock | null;
+  viewHealth?: { status: string; reason: string | null } | null;
 }
 
 /** A `session/goalChanged` goal: null clears it; undefined means the block is not a goal (no objective). */
@@ -714,6 +719,7 @@ export class HeliconServer {
       distro: options.distro,
       musePath: options.musePath,
       runtime: options.runtime ?? parseRuntimePreference(process.env["HELICON_MUSE_RUNTIME"]),
+      syncSessionNames: options.syncSessionNames ?? true,
       findNativeMuse: options.findNativeMuse,
       hostFactory: options.hostFactory ?? realHostFactory,
       home: options.home ?? homedir(),
@@ -1244,7 +1250,7 @@ export class HeliconServer {
       if (method === "POST" && action) {
         const body = await this.readBody(req);
         if (action === "resume") {
-          this.json(res, 200, await this.loadTranscript(sessionId));
+          this.json(res, 200, await this.loadTranscript(sessionId, body["refresh"] === true));
           return true;
         }
         const manager = await this.managerForSession(sessionId);
@@ -1576,12 +1582,22 @@ export class HeliconServer {
       }
       const prepared = await this.prepareAttachments(this.store.findSession(sessionId)?.cwd ?? "", files);
       this.wake(sessionId);
+      const live = this.liveFor(sessionId);
+      const sentAtRevision = ++live.activityRevision;
       const ack = await manager.sendTurn(sessionId, prepared.prompt(text), {
         displayText: str(body["displayText"]) ?? undefined,
         ifBusy: typeof ifBusy === "string" ? ifBusy : undefined,
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
       });
+      if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
+        live.activityRevision += 1;
+        live.activeTurnId = ack.turnId;
+        live.turnStartedAt = nowIso();
+        live.lastTerminal = null;
+        live.lastError = null;
+        this.emitStatus(sessionId);
+      }
       // The saved attachments go back with the ack: the open thread shows them without waiting for a reload.
       const saved = prepared.files.map((file, index) =>
         this.attachmentView(
@@ -1806,6 +1822,8 @@ export class HeliconServer {
         lastError: null,
         goal: null,
         goalSeq: 0,
+        activityRevision: 0,
+        viewHealth: null,
       };
       this.live.set(sessionId, state);
     }
@@ -1825,6 +1843,7 @@ export class HeliconServer {
       lastTerminal: state.lastTerminal,
       lastError: state.lastError,
       goal: state.goal,
+      viewHealth: state.viewHealth,
     };
   }
 
@@ -1947,6 +1966,14 @@ export class HeliconServer {
     if ((this.runtimeHint() ?? this.runtimeKnown) === "native") {
       return this.spawnCwdFor(cwd);
     }
+    const unc = /^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)(?:\\(.*))?$/i.exec(cwd);
+    if (unc) {
+      const distro = this.options.distro ?? this.envCache?.value.defaultDistro ?? "Ubuntu";
+      if (unc[1]!.toLowerCase() !== distro.toLowerCase()) {
+        throw new HttpError(400, `This folder belongs to WSL ${unc[1]}, but Muse is running in ${distro}.`);
+      }
+      return "/" + (unc[2] ?? "").replace(/\\/g, "/");
+    }
     if (isWindowsAbs(cwd)) {
       try {
         return toWslPath(cwd);
@@ -1963,6 +1990,12 @@ export class HeliconServer {
   }
 
   private storePathFor(remoteRoot: string): string {
+    if (this.options.platform === "win32" && isWslAbs(remoteRoot)) {
+      const existing = this.store.listProjects().find((project) => {
+        try { return this.hostPathFor(project.cwd) === remoteRoot; } catch { return false; }
+      });
+      if (existing) return existing.cwd;
+    }
     if (this.options.platform === "win32" && isWindowsAbs(remoteRoot)) {
       // Native Muse may spell a folder `d:/work`; the store keeps one spelling, `D:\\work`.
       const normal = win32.normalize(remoteRoot);
@@ -2456,18 +2489,29 @@ export class HeliconServer {
     };
   }
 
-  private async loadTranscript(sessionId: string): Promise<Record<string, unknown>> {
+  private async loadTranscript(sessionId: string, refresh = false): Promise<Record<string, unknown>> {
     // A goal change can land while this load is in flight; history must not then write the older goal back.
     const goalSeqAtStart = this.liveFor(sessionId).goalSeq;
     const found = this.store.findSession(sessionId);
     const host = await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
     const manager = host.manager;
+    const activityAtStart = this.liveFor(sessionId).activityRevision;
     let readOnly = false;
     let readOnlyReason: string | null = null;
     let msp: Record<string, unknown> | null = null;
+    let read: Record<string, unknown> | null = null;
     try {
-      msp = asRecord(asRecord(await manager.resumeSession(sessionId, true))?.["session"]);
-      this.sessionHosts.set(sessionId, host.key);
+      if (refresh) {
+        // A quiet turn can still be executing or waiting on a question. Reading must never reattach it.
+        read = asRecord(await manager.readSession(sessionId, false));
+        msp = asRecord(read?.["session"]);
+        readOnly = this.sessionHosts.get(sessionId) !== host.key;
+      } else {
+        const resumed = asRecord(await manager.resumeSession(sessionId, true));
+        msp = asRecord(resumed?.["session"]);
+        this.sessionHosts.set(sessionId, host.key);
+        read = resumed;
+      }
     } catch (error) {
       const info = errorInfo(error);
       // Only another host holding the session makes it read-only here; any other failure is real and surfaces.
@@ -2492,30 +2536,61 @@ export class HeliconServer {
       }
     }
 
-    // session/read with items is a point-in-time log: it does not take the lease, so CLI history still lands.
-    if (events.length === 0) {
-      const read = await manager.readSession(sessionId, false).catch(() => null);
-      const payload = asRecord(read);
-      if (!msp) {
-        msp = asRecord(payload?.["session"]);
-      }
-      events = eventsFromHistory(payload);
+    // The read can have newer item revisions than a partially available page. Append its item
+    // records so the UI's revision fold selects the newest; usage remains owned by paged events.
+    if (events.length === 0 && !refresh) {
+      read = asRecord(await manager.readSession(sessionId, false));
     }
+    if (!msp) msp = asRecord(read?.["session"]);
+    events.push(...eventsFromHistory(read));
 
-    const pending = await manager.listPending(sessionId).catch(() => ({ approvals: [], userInputs: [] }));
-    const approvals = pending.approvals.map((a) => stripSource(asRecord(a) ?? {}));
-    const userInputs = pending.userInputs.map((u) => stripSource(asRecord(u) ?? {}));
+    const pending = await manager.listPending(sessionId).catch(() => null);
+    const approvals = (pending?.approvals ?? []).map((a) => stripSource(asRecord(a) ?? {}));
+    const userInputs = (pending?.userInputs ?? []).map((u) => stripSource(asRecord(u) ?? {}));
 
     const live = this.liveFor(sessionId);
-    if (msp) {
+    const superseded = live.activityRevision !== activityAtStart;
+    // A different/new host reports notLoaded even while the owning host is still working.
+    const statusKnown = msp !== null && msp["status"] !== "notLoaded";
+    const history = asRecord(read?.["history"]);
+    const noneReason = str(history?.["noneReason"]);
+    const snapshotItems = asRecord(asRecord(history?.["snapshot"])?.["state"])?.["items"];
+    const historyServed =
+      (history?.["mode"] === "inline" && Array.isArray(history["items"])) ||
+      (["snapshot", "anchoredSnapshot"].includes(String(history?.["mode"])) &&
+        (Array.isArray(snapshotItems) || asRecord(snapshotItems) !== null));
+    if (!superseded) {
+      if (noneReason === "projectionUnavailable") {
+        live.viewHealth = { status: "unavailable", reason: noneReason };
+      } else if (statusKnown && historyServed) {
+        live.viewHealth = null;
+      }
+    }
+    if (msp && statusKnown && !superseded) {
       const active = str(msp["activeTurnId"]);
       if (active !== live.activeTurnId) {
         live.activeTurnId = active;
         live.turnStartedAt = active ? (live.turnStartedAt ?? nowIso()) : null;
       }
     }
-    live.pendingApprovals = new Set(approvals.map((a) => str(a["approvalId"])).filter((id): id is string => id !== null));
-    live.pendingInputs = new Set(userInputs.map((u) => str(u["userInputId"])).filter((id): id is string => id !== null));
+    if (pending && statusKnown && !superseded) {
+      live.pendingApprovals = new Set(approvals.map((a) => str(a["approvalId"])).filter((id): id is string => id !== null));
+      live.pendingInputs = new Set(userInputs.map((u) => str(u["userInputId"])).filter((id): id is string => id !== null));
+    }
+    // Muse's history projection can synthesize failed/incomplete for an open run. The loaded
+    // session still owns that turn; do not present its unfinished snapshot as a real failure.
+    if (live.activeTurnId) {
+      events = events.filter((event) => !(event.method === "turn/completed" &&
+        event.params["terminal"] === "failed" && event.params["reason"] === "incomplete" &&
+        event.params["turnId"] === live.activeTurnId));
+    }
+    if (!superseded) {
+      const terminal = [...events].reverse().find((event) => event.method === "turn/completed");
+      if (terminal && !live.activeTurnId) {
+        live.lastTerminal = str(terminal.params["terminal"]);
+        live.lastError = live.lastTerminal === "failed" ? str(asRecord(terminal.params["error"])?.["message"]) ?? "The turn failed." : null;
+      }
+    }
     // Opening a thread backfills the usage page with the calls it made before this server ever ran.
     for (const event of events) {
       if (event.method === "session/tokenUsage") {
@@ -2533,7 +2608,7 @@ export class HeliconServer {
     }
     this.emitStatus(sessionId);
 
-    if (found) {
+    if (found && !superseded) {
       this.store.recordSession({
         id: sessionId,
         projectId: found.session.projectId,
@@ -2558,7 +2633,7 @@ export class HeliconServer {
       msp: msp
         ? {
             status: str(msp["status"]),
-            activeTurnId: str(msp["activeTurnId"]),
+            activeTurnId: superseded || !statusKnown ? live.activeTurnId : str(msp["activeTurnId"]),
             modelId: str(msp["modelId"]),
             approvalMode: asRecord(msp["approvalMode"])?.["mode"] ?? null,
             workspaceRoot: str(msp["workspaceRoot"]),
@@ -2573,6 +2648,10 @@ export class HeliconServer {
       attachments: this.store.listAttachments(sessionId).map((record) => this.attachmentView(record)),
       shellRuns: this.store.listShellRuns(sessionId),
       pending: { approvals, userInputs },
+      pendingComplete: pending !== null && statusKnown && !superseded,
+      // A readable old prefix does not make an unavailable projection a complete replacement.
+      historyUnavailable: noneReason === "projectionUnavailable" || (noneReason !== null && events.length === 0),
+      viewHealth: live.viewHealth,
       readOnly,
       readOnlyReason,
     };
@@ -2610,7 +2689,8 @@ export class HeliconServer {
       // Muse names its own sessions, and that name is what the user sees in the CLI, so it wins here too.
       // Only a title the user typed in Helicon outranks it. MSP `title` is just the first-prompt echo,
       // so it is only a fallback, sanitized like any other derived title.
-      const keepOurs = existing?.titleSource === "user";
+      const keepOurs = existing?.titleSource === "user" ||
+        (!this.options.syncSessionNames && existing !== null && existing.titleSource !== "placeholder");
       const mspName = keepOurs ? null : firstString(session, ["name"]);
       const mspTitle = keepOurs ? null : firstString(session, ["title"]);
       const echoTitle = mspName ? null : mspTitle ? deriveTitle(mspTitle) : null;
@@ -2954,13 +3034,24 @@ export class HeliconServer {
    */
   private async runLogin(id: string, profile: Profile): Promise<{ url: string; code: string | null }> {
     const command = this.aonia.loginCommand(profile);
-    const resolved = command.command === "muse" && this.options.musePath ? this.options.musePath : command.command;
+    const runtime = await this.museRuntime();
+    const resolved = command.command === "muse"
+      ? this.options.musePath ?? (await this.environment(false)).musePath ?? command.command
+      : command.command;
+    const login = planMuseCli({ platform: this.options.platform, runtime, distro: this.options.distro,
+      musePath: resolved, args: command.args });
+    const loginEnv: Record<string, string> = Object.fromEntries(
+      Object.entries({ ...process.env, ...command.env }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+    if (this.options.platform === "win32" && runtime === "wsl") {
+      loginEnv["WSLENV"] = this.profileWslEnv();
+    }
     const previous = this.loginChildren.get(id);
     if (previous) {
       previous.kill();
       this.loginChildren.delete(id);
     }
-    const child = this.options.loginSpawn(resolved, command.args, { env: command.env });
+    const child = this.options.loginSpawn(login.command, login.args, { env: loginEnv });
     this.loginChildren.set(id, child);
     return new Promise((resolvePromise, reject) => {
       let settled = false;
@@ -3067,7 +3158,15 @@ export class HeliconServer {
       sandboxDisabled,
       yoloEnabled,
     });
-    return { command: plan.command, args: plan.args, cwd: plan.cwd };
+    return { command: plan.command, args: plan.args, cwd: plan.cwd,
+      ...(profileEnv ? { env: { ...process.env, ...profileEnv, WSLENV: this.profileWslEnv() } } : {}) };
+  }
+
+  private profileWslEnv(): string {
+    return [
+      ...(process.env["WSLENV"] ?? "").split(":").filter((entry) => entry && !["XDG_CONFIG_HOME", "XDG_DATA_HOME"].includes(entry.split("/")[0]!)),
+      "XDG_CONFIG_HOME/pu", "XDG_DATA_HOME/pu",
+    ].join(":");
   }
 
   /** The launcher's release details for a binary in its install folder, as the launcher itself would pass them. */
@@ -3132,17 +3231,38 @@ export class HeliconServer {
 
   private track(sessionId: string, method: string, params: Record<string, unknown>): void {
     const live = this.liveFor(sessionId);
+    if (["approval/requested", "approval/resolved", "userInput/requested", "userInput/settled", "session/statusChanged"].includes(method)) {
+      live.activityRevision += 1;
+    }
     let changed = false;
+    const item = asRecord(params["item"]);
+    const progressTurnId = str(item?.["turnId"]) ?? str(params["turnId"]);
+    const currentProgress = progressTurnId !== null &&
+      (progressTurnId === live.activeTurnId || (method === "turn/started" && live.activeTurnId === null));
+    const durableProgress = currentProgress && str(params["viewCursor"]) !== null && asRecord(params["sourceRange"]) !== null &&
+      (["turn/started", "turn/completed"].includes(method) ||
+        (["item/started", "item/updated", "item/completed"].includes(method) && str(item?.["itemId"]) !== null));
+    if (durableProgress) {
+      // Even when its lifecycle did not change, new current-turn content supersedes an older read.
+      live.activityRevision += 1;
+      if (live.viewHealth !== null) {
+        live.viewHealth = null;
+        changed = true;
+      }
+    }
     switch (method) {
       case "turn/started": {
+        live.activityRevision += 1;
         live.activeTurnId = str(params["turnId"]);
         live.turnStartedAt = nowIso();
         live.lastError = null;
+        live.lastTerminal = null;
         changed = true;
         this.wake(sessionId);
         break;
       }
       case "turn/completed": {
+        live.activityRevision += 1;
         const turnId = str(params["turnId"]);
         if (!live.activeTurnId || live.activeTurnId === turnId) {
           live.activeTurnId = null;
@@ -3161,6 +3281,14 @@ export class HeliconServer {
         }
         changed = true;
         this.sessionsChanged();
+        break;
+      }
+      case "session/viewHealthChanged": {
+        if (params["health"] === "unavailable") {
+          live.activityRevision += 1;
+          live.viewHealth = { status: "unavailable", reason: str(params["noneReason"]) };
+          changed = true;
+        }
         break;
       }
       case "approval/requested": {
@@ -3259,6 +3387,7 @@ export class HeliconServer {
    * still deserves the name the user gave it.
    */
   private async renameInMuse(sessionId: string, name: string): Promise<void> {
+    if (!this.options.syncSessionNames) return;
     const hostKey = this.sessionHosts.get(sessionId);
     const managed = hostKey ? this.hosts.get(hostKey) : undefined;
     if (!managed) {
@@ -3365,6 +3494,7 @@ export class HeliconServer {
     if (!title || !record || record.title === title) {
       return;
     }
+    if (!this.options.syncSessionNames && record.titleSource !== "placeholder") return;
     // A Muse-selected name is never upgraded, even if an echo here owed an attempt.
     this.titleUpgradePending.delete(sessionId);
     this.store.updateSession(sessionId, { title, titleSource: record.titleSource === "user" ? "user" : "auto" });

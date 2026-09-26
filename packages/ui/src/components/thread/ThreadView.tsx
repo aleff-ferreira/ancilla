@@ -1,10 +1,11 @@
 import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, StopCircleIcon, TreeStructureIcon } from "../ui/icons.js";
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
 import { basename, formatDuration } from "../../model/format.js";
 import { backgroundTasks } from "../../model/plan.js";
 import { goalView } from "../../model/goal.js";
+import { agentActivityView } from "../../model/agents.js";
 import type { ThreadState } from "../../model/store.js";
 import type { SessionSummary } from "../../types.js";
 import { SidebarToggle, TrafficLightSpacer } from "../chrome.js";
@@ -17,11 +18,15 @@ import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "..
 import { Button, IconButton, MOD, Spinner } from "../ui/primitives.js";
 import { FilesPanel } from "../files/FilesPanel.js";
 import { Transcript } from "./Transcript.js";
+import { AgentPanel } from "./AgentPanel.js";
 
 export function ThreadView(props: { sessionId: string }) {
   const session = useApp((s) => s.sessions[props.sessionId] ?? null);
   const thread = useApp((s) => s.threads[props.sessionId] ?? null);
   const filesOpen = useApp((s) => s.prefs.filesOpen);
+  const connection = useApp((s) => s.connection);
+  const agents = useMemo(() => thread ? agentActivityView(thread.fold) : null,
+    [thread?.fold.agentItems ?? thread?.fold.items, thread?.fold.activeTurnId]);
   if (!session) {
     return <MissingThread />;
   }
@@ -31,6 +36,8 @@ export function ThreadView(props: { sessionId: string }) {
       <ThreadHeader session={session} thread={thread} running={running} />
       <div className="flex min-h-0 flex-1">
         <div className="@container flex min-w-0 flex-1 flex-col">
+          {agents ? <AgentPanel key={props.sessionId} sessionId={props.sessionId} view={agents} leadRunning={running}
+            stale={Boolean(connection !== "open" || thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || session.live?.viewHealth?.status === "unavailable")} /> : null}
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
           <Dock session={session} thread={thread} running={running} />
         </div>
@@ -278,9 +285,10 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
             onRetry={() => void controller.loadThread(session.sessionId)}
           />
         ) : null}
-        {thread?.stalled && !thread.readOnly ? (
+        {thread && props.running && !thread.readOnly && (thread.stalled || thread.historySync) ? (
           <StalledNotice
             busy={thread.load === "loading"}
+            historySync={thread.historySync}
             onRetry={() => void controller.retryStalledThread(session.sessionId)}
           />
         ) : null}

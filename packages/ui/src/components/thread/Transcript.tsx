@@ -664,6 +664,12 @@ function TurnError(props: {
   files: AttachmentView[];
 }) {
   const controller = useController();
+  const earlier = useApp((s) => {
+    const fold = s.threads[props.sessionId]?.fold;
+    if (!fold || !props.turnId) return false;
+    const latest = [...fold.order].reverse().map((id) => fold.items[id]).find((item) => item?.kind === "userMessage" && item.turnId);
+    return Boolean(latest && latest.turnId !== props.turnId);
+  });
   const hadImages = props.files.some((file) => file.kind === "image");
   // Some failures are about the thread, not the turn: retrying sends the same history and fails the same way.
   const stuck = stuckThread(props.message, { ownImages: hadImages });
@@ -696,7 +702,7 @@ function TurnError(props: {
     <div className="flex items-start gap-3 rounded-xl bg-danger-soft px-3.5 py-3" role="alert">
       <WarningCircleIcon size={16} className="mt-0.5 shrink-0 text-danger" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-fg">{stuck ? "This thread cannot go on as it is" : "This turn failed"}</p>
+        <p className="text-sm font-medium text-fg">{earlier ? "An earlier turn failed" : stuck ? "This thread cannot go on as it is" : "This turn failed"}</p>
         <p className="mt-0.5 text-sm break-words text-muted">{stuck ? stuck.message : props.message}</p>
         {stuck ? <p className="mt-1 text-2xs break-words text-subtle">{props.message}</p> : null}
       </div>

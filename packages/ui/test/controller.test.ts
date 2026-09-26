@@ -4,7 +4,7 @@ import { HeliconError, type EventHandler, type HeliconClient } from "../src/clie
 import { HeliconController, staleThreadReason, type Platform } from "../src/model/controller.js";
 import { buildTurns } from "../src/model/fold.js";
 import { ZOOM_MAX, ZOOM_MIN } from "../src/model/store.js";
-import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest } from "../src/types.js";
+import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 
 const SESSION: SessionSummary = {
@@ -87,7 +87,9 @@ class FakeClient implements HeliconClient {
     this.startCalls.push({ cwd, approvalMode: options?.approvalMode, modelId: options?.modelId, accountId: options?.accountId ?? null });
     return { ...SESSION, accountId: options?.accountId ?? null };
   }
-  loadTranscript() {
+  transcriptOptions: ({ refresh?: boolean } | undefined)[] = [];
+  loadTranscript(_sessionId: string, options?: { refresh?: boolean }) {
+    this.transcriptOptions.push(options);
     return this.transcript();
   }
   async updateSession() {
@@ -385,7 +387,34 @@ describe("HeliconController", () => {
     assert.deepEqual(state.route, { kind: "thread", sessionId: "s1" });
     assert.equal(state.threads["s1"]?.load, "ready");
     assert.equal(buildTurns(state.threads["s1"]!.fold).length, 3);
+    assert.deepEqual(client.transcriptOptions, [undefined], "an idle session still uses the normal initial load");
     stop();
+  });
+
+  it("reads a running session on a fresh page without resuming its active turn", async () => {
+    const client = new FakeClient();
+    const session: SessionSummary = {
+      ...SESSION,
+      live: { activeTurnId: "live-1", turnStartedAt: null, pendingApprovals: 0, pendingInputs: 1, lastTerminal: null, lastError: null },
+    };
+    client.listSessions = async () => [session];
+    client.transcript = async () => load({
+      session,
+      msp: { status: "running", activeTurnId: "live-1", modelId: "muse-spark-1.3", approvalMode: "onRequest", workspaceRoot: "/work/app", turnCount: 4 },
+      events: [...historyEvents, { method: "turn/started", params: { turnId: "live-1" }, at: 1 }],
+      pending: { approvals: [], userInputs: [{ userInputId: "q1", sessionId: "s1", turnId: "live-1", questions: [] }] },
+    });
+    const { controller, stop } = await started(client);
+    try {
+      assert.deepEqual(client.transcriptOptions, [{ refresh: true }], "the first load must not reattach an already running session");
+      const thread = controller.store.get().threads["s1"];
+      assert.equal(thread?.load, "ready");
+      assert.equal(thread?.fold.activeTurnId, "live-1");
+      assert.ok(thread?.fold.userInputs["q1"], "the active turn's pending question remains available");
+      assert.equal(client.sent.length, 0);
+    } finally {
+      stop();
+    }
   });
 
   it("loads the thread-title switch at boot and flips it with rollback", async () => {
@@ -1805,6 +1834,62 @@ describe("HeliconController", () => {
     stop();
   });
 
+  for (const transcriptFirst of [true, false]) {
+    it(`reconciles one PDF and image send when its transcript arrives ${transcriptFirst ? "before" : "after"} the ack`, async () => {
+      const client = new FakeClient();
+      let acknowledge!: (ack: { turnId: string | null; disposition: string | null }) => void;
+      client.sendResult = () => new Promise((resolve) => { acknowledge = resolve; });
+      const { controller, stop } = await started(client);
+      const text = "Review the attached report and image";
+      const attachments = [
+        { name: "report.pdf", mediaType: "application/pdf", base64: "JVBERi0x" },
+        { name: "shot.png", mediaType: "image/png", base64: "iVBORw0K" },
+      ];
+      const materialize = () => {
+        client.handler?.({
+          type: "msp", sessionId: "s1", method: "item/completed", at: 2,
+          params: { sessionId: "s1", item: {
+            itemId: "u9", kind: "userMessage", status: "completed", revision: 1,
+            turnId: "t9", commandId: "t9", text: `${text}\n\n@.helicon/attachments/report.pdf[Image #1]`,
+          } },
+        });
+        controller.flush();
+      };
+      try {
+        const sending = controller.send(text, { attachments });
+        assert.equal(await controller.send(text, { attachments }), true, "an overlapping submission shares the first send");
+        if (transcriptFirst) materialize();
+        acknowledge({ turnId: "t9", disposition: "started" });
+        assert.equal(await sending, true);
+        if (!transcriptFirst) materialize();
+        assert.equal(client.sent.length, 1);
+        assert.equal(client.sent[0]?.text, text);
+        assert.equal(client.sent[0]?.displayText, text, "the original prompt is preserved for presentation");
+        assert.deepEqual(client.sent[0]?.attachments, attachments);
+        const fold = controller.store.get().threads["s1"]!.fold;
+        assert.equal(fold.echoes.length, 0, "the rewritten materialized prompt replaces its local echo");
+        assert.equal(fold.order.filter((id) => id === "u9").length, 1);
+      } finally {
+        stop();
+      }
+    });
+  }
+
+  it("preserves a slash command's display text when it carries an attachment", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      assert.equal(await controller.send("/init", {
+        attachments: [{ name: "report.pdf", mediaType: "application/pdf", base64: "JVBERi0x" }],
+      }), true);
+      assert.equal(client.sent.length, 1);
+      assert.equal(client.sent[0]?.displayText, "/init");
+      assert.notEqual(client.sent[0]?.text, "/init", "the expanded instructions still reach the model");
+    } finally {
+      stop();
+    }
+  });
+
   it("hands a `!` command the host could not run to the agent", async () => {
     const client = new FakeClient();
     const { controller, stop } = await started(client);
@@ -1962,8 +2047,9 @@ describe("stale thread watchdog", () => {
         now = value;
       },
       runStaleChecks: () => {
-        for (const timer of [...timers]) {
-          if (timer && timer.ms === 30_000) {
+        for (const [index, timer] of [...timers].entries()) {
+          if (timer && timer.ms === 15_000) {
+            timers[index] = null;
             timer.fn();
           }
         }
@@ -1985,6 +2071,209 @@ describe("stale thread watchdog", () => {
     await settle();
     return { controller, stop, ...watch };
   }
+
+  const work = (revision: number, text = `Progress ${revision}`): ViewEvent => ({
+    method: "item/updated", params: { item: {
+      itemId: "current-work", kind: "agentMessage", status: "inProgress", revision, turnId: "live-1", text,
+    } },
+  });
+  const fallbackLoad = (revision: number): TranscriptLoad => ({
+    ...runningLoad(),
+    events: [...runningLoad().events, work(revision)],
+    historyUnavailable: true,
+    viewHealth: { status: "unavailable", reason: "projectionUnavailable" },
+  });
+
+  it("checks progressing partial history every 15 seconds without claiming the live stream recovered", async () => {
+    const client = new FakeClient();
+    let revision = 0;
+    client.transcript = async () => fallbackLoad(++revision);
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    assert.deepEqual(controller.store.get().threads.s1?.historySync, { checkedAt: 1_000_000, progressAt: 1_000_000 });
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    const thread = controller.store.get().threads.s1!;
+    assert.equal(revision, 2);
+    assert.equal(thread.fold.items["current-work"].revision, 2);
+    assert.deepEqual(thread.historySync, { checkedAt: 1_015_000, progressAt: 1_015_000 });
+    assert.equal(thread.stalled, false);
+    assert.equal(thread.fold.activeTurnId, "live-1");
+    assert.equal(thread.fold.turns["live-1"].terminal, undefined);
+    assert.deepEqual(client.transcriptOptions.at(-1), { refresh: true });
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
+
+  it("keeps the fallback request cadence when a saved-history read takes time", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => fallbackLoad(1);
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    let finish!: (value: TranscriptLoad) => void;
+    client.transcript = () => new Promise((resolve) => { finish = resolve; });
+    setNow(1_015_000); runStaleChecks(); await settle();
+    assert.equal(client.transcriptOptions.length, 2);
+    setNow(1_017_000); finish(fallbackLoad(2)); await settle(); await settle();
+    assert.equal(controller.store.get().threads.s1?.historySync?.checkedAt, 1_017_000);
+    client.transcript = async () => fallbackLoad(3);
+    setNow(1_030_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(client.transcriptOptions.length, 3, "a slow response must not skip the next 15-second read");
+    assert.equal(controller.store.get().threads.s1?.fold.items["current-work"].revision, 3);
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
+
+  it("keeps fallback progress time unchanged when saved history repeats the same revision", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => fallbackLoad(1);
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    assert.deepEqual(controller.store.get().threads.s1?.historySync, { checkedAt: 1_015_000, progressAt: 1_000_000 });
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, "live-1");
+    stop();
+  });
+
+  it("uses the longer fallback interval for loaded threads outside the selected chat", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => { reads++; return fallbackLoad(reads); };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    controller.navigate({ kind: "settings" });
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(reads, 1);
+    setNow(1_120_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(reads, 2);
+    assert.deepEqual(client.transcriptOptions.at(-1), { refresh: true });
+    stop();
+  });
+
+  it("keeps a usable fold and retries a transient fallback error without resuming or resending", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => {
+      reads++;
+      if (reads === 2) throw new Error("temporary read outage");
+      return fallbackLoad(reads);
+    };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    const failed = controller.store.get().threads.s1!;
+    assert.equal(failed.load, "ready");
+    assert.equal(failed.fold.items["current-work"].revision, 1);
+    assert.equal(failed.fold.activeTurnId, "live-1");
+    assert.equal(failed.error, "temporary read outage");
+    setNow(1_030_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(reads, 2, "a failed read does not retry every 15 seconds");
+    setNow(1_045_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(reads, 3);
+    assert.equal(controller.store.get().threads.s1?.error, null);
+    assert.equal(controller.store.get().threads.s1?.fold.items["current-work"].revision, 3);
+    assert.ok(client.transcriptOptions.slice(1).every((options) => options?.refresh === true));
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
+
+  it("uses read-only refresh when the loaded fold is active even if server live state is absent", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => ({ ...runningLoad(), readOnly: true });
+    const { controller, stop } = await startedWatching(client);
+    assert.equal(controller.store.get().sessions.s1?.live, null);
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, "live-1");
+    await controller.loadThread("s1");
+    assert.deepEqual(client.transcriptOptions.at(-1), { refresh: true });
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
+
+  it("continues unavailable-history recovery when an old pending input is still cached", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => {
+      reads++;
+      return { ...fallbackLoad(reads), pending: { approvals: [], userInputs: reads === 1
+        ? [{ userInputId: "old-question", turnId: "live-1", questions: [] } as unknown as UserInputRequest] : [] } };
+    };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    assert.ok(controller.store.get().threads.s1?.fold.userInputs["old-question"]);
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(reads, 2);
+    assert.equal(Object.keys(controller.store.get().threads.s1!.fold.userInputs).length, 0);
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, "live-1");
+    stop();
+  });
+
+  it("clears fallback and stale state on fresh live progress, but not metadata or replayed revisions", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => fallbackLoad(2);
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(controller.store.get().threads.s1?.stalled, true);
+    const deliver = (event: ViewEvent) => {
+      client.handler?.({ type: "msp", sessionId: "s1", ...event, at: 1_015_001 });
+      controller.flush();
+    };
+    deliver({ method: "session/tokenUsage", params: { inputTokens: 20, outputTokens: 10 } });
+    deliver(work(1));
+    assert.equal(controller.store.get().threads.s1?.stalled, true);
+    assert.ok(controller.store.get().threads.s1?.historySync);
+    deliver(work(3));
+    assert.equal(controller.store.get().threads.s1?.stalled, false);
+    assert.equal(controller.store.get().threads.s1?.historySync, undefined);
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, "live-1");
+    stop();
+  });
+
+  it("clears ended-turn fallback state even when the saved response retains unavailable health", async () => {
+    const client = new FakeClient();
+    let reads = 0;
+    client.transcript = async () => ++reads === 1 ? fallbackLoad(1) : load({
+      events: [...historyEvents, { method: "turn/completed", params: { turnId: "live-1", terminal: "completed" } }],
+      historyUnavailable: true,
+      viewHealth: { status: "unavailable", reason: "projectionUnavailable" },
+    });
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    setNow(1_015_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, null);
+    assert.equal(controller.store.get().threads.s1?.stalled, false);
+    assert.equal(controller.store.get().threads.s1?.historySync, undefined);
+    stop();
+  });
+
+  it("reads saved results immediately when Muse reports unavailable updates, without resending", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => runningLoad();
+    const { controller, stop } = await startedWatching(client);
+    client.transcript = async () => load({
+      events: [...historyEvents, { method: "turn/completed", params: { turnId: "live-1", terminal: "completed" }, at: 2 }],
+      viewHealth: { status: "unavailable", reason: "projectionUnavailable" },
+    });
+    client.handler?.({ type: "msp", sessionId: "s1", method: "session/viewHealthChanged",
+      params: { health: "unavailable", noneReason: "projectionUnavailable" }, at: 1 });
+    await settle();
+    await settle();
+    assert.deepEqual(client.transcriptOptions.at(-1), { refresh: true });
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, null);
+    assert.equal(controller.store.get().threads.s1?.fold.turns["live-1"]?.terminal, "completed");
+    assert.equal(controller.store.get().threads.s1?.stalled, false, "saved completion clears the stale-update notice");
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
+
+  it("continues read-only recovery after backoff instead of leaving a permanent spinner", async () => {
+    const client = new FakeClient();
+    let loads = 0;
+    client.transcript = async () => { loads += 1; return runningLoad(); };
+    const { controller, stop, setNow, runStaleChecks } = await startedWatching(client);
+    for (const elapsed of [31_000, 62_000, 93_000]) {
+      setNow(1_000_000 + elapsed); runStaleChecks(); await settle(); await settle();
+    }
+    assert.equal(loads, 3);
+    client.transcript = async () => { loads += 1; return load(); };
+    setNow(1_000_000 + 183_000); runStaleChecks(); await settle(); await settle();
+    assert.equal(loads, 4);
+    assert.equal(controller.store.get().threads.s1?.fold.activeTurnId, null);
+    assert.deepEqual(client.transcriptOptions.at(-1), { refresh: true });
+    assert.equal(client.sent.length, 0);
+    stop();
+  });
 
   it("reloads a thread whose ending never landed", async () => {
     const client = new FakeClient();

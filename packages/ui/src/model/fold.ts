@@ -67,7 +67,12 @@ export interface CallUsage {
   durationMs: number | null;
 }
 
+type MetaField = "todoList" | "branch" | "contextUsage" | "modelId" | "approvalMode" | "goal";
+interface MetaObservation { cursor: string | null; at: number | undefined }
+
 export interface ThreadMeta {
+  /** Ordering evidence for accepting newer metadata from a non-authoritative history page. */
+  observed?: Partial<Record<MetaField, MetaObservation>>;
   todoList: TodoItem[] | null;
   branch: string | null;
   contextUsage: ContextUsage | null;
@@ -89,6 +94,8 @@ export interface ThreadMeta {
 
 export interface ThreadFold {
   items: Record<string, MspItem>;
+  /** Small stable index for the agent panel; ordinary text deltas do not replace it. */
+  agentItems?: Record<string, MspItem>;
   /** Item ids in first-opened order. */
   order: string[];
   turns: Record<string, TurnInfo>;
@@ -109,6 +116,7 @@ export const HIDDEN_KINDS: ReadonlySet<string> = new Set(["reminderChild"]);
 export function emptyFold(): ThreadFold {
   return {
     items: {},
+    agentItems: {},
     order: [],
     turns: {},
     activeTurnId: null,
@@ -221,6 +229,7 @@ class Draft {
   private orderCopied = false;
   private echoesCopied = false;
   private callsCopied = false;
+  private agentsCopied = false;
 
   /**
    * Only the maps this batch can write to are copied. A long thread holds tens of thousands of items, and copying
@@ -270,6 +279,17 @@ class Draft {
     }
     this.fold.meta.calls[key] = call;
   }
+
+  putAgentItem(item: MspItem): void {
+    if (item.kind !== "workflow" && item.kind !== "subagent") return;
+    if (!this.agentsCopied) {
+      this.fold.agentItems = { ...(this.fold.agentItems ?? Object.fromEntries(
+        Object.entries(this.fold.items).filter(([, entry]) => entry.kind === "workflow" || entry.kind === "subagent"),
+      )) };
+      this.agentsCopied = true;
+    }
+    this.fold.agentItems![item.itemId] = item;
+  }
 }
 
 function upsertItem(draft: Draft, incoming: MspItem): void {
@@ -282,6 +302,7 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
   const current = d.items[incoming.itemId];
   if (!current) {
     d.items[incoming.itemId] = incoming;
+    draft.putAgentItem(incoming);
     draft.pushOrder(incoming.itemId);
     if (incoming.kind === "userMessage") {
       matchEcho(draft, incoming);
@@ -298,6 +319,15 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
     return;
   }
   const next: MspItem = { ...incoming };
+  // Muse supplies a workflow child's assignment at scheduling, then omits it from
+  // status-only revisions. Retain the label without carrying stale phase/outcome data.
+  if (incoming.kind === "workflow" && incoming.children && current.children) {
+    const labels = new Map(current.children.map((child) => [`${child.childId}:${child.attempt}`, child.label]));
+    next.children = incoming.children.map((child) => {
+      const label = child.label ?? labels.get(`${child.childId}:${child.attempt}`);
+      return label && !child.label ? { ...child, label } : child;
+    });
+  }
   // A final that arrives empty keeps what already streamed in.
   if (!next.text && current.text) {
     next.text = current.text;
@@ -312,6 +342,7 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
     next.turnId = current.turnId;
   }
   d.items[incoming.itemId] = next;
+  draft.putAgentItem(next);
   // A later revision can bring the shown text (`displayText`) the first one lacked, so match again.
   if (next.kind === "userMessage") {
     matchEcho(draft, next);
@@ -323,17 +354,41 @@ function promptTexts(item: MspItem): Set<string> {
   return new Set([item.displayText, item.text].filter((t): t is string => Boolean(t)).map((t) => normalizeText(t)));
 }
 
+function observeMeta(meta: ThreadMeta, field: MetaField, event: ViewEvent): void {
+  meta.observed = { ...meta.observed, [field]: { cursor: str(event.params["viewCursor"]), at: event.at } };
+}
+
+/** Only the observed v:<session>:<sequence> cursor form has a comparable order. */
+function newerObservation(event: ViewEvent, previous: MetaObservation): boolean {
+  const before = previous.cursor?.match(/^(v:.+):(\d+)$/);
+  const after = str(event.params["viewCursor"])?.match(/^(v:.+):(\d+)$/);
+  if (before && after && before[1] === after[1]) return BigInt(after[2]!) > BigInt(before[2]!);
+  if (previous.cursor && previous.cursor === event.params["viewCursor"]) return false;
+  return event.at !== undefined && previous.at !== undefined && event.at > previous.at;
+}
+
+/** Attachments and expanded commands can change the saved body without changing the send. */
+function echoMatchesPrompt(echo: LocalEcho, item: MspItem): boolean {
+  if (item.kind !== "userMessage") return false;
+  if (echo.turnId !== null) {
+    if (echo.turnId !== item.turnId && echo.turnId !== item.commandId) return false;
+    // A normal/queued send owns its turn. A steer shares the ongoing turn with the
+    // original prompt, so its text must match an actual steered item as well.
+    if (echo.disposition !== "steered") return item.steered !== true;
+    return item.steered === true && promptTexts(item).has(normalizeText(echo.text));
+  }
+  return promptTexts(item).has(normalizeText(echo.text));
+}
+
 function matchEcho(draft: Draft, item: MspItem): void {
   const echoes = draft.fold.echoes;
   if (echoes.length === 0) {
     return;
   }
-  const texts = promptTexts(item);
-  let index = echoes.findIndex(
-    (e) => e.turnId !== null && (e.turnId === item.turnId || e.turnId === item.commandId) && texts.has(normalizeText(e.text)),
-  );
+  let index = echoes.findIndex((e) => e.turnId !== null && echoMatchesPrompt(e, item));
   if (index < 0) {
-    index = echoes.findIndex((e) => texts.has(normalizeText(e.text)));
+    // An acknowledged repeat belongs to its own turn, even when an old item is revised.
+    index = echoes.findIndex((e) => e.turnId === null && echoMatchesPrompt(e, item));
   }
   if (index >= 0) {
     draft.removeEcho(index);
@@ -465,9 +520,8 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       }
       // The turn is over, so its local copy has done its job: the prompt is either in the transcript or it
       // never will be. Keeping it would leave a bubble stuck on "Sending" for the rest of the thread.
-      const echo = d.echoes.findIndex((e) => e.turnId === turnId);
-      if (echo >= 0) {
-        draft.removeEcho(echo);
+      for (let echo = d.echoes.length - 1; echo >= 0; echo--) {
+        if (d.echoes[echo]?.turnId === turnId) draft.removeEcho(echo);
       }
       break;
     }
@@ -545,9 +599,11 @@ function applyOne(draft: Draft, event: ViewEvent): void {
     }
     case "session/todoListChanged":
       d.meta.todoList = Array.isArray(params["items"]) ? (params["items"] as TodoItem[]) : [];
+      observeMeta(d.meta, "todoList", event);
       break;
     case "session/branchChanged":
       d.meta.branch = str(params["branch"]);
+      observeMeta(d.meta, "branch", event);
       break;
     case "session/contextUsage":
       d.meta.contextUsage = {
@@ -555,6 +611,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
         windowTokens: numberOr(params["windowTokens"]),
         pressure: str(params["pressure"]) ?? "normal",
       };
+      observeMeta(d.meta, "contextUsage", event);
       break;
     case "session/tokenUsage": {
       const cumulative = asRecord(params["cumulative"]);
@@ -584,10 +641,12 @@ function applyOne(draft: Draft, event: ViewEvent): void {
     }
     case "session/modelChanged":
       d.meta.modelId = str(params["modelId"]) ?? d.meta.modelId;
+      if (str(params["modelId"])) observeMeta(d.meta, "modelId", event);
       break;
     case "session/approvalModeChanged":
       if (isApprovalMode(params["mode"])) {
         d.meta.approvalMode = params["mode"];
+        observeMeta(d.meta, "approvalMode", event);
       }
       break;
     case "session/goalChanged": {
@@ -620,15 +679,18 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       }
       d.meta.goal = next;
       d.meta.goalSeen = true;
+      observeMeta(d.meta, "goal", event);
       break;
     }
     case "session/started": {
       const session = asRecord(params["session"]);
       if (session) {
         d.meta.modelId = str(session["modelId"]) ?? d.meta.modelId;
+        if (str(session["modelId"])) observeMeta(d.meta, "modelId", event);
         const mode = asRecord(session["approvalMode"])?.["mode"];
         if (isApprovalMode(mode)) {
           d.meta.approvalMode = mode;
+          observeMeta(d.meta, "approvalMode", event);
         }
       }
       d.closed = false;
@@ -677,10 +739,9 @@ function carriedEchoes(fold: ThreadFold, echoes: readonly LocalEcho[]): LocalEch
     if (fold.turns[turnId]?.terminal) {
       continue;
     }
-    const text = normalizeText(echo.text);
     const landed = fold.order.some((id) => {
       const item = fold.items[id];
-      return item?.kind === "userMessage" && (item.turnId === turnId || item.commandId === turnId) && promptTexts(item).has(text);
+      return item !== undefined && echoMatchesPrompt(echo, item);
     });
     if (landed) {
       continue;
@@ -691,14 +752,124 @@ function carriedEchoes(fold: ThreadFold, echoes: readonly LocalEcho[]): LocalEch
   return kept;
 }
 
+/** A capped history page can omit the scheduling revision that gave a child its label. */
+function carriedWorkflowLabels(fold: ThreadFold, previous: ThreadFold | null | undefined): ThreadFold {
+  if (!previous) return fold;
+  let result = fold;
+  for (const item of Object.values(fold.agentItems ?? fold.items)) {
+    if (item.kind !== "workflow" || !item.children?.length) continue;
+    const old = previous.items[item.itemId];
+    if (old?.kind !== "workflow" || !old.children?.length) continue;
+    const labels = new Map(old.children.map((child) => [`${child.childId}:${child.attempt}`, child.label]));
+    let changed = false;
+    const children = item.children.map((child) => {
+      if (child.label?.trim()) return child;
+      const label = labels.get(`${child.childId}:${child.attempt}`);
+      if (!label?.trim()) return child;
+      changed = true;
+      return { ...child, label };
+    });
+    if (!changed) continue;
+    if (result === fold) {
+      result = { ...fold, items: { ...fold.items }, ...(fold.agentItems ? { agentItems: { ...fold.agentItems } } : {}) };
+    }
+    const next = { ...item, children };
+    result.items[item.itemId] = next;
+    if (result.agentItems) result.agentItems[item.itemId] = next;
+  }
+  return result;
+}
+
+/** A partial projection can contain old terminal and metadata records alongside genuinely newer work. */
+function partialHistoryEvents(load: TranscriptLoad, previous: ThreadFold): ViewEvent[] {
+  const fields: Record<string, MetaField> = {
+    "session/todoListChanged": "todoList", "session/branchChanged": "branch",
+    "session/contextUsage": "contextUsage", "session/modelChanged": "modelId",
+    "session/approvalModeChanged": "approvalMode", "session/goalChanged": "goal",
+  };
+  return load.events.filter((event) => {
+    const field = fields[event.method];
+    if (field) {
+      const observed = previous.meta.observed?.[field];
+      if (observed) return newerObservation(event, observed);
+      return field === "goal" ? !previous.meta.goalSeen : previous.meta[field] === null;
+    }
+    const turnId = str(event.params["turnId"]);
+    const turn = turnId ? previous.turns[turnId] : undefined;
+    switch (event.method) {
+      case "turn/started":
+        return !turn?.terminal && turn?.startedAt === undefined;
+      case "turn/completed":
+      case "turn/unqueued":
+        // A saved failure/incomplete is not authority to stop a session still reported running.
+        return !turn?.terminal && turnId !== load.msp?.activeTurnId;
+      case "turn/retryScheduled":
+        return !turn?.terminal && (!turn || (turn.retry !== undefined &&
+          (numberOr(event.params["nextAttempt"]) ?? 0) > turn.retry.nextAttempt));
+      case "turn/retracted":
+        return true;
+      case "approval/resolved":
+        return !previous.resolved[str(event.params["approvalId"]) ?? ""];
+      case "userInput/settled":
+        return !previous.settled[str(event.params["userInputId"]) ?? ""];
+      default:
+        // Items are merged separately; cumulative usage is monotonic below. An old session/started
+        // or session/closed must not replace current settings or revive/stop the displayed turn.
+        return false;
+    }
+  });
+}
+
 /** Build a fold from a resume response; the server's pending set is authoritative. */
 export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null): ThreadFold {
-  let fold = applyEvents(emptyFold(), load.events);
-  const approvals: Record<string, ApprovalRequest> = {};
+  const partial = load.historyUnavailable || load.viewHealth?.status === "unavailable";
+  const snapshot = applyEvents(emptyFold(), load.events);
+  let fold = snapshot;
+  if (partial && previous) {
+    // Replaying old deltas onto a live item would duplicate its text. Fold the page independently
+    // first, then admit only newer snapshots or a verified extension of the same streamed revision.
+    const merged = partialHistoryEvents(load, previous);
+    for (const id of snapshot.order) {
+      const item = snapshot.items[id];
+      const current = previous.items[id];
+      merged.push({ method: "item/updated", params: { item } });
+      if (!current || current.revision === 0 || item.revision !== current.revision || item.status !== "inProgress" || current.status !== "inProgress") continue;
+      const fields: [string, string | undefined, string | undefined][] = [
+        ["text", current.text, item.text], ["output", current.visibleOutput, item.visibleOutput],
+        ...(item.summary ?? []).map((value, index): [string, string | undefined, string | undefined] => [`summary.${index}`, current.summary?.[index], value]),
+      ];
+      for (const [field, before = "", after = ""] of fields) {
+        if (after.length > before.length && after.startsWith(before)) {
+          merged.push({ method: "item/delta", params: { itemId: id, field, delta: after.slice(before.length), turnId: item.turnId } });
+        }
+      }
+    }
+    fold = applyEvents(previous, merged);
+    const before = previous.meta.tokenTotals;
+    const after = snapshot.meta.tokenTotals;
+    fold = {
+      ...fold,
+      activeTurnId: previous.activeTurnId && !fold.turns[previous.activeTurnId]?.terminal ? previous.activeTurnId : null,
+      meta: {
+        ...fold.meta,
+        // Cursor-keyed calls can be backfilled independently of a stale cumulative reading.
+        calls: { ...snapshot.meta.calls, ...previous.meta.calls },
+        tokenTotals: before && after ? {
+          promptTokens: Math.max(before.promptTokens, after.promptTokens),
+          outputTokens: Math.max(before.outputTokens, after.outputTokens),
+          totalTokens: Math.max(before.totalTokens, after.totalTokens),
+        } : before ?? after,
+        modelId: fold.meta.modelId ?? snapshot.meta.modelId,
+        approvalMode: fold.meta.approvalMode ?? snapshot.meta.approvalMode,
+      },
+    };
+  }
+  fold = carriedWorkflowLabels(fold, previous);
+  const approvals: Record<string, ApprovalRequest> = load.pendingComplete === false ? { ...previous?.approvals } : {};
   for (const approval of load.pending.approvals) {
     approvals[approval.approvalId] = approval;
   }
-  const userInputs: Record<string, UserInputRequest> = {};
+  const userInputs: Record<string, UserInputRequest> = load.pendingComplete === false ? { ...previous?.userInputs } : {};
   for (const input of load.pending.userInputs) {
     userInputs[input.userInputId] = input;
   }
@@ -731,23 +902,20 @@ export function updateEcho(fold: ThreadFold, localId: string, patch: Partial<Loc
   if (index < 0) {
     return fold;
   }
-  // If the stream already echoed this prompt back, the local copy is done.
-  if (patch.turnId && patch.disposition !== "queued") {
-    const echo = fold.echoes[index] as LocalEcho;
+  const echo = { ...(fold.echoes[index] as LocalEcho), ...patch };
+  // The item (or even the completed turn) may have reached the stream before its HTTP ack.
+  if (echo.turnId) {
+    if (fold.turns[echo.turnId]?.terminal) return removeEcho(fold, localId);
     const landed = fold.order.some((id) => {
       const item = fold.items[id];
-      return (
-        item?.kind === "userMessage" &&
-        (item.turnId === patch.turnId || item.commandId === patch.turnId) &&
-        promptTexts(item).has(normalizeText(echo.text))
-      );
+      return item !== undefined && echoMatchesPrompt(echo, item);
     });
     if (landed) {
       return removeEcho(fold, localId);
     }
   }
   const echoes = [...fold.echoes];
-  echoes[index] = { ...(echoes[index] as LocalEcho), ...patch };
+  echoes[index] = echo;
   return { ...fold, echoes };
 }
 

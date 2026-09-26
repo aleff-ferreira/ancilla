@@ -1,8 +1,8 @@
-import { CaretDownIcon, CaretUpIcon, ChatCircleDotsIcon, CheckCircleIcon, CheckIcon, CircleIcon, ClockIcon, ListChecksIcon, LockIcon, PencilSimpleIcon, PlugsIcon, ShieldWarningIcon, XCircleIcon, XIcon } from "../ui/icons.js";
+import { CaretDownIcon, CaretUpIcon, ChatCircleDotsIcon, CheckCircleIcon, CheckIcon, CircleIcon, ClockCounterClockwiseIcon, ClockIcon, ListChecksIcon, LockIcon, PencilSimpleIcon, PlugsIcon, ShieldWarningIcon, XCircleIcon, XIcon } from "../ui/icons.js";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useApp, useController } from "../../app/context.js";
 import type { LocalEcho } from "../../model/fold.js";
-import { describeApproval } from "../../model/format.js";
+import { describeApproval, formatFullDate } from "../../model/format.js";
 import type { ApprovalChoice, ApprovalRequest, TodoItem, UserInputAnswer, UserInputQuestion, UserInputRequest } from "../../types.js";
 import { Tip } from "../ui/overlays.js";
 import { Button, IconButton, Shortcut, Spinner, cn } from "../ui/primitives.js";
@@ -515,27 +515,41 @@ export function QueuedList(props: { sessionId: string; items: LocalEcho[] }) {
   );
 }
 
-/**
- * The thread still shows a turn running, but its stream went quiet and reloading from history did
- * not move it on. Saying so beats a spinner that will never resolve: the work itself usually
- * finished, and the transcript catches up once the backend starts talking again (#42).
- */
-export function StalledNotice(props: { onRetry: () => void; busy: boolean }) {
+/** Saved-history recovery does not establish that the live event feed has recovered. */
+export function StalledNotice(props: {
+  onRetry: () => void;
+  busy: boolean;
+  historySync?: { checkedAt: number; progressAt: number | null };
+}) {
+  const syncing = props.historySync !== undefined;
   return (
-    <div className="flex items-start gap-3 rounded-2xl bg-sunken px-4 py-3 shadow-[0_0_0_1px_var(--border)]">
-      <PlugsIcon size={15} className="mt-0.5 shrink-0 text-warn" />
+    <div className="grid grid-cols-[15px_minmax(0,1fr)] items-start gap-x-3 gap-y-2 rounded-2xl bg-sunken px-4 py-3 shadow-[0_0_0_1px_var(--border)] @min-[520px]:grid-cols-[15px_minmax(0,1fr)_auto]">
+      {syncing ? <ClockCounterClockwiseIcon size={15} className="mt-0.5 text-subtle" aria-hidden="true" /> : <PlugsIcon size={15} className="mt-0.5 text-warn" aria-hidden="true" />}
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-fg">This thread stopped receiving updates</p>
+        <p role="status" className="text-sm font-medium text-fg">{syncing ? "Syncing saved progress" : "This thread stopped receiving updates"}</p>
         <p className="mt-0.5 text-xs text-muted">
-          Muse is most likely still working, and may well have finished. Reloading the history twice did not move
-          this turn on, so nothing more arrives here until it does. Restarting Helicon reconnects it.
+          {syncing ? "Muse’s live feed is unavailable. Helicon checks saved progress automatically without resending your task." : <>
+            Live updates are unavailable. Muse may still be working, or may already have finished.
+            Helicon checks saved results without sending your task again. You can refresh the results now.
+          </>}
         </p>
+        {props.historySync ? (
+          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-2xs text-subtle">
+            <span>Last checked <HistorySyncTime at={props.historySync.checkedAt} /></span>
+            {props.historySync.progressAt !== null ? <span>Progress updated <HistorySyncTime at={props.historySync.progressAt} /></span> : null}
+          </div>
+        ) : null}
       </div>
-      <Button size="sm" onClick={props.onRetry} loading={props.busy}>
-        Reload
+      <Button size="sm" className="col-start-2 justify-self-start @min-[520px]:col-start-3 @min-[520px]:row-start-1" onClick={props.onRetry} loading={props.busy}>
+        Reload results
       </Button>
     </div>
   );
+}
+
+function HistorySyncTime(props: { at: number }) {
+  const date = new Date(props.at);
+  return <time dateTime={date.toISOString()} title={formatFullDate(props.at)} className="tabular-nums">{date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time>;
 }
 
 export function ReadOnlyNotice(props: { reason: string | null; onRetry: () => void; busy: boolean }) {

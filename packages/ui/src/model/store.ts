@@ -189,6 +189,8 @@ export interface ThreadState {
    * leaving a spinner that means nothing (#42).
    */
   stalled: boolean;
+  /** Saved history is being checked while live view updates are unavailable. This is not a restored live stream. */
+  historySync?: { checkedAt: number; progressAt: number | null };
 }
 
 export interface Toast {

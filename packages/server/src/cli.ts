@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseRuntimePreference } from "@helicon/daemon";
@@ -48,6 +48,22 @@ async function main(): Promise<void> {
   const { HeliconServer } = await import("./server.js");
   const portRaw = flagValue(argv, "--port");
   const dataDir = flagValue(argv, "--data-dir") ?? join(homedir(), ".helicon");
+  // Machine-local runtime selection survives replacing the bundled server on an app update.
+  const runtimeFile = join(dataDir, "runtime.json");
+  const local = dataDir !== ":memory:" && existsSync(runtimeFile)
+    ? JSON.parse(readFileSync(runtimeFile, "utf8")) as {
+        runtime?: string; distro?: string; musePath?: string; wslEnv?: Record<string, string>; syncSessionNames?: boolean;
+      }
+    : {};
+  if (process.platform === "win32") {
+    const forwarded = (process.env["WSLENV"] ?? "").split(":").filter(Boolean);
+    for (const [key, value] of Object.entries(local.wslEnv ?? {})) {
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof value !== "string") throw new Error("Invalid runtime.json wslEnv entry.");
+      process.env[key] ??= value;
+      if (!forwarded.some((entry) => entry.split("/")[0] === key)) forwarded.push(`${key}/u`);
+    }
+    process.env["WSLENV"] = forwarded.join(":");
+  }
   if (dataDir !== ":memory:") {
     mkdirSync(dataDir, { recursive: true });
   }
@@ -58,9 +74,10 @@ async function main(): Promise<void> {
     staticDir: flagValue(argv, "--static"),
     token: flagValue(argv, "--token"),
     allowOrigins: flagValues(argv, "--allow-origin"),
-    distro: flagValue(argv, "--distro") ?? undefined,
-    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? process.env["HELICON_MUSE_RUNTIME"]),
-    musePath: flagValue(argv, "--muse") ?? undefined,
+    distro: flagValue(argv, "--distro") ?? local.distro,
+    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? process.env["HELICON_MUSE_RUNTIME"] ?? local.runtime),
+    musePath: flagValue(argv, "--muse") ?? local.musePath,
+    syncSessionNames: local.syncSessionNames,
   });
   const bound = await server.listen();
   process.stdout.write(`helicon-server listening on http://${bound.host}:${bound.port}\n`);
