@@ -1,6 +1,10 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { AncillaStore } from "../src/store.js";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { AncillaStore, ProjectFolderError } from "../src/store.js";
 
 describe("AncillaStore", () => {
   it("groups sessions under projects by directory", () => {
@@ -228,5 +232,108 @@ describe("AncillaStore", () => {
     assert.equal(store.listProjects().find((p) => p.cwd === "/work/proj")?.defaultAccountId, "work");
     store.setDefaultAccount("/work/proj", null);
     assert.equal(store.listProjects().find((p) => p.cwd === "/work/proj")?.defaultAccountId, null);
+  });
+
+  it("lists a project's folders with its own first, and never a folder as a project", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    store.upsertProject("/work/app");
+    const updated = store.addProjectFolder("/work/app", "/work/app-docs");
+    store.addProjectFolder("/work/app", "/work/app-infra");
+    assert.deepEqual(updated.folders.map((f) => f.cwd), ["/work/app", "/work/app-docs"]);
+    assert.deepEqual(store.listProjects().map((p) => p.cwd), ["/work/app"], "a folder is not listed on its own");
+    assert.deepEqual(
+      store.listProjects()[0]?.folders.map((f) => `${f.displayName}:${f.cwd}`),
+      ["app:/work/app", "app-docs:/work/app-docs", "app-infra:/work/app-infra"],
+    );
+    assert.equal(store.getProject("/work/app-docs")?.cwd, "/work/app-docs", "a folder's own row still answers by cwd");
+    assert.equal(store.projectForFolder("/work/app-docs")?.cwd, "/work/app", "a folder is owned by its project");
+    assert.equal(store.projectForFolder("/work/app")?.cwd, "/work/app", "a project owns itself");
+    assert.equal(store.projectForFolder("/nowhere"), null);
+    assert.deepEqual(store.listFolders().map((p) => p.cwd), ["/work/app", "/work/app-docs", "/work/app-infra"]);
+    assert.equal(store.addProjectFolder("/work/app", "/work/app-docs").folders.length, 3, "adding a folder twice changes nothing");
+  });
+
+  it("moves an existing project's sessions along when it becomes a folder, and back out when removed", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    const app = store.upsertProject("/work/app");
+    const docs = store.upsertProject("/work/docs");
+    store.setPinned("/work/docs", true);
+    store.recordSession({ id: "d1", projectId: docs.id, activityAt: "2026-03-01T00:00:00.000Z" });
+    store.recordSession({ id: "a1", projectId: app.id, activityAt: "2026-01-01T00:00:00.000Z" });
+    store.addProjectFolder("/work/app", "/work/docs");
+    assert.deepEqual(store.listProjects().map((p) => p.cwd), ["/work/app"]);
+    assert.equal(store.findSession("d1")?.cwd, "/work/docs", "the session keeps running in its own folder");
+    assert.equal(store.listProjects()[0]?.activityAt, "2026-03-01T00:00:00.000Z", "a folder's threads count as the project's activity");
+    assert.equal(store.listProjects()[0]?.pinned, false);
+    store.setPinned("/work/docs", true);
+    assert.equal(store.getProject("/work/docs")?.pinned, false, "a folder cannot be pinned");
+    const usage = { turnId: null, modelId: "m", promptTokens: 1, outputTokens: 1, inputTokens: 1, cachedTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, durationMs: null, at: "2026-03-01T00:00:00.000Z" };
+    store.recordUsage({ key: "u1", sessionId: "d1", ...usage });
+    store.recordUsage({ key: "u2", sessionId: "a1", ...usage });
+    assert.deepEqual(store.listUsage().map((row) => row.projectCwd), ["/work/app", "/work/app"], "usage rolls up to the project");
+
+    const parent = store.removeProjectFolder("/work/app", "/work/docs");
+    assert.deepEqual(parent.folders.map((f) => f.cwd), ["/work/app"]);
+    assert.deepEqual(store.listProjects().map((p) => p.cwd).sort(), ["/work/app", "/work/docs"], "a removed folder is a project again");
+    assert.equal(store.findSession("d1")?.cwd, "/work/docs");
+    assert.throws(() => store.removeProjectFolder("/work/app", "/work/docs"), ProjectFolderError);
+  });
+
+  it("refuses folders that would nest, or a project as a folder of itself", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    store.upsertProject("/work/app");
+    store.upsertProject("/work/other");
+    store.addProjectFolder("/work/app", "/work/app-docs");
+    store.addProjectFolder("/work/other", "/work/other-docs");
+    assert.throws(() => store.addProjectFolder("/work/app", "/work/app"), ProjectFolderError);
+    assert.throws(() => store.addProjectFolder("/work/app-docs", "/work/deeper"), ProjectFolderError, "a folder cannot take folders");
+    assert.throws(() => store.addProjectFolder("/work/app", "/work/other"), ProjectFolderError, "a project with folders must be emptied first");
+    assert.throws(() => store.addProjectFolder("/nowhere", "/work/x"), ProjectFolderError);
+    assert.equal(store.getProject("/work/deeper"), null, "a refused folder leaves no row behind");
+    assert.deepEqual(store.listProjects().map((p) => p.cwd).sort(), ["/work/app", "/work/other"]);
+  });
+
+  it("hides a project's folders with it, and brings them back with it", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    store.upsertProject("/work/app");
+    store.addProjectFolder("/work/app", "/work/app-docs");
+    store.setHidden("/work/app", true);
+    assert.equal(store.getProject("/work/app-docs")?.hidden, true);
+    assert.equal(store.listFolders().length, 0);
+    store.upsertProject("/work/app-docs");
+    assert.equal(store.getProject("/work/app-docs")?.hidden, true, "discovery in a folder does not unhide it");
+    assert.equal(store.getProject("/work/app-docs")?.folders.length, 1, "discovery leaves the folder where it is");
+    store.setHidden("/work/app", false);
+    assert.deepEqual(store.listFolders().map((p) => p.cwd), ["/work/app", "/work/app-docs"]);
+  });
+
+  it("adds the parent column to a database made before folders existed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ancilla-store-"));
+    const path = join(dir, "old.db");
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cwd TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO projects (cwd, display_name, pinned, created_at, updated_at)
+        VALUES ('/work/old', 'old', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+    old.close();
+    const store = new AncillaStore(path);
+    after(() => store.close());
+    const projects = store.listProjects();
+    assert.deepEqual(projects.map((p) => p.cwd), ["/work/old"]);
+    assert.deepEqual(projects[0]?.folders, [{ cwd: "/work/old", displayName: "old" }]);
+    assert.equal(projects[0]?.pinned, true, "existing rows keep their data");
+    assert.deepEqual(store.addProjectFolder("/work/old", "/work/old-docs").folders.map((f) => f.cwd), ["/work/old", "/work/old-docs"]);
   });
 });

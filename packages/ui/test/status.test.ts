@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { applyEvent, emptyFold } from "../src/model/fold.js";
-import { groupByProject, groupByStatus, settledEntries, threadStatus, type SidebarEntry } from "../src/model/status.js";
+import { groupByProject, groupByStatus, projectForCwd, settledEntries, threadStatus, type SidebarEntry } from "../src/model/status.js";
 import type { LiveView, ProjectView, SessionSummary } from "../src/types.js";
 
 const BASE = "2026-09-01T00:00:00.000Z";
@@ -57,8 +57,15 @@ describe("threadStatus", () => {
 
 describe("sidebar grouping", () => {
   const projects: ProjectView[] = [
-    { cwd: "/work/a", displayName: "a", pinned: false, activityAt: BASE, defaultAccountId: null },
-    { cwd: "/work/b", displayName: "b", pinned: false, activityAt: BASE, defaultAccountId: null },
+    { cwd: "/work/a", displayName: "a", pinned: false, activityAt: BASE, defaultAccountId: null, folders: [{ cwd: "/work/a", displayName: "a" }] },
+    {
+      cwd: "/work/b",
+      displayName: "b",
+      pinned: false,
+      activityAt: BASE,
+      defaultAccountId: null,
+      folders: [{ cwd: "/work/b", displayName: "b" }, { cwd: "/work/b-docs", displayName: "b-docs" }],
+    },
   ];
   const entries: SidebarEntry[] = [
     { session: session("old", { createdAt: "2026-09-01T01:00:00.000Z", activityAt: "2026-09-09T00:00:00.000Z" }), status: "idle" },
@@ -69,6 +76,7 @@ describe("sidebar grouping", () => {
     { session: session("shelved-earlier", { settled: true, settledAt: "2026-09-02T00:00:00.000Z" }), status: "idle" },
     { session: session("woken", { settled: true, settledAt: "2026-09-02T00:00:00.000Z" }, { pendingApprovals: 1 }), status: "approval" },
     { session: session("other", { cwd: "/work/b" }), status: "idle" },
+    { session: session("in-second-folder", { cwd: "/work/b-docs", createdAt: "2026-09-05T00:00:00.000Z" }), status: "running" },
     { session: session("hidden-project", { cwd: "/work/hidden" }), status: "idle" },
   ];
 
@@ -80,7 +88,17 @@ describe("sidebar grouping", () => {
     assert.deepEqual(groups[0]?.settled.map((e) => e.session.sessionId), ["shelved", "shelved-earlier"]);
     assert.equal(groups[0]?.attention, 1);
     assert.equal(groups[0]?.running, 1);
-    assert.deepEqual(groups[1]?.entries.map((e) => e.session.sessionId), ["other"]);
+    // A thread in a project's second folder is the project's thread, counted with the rest.
+    assert.deepEqual(groups[1]?.entries.map((e) => e.session.sessionId), ["in-second-folder", "other"]);
+    assert.equal(groups[1]?.running, 1);
+  });
+
+  it("finds the project that owns a folder, its own or an added one", () => {
+    assert.equal(projectForCwd(projects, "/work/b-docs")?.cwd, "/work/b");
+    assert.equal(projectForCwd(projects, "/work/b")?.cwd, "/work/b");
+    assert.equal(projectForCwd(projects, "/work/a")?.cwd, "/work/a");
+    assert.equal(projectForCwd(projects, "/work/hidden"), null);
+    assert.equal(projectForCwd(projects, null), null);
   });
 
   it("groups active threads by status and lists settled ones apart", () => {

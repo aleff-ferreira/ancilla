@@ -1,8 +1,9 @@
-import { ArrowsClockwiseIcon, CaretDownIcon, CheckIcon, FolderPlusIcon } from "../ui/icons.js";
+import { ArrowsClockwiseIcon, CaretDownIcon, CheckIcon, FolderIcon, FolderPlusIcon } from "../ui/icons.js";
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { relativeTime, shortenPath } from "../../model/format.js";
 import { planView } from "../../model/plan.js";
+import { projectForCwd } from "../../model/status.js";
 import type { AccountView, PlanUsage, PlanUsageByAccount, ProjectView } from "../../types.js";
 import { TopBar } from "../chrome.js";
 import { Composer, ComposerFooter } from "../composer/Composer.js";
@@ -21,12 +22,14 @@ export function NewThread(props: { cwd: string | null }) {
   const planUsage = useApp((s) => s.planUsage);
   const planUsageByAccount = useApp((s) => s.planUsageByAccount);
   const now = useNow(60_000);
-  const project = projects.find((p) => p.cwd === props.cwd) ?? projects[0] ?? null;
+  const project = projectForCwd(projects, props.cwd) ?? projects[0] ?? null;
+  // The thread starts in the folder the route names when it is one of the project's; otherwise in the project's own.
+  const folder = project && props.cwd && project.folders.some((f) => f.cwd === props.cwd) ? props.cwd : (project?.cwd ?? null);
   const recent = useMemo(
     () =>
       project
         ? Object.values(sessions)
-            .filter((s) => s.cwd === project.cwd)
+            .filter((s) => project.folders.some((f) => f.cwd === s.cwd))
             .sort((a, b) => (a.activityAt < b.activityAt ? 1 : -1))
             .slice(0, 5)
         : [],
@@ -47,10 +50,11 @@ export function NewThread(props: { cwd: string | null }) {
           <h1 className={DISPLAY}>
             Start a thread in <ProjectSwitcher project={project} projects={projects} />
           </h1>
+          {project.folders.length > 1 ? <FolderSwitcher project={project} folder={folder ?? project.cwd} /> : null}
           <div className="mt-7">
-            <Composer sessionId={null} cwd={project.cwd} running={false} readOnly={false} variant="home" autoFocus />
+            <Composer sessionId={null} cwd={folder ?? project.cwd} running={false} readOnly={false} variant="home" autoFocus />
           </div>
-          <ComposerFooter cwd={project.cwd} branch={null} running={false} />
+          <ComposerFooter cwd={folder ?? project.cwd} branch={null} running={false} />
           {nearCap ? <p className="mt-2 text-xs text-muted">{nearCap}</p> : null}
           {recent.length > 0 ? (
             <section className="mt-12" aria-label={`Recent threads in ${project.displayName}`}>
@@ -121,6 +125,48 @@ function nearCapHint(
     return null;
   }
   return `${high.name} is at ${high.percent}%. ${low.name} has more room, at ${low.percent}%.`;
+}
+
+/**
+ * Which of the project's folders the thread starts in. Muse gives a session one workspace root, so a thread runs in
+ * one folder; picking one changes the route's cwd, and the composer and its footer follow.
+ */
+function FolderSwitcher(props: { project: ProjectView; folder: string }) {
+  const controller = useController();
+  const current = props.project.folders.find((f) => f.cwd === props.folder) ?? props.project.folders[0];
+  return (
+    <Menu>
+      <MenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Folder: ${current?.displayName ?? props.folder}`}
+          className="mt-3 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-sm text-muted transition-colors hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
+        >
+          <FolderIcon size={14} className="shrink-0" aria-hidden="true" />
+          <span>
+            in <span className="font-medium text-fg">{current?.displayName ?? props.folder}</span>
+          </span>
+          <CaretDownIcon size={12} aria-hidden="true" />
+        </button>
+      </MenuTrigger>
+      <MenuContent className="w-[320px]">
+        <MenuRadioGroup value={props.folder} onValueChange={(cwd) => controller.newThread(cwd)}>
+          {props.project.folders.map((f) => (
+            <MenuOption
+              key={f.cwd}
+              value={f.cwd}
+              label={f.displayName}
+              description={
+                <span className="block truncate" title={f.cwd}>
+                  {shortenPath(f.cwd, 44)}
+                </span>
+              }
+            />
+          ))}
+        </MenuRadioGroup>
+      </MenuContent>
+    </Menu>
+  );
 }
 
 function ProjectSwitcher(props: { project: ProjectView; projects: ProjectView[] }) {

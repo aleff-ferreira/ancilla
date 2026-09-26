@@ -1,5 +1,5 @@
 import { Dialog as RDialog, DropdownMenu, Tooltip as RTooltip } from "radix-ui";
-import { CheckIcon, XIcon } from "./icons.js";
+import { CaretRightIcon, CheckIcon, XIcon } from "./icons.js";
 import type { ReactElement, ReactNode } from "react";
 import { Shortcut, cn } from "./primitives.js";
 
@@ -162,6 +162,39 @@ export function MenuCheck(props: { checked: boolean; onChange: (checked: boolean
 
 export function MenuLabel(props: { children: ReactNode }) {
   return <DropdownMenu.Label className="px-2 pt-1.5 pb-1 text-xs font-medium text-subtle">{props.children}</DropdownMenu.Label>;
+}
+
+export const MenuSub = DropdownMenu.Sub;
+
+/** A row that opens a nested menu beside it; the caret says so. Looks like `MenuItem`. */
+export function MenuSubTrigger(props: { icon?: ReactNode; children: ReactNode; hint?: ReactNode; disabled?: boolean }) {
+  return (
+    <DropdownMenu.SubTrigger disabled={props.disabled} className={cn(ITEM, "data-[state=open]:bg-hover")}>
+      {props.icon ? <span className="flex size-4 shrink-0 items-center justify-center text-muted">{props.icon}</span> : null}
+      <span className="min-w-0 flex-1 truncate">{props.children}</span>
+      {props.hint ? <span className="shrink-0 text-xs text-subtle">{props.hint}</span> : null}
+      <CaretRightIcon size={12} className="shrink-0 text-subtle" aria-hidden="true" />
+    </DropdownMenu.SubTrigger>
+  );
+}
+
+/** The nested menu itself, styled like `MenuContent`. */
+export function MenuSubContent(props: { children: ReactNode; className?: string }) {
+  return (
+    <DropdownMenu.Portal>
+      <DropdownMenu.SubContent
+        sideOffset={4}
+        alignOffset={-4}
+        {...FLOATING}
+        className={cn(
+          "pop z-[var(--z-dropdown)] max-h-[var(--radix-dropdown-menu-content-available-height)] max-w-[min(360px,calc(100dvw-24px))] min-w-[208px] overflow-y-auto rounded-xl bg-raised p-1 text-sm text-fg shadow-pop outline-none",
+          props.className,
+        )}
+      >
+        {props.children}
+      </DropdownMenu.SubContent>
+    </DropdownMenu.Portal>
+  );
 }
 
 export function MenuSeparator() {

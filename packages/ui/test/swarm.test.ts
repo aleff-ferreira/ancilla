@@ -845,7 +845,7 @@ describe("attention and phases helpers", () => {
 describe("sidebar, activity and the window title", () => {
   function state(threads: Record<string, ThreadState>, sessions: Record<string, SessionSummary>, route: AppState["route"] = { kind: "thread", sessionId: "s1" }): AppState {
     const base = initialState(defaultPrefs("2026-09-26T00:00:00.000Z"));
-    return { ...base, connection: "open", route, sessions, threads, projects: [{ cwd: "/work/lantern", displayName: "lantern", pinned: true, activityAt: SESSION.activityAt, defaultAccountId: null }] };
+    return { ...base, connection: "open", route, sessions, threads, projects: [{ cwd: "/work/lantern", displayName: "lantern", pinned: true, activityAt: SESSION.activityAt, defaultAccountId: null, folders: [{ cwd: "/work/lantern", displayName: "lantern" }] }] };
   }
   function thread(f: ThreadFold, extra: Partial<ThreadState> = {}): ThreadState {
     return { load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false, fold: f, attachments: [], shellRuns: [], stalled: false, ...extra };

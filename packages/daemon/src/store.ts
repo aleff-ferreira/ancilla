@@ -12,7 +12,17 @@ export interface Project {
   activityAt: string;
   /** The aonia profile new threads in this project default to; null for the default login. */
   defaultAccountId: string | null;
+  /** Every folder the project groups: its own cwd first, then the folders added to it. */
+  folders: ProjectFolder[];
 }
+
+export interface ProjectFolder {
+  cwd: string;
+  displayName: string;
+}
+
+/** A folder change the store refuses; the server turns it into a 400 with this message. */
+export class ProjectFolderError extends Error {}
 
 /** How a session title was chosen; a higher rank is never overwritten by a lower one. */
 export type TitleSource = "placeholder" | "auto" | "user";
@@ -219,6 +229,8 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   // NULL = the default Muse login, i.e. today's behaviour; only sessions started under a profile carry an id.
   { table: "sessions", column: "account_id", ddl: "ALTER TABLE sessions ADD COLUMN account_id TEXT" },
   { table: "projects", column: "default_account_id", ddl: "ALTER TABLE projects ADD COLUMN default_account_id TEXT" },
+  // A row with a parent is a folder inside that project, never a project of its own. One level deep only.
+  { table: "projects", column: "parent_id", ddl: "ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id)" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -412,6 +424,7 @@ export class AncillaStore {
     return this.getProject(cwd) as Project;
   }
 
+  /** The row for a cwd, whether it is a project of its own or a folder inside one. */
   getProject(cwd: string): Project | null {
     const row = this.db
       .prepare(`SELECT p.*, ${this.projectActivitySql()} AS activity_at FROM projects p WHERE p.cwd = ?`)
@@ -419,16 +432,82 @@ export class AncillaStore {
     return row ? this.toProject(row) : null;
   }
 
+  /** The project that owns a cwd: the row itself when it is top-level, else the project it is a folder of. */
+  projectForFolder(cwd: string): Project | null {
+    const row = this.db.prepare(`SELECT id, parent_id FROM projects WHERE cwd = ?`).get(cwd) as Row | undefined;
+    if (!row) {
+      return null;
+    }
+    const id = row["parent_id"] === null || row["parent_id"] === undefined ? Number(row["id"]) : Number(row["parent_id"]);
+    const owner = this.db
+      .prepare(`SELECT p.*, ${this.projectActivitySql()} AS activity_at FROM projects p WHERE p.id = ?`)
+      .get(id) as Row | undefined;
+    return owner ? this.toProject(owner) : null;
+  }
+
+  /** Top-level projects only; a folder inside a project is listed under it, never on its own. */
   listProjects(options: { includeHidden?: boolean } = {}): Project[] {
-    const where = options.includeHidden ? "" : "WHERE p.hidden = 0";
+    const where = options.includeHidden ? "" : "AND p.hidden = 0";
     const rows = this.db
       .prepare(
         `SELECT p.*, ${this.projectActivitySql()} AS activity_at
-         FROM projects p ${where}
+         FROM projects p WHERE p.parent_id IS NULL ${where}
          ORDER BY p.pinned DESC, p.position IS NULL, p.position, activity_at DESC, p.id DESC`,
       )
       .all() as Row[];
     return rows.map((row) => this.toProject(row));
+  }
+
+  /** Every folder row, top-level or inside a project, for callers that need each workspace root. */
+  listFolders(options: { includeHidden?: boolean } = {}): Project[] {
+    const where = options.includeHidden ? "" : "WHERE p.hidden = 0";
+    const rows = this.db
+      .prepare(`SELECT p.*, ${this.projectActivitySql()} AS activity_at FROM projects p ${where} ORDER BY p.id`)
+      .all() as Row[];
+    return rows.map((row) => this.toProject(row));
+  }
+
+  /**
+   * Makes `folderCwd` a folder of the project at `projectCwd`. A folder that was a project of its own keeps its
+   * row, so its sessions come along; it just stops being listed on its own. Refused when the two are the same
+   * folder, when the project is itself a folder inside another, or when the folder has folders of its own.
+   */
+  addProjectFolder(projectCwd: string, folderCwd: string): Project {
+    if (folderCwd === projectCwd) {
+      throw new ProjectFolderError("A project cannot be a folder of itself.");
+    }
+    const parent = this.db.prepare(`SELECT id, parent_id, display_name FROM projects WHERE cwd = ?`).get(projectCwd) as Row | undefined;
+    if (!parent) {
+      throw new ProjectFolderError("Unknown project.");
+    }
+    if (parent["parent_id"] !== null && parent["parent_id"] !== undefined) {
+      throw new ProjectFolderError(`${parent["display_name"]} is itself a folder of another project. Add the folder to that project instead.`);
+    }
+    this.upsertProject(folderCwd);
+    const folder = this.db.prepare(`SELECT id, display_name FROM projects WHERE cwd = ?`).get(folderCwd) as Row;
+    const nested = this.db.prepare(`SELECT COUNT(*) AS n FROM projects WHERE parent_id = ?`).get(folder["id"]) as Row;
+    if (Number(nested["n"]) > 0) {
+      throw new ProjectFolderError(`${folder["display_name"]} is a project with folders of its own. Remove its folders first.`);
+    }
+    // A folder has no place of its own in the sidebar order, so its pin and position go with its independence.
+    this.db
+      .prepare(`UPDATE projects SET parent_id = ?, hidden = 0, pinned = 0, position = NULL, updated_at = ? WHERE id = ?`)
+      .run(parent["id"], nowIso(), folder["id"]);
+    return this.getProject(projectCwd) as Project;
+  }
+
+  /** Takes a folder out of its project. It becomes a project of its own again, visible, so no thread disappears. */
+  removeProjectFolder(projectCwd: string, folderCwd: string): Project {
+    const parent = this.db.prepare(`SELECT id FROM projects WHERE cwd = ?`).get(projectCwd) as Row | undefined;
+    if (!parent) {
+      throw new ProjectFolderError("Unknown project.");
+    }
+    const folder = this.db.prepare(`SELECT id, parent_id FROM projects WHERE cwd = ?`).get(folderCwd) as Row | undefined;
+    if (!folder || folder["parent_id"] !== parent["id"]) {
+      throw new ProjectFolderError("That folder is not part of this project.");
+    }
+    this.db.prepare(`UPDATE projects SET parent_id = NULL, hidden = 0, updated_at = ? WHERE id = ?`).run(nowIso(), folder["id"]);
+    return this.getProject(projectCwd) as Project;
   }
 
   /** A `!` command Ancilla ran itself in the workspace, kept so a reopened thread still shows it. */
@@ -494,14 +573,15 @@ export class AncillaStore {
       );
   }
 
-  /** Every recorded call since `since`, newest last, with the thread and project it belongs to. */
+  /** Every recorded call since `since`, newest last, with the thread and the project (not the folder) it belongs to. */
   listUsage(since?: string): UsageRow[] {
     const rows = this.db
       .prepare(
-        `SELECT u.*, s.title AS session_title, p.cwd AS project_cwd
+        `SELECT u.*, s.title AS session_title, COALESCE(owner.cwd, p.cwd) AS project_cwd
          FROM usage u
          LEFT JOIN sessions s ON s.id = u.session_id
          LEFT JOIN projects p ON p.id = s.project_id
+         LEFT JOIN projects owner ON owner.id = p.parent_id
          ${since ? "WHERE u.at >= ?" : ""}
          ORDER BY u.at`,
       )
@@ -528,21 +608,25 @@ export class AncillaStore {
   /** The order the user dragged projects into; anything not listed keeps falling back to recent activity. */
   setProjectOrder(cwds: string[]): void {
     const now = nowIso();
-    const update = this.db.prepare(`UPDATE projects SET position = ?, updated_at = ? WHERE cwd = ?`);
+    const update = this.db.prepare(`UPDATE projects SET position = ?, updated_at = ? WHERE cwd = ? AND parent_id IS NULL`);
     cwds.forEach((cwd, index) => update.run(index, now, cwd));
   }
 
+  /** Pins are a top-level affair: a folder inside a project has no row of its own in the sidebar. */
   setPinned(cwd: string, pinned: boolean): void {
     this.db
-      .prepare(`UPDATE projects SET pinned = ?, updated_at = ? WHERE cwd = ?`)
+      .prepare(`UPDATE projects SET pinned = ?, updated_at = ? WHERE cwd = ? AND parent_id IS NULL`)
       .run(pinned ? 1 : 0, nowIso(), cwd);
   }
 
-  /** Hiding removes a project from the sidebar without touching Muse's own session data. */
+  /** Hiding removes a project from the sidebar without touching Muse's own session data. Its folders go with it. */
   setHidden(cwd: string, hidden: boolean): void {
     this.db
-      .prepare(`UPDATE projects SET hidden = ?, updated_at = ? WHERE cwd = ?`)
-      .run(hidden ? 1 : 0, nowIso(), cwd);
+      .prepare(
+        `UPDATE projects SET hidden = ?, updated_at = ?
+         WHERE cwd = ? OR parent_id = (SELECT id FROM projects WHERE cwd = ?)`,
+      )
+      .run(hidden ? 1 : 0, nowIso(), cwd, cwd);
   }
 
   /** Which account new threads here default to; null clears it back to the default login. */
@@ -770,9 +854,25 @@ export class AncillaStore {
     this.db.close();
   }
 
+  /** A project's latest activity counts the sessions in its folders too, so it sorts by all of its threads. */
   private projectActivitySql(): string {
     return `COALESCE((SELECT MAX(COALESCE(s.activity_at, s.updated_at)) FROM sessions s
-      WHERE s.project_id = p.id AND s.archived = 0), p.created_at)`;
+      JOIN projects f ON f.id = s.project_id
+      WHERE (f.id = p.id OR f.parent_id = p.id) AND s.archived = 0), p.created_at)`;
+  }
+
+  /** The project's own folder first, then the ones added to it, in the order they were placed or added. */
+  private foldersOf(row: Row): ProjectFolder[] {
+    const children = this.db
+      .prepare(
+        `SELECT cwd, display_name FROM projects WHERE parent_id = ?
+         ORDER BY position IS NULL, position, created_at, id`,
+      )
+      .all(row["id"]) as Row[];
+    return [
+      { cwd: String(row["cwd"]), displayName: String(row["display_name"]) },
+      ...children.map((child) => ({ cwd: String(child["cwd"]), displayName: String(child["display_name"]) })),
+    ];
   }
 
   private getTurn(id: string): TurnRecord {
@@ -800,6 +900,7 @@ export class AncillaStore {
       updatedAt: String(row["updated_at"]),
       activityAt: String(row["activity_at"] ?? row["created_at"]),
       defaultAccountId: row["default_account_id"] === null || row["default_account_id"] === undefined ? null : String(row["default_account_id"]),
+      folders: this.foldersOf(row),
     };
   }
 

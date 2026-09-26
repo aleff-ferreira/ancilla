@@ -1172,6 +1172,51 @@ describe("AncillaServer", () => {
     assert.equal((await get(base, "/api/projects")).projects.length, 1);
   });
 
+  it("groups a project's folders, and the threads Muse ran in them, under one project", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", (params: Record<string, unknown>) => ({ session: { sessionId: params["workspaceRoot"] === "/work/app-docs" ? "d1" : "a1" } }));
+    // Muse already ran a thread in the docs folder; discovery in that folder must attach it to the project.
+    connection.replies.set("session/list", (params: Record<string, unknown>) => ({
+      sessions: params["workspaceRoot"] === "/work/app-docs" ? [{ sessionId: "tui-1", workspaceRoot: "/work/app-docs", updatedAt: "2026-09-01T00:00:00.000Z" }] : [],
+      nextCursor: null,
+    }));
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work/app" });
+    await send(base, "/api/sessions", { cwd: "/work/app-docs" });
+    const cwds = async () => (await get(base, "/api/projects")).projects.map((p: { cwd: string }) => p.cwd).sort();
+    const threads = async () => (await get(base, "/api/sessions")).sessions.map((s: { sessionId: string; cwd: string }) => `${s.sessionId}@${s.cwd}`).sort();
+    assert.deepEqual(await cwds(), ["/work/app", "/work/app-docs"]);
+
+    const added = await send(base, "/api/projects/folders", { cwd: "/work/app", path: "/work/app-docs/" });
+    assert.equal(added.status, 200);
+    assert.deepEqual(added.json.project.folders.map((f: { cwd: string }) => f.cwd), ["/work/app", "/work/app-docs"]);
+    assert.equal(added.json.warning, null);
+    assert.deepEqual(await cwds(), ["/work/app"], "the folder is no longer a project of its own");
+    assert.deepEqual(await threads(), ["a1@/work/app", "d1@/work/app-docs", "tui-1@/work/app-docs"], "its threads came along, and each still names its own folder");
+    assert.deepEqual((await get(base, "/api/projects")).projects[0].folders.map((f: { cwd: string }) => f.cwd), ["/work/app", "/work/app-docs"]);
+
+    const readded = await send(base, "/api/projects", { cwd: "/work/app-docs" });
+    assert.equal(readded.json.project.cwd, "/work/app", "adding a folder that is inside a project answers with the project");
+    assert.deepEqual(await cwds(), ["/work/app"]);
+
+    assert.equal((await send(base, "/api/projects/folders", { cwd: "/work/app", path: "/work/app" })).status, 400);
+    assert.equal((await send(base, "/api/projects/folders", { cwd: "/work/app-docs", path: "/work/deeper" })).status, 400);
+    assert.equal((await send(base, "/api/projects/folders", { cwd: "/nowhere", path: "/work/x" })).status, 404);
+    assert.equal((await send(base, `/api/projects/folders?cwd=${encodeURIComponent("/work/app")}&path=${encodeURIComponent("/work/x")}`, undefined, "DELETE")).status, 400);
+
+    await send(base, `/api/projects?cwd=${encodeURIComponent("/work/app")}`, undefined, "DELETE");
+    assert.deepEqual(await threads(), [], "hiding the project hides its folders' threads too");
+    await send(base, "/api/projects", { cwd: "/work/app-docs" });
+    assert.deepEqual(await cwds(), ["/work/app"], "re-adding a folder brings its project back, whole");
+    assert.equal((await threads()).length, 3);
+
+    const removed = await send(base, `/api/projects/folders?cwd=${encodeURIComponent("/work/app")}&path=${encodeURIComponent("/work/app-docs")}`, undefined, "DELETE");
+    assert.equal(removed.status, 200);
+    assert.deepEqual(removed.json.project.folders.map((f: { cwd: string }) => f.cwd), ["/work/app"]);
+    assert.deepEqual(await cwds(), ["/work/app", "/work/app-docs"], "a removed folder is a project again");
+    assert.equal((await threads()).length, 3, "no thread disappears");
+  });
+
   it("opens known project folders only", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/list", { sessions: [], nextCursor: null });
@@ -1187,6 +1232,10 @@ describe("AncillaServer", () => {
     await send(base, "/api/projects", { cwd: "/mnt/d/work/app" });
     assert.equal((await send(base, "/api/open", { cwd: "/mnt/d/work/app", target: "editor" })).status, 200);
     assert.deepEqual(opened, [{ path: "D:\\work\\app", target: "editor" }]);
+    // A folder inside a project is a known folder too.
+    await send(base, "/api/projects/folders", { cwd: "/mnt/d/work/app", path: "/mnt/d/work/app-docs" });
+    assert.equal((await send(base, "/api/open", { cwd: "/mnt/d/work/app-docs" })).status, 200);
+    assert.deepEqual(opened.at(-1), { path: "D:\\work\\app-docs", target: "files" });
   });
 
   it("settles and un-settles threads, and wakes a settled thread when work starts", async () => {
@@ -2319,6 +2368,23 @@ describe("file viewer", () => {
       body: JSON.stringify({ cwd, path: "../evil.md", content: "x", baseMtimeMs: null }),
     });
     assert.equal(write.status, 403);
+  });
+
+  it("serves files from a folder inside a project, confined to that folder", async () => {
+    const { base, cwd } = await project();
+    const { mkdtemp, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const second = await mkdtemp(join(tmpdir(), "ancilla-second-"));
+    await writeFile(join(second, "NOTES.md"), "notes");
+    const added = await send(base, "/api/projects/folders", { cwd, path: second });
+    assert.equal(added.status, 200);
+    const folder = added.json.project.folders[1].cwd as string;
+    const q = (path: string) => `cwd=${encodeURIComponent(folder)}&path=${encodeURIComponent(path)}`;
+    const listing = await get(base, `/api/files/list?${q("")}`);
+    assert.deepEqual(listing.entries.map((e: { name: string }) => e.name), ["NOTES.md"]);
+    assert.equal((await get(base, `/api/files/read?${q("NOTES.md")}`)).content, "notes");
+    assert.equal((await fetch(`${base}/api/files/read?${q("../../etc/passwd")}`)).status, 403);
   });
 
   it("never serves a file as a page that can script this origin, and serves video in ranges", async () => {

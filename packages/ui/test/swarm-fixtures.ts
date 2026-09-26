@@ -27,7 +27,7 @@ export function session(id: string, title: string, extra: Partial<SessionSummary
   };
 }
 
-export const PROJECT: ProjectView = { cwd: "/work/lantern", displayName: "lantern", pinned: false, activityAt: "2026-09-26T14:03:00.000Z", defaultAccountId: null };
+export const PROJECT: ProjectView = { cwd: "/work/lantern", displayName: "lantern", pinned: false, activityAt: "2026-09-26T14:03:00.000Z", defaultAccountId: null, folders: [{ cwd: "/work/lantern", displayName: "lantern" }] };
 
 function workflowItem(revision: number, children: WorkflowChild[], when: number): ViewEvent {
   return {

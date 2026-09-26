@@ -23,6 +23,13 @@ export interface ProjectView {
   activityAt: string;
   /** The account new threads here default to; null for the default login. */
   defaultAccountId: string | null;
+  /** Every folder the project groups, its own first. A thread runs in exactly one of them. */
+  folders: ProjectFolder[];
+}
+
+export interface ProjectFolder {
+  cwd: string;
+  displayName: string;
 }
 
 /** Server-tracked live state for a session; null until the server has seen it run. */
