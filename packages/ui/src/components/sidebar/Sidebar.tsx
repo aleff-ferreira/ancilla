@@ -21,6 +21,9 @@ import type { ProjectView, SessionSummary } from "../../types.js";
 import { Menu, MenuCheck, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, Logo, MOD, Shortcut, Spinner, cn, isMac } from "../ui/primitives.js";
 import { StatusGlyph } from "../ui/StatusGlyph.js";
+import type { SidebarSwarmSummary } from "../../model/swarm.js";
+import { ActivityButton } from "../swarm/ActivityBadge.js";
+import { SidebarSwarmRow, useSidebarSwarm } from "../swarm/SidebarSwarmRow.js";
 
 const PROJECT_PREVIEW = 6;
 const STATUS_PREVIEW = 30;
@@ -528,9 +531,13 @@ function RowStatus(props: { entry: SidebarEntry; now: number; settled?: boolean 
   }
 }
 
-/** The second line of an active card: the project in the status view, an open goal, and the branch once known. */
-function RowMeta(props: { session: SessionSummary; showProject?: boolean }) {
+/**
+ * The second line of an active card: the project in the status view, an open goal, and the branch once known. While
+ * the thread's agents run, their strip and counts take the branch's place; the branch stays in the thread header.
+ */
+function RowMeta(props: { session: SessionSummary; showProject?: boolean; swarm?: SidebarSwarmSummary | null }) {
   const branch = useApp((s) => s.threads[props.session.sessionId]?.fold.meta.branch ?? null);
+  const swarm = props.swarm ?? null;
   // An opened thread's own goal is the freshest; otherwise, what the server last saw.
   const goal = useApp((s) => {
     const fold = s.threads[props.session.sessionId]?.fold;
@@ -538,7 +545,7 @@ function RowMeta(props: { session: SessionSummary; showProject?: boolean }) {
   });
   const tone = goal ? statusLabel(goal.status).tone : null;
   const open = goal !== null && (tone === "active" || tone === "paused" || tone === "attention");
-  if (!props.showProject && !branch && !open) {
+  if (!props.showProject && !branch && !open && !swarm) {
     return null;
   }
   return (
@@ -557,7 +564,9 @@ function RowMeta(props: { session: SessionSummary; showProject?: boolean }) {
           {Math.round(Math.max(0, Math.min(100, goal.percentComplete)))}%
         </span>
       ) : null}
-      {branch ? (
+      {swarm ? (
+        <SidebarSwarmRow summary={swarm} />
+      ) : branch ? (
         <span className="flex min-w-0 items-center gap-1">
           <GitBranchIcon size={11} className="shrink-0" aria-hidden="true" />
           <span className="truncate font-mono text-2xs">{branch}</span>
@@ -585,6 +594,7 @@ export const ThreadRow = memo(
     const controller = useController();
     const { session, status } = props.entry;
     const [renaming, setRenaming] = useState(false);
+    const swarm = useSidebarSwarm(session, status, props.now);
     const emphasized = props.active || status === "unread" || isLive(status);
     return (
       <li>
@@ -633,7 +643,7 @@ export const ThreadRow = memo(
                 <AccountBadge accountId={session.accountId} />
                 <span className="min-w-0 flex-1 truncate">{session.title}</span>
               </span>
-              {props.settled ? null : <RowMeta session={session} showProject={props.showProject} />}
+              {props.settled ? null : <RowMeta session={session} showProject={props.showProject} swarm={swarm} />}
               <span className="sr-only">{`, ${STATUS_LABEL[status]}${session.sandboxDisabled === true ? ", sandbox off" : ""}${session.accountId ? ", using a separate account" : ""}`}</span>
             </button>
           )}
@@ -826,6 +836,7 @@ function SidebarFooter() {
           <span className="truncate">{status.text}</span>
         </div>
       </Tip>
+      <ActivityButton />
       <Tip label="Refresh threads from Muse" side="top">
         <IconButton label="Refresh threads from Muse" onClick={() => void controller.discoverAll()} disabled={discovering}>
           <ArrowsClockwiseIcon size={14} className={cn(discovering && "animate-spin")} />

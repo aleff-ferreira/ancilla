@@ -5,6 +5,7 @@ import { WhatsNew } from "../components/app/WhatsNew.js";
 import { BootError, BootScreen, NewThread, Onboarding, Welcome } from "../components/home/Home.js";
 import { CommandPalette } from "../components/palette/CommandPalette.js";
 import { isTyping } from "../components/requests/Requests.js";
+import { ActivityDrawerHost } from "../components/swarm/ActivityDrawer.js";
 import { SettingsPage } from "../components/settings/SettingsPage.js";
 import { Sidebar } from "../components/sidebar/Sidebar.js";
 import { ThreadView } from "../components/thread/ThreadView.js";
@@ -15,9 +16,11 @@ import { Toasts } from "../components/ui/Toasts.js";
 import { AncillaController, type Platform } from "../model/controller.js";
 import type { Notifier } from "../model/notify.js";
 import type { AppUpdater } from "../model/updates.js";
+import { windowTitleCount } from "../model/swarm.js";
 import { zoomStepFromKey, type ZoomStep } from "../model/zoom-shortcut.js";
 import { ControllerProvider, useApp, useController } from "./context.js";
 import { FrameProvider, FrameStrip, WindowControls, type WindowFrame } from "./frame.js";
+import { swarmShortcut, windowTitle } from "./swarm-shortcuts.js";
 
 declare global {
   interface WindowEventMap {
@@ -58,7 +61,10 @@ export function AncillaApp(props: AncillaAppProps) {
           <ThemeSync />
           <ZoomSync />
           <GlobalShortcuts />
+          <WindowTitleSync />
+          <AwaySync />
           <Shell />
+          <ActivityDrawerHost />
           <CommandPalette />
           <AddProjectDialog />
           <WhatsNew />
@@ -141,6 +147,17 @@ function GlobalShortcuts() {
         applyZoomStep(controller, zoom);
         return;
       }
+      const swarm = swarmShortcut(event, isMac);
+      if (swarm === "activity") {
+        event.preventDefault();
+        controller.setActivityOpen(!controller.store.get().swarm.activityOpen);
+        return;
+      }
+      if (swarm === "swarm") {
+        event.preventDefault();
+        controller.toggleSwarmPanel();
+        return;
+      }
       if (mod && !event.shiftKey && !event.altKey && key === "k") {
         event.preventDefault();
         controller.setPaletteOpen(!controller.store.get().paletteOpen);
@@ -180,6 +197,36 @@ function GlobalShortcuts() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("ancilla-zoom-step", onMenuZoom);
     };
+  }, [controller]);
+  return null;
+}
+
+/** Names the window after the open thread, with the requests waiting anywhere in front: `(2) Title — Ancilla`. */
+function WindowTitleSync() {
+  const controller = useController();
+  const count = useApp(windowTitleCount);
+  const thread = useApp((s) => (s.route.kind === "thread" ? (s.sessions[s.route.sessionId]?.title ?? null) : null));
+  useEffect(() => {
+    controller.setWindowTitle(windowTitle(count, thread));
+  }, [controller, count, thread]);
+  return null;
+}
+
+/** Notes when the window leaves sight, so the open thread can say what happened since. */
+function AwaySync() {
+  const controller = useController();
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== "hidden") {
+        return;
+      }
+      const state = controller.store.get();
+      if (state.route.kind === "thread") {
+        controller.markLeft(state.route.sessionId);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [controller]);
   return null;
 }
