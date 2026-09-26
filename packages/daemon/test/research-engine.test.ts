@@ -74,6 +74,34 @@ describe("runResearch", () => {
     assert.deepEqual(savedEvent?.payload, { count: 2, verified: 1 });
   });
 
+  it("writes the stop-and-write report early in the window, before an automatic salvage would", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["Early"]), decision("CONTINUE_RESEARCH", ["Later"])],
+      writer: ["# Early stop\n\nClaim [A1-S1]."],
+    });
+    // Only a few seconds pass per call: far below the 60% of the window an automatic salvage needs.
+    model.onCall = () => clock.advanceMinutes(0.05);
+    const controller = new AbortController();
+    const worker = new FakeWorker(verifiedWorkerScript());
+    worker.onStart = (task) => {
+      if (task.agentId === 2) controller.abort();
+    };
+    const harness = makeHarness(model, worker, clock);
+    const outcome = await runResearch({ ...INPUT, stopWritesReport: true }, testConfig({ windowMaxMinutes: 10, salvageFraction: 0.6 }), harness.deps, controller.signal);
+    assert.equal(outcome.status, "partial");
+    assert.equal(outcome.report, "# Early stop\n\nClaim [1].\n\n## Sources\n\n[1] Source A1 (https://example.org/a1)");
+    // Without findings there is nothing to write from, whatever the user asked.
+    const bare = new FakeModel({ brief: [briefText()], supervisor: [decision("CONTINUE_RESEARCH", ["Only"])], writer: ["unused"] });
+    const bareController = new AbortController();
+    const bareWorker = new FakeWorker(verifiedWorkerScript());
+    bareWorker.onStart = () => bareController.abort();
+    const bareOutcome = await runResearch({ ...INPUT, stopWritesReport: true }, testConfig({}), makeHarness(bare, bareWorker, new FakeClock()).deps, bareController.signal);
+    assert.equal(bareOutcome.status, "cancelled");
+    assert.equal(bareOutcome.report, null);
+  });
+
   it("writes a salvage report on abort when stopWritesReport is set, and starts no more workers", async () => {
     const clock = new FakeClock();
     // Four topics: the decision cap is maxParallel * 2, and maxParallel is 2 below.

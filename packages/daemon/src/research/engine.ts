@@ -10,7 +10,7 @@
 
 import type { ResearchConfig } from "./config.js";
 import { buildFinalRegistry, finalizeCitations } from "./citations.js";
-import { RunCancelled, RunContext, hasFindings, shouldSalvage } from "./context.js";
+import { RunCancelled, RunContext, hasFindings } from "./context.js";
 import { parseBrief } from "./parse.js";
 import { BRIEF_RETRY_NUDGE, buildBriefPrompt } from "./prompts/brief.js";
 import { DEFAULT_TARGET_LANGUAGE } from "./prompts/common.js";
@@ -247,7 +247,9 @@ async function writeAndFinish(ctx: RunContext, salvage: boolean, why: string | n
 async function cancel(ctx: RunContext): Promise<ResearchOutcome> {
   const { state, input } = ctx;
   const elapsedMinutes = Math.round(ctx.elapsedMinutes() * 100) / 100;
-  const salvage = input.stopWritesReport === true && shouldSalvage(ctx);
+  // A user who stops and asks for a report gets one whenever anything was found: the time fraction that gates
+  // an automatic salvage (upstream's rule for an aborted loop) does not apply to an explicit request.
+  const salvage = input.stopWritesReport === true && hasFindings(state);
   const reason = salvage ? "cancelled; writing a salvage report" : "cancelled";
   ctx.emit("run_cancelled", { reason, elapsedMinutes, rounds: state.rounds.length });
   if (!salvage) {
