@@ -38,7 +38,7 @@ import {
   ToolRow,
   type Gate,
 } from "./items.js";
-import { WorkflowCard } from "./WorkflowCard.js";
+import { SwarmAnchorRow } from "../swarm/SwarmAnchorRow.js";
 
 type GateMap = Record<string, Gate>;
 type AnswerMap = Record<string, UserInputAnswer[]>;
@@ -353,7 +353,8 @@ function Entry(props: { item: MspItem; gate?: Gate; answers: UserInputAnswer[] |
     case "subagent":
       return <SubagentRow item={item} sessionId={props.sessionId} />;
     case "workflow":
-      return <WorkflowCard item={item} sessionId={props.sessionId} />;
+      // The run lives in the dock; the transcript keeps one line at the launch point that points there.
+      return <SwarmAnchorRow item={item} sessionId={props.sessionId} />;
     case "compaction":
       return <CompactionRow item={item} />;
     case "userMessage":
