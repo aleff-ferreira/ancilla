@@ -676,7 +676,7 @@ describe("AncillaServer", () => {
       sessions: [{ sessionId: "s1", workspaceRoot: "/work/proj", name: "Wire up the updater", title: "fix the updater please" }],
       nextCursor: null,
     });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     connection.notify("item/completed", {
       sessionId: "s1",
@@ -686,7 +686,7 @@ describe("AncillaServer", () => {
     assert.equal((await read()).title, "fix the updater please");
 
     await send(base, "/api/discover", {});
-    assert.equal((await read()).title, "Wire up the updater", "the name Muse shows in its own CLI wins");
+    assert.equal((await read()).title, "Wire up the updater", "with titles shared, the name Muse shows in its own CLI wins");
 
     await send(base, "/api/sessions/s1", { title: "Updater work" }, "PATCH");
     await send(base, "/api/discover", {});
@@ -1077,10 +1077,10 @@ describe("AncillaServer", () => {
     assert.equal(count, 1, "a same-timestamp re-read must not re-emit plan-usage");
   });
 
-  it("gives Muse the name typed here, and takes the name Muse settles on", async () => {
+  it("gives Muse the name typed here, and takes the name Muse settles on, when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const read = async () => (await get(base, "/api/sessions")).sessions[0];
 
@@ -1104,14 +1104,15 @@ describe("AncillaServer", () => {
     assert.equal(session.title, "Local only");
   });
 
-  it("can keep generated and typed titles local without writing rename records to Muse", async () => {
+  it("keeps generated and typed titles local by default, writing no rename records to Muse", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const exec: ExecFn = async () => ({
       stdout: JSON.stringify({ payload_type: "run.terminal.completed", payload: { kind: "run_terminal", terminal: "completed", text: "Parallel code investigation" } }),
       exitCode: 0,
     });
-    const { base } = await start(connection, { syncSessionNames: false, exec });
+    // No syncSessionNames: what a runtime.json without the key, or none at all, gives.
+    const { base } = await start(connection, { exec });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
     connection.notify("item/completed", {
@@ -1394,7 +1395,7 @@ describe("AncillaServer", () => {
     assert.deepEqual(probe.targets.map((t) => t.args), [["serve", "--disable-sandbox", "--trust-workspace"]]);
   });
 
-  it("upgrades an echo title with one muse exec call, and pushes the name back", async () => {
+  it("upgrades an echo title with one muse exec call, and pushes the name back when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     let release!: () => void;
@@ -1410,7 +1411,7 @@ describe("AncillaServer", () => {
         exitCode: 0,
       };
     };
-    const { base } = await start(connection, { exec });
+    const { base } = await start(connection, { exec, syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
     connection.notify("item/completed", {
@@ -2088,10 +2089,10 @@ describe("slash commands, skills and shell", () => {
     assert.equal(empty.status, 400, "a message with neither text nor a file is refused");
   });
 
-  it("lets Muse's own name replace a title derived from a /skill prompt", async () => {
+  it("lets Muse's own name replace a title derived from a /skill prompt when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     connection.notify("item/completed", {
       sessionId: "s1",
@@ -2176,7 +2177,7 @@ describe("slash commands, skills and shell", () => {
         exitCode: 0,
       };
     };
-    const { base } = await start(connection, { exec });
+    const { base } = await start(connection, { exec, syncSessionNames: true });
     await send(base, "/api/title-settings", { enabled: false }, "PATCH");
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
@@ -2197,7 +2198,7 @@ describe("slash commands, skills and shell", () => {
       sessions: [{ sessionId: "s1", workspaceRoot: "/work/proj", title: "fix the updater please" }],
       nextCursor: null,
     });
-    const { base: base2 } = await start(second, { exec });
+    const { base: base2 } = await start(second, { exec, syncSessionNames: true });
     await send(base2, "/api/title-settings", { enabled: false }, "PATCH");
     await send(base2, "/api/sessions", { cwd: "/work/proj" });
     await send(base2, "/api/discover", {});

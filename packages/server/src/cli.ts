@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseRuntimePreference } from "@ancilla/daemon";
@@ -14,7 +14,7 @@ function usage(): string {
     "  --static <dir>    serve a built frontend from this directory",
     "  --token <value>   require a token for non-loopback access",
     "  --allow-origin <o>  browser origin allowed to connect from another site (repeatable)",
-    "  --distro <name>   WSL distro for muse on Windows (default Ubuntu)",
+    "  --distro <name>   WSL distro for muse on Windows (default: WSL's default distro, else Ubuntu)",
     "  --runtime <mode>  Windows only: native, wsl, or auto (default; native Muse once installed)",
     "  --muse <path>     explicit muse binary path",
   ].join("\n");
@@ -47,29 +47,26 @@ async function main(): Promise<void> {
   }
   const { AncillaServer } = await import("./server.js");
   const { envSetting, importLegacyRuntime } = await import("./legacy.js");
+  const { readRuntimeConfig } = await import("./runtimeConfig.js");
   const portRaw = flagValue(argv, "--port");
   const dataDir = flagValue(argv, "--data-dir") ?? join(homedir(), ".ancilla");
+  // Only stderr: stdout's first line is the readiness handshake.
+  const log = (message: string) => process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
   if (dataDir !== ":memory:") {
     mkdirSync(dataDir, { recursive: true });
-    // A first start brings Helicon's runtime choice along. Only stderr: stdout's first line is the readiness handshake.
-    const log = (message: string) => process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
+    // A first start brings Helicon's runtime choice along.
     importLegacyRuntime(dataDir, homedir(), log);
   }
-  // Machine-local runtime selection survives replacing the bundled server on an app update.
-  const runtimeFile = join(dataDir, "runtime.json");
-  const local = dataDir !== ":memory:" && existsSync(runtimeFile)
-    ? JSON.parse(readFileSync(runtimeFile, "utf8")) as {
-        runtime?: string; distro?: string; musePath?: string; wslEnv?: Record<string, string>; syncSessionNames?: boolean;
-      }
-    : {};
+  // Machine-local runtime selection survives replacing the bundled server on an app update. A file or field that
+  // cannot be used is left out with a line in the log; the server starts either way.
+  const local = dataDir === ":memory:" ? { wslEnv: {} } : readRuntimeConfig(join(dataDir, "runtime.json"), log);
   if (process.platform === "win32") {
-    const forwarded = (process.env["WSLENV"] ?? "").split(":").filter(Boolean);
-    for (const [key, value] of Object.entries(local.wslEnv ?? {})) {
-      if (!/^[A-Z_][A-Z0-9_]*$/.test(key) || typeof value !== "string") throw new Error("Invalid runtime.json wslEnv entry.");
-      process.env[key] ??= value;
-      if (!forwarded.some((entry) => entry.split("/")[0] === key)) forwarded.push(`${key}/u`);
+    for (const [key, value] of Object.entries(local.wslEnv)) {
+      const windows = Object.entries(process.env).find(([name]) => name.toUpperCase() === key.toUpperCase())?.[1];
+      if (windows !== undefined && windows !== value) {
+        log(`runtime.json wslEnv ${key} replaces the Windows value of ${key} for Muse in WSL`);
+      }
     }
-    process.env["WSLENV"] = forwarded.join(":");
   }
   const server = new AncillaServer({
     port: portRaw ? Number.parseInt(portRaw, 10) : 3127,
@@ -82,6 +79,7 @@ async function main(): Promise<void> {
     runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? envSetting("MUSE_RUNTIME") ?? local.runtime),
     musePath: flagValue(argv, "--muse") ?? local.musePath,
     syncSessionNames: local.syncSessionNames,
+    wslEnv: local.wslEnv,
   });
   const bound = await server.listen();
   process.stdout.write(`ancilla-server listening on http://${bound.host}:${bound.port}\n`);

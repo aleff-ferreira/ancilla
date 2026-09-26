@@ -14,6 +14,7 @@ import {
   statSync,
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { decodeConfigText } from "./runtimeConfig.js";
 
 /**
  * Ancilla is a fork of Helicon, and a Helicon user's projects, pins, thread titles and runtime choice live in
@@ -88,7 +89,7 @@ function unstarted(dataDir: string): boolean {
 /**
  * Copies Helicon's `runtime.json` (runtime, distro, Muse path, WSL environment) into a data dir that has not started
  * yet and has none of its own. It has to run before the server reads that file, and so before the database import,
- * which is what marks the data dir as started. Only a JSON object is copied: the server will not start on a broken one.
+ * which is what marks the data dir as started. Only a JSON object is copied: the server would ignore anything else.
  */
 export function importLegacyRuntime(dataDir: string, home: string, log: LegacyLog): boolean {
   const target = join(dataDir, RUNTIME_FILE);
@@ -101,7 +102,8 @@ export function importLegacyRuntime(dataDir: string, home: string, log: LegacyLo
     return false;
   }
   try {
-    const parsed = JSON.parse(readFileSync(source, "utf8")) as unknown;
+    // Written by hand on Windows, it can carry a byte order mark or be UTF-16; the server reads those too.
+    const parsed = JSON.parse(decodeConfigText(readFileSync(source))) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       throw new Error("it is not a JSON object");
     }
