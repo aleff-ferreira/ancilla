@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -28,6 +29,7 @@ import {
   probeEnvironment,
   resolveMuseInDistro,
   defaultExec,
+  FALLBACK_DISTRO,
   toWslPath,
   toWindowsPath,
   type ApprovalMode,
@@ -44,6 +46,7 @@ import {
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
 import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
+import { wslSpawnEnv } from "./runtimeConfig.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
@@ -120,8 +123,13 @@ export interface ServerOptions {
   aonia?: Aonia;
   /** On Windows: `native` runs Windows Muse, `wsl` runs Muse in WSL, `auto` (the default) prefers native once installed. */
   runtime?: RuntimePreference;
-  /** Keep titles local when a host's session/rename corrupts workflow replay (observed with Muse 1.4.0). */
+  /**
+   * Share thread titles with Muse through `session/rename`, and take the names Muse picks. Off unless set to true:
+   * Muse 1.4.0 can record a rename so that the session's later workflows fail to load (`missing field kind`).
+   */
   syncSessionNames?: boolean;
+  /** Windows only: environment variables for Muse inside WSL. Only processes started through `wsl.exe` get them. */
+  wslEnv?: Record<string, string>;
   /** Finds native Windows Muse; the real install folders by default. */
   findNativeMuse?: () => NativeMuse | null;
   hostFactory?: HostFactory;
@@ -161,6 +169,11 @@ export interface GoalBlock {
 interface LiveState {
   activeTurnId: string | null;
   turnStartedAt: string | null;
+  /**
+   * The host whose own feed, reply or read showed the active turn running there. Null when only a session listing
+   * said so, which cannot tell this server's hosts from another Muse client.
+   */
+  turnHost: string | null;
   pendingApprovals: Set<string>;
   pendingInputs: Set<string>;
   lastTerminal: string | null;
@@ -168,9 +181,42 @@ interface LiveState {
   goal: GoalBlock | null;
   /** Bumped on every live goal change, so a slow transcript load never writes an older goal over a newer one. */
   goalSeq: number;
+  /** The view cursor of the goal held, so a stale history prefix cannot put an older goal back. */
+  goalCursor: string | null;
+  /**
+   * Bumped by anything newer than a read in flight: live lifecycle and request changes, current-turn progress, view
+   * health, a host going away, the session closing, a listing that shows it running. A load that sees it move applies
+   * nothing it read.
+   */
   activityRevision: number;
   viewHealth: { status: string; reason: string | null } | null;
+  /** Why another Muse client was last found holding the session; null once it loaded, or read as loaded, here. */
+  readOnlyReason: string | null;
+  /**
+   * Terminal records history held for a turn while a fresh read said that turn was still running: the stand-ins
+   * Muse's projection writes for an open run. A stale prefix that still carries one says nothing about the outcome.
+   */
+  provisional: Set<string>;
 }
+
+/** An account's Muse folders, crossed into WSL as Linux paths (`p`) and for WSL processes only (`u`). */
+const PROFILE_WSLENV = ["XDG_CONFIG_HOME/pu", "XDG_DATA_HOME/pu"];
+
+/** Stand-in terminal records kept per session; enough for the runs a stalled projection can be behind by. */
+const PROVISIONAL_LIMIT = 64;
+
+/** Whether view cursor `a` comes after `b`. Only the v:<session>:<sequence> form has an order. */
+function cursorAfter(a: string | null, b: string | null): boolean {
+  const after = a?.match(/^(v:.+):(\d+)$/);
+  const before = b?.match(/^(v:.+):(\d+)$/);
+  return Boolean(after && before && after[1] === before[1] && BigInt(after[2]!) > BigInt(before[2]!));
+}
+
+/**
+ * How Muse 1.4.0 fails once a `session/rename` record has broken a session's workflow event log: the rename itself,
+ * or a later workflow's admission, reports that the log's records no longer decode.
+ */
+const RENAME_DECODE_FAILURE = /payload decode failed: missing field kind/i;
 
 export interface LiveView {
   activeTurnId: string | null;
@@ -314,13 +360,13 @@ function runCapture(
   });
 }
 
-function runProcess(command: string, args: string[], timeoutMs: number): Promise<void> {
+function runProcess(command: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((done, fail) => {
     const child = spawn(command, args, {
       windowsHide: true,
       stdio: ["ignore", "ignore", "pipe"],
       // Fail fast on a private repository instead of waiting for a password nobody can type.
-      env: {
+      env: env ?? {
         ...process.env,
         GIT_TERMINAL_PROMPT: "0",
         WSLENV: [process.env["WSLENV"], "GIT_TERMINAL_PROMPT/u"].filter(Boolean).join(":"),
@@ -683,6 +729,10 @@ export class AncillaServer {
   private unroutedByMethod = new Map<string, number>();
   /** Where Muse runs, once known; see `museRuntime`. */
   private runtimeKnown: MuseRuntime | null = null;
+  /** The WSL distro the environment probe found Muse in, when none was configured; see `wslDistro`. */
+  private distroKnown: string | null = null;
+  /** Hosts whose Muse reported the rename-broken event log; no title is sent to them again. */
+  private readonly renameRefused = new Set<string>();
   private closed = false;
   private readonly options: Required<
     Omit<
@@ -723,7 +773,9 @@ export class AncillaServer {
       distro: options.distro,
       musePath: options.musePath,
       runtime: options.runtime ?? parseRuntimePreference(envSetting("MUSE_RUNTIME")),
-      syncSessionNames: options.syncSessionNames ?? true,
+      // Titles stay local unless sharing them was asked for in so many words; see `ServerOptions`.
+      syncSessionNames: options.syncSessionNames === true,
+      wslEnv: { ...(options.wslEnv ?? {}) },
       findNativeMuse: options.findNativeMuse,
       hostFactory: options.hostFactory ?? realHostFactory,
       home: options.home ?? homedir(),
@@ -1587,7 +1639,8 @@ export class AncillaServer {
       if (effort !== undefined && effort !== null && !isReasoningEffort(effort)) {
         throw new HttpError(400, "Unknown reasoningEffort.");
       }
-      const manager = await this.managerForSession(sessionId);
+      const managed = await this.hostForSession(sessionId);
+      const manager = managed.manager;
       if (typeof effort === "string") {
         await this.applyEffort(manager, sessionId, effort);
       }
@@ -1601,10 +1654,15 @@ export class AncillaServer {
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
       });
+      // A host that took the turn has the session loaded.
+      if (this.hosts.get(managed.key) === managed) {
+        this.sessionHosts.set(sessionId, managed.key);
+      }
       if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
         live.activityRevision += 1;
         live.activeTurnId = ack.turnId;
         live.turnStartedAt = nowIso();
+        live.turnHost = managed.key;
         live.lastTerminal = null;
         live.lastError = null;
         this.emitStatus(sessionId);
@@ -1739,23 +1797,38 @@ export class AncillaServer {
       return this.envCache.value;
     }
     const hint = this.runtimeHint();
-    const probe = await probeEnvironment(defaultExec, this.options.platform, {
+    const configured = this.options.musePath ?? null;
+    // The probe looks where Muse will be started: the configured distro and path, with runtime.json's environment.
+    const wslEnv = this.wslEnvFor();
+    const probe = await probeEnvironment(this.options.exec, this.options.platform, {
       preference: hint === "native" || hint === "wsl" ? hint : this.options.runtime,
       ...(this.options.findNativeMuse ? { findNative: this.options.findNativeMuse } : {}),
+      ...(this.options.distro ? { distro: this.options.distro } : {}),
+      musePath: configured,
+      ...(wslEnv ? { env: wslEnv } : {}),
     });
     if (!hint) {
       this.runtimeKnown = probe.runtime;
     }
+    if (probe.museDistro) {
+      this.distroKnown = probe.museDistro;
+    }
     if (probe.runtime === "native" && probe.native && !this.options.findNativeMuse) {
       refreshNativeMuse(probe.native);
+    }
+    let musePath = probe.musePath;
+    // A configured binary on this machine is the one hosts start, so it is the one that has to be there.
+    if (configured && (probe.runtime === "native" ? isWindowsAbs(configured) : probe.runtime === "posix" && configured.includes("/"))) {
+      musePath = existsSync(configured) ? configured : null;
     }
     const value: EnvView = {
       platform: probe.platform,
       runtime: probe.runtime,
       wslAvailable: probe.wslAvailable,
-      defaultDistro: probe.defaultDistro,
-      museFound: probe.musePath !== null,
-      musePath: probe.musePath,
+      // The distro Muse runs in, which is what the app shows as WSL's; the Windows default only when that is unknown.
+      defaultDistro: probe.runtime === "wsl" ? (probe.museDistro ?? probe.defaultDistro) : probe.defaultDistro,
+      museFound: musePath !== null,
+      musePath,
       version: ANCILLA_VERSION,
       persistent: this.options.dataDir !== ":memory:",
     };
@@ -1827,14 +1900,18 @@ export class AncillaServer {
       state = {
         activeTurnId: null,
         turnStartedAt: null,
+        turnHost: null,
         pendingApprovals: new Set(),
         pendingInputs: new Set(),
         lastTerminal: null,
         lastError: null,
         goal: null,
         goalSeq: 0,
+        goalCursor: null,
         activityRevision: 0,
         viewHealth: null,
+        readOnlyReason: null,
+        provisional: new Set(),
       };
       this.live.set(sessionId, state);
     }
@@ -1940,16 +2017,56 @@ export class AncillaServer {
     return null;
   }
 
-  /** Where Muse runs. On Windows, native Muse wins over WSL once it is installed, unless WSL was asked for. */
+  /**
+   * Where Muse runs. On Windows, native Muse wins over WSL once it is installed, unless WSL was asked for. For WSL
+   * this also settles the distro, so every caller past it checks paths against the distro hosts are started in.
+   */
   private async museRuntime(): Promise<MuseRuntime> {
-    const hinted = this.runtimeHint();
-    if (hinted) {
-      return hinted;
+    let runtime = this.runtimeHint();
+    if (!runtime) {
+      if (!this.runtimeKnown) {
+        await this.environment(false);
+      }
+      runtime = this.runtimeKnown ?? "wsl";
     }
-    if (!this.runtimeKnown) {
+    if (runtime === "wsl" && !this.options.distro && !this.distroKnown) {
       await this.environment(false);
     }
-    return this.runtimeKnown ?? "wsl";
+    return runtime;
+  }
+
+  /**
+   * The WSL distro Muse runs in: the configured one, else the one the environment probe found Muse in (`Ubuntu`, or
+   * the default distro when Muse is only there). Hosts, CLI calls and the check on `\\wsl.localhost\` folders all
+   * take it from here, so they cannot disagree.
+   */
+  private wslDistro(): string {
+    return this.options.distro ?? this.distroKnown ?? FALLBACK_DISTRO;
+  }
+
+  /**
+   * The environment for a process started through `wsl.exe`: runtime.json's `wslEnv` over this process's own, with
+   * `overlay` (an account's folders) winning over both and `forward` added to WSLENV. Undefined, so the child simply
+   * inherits, when there is nothing to add. Processes on the Windows side never see these.
+   */
+  private wslEnvFor(overlay: Record<string, string> | null = null, forward: string[] = []): Record<string, string> | undefined {
+    const own = this.wslEnvWithout(overlay);
+    if (Object.keys(own).length === 0 && !overlay && forward.length === 0) {
+      return undefined;
+    }
+    return wslSpawnEnv({ ...process.env, ...(overlay ?? {}) }, own, forward);
+  }
+
+  /** runtime.json's `wslEnv`, less the names `overlay` sets: an account's own folders win over it. */
+  private wslEnvWithout(overlay: Record<string, string | undefined> | null | undefined): Record<string, string> {
+    const taken = new Set(Object.keys(overlay ?? {}).map((name) => name.toUpperCase()));
+    return Object.fromEntries(Object.entries(this.options.wslEnv).filter(([key]) => !taken.has(key.toUpperCase())));
+  }
+
+  /** Runs a planned CLI call. One that goes through `wsl.exe` carries runtime.json's `wslEnv`. */
+  private runPlanned(plan: { command: string; args: string[] }, runtime: MuseRuntime) {
+    const env = this.options.platform === "win32" && runtime === "wsl" ? this.wslEnvFor() : undefined;
+    return env ? this.options.exec(plan.command, plan.args, { env }) : this.options.exec(plan.command, plan.args);
   }
 
   private spawnCwdFor(cwd: string): string {
@@ -1979,7 +2096,8 @@ export class AncillaServer {
     }
     const unc = /^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)(?:\\(.*))?$/i.exec(cwd);
     if (unc) {
-      const distro = this.options.distro ?? this.envCache?.value.defaultDistro ?? "Ubuntu";
+      // The distro hosts start in, not WSL's default: the two differ when Muse lives in another distro.
+      const distro = this.wslDistro();
       if (unc[1]!.toLowerCase() !== distro.toLowerCase()) {
         throw new HttpError(400, `This folder belongs to WSL ${unc[1]}, but Muse is running in ${distro}.`);
       }
@@ -2083,7 +2201,8 @@ export class AncillaServer {
     await mkdir((ctx.platform === "win32" ? win32 : posix).dirname(resolved.local), { recursive: true });
     // A Linux folder under WSL is cloned by WSL's own git, so it gets Linux line endings and permissions.
     if (ctx.platform === "win32" && resolved.flavor === "posix" && !resolved.display.startsWith("/mnt/")) {
-      await runProcess("wsl.exe", ["-d", ctx.distro ?? "", "--", "git", "clone", "--", remote, resolved.display], CLONE_TIMEOUT_MS);
+      const env = wslSpawnEnv({ ...process.env, GIT_TERMINAL_PROMPT: "0" }, this.options.wslEnv, ["GIT_TERMINAL_PROMPT/u"]);
+      await runProcess("wsl.exe", ["-d", ctx.distro ?? "", "--", "git", "clone", "--", remote, resolved.display], CLONE_TIMEOUT_MS, env);
     } else {
       await runProcess("git", ["clone", "--", remote, resolved.local], CLONE_TIMEOUT_MS);
     }
@@ -2133,8 +2252,9 @@ export class AncillaServer {
     if (root) {
       args.push("--workspace", root);
     }
-    const plan = planMuseCli({ platform: this.options.platform, distro: this.options.distro, musePath, args, runtime: await this.museRuntime() });
-    const result = await this.options.exec(plan.command, plan.args);
+    const runtime = await this.museRuntime();
+    const plan = planMuseCli({ platform: this.options.platform, distro: this.wslDistro(), musePath, args, runtime });
+    const result = await this.runPlanned(plan, runtime);
     const parsed = parseSkillList(result.stdout);
     const listing: SkillListing = parsed
       ? { at: Date.now(), ...parsed, error: null }
@@ -2161,7 +2281,8 @@ export class AncillaServer {
     if (bundled?.split("/").includes("..")) {
       throw new HttpError(400, "That skill's path is not readable.");
     }
-    if ((await this.museRuntime()) === "native") {
+    const runtime = await this.museRuntime();
+    if (runtime === "native") {
       // Native Muse keeps its data where the launcher keeps its config: XDG folders under the user profile.
       const dataHome = process.env["XDG_DATA_HOME"] || join(this.options.home, ".local", "share");
       const file = bundled ? win32.join(dataHome, "muse", "skills", "bundled", ...bundled.split("/")) : path;
@@ -2175,11 +2296,11 @@ export class AncillaServer {
     const script = bundled ? 'exec cat -- "${XDG_DATA_HOME:-$HOME/.local/share}/muse/skills/bundled/$1"' : 'exec cat -- "$1"';
     const plan = planHostCommand({
       platform: this.options.platform,
-      distro: this.options.distro,
+      distro: this.wslDistro(),
       program: "sh",
       args: ["-c", script, "sh", bundled ?? path],
     });
-    const result = await this.options.exec(plan.command, plan.args);
+    const result = await this.runPlanned(plan, runtime);
     const body = result.exitCode === 0 ? stripFrontmatter(result.stdout) : "";
     if (!body) {
       throw new HttpError(502, "Could not read that skill's instructions.");
@@ -2456,7 +2577,7 @@ export class AncillaServer {
     }
     const plan = planHostCommand({
       platform: this.options.platform,
-      distro: this.options.distro,
+      distro: this.wslDistro(),
       program: "sh",
       // $1 is the workspace, then the command; a login shell so the user's PATH is the one they expect.
       args: ["-c", 'cd "$1" || exit 1; shift; exec "${SHELL:-/bin/sh}" -lc "$1"', "sh", this.hostPathFor(cwd), command],
@@ -2500,6 +2621,12 @@ export class AncillaServer {
     };
   }
 
+  /**
+   * A thread's transcript, status and pending requests. Opening a thread loads (resumes) the session on its host.
+   * A refresh only reads, since a quiet turn can still be executing or waiting on a question and reading must never
+   * reattach it; but a refresh that finds the session unloaded, with nothing this server could reattach, loads it
+   * as opening does. Read-only is only ever another Muse client's lease, reported with that client's reason.
+   */
   private async loadTranscript(sessionId: string, refresh = false): Promise<Record<string, unknown>> {
     // A goal change can land while this load is in flight; history must not then write the older goal back.
     const goalSeqAtStart = this.liveFor(sessionId).goalSeq;
@@ -2507,30 +2634,54 @@ export class AncillaServer {
     const host = await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
     const manager = host.manager;
     const activityAtStart = this.liveFor(sessionId).activityRevision;
-    let readOnly = false;
-    let readOnlyReason: string | null = null;
+    // The run believed to be going as the load began: the only one whose outcome the load may report.
+    const activeBefore = this.liveFor(sessionId).activeTurnId;
     let msp: Record<string, unknown> | null = null;
     let read: Record<string, unknown> | null = null;
-    try {
-      if (refresh) {
-        // A quiet turn can still be executing or waiting on a question. Reading must never reattach it.
-        read = asRecord(await manager.readSession(sessionId, false));
-        msp = asRecord(read?.["session"]);
-        readOnly = this.sessionHosts.get(sessionId) !== host.key;
-      } else {
-        const resumed = asRecord(await manager.resumeSession(sessionId, true));
-        msp = asRecord(resumed?.["session"]);
-        this.sessionHosts.set(sessionId, host.key);
-        read = resumed;
+    // Turns a read reported running. A terminal record the page holds for one may be the projection's stand-in.
+    const readActive = new Set<string>();
+    const noteActive = (session: Record<string, unknown> | null) => {
+      const active = session && session["status"] !== "notLoaded" ? str(session["activeTurnId"]) : null;
+      if (active) readActive.add(active);
+    };
+    let resume = !refresh;
+    if (refresh) {
+      read = asRecord(await manager.readSession(sessionId, false));
+      msp = asRecord(read?.["session"]);
+      noteActive(msp);
+      // Requests the durable log still holds wait on the user; only opening the thread brings them back.
+      const awaiting = Array.isArray(read?.["pendingRequests"]) && (read["pendingRequests"] as unknown[]).length > 0;
+      resume = msp?.["status"] === "notLoaded" && !awaiting && this.mayLoadUnloaded(sessionId, host);
+    }
+    let resumed = false;
+    if (resume) {
+      try {
+        const reply = asRecord(await manager.resumeSession(sessionId, true));
+        msp = asRecord(reply?.["session"]) ?? msp;
+        if (!refresh) {
+          read = reply;
+        }
+        resumed = true;
+        if (this.hosts.get(host.key) === host) {
+          this.sessionHosts.set(sessionId, host.key);
+        }
+        this.liveFor(sessionId).readOnlyReason = null;
+      } catch (error) {
+        const info = errorInfo(error);
+        if (info.kind === "sessionInUse") {
+          // Only another client holding the session makes it read-only here, and always with a reason to show.
+          this.liveFor(sessionId).readOnlyReason = info.message.trim() || "Another Muse session has this thread open.";
+          if (this.sessionHosts.get(sessionId) === host.key) {
+            this.sessionHosts.delete(sessionId);
+          }
+        } else if (!refresh) {
+          // Opening a thread that cannot load is a real failure and surfaces.
+          throw error;
+        } else {
+          // A refresh already has what it read; the next open or send loads the session, or reports why not.
+          this.log(`refresh of ${sessionId} could not load it on ${host.key}: ${info.message}`);
+        }
       }
-    } catch (error) {
-      const info = errorInfo(error);
-      // Only another host holding the session makes it read-only here; any other failure is real and surfaces.
-      if (info.kind !== "sessionInUse") {
-        throw error;
-      }
-      readOnly = true;
-      readOnlyReason = info.message;
     }
 
     let events: { method: string; params: Record<string, unknown> }[] = [];
@@ -2549,8 +2700,16 @@ export class AncillaServer {
 
     // The read can have newer item revisions than a partially available page. Append its item
     // records so the UI's revision fold selects the newest; usage remains owned by paged events.
+    let historyFailed = false;
     if (events.length === 0 && !refresh) {
-      read = asRecord(await manager.readSession(sessionId, false));
+      // A thread whose load went through (or that another client holds) still opens when this read fails: the
+      // response then says its history is incomplete rather than failing the whole thread.
+      const fallback = await manager.readSession(sessionId, false).then(asRecord, () => undefined);
+      if (fallback === undefined) {
+        historyFailed = true;
+      } else {
+        read = fallback;
+      }
     }
     if (!msp) msp = asRecord(read?.["session"]);
     events.push(...eventsFromHistory(read));
@@ -2559,47 +2718,126 @@ export class AncillaServer {
     const approvals = (pending?.approvals ?? []).map((a) => stripSource(asRecord(a) ?? {}));
     const userInputs = (pending?.userInputs ?? []).map((u) => stripSource(asRecord(u) ?? {}));
 
+    if (refresh && !resumed) {
+      // Read the status once more, now the pages are in: a turn that started or ended while they came is then
+      // known, and its record in the page is not taken for more than it is. A failed re-read keeps the first.
+      const later = asRecord(asRecord(await manager.readSession(sessionId, true).catch(() => null))?.["session"]);
+      if (later) {
+        msp = { ...(msp ?? {}), ...later, status: later["status"], activeTurnId: later["activeTurnId"] ?? null };
+      }
+    }
+
     const live = this.liveFor(sessionId);
     const superseded = live.activityRevision !== activityAtStart;
     // A different/new host reports notLoaded even while the owning host is still working.
     const statusKnown = msp !== null && msp["status"] !== "notLoaded";
+    noteActive(msp);
+    if (refresh && !resumed && statusKnown) {
+      // Read as loaded, the session is this host's own to write to. Read as unloaded, whatever was last found about
+      // another client's lease stands; a missing binding alone never makes a thread read-only.
+      if (this.hosts.get(host.key) === host) {
+        this.sessionHosts.set(sessionId, host.key);
+      }
+      live.readOnlyReason = null;
+    }
+    const readOnlyReason = live.readOnlyReason;
     const history = asRecord(read?.["history"]);
     const noneReason = str(history?.["noneReason"]);
+    // An unavailable projection serves an older prefix, which can end before what has since happened.
+    const partial = noneReason === "projectionUnavailable";
     const snapshotItems = asRecord(asRecord(history?.["snapshot"])?.["state"])?.["items"];
     const historyServed =
       (history?.["mode"] === "inline" && Array.isArray(history["items"])) ||
       (["snapshot", "anchoredSnapshot"].includes(String(history?.["mode"])) &&
         (Array.isArray(snapshotItems) || asRecord(snapshotItems) !== null));
     if (!superseded) {
-      if (noneReason === "projectionUnavailable") {
+      if (partial) {
         live.viewHealth = { status: "unavailable", reason: noneReason };
-      } else if (statusKnown && historyServed) {
+      } else if (historyServed) {
+        // Served history means the projection works, whether or not this host has the session loaded.
         live.viewHealth = null;
       }
     }
-    if (msp && statusKnown && !superseded) {
-      const active = str(msp["activeTurnId"]);
+
+    const terminalFor = (event: { method: string; params: Record<string, unknown> }) =>
+      event.method === "turn/completed" ? str(event.params["turnId"]) : null;
+    const failed = (event: { method: string; params: Record<string, unknown> }) => str(event.params["terminal"]) === "failed";
+    const fresh = statusKnown && !superseded;
+    if (fresh) {
+      const active = str(msp!["activeTurnId"]);
       if (active !== live.activeTurnId) {
         live.activeTurnId = active;
-        live.turnStartedAt = active ? (live.turnStartedAt ?? nowIso()) : null;
+        live.turnStartedAt = active ? nowIso() : null;
+      }
+      live.turnHost = active ? host.key : null;
+    } else if (!statusKnown && !superseded && live.activeTurnId) {
+      // Unloaded here, the session can still be running in another client. Only its own recorded end, which no
+      // projection stands in for, says that run is over.
+      const running = live.activeTurnId;
+      if (events.some((event) => terminalFor(event) === running && !failed(event))) {
+        live.activeTurnId = null;
+        live.turnStartedAt = null;
+        live.turnHost = null;
       }
     }
     if (pending && statusKnown && !superseded) {
       live.pendingApprovals = new Set(approvals.map((a) => str(a["approvalId"])).filter((id): id is string => id !== null));
       live.pendingInputs = new Set(userInputs.map((u) => str(u["userInputId"])).filter((id): id is string => id !== null));
     }
-    // Muse's history projection can synthesize failed/incomplete for an open run. The loaded
-    // session still owns that turn; do not present its unfinished snapshot as a real failure.
-    if (live.activeTurnId) {
-      events = events.filter((event) => !(event.method === "turn/completed" &&
-        event.params["terminal"] === "failed" && event.params["reason"] === "incomplete" &&
-        event.params["turnId"] === live.activeTurnId));
+    // Muse's history projection writes a failed terminal record for a run that is still open. A turn a fresh read
+    // says is running cannot have ended, so no terminal record for it is shown; a failed one is the stand-in, kept
+    // so that it is dropped again from any stale prefix that still carries it. A failed record for a turn only
+    // believed to be running, or that a read showed running while the page was taken, is held back as unconfirmed.
+    // Real failures of any other turn, and of that turn once it has stopped, stay visible.
+    const runningNow = fresh ? live.activeTurnId : null;
+    const unconfirmed = new Set(readActive);
+    if (!fresh && live.activeTurnId) unconfirmed.add(live.activeTurnId);
+    // A turn the page shows starting after one of those began after that read was taken, so it may be open as well.
+    const lastStart = events.findLastIndex((event) => event.method === "turn/started" && unconfirmed.has(str(event.params["turnId"]) ?? ""));
+    for (const event of lastStart === -1 ? [] : events.slice(lastStart + 1)) {
+      const turnId = event.method === "turn/started" ? str(event.params["turnId"]) : null;
+      if (turnId) unconfirmed.add(turnId);
     }
-    if (!superseded) {
-      const terminal = [...events].reverse().find((event) => event.method === "turn/completed");
-      if (terminal && !live.activeTurnId) {
-        live.lastTerminal = str(terminal.params["terminal"]);
-        live.lastError = live.lastTerminal === "failed" ? str(asRecord(terminal.params["error"])?.["message"]) ?? "The turn failed." : null;
+    events = events.filter((event) => {
+      const turnId = terminalFor(event);
+      if (!turnId) {
+        return true;
+      }
+      const signature = JSON.stringify(event.params);
+      if (turnId === runningNow) {
+        if (failed(event)) {
+          live.provisional.delete(signature);
+          live.provisional.add(signature);
+          if (live.provisional.size > PROVISIONAL_LIMIT) {
+            live.provisional.delete(live.provisional.values().next().value as string);
+          }
+        }
+        return false;
+      }
+      if (unconfirmed.has(turnId) && failed(event)) {
+        return false;
+      }
+      return !(partial && live.provisional.has(signature));
+    });
+    if (!superseded && activeBefore && live.activeTurnId !== activeBefore) {
+      // The run that was going has stopped. Its outcome is its own terminal record; without one, or with a failure
+      // from a stale prefix (which can be a stand-in for a run that went on), the outcome is unknown and nothing
+      // announces a result. A new run under way has no outcome yet either.
+      const own = [...events].reverse().find((event) => terminalFor(event) === activeBefore);
+      const terminal = own && live.activeTurnId === null ? (str(own.params["terminal"]) ?? "completed") : null;
+      const known = terminal !== null && !(terminal === "failed" && partial);
+      live.lastTerminal = known ? terminal : null;
+      live.lastError = known && terminal === "failed" ? (str(asRecord(own!.params["error"])?.["message"]) ?? "The turn failed.") : null;
+    } else if (!activeBefore && fresh && !partial && live.activeTurnId === null && live.lastTerminal === null) {
+      // Nothing seen here says how the last run ended (a thread opened after a restart, say). A complete history
+      // read from a session that is loaded and idle does, when its last record closes the last run it started.
+      const lastStart = events.findLastIndex((event) => event.method === "turn/started");
+      const last = events.findLastIndex((event) => event.method === "turn/completed");
+      const closing = last > lastStart ? events[last]! : null;
+      const startedId = lastStart === -1 ? null : str(events[lastStart]!.params["turnId"]);
+      if (closing && (startedId === null || terminalFor(closing) === startedId)) {
+        live.lastTerminal = str(closing.params["terminal"]) ?? "completed";
+        live.lastError = live.lastTerminal === "failed" ? (str(asRecord(closing.params["error"])?.["message"]) ?? "The turn failed.") : null;
       }
     }
     // Opening a thread backfills the usage page with the calls it made before this server ever ran.
@@ -2608,12 +2846,17 @@ export class AncillaServer {
         this.recordUsage(sessionId, event.params);
       }
     }
-    // The history's last goal change is the goal as of now, unless a live one arrived while this load ran.
+    // The history's last goal change is the goal as of now, unless a live one arrived while this load ran, or the
+    // history is a stale prefix whose goal is not newer than the one held.
     for (let index = events.length - 1; live.goalSeq === goalSeqAtStart && index >= 0; index -= 1) {
       const event = events[index];
       const goal = event?.method === "session/goalChanged" ? goalOf(event.params["goal"]) : undefined;
       if (goal !== undefined) {
-        live.goal = goal;
+        const cursor = str(event!.params["viewCursor"]);
+        if (!partial || live.goal === null || cursorAfter(cursor, live.goalCursor)) {
+          live.goal = goal;
+          live.goalCursor = cursor;
+        }
         break;
       }
     }
@@ -2661,9 +2904,10 @@ export class AncillaServer {
       pending: { approvals, userInputs },
       pendingComplete: pending !== null && statusKnown && !superseded,
       // A readable old prefix does not make an unavailable projection a complete replacement.
-      historyUnavailable: noneReason === "projectionUnavailable" || (noneReason !== null && events.length === 0),
+      historyUnavailable: partial || (noneReason !== null && events.length === 0) || historyFailed,
       viewHealth: live.viewHealth,
-      readOnly,
+      // Read-only always comes with the reason another client gave; never from a binding this server lost.
+      readOnly: readOnlyReason !== null,
       readOnlyReason,
     };
   }
@@ -2723,7 +2967,15 @@ export class AncillaServer {
       const running = str(session["status"]) === "running" && Boolean(str(session["activeTurnId"]));
       if (running) {
         const live = this.liveFor(sessionId);
-        live.activeTurnId = str(session["activeTurnId"]);
+        const listed = str(session["activeTurnId"]);
+        if (live.activeTurnId !== listed) {
+          // Newer than any read in flight, which must not then write an older state back over it.
+          live.activityRevision += 1;
+          live.activeTurnId = listed;
+          live.turnStartedAt = null;
+        }
+        // A host lists a session as running only while it has that session loaded; others list it notLoaded.
+        live.turnHost = host.key;
         live.turnStartedAt = live.turnStartedAt ?? nowIso();
         this.sessionHosts.set(sessionId, host.key);
       }
@@ -2839,9 +3091,10 @@ export class AncillaServer {
     modelId: string | null,
   ): Promise<void> {
     const musePath = await this.cliMusePath();
+    const runtime = await this.museRuntime();
     const plan = planMuseCli({
       platform: this.options.platform,
-      distro: this.options.distro,
+      distro: this.wslDistro(),
       musePath,
       args: [
         "exec",
@@ -2855,9 +3108,9 @@ export class AncillaServer {
         ...(modelId ? ["--model", modelId] : []),
         buildThreadTitlePrompt(firstText),
       ],
-      runtime: await this.museRuntime(),
+      runtime,
     });
-    const result = await this.options.exec(plan.command, plan.args);
+    const result = await this.runPlanned(plan, runtime);
     if (this.closed || result.exitCode !== 0) {
       return;
     }
@@ -2875,13 +3128,32 @@ export class AncillaServer {
   }
 
   private async managerForSession(sessionId: string): Promise<SessionManager> {
+    return (await this.hostForSession(sessionId)).manager;
+  }
+
+  /** The host that has the session loaded, else the one its workspace and account start. */
+  private async hostForSession(sessionId: string): Promise<ManagedHost> {
     const key = this.sessionHosts.get(sessionId);
     const loaded = key ? this.hosts.get(key) : undefined;
     if (loaded) {
-      return loaded.manager;
+      return loaded;
     }
     const found = this.store.findSession(sessionId);
-    return (await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null)).manager;
+    return this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
+  }
+
+  /**
+   * Whether a refresh that found the session unloaded on its host may load it there, as opening the thread does.
+   * Only when this server knows of nothing it could reattach: no other live host of its own has the session, and no
+   * turn, approval or question is open. Another Muse client's lease still refuses the load, and that refusal (with
+   * its reason) is the one thing that makes a thread read-only.
+   */
+  private mayLoadUnloaded(sessionId: string, host: ManagedHost): boolean {
+    const mapped = this.sessionHosts.get(sessionId);
+    if (mapped !== undefined && mapped !== host.key && this.hosts.has(mapped)) {
+      return false;
+    }
+    return !this.isBusy(sessionId);
   }
 
   private async hostFor(cwd: string, accountId: string | null = null): Promise<ManagedHost> {
@@ -2968,16 +3240,35 @@ export class AncillaServer {
    */
   private forgetHost(managed: ManagedHost, lastError: string): void {
     this.hosts.delete(managed.key);
+    const affected = new Set<string>();
     for (const [sessionId, key] of this.sessionHosts) {
       if (key !== managed.key) {
         continue;
       }
       this.sessionHosts.delete(sessionId);
       this.effortApplied.delete(sessionId);
+      affected.add(sessionId);
+    }
+    // A turn this host was seen running is over too, even when the session's binding had already moved or lapsed.
+    for (const [sessionId, live] of this.live) {
+      if (live.turnHost === managed.key) {
+        affected.add(sessionId);
+      }
+    }
+    for (const sessionId of affected) {
       const live = this.live.get(sessionId);
-      if (live && (live.activeTurnId || live.pendingApprovals.size || live.pendingInputs.size)) {
+      if (!live) {
+        continue;
+      }
+      // A load that read the session from this host before it went must not write that state back afterwards.
+      live.activityRevision += 1;
+      if (live.turnHost === managed.key) {
+        live.turnHost = null;
+      }
+      if (live.activeTurnId || live.pendingApprovals.size || live.pendingInputs.size) {
         live.activeTurnId = null;
         live.turnStartedAt = null;
+        live.turnHost = null;
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         live.lastTerminal = "failed";
@@ -3049,14 +3340,13 @@ export class AncillaServer {
     const resolved = command.command === "muse"
       ? this.options.musePath ?? (await this.environment(false)).musePath ?? command.command
       : command.command;
-    const login = planMuseCli({ platform: this.options.platform, runtime, distro: this.options.distro,
+    const login = planMuseCli({ platform: this.options.platform, runtime, distro: this.wslDistro(),
       musePath: resolved, args: command.args });
-    const loginEnv: Record<string, string> = Object.fromEntries(
-      Object.entries({ ...process.env, ...command.env }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
-    if (this.options.platform === "win32" && runtime === "wsl") {
-      loginEnv["WSLENV"] = this.profileWslEnv();
-    }
+    const loginEnv: Record<string, string> = this.options.platform === "win32" && runtime === "wsl"
+      ? wslSpawnEnv({ ...process.env, ...command.env }, this.wslEnvWithout(command.env), PROFILE_WSLENV)
+      : Object.fromEntries(
+          Object.entries({ ...process.env, ...command.env }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        );
     const previous = this.loginChildren.get(id);
     if (previous) {
       previous.kill();
@@ -3160,24 +3450,17 @@ export class AncillaServer {
           : {}),
       };
     }
-    // WSL profile env passthrough is P3 (needs WSLENV); accounts on WSL are a later change.
     const plan = planServe({
       platform: "win32",
-      distro: this.options.distro ?? "Ubuntu",
+      distro: this.wslDistro(),
       musePath,
       cwd: this.spawnCwdFor(cwd),
       sandboxDisabled,
       yoloEnabled,
     });
-    return { command: plan.command, args: plan.args, cwd: plan.cwd,
-      ...(profileEnv ? { env: { ...process.env, ...profileEnv, WSLENV: this.profileWslEnv() } } : {}) };
-  }
-
-  private profileWslEnv(): string {
-    return [
-      ...(process.env["WSLENV"] ?? "").split(":").filter((entry) => entry && !["XDG_CONFIG_HOME", "XDG_DATA_HOME"].includes(entry.split("/")[0]!)),
-      "XDG_CONFIG_HOME/pu", "XDG_DATA_HOME/pu",
-    ].join(":");
+    // An account's folders and runtime.json's variables cross into WSL for this host only.
+    const env = profileEnv ? this.wslEnvFor(profileEnv, PROFILE_WSLENV) : this.wslEnvFor();
+    return { command: plan.command, args: plan.args, cwd: plan.cwd, ...(env ? { env } : {}) };
   }
 
   /** The launcher's release details for a binary in its install folder, as the launcher itself would pass them. */
@@ -3208,7 +3491,7 @@ export class AncillaServer {
       }
       this.sessionHosts.set(event.sessionId, hostKey);
       this.noteNotification(event.sessionId, notification.method);
-      this.track(event.sessionId, notification.method, params);
+      this.track(event.sessionId, notification.method, params, hostKey);
       this.emit("ancilla", event);
     } catch (error) {
       this.forwardFailures += 1;
@@ -3240,7 +3523,7 @@ export class AncillaServer {
     process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
   }
 
-  private track(sessionId: string, method: string, params: Record<string, unknown>): void {
+  private track(sessionId: string, method: string, params: Record<string, unknown>, hostKey: string | null = null): void {
     const live = this.liveFor(sessionId);
     if (["approval/requested", "approval/resolved", "userInput/requested", "userInput/settled", "session/statusChanged"].includes(method)) {
       live.activityRevision += 1;
@@ -3250,7 +3533,8 @@ export class AncillaServer {
     const progressTurnId = str(item?.["turnId"]) ?? str(params["turnId"]);
     const currentProgress = progressTurnId !== null &&
       (progressTurnId === live.activeTurnId || (method === "turn/started" && live.activeTurnId === null));
-    const durableProgress = currentProgress && str(params["viewCursor"]) !== null && asRecord(params["sourceRange"]) !== null &&
+    const durable = str(params["viewCursor"]) !== null && asRecord(params["sourceRange"]) !== null;
+    const durableProgress = currentProgress && durable &&
       (["turn/started", "turn/completed"].includes(method) ||
         (["item/started", "item/updated", "item/completed"].includes(method) && str(item?.["itemId"]) !== null));
     if (durableProgress) {
@@ -3260,12 +3544,22 @@ export class AncillaServer {
         live.viewHealth = null;
         changed = true;
       }
+    } else if (durable && live.activeTurnId === null && live.viewHealth !== null && method !== "session/viewHealthChanged") {
+      // With no turn running there is no current-turn progress to wait for: any durable record means the view is
+      // being written again. The bump keeps a read that started before it from marking the view unavailable again.
+      live.activityRevision += 1;
+      live.viewHealth = null;
+      changed = true;
+    }
+    if (method === "turn/completed" || method === "item/completed" || method === "item/updated") {
+      this.noteRenameBreakage(hostKey, params);
     }
     switch (method) {
       case "turn/started": {
         live.activityRevision += 1;
         live.activeTurnId = str(params["turnId"]);
         live.turnStartedAt = nowIso();
+        live.turnHost = hostKey;
         live.lastError = null;
         live.lastTerminal = null;
         changed = true;
@@ -3278,6 +3572,7 @@ export class AncillaServer {
         if (!live.activeTurnId || live.activeTurnId === turnId) {
           live.activeTurnId = null;
           live.turnStartedAt = null;
+          live.turnHost = null;
         }
         const terminal = str(params["terminal"]) ?? "completed";
         live.lastTerminal = terminal;
@@ -3296,8 +3591,15 @@ export class AncillaServer {
       }
       case "session/viewHealthChanged": {
         if (params["health"] === "unavailable") {
+          // Newer than any read in flight, which must not undo it.
           live.activityRevision += 1;
           live.viewHealth = { status: "unavailable", reason: str(params["noneReason"]) };
+          changed = true;
+        } else if (live.viewHealth !== null) {
+          // Any other health means the view is back, idle session or not, and every open window hears it. The bump
+          // keeps a read that found the view unavailable from marking it so again.
+          live.activityRevision += 1;
+          live.viewHealth = null;
           changed = true;
         }
         break;
@@ -3331,9 +3633,12 @@ export class AncillaServer {
         break;
       }
       case "session/closed": {
+        // A read taken before the close must not reopen the turn or requests the close ended.
+        live.activityRevision += 1;
         changed = live.activeTurnId !== null || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0;
         live.activeTurnId = null;
         live.turnStartedAt = null;
+        live.turnHost = null;
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         this.sessionHosts.delete(sessionId);
@@ -3356,6 +3661,7 @@ export class AncillaServer {
         if (goal !== undefined) {
           live.goal = goal;
           live.goalSeq += 1;
+          live.goalCursor = str(params["viewCursor"]);
           changed = true;
         }
         break;
@@ -3393,22 +3699,52 @@ export class AncillaServer {
   }
 
   /**
-   * Gives Muse the name typed here, so the CLI, `/name` addressing and other clients see it too. Only a host that
-   * already has the session loaded is asked; the local title stands either way, since a thread that never loads
+   * Gives Muse the name typed or generated here, so the CLI, `/name` addressing and other clients see it too, when
+   * sharing titles was switched on. Only a host that already has the session loaded is asked, and never one whose
+   * Muse showed the rename-broken event log; the local title stands either way, since a thread that never loads
    * still deserves the name the user gave it.
    */
   private async renameInMuse(sessionId: string, name: string): Promise<void> {
     if (!this.options.syncSessionNames) return;
     const hostKey = this.sessionHosts.get(sessionId);
     const managed = hostKey ? this.hosts.get(hostKey) : undefined;
-    if (!managed) {
+    if (!managed || this.renameRefused.has(managed.key)) {
       return;
     }
     try {
       await managed.manager.renameSession(sessionId, name);
-    } catch {
-      /* an ephemeral session, or a host without session/rename */
+    } catch (error) {
+      // An ephemeral session, or a host without session/rename, is fine; a log the rename cannot be written to is not.
+      this.refuseRenames(managed.key, errorInfo(error).message);
     }
+  }
+
+  /** Watches failures for the rename-broken event log, from the turn itself or from a workflow item within it. */
+  private noteRenameBreakage(hostKey: string | null, params: Record<string, unknown>): void {
+    if (!hostKey || !this.options.syncSessionNames || this.renameRefused.has(hostKey)) {
+      return;
+    }
+    const error = params["error"];
+    if (error !== undefined && error !== null) {
+      this.refuseRenames(hostKey, typeof error === "string" ? error : JSON.stringify(error));
+    }
+    const item = asRecord(params["item"]);
+    // Only a failed item is read through; a swarm's many healthy updates cost nothing here.
+    if (item && (/fail|error/i.test(str(item["status"]) ?? "") || (item["error"] !== undefined && item["error"] !== null))) {
+      this.refuseRenames(hostKey, JSON.stringify(item));
+    }
+  }
+
+  /** Stops sending titles to a host once its Muse reports the rename-broken event log, and says so once. */
+  private refuseRenames(hostKey: string, message: string): void {
+    if (this.renameRefused.has(hostKey) || !RENAME_DECODE_FAILURE.test(message)) {
+      return;
+    }
+    this.renameRefused.add(hostKey);
+    this.log(
+      `Muse on host ${hostKey} reported "missing field kind" while reading a session's event log, which a session/rename ` +
+        "can cause; thread titles are no longer sent to it and stay in Ancilla only",
+    );
   }
 
   /**

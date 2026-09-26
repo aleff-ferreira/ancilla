@@ -9,7 +9,12 @@ export interface ExecResult {
   exitCode: number;
 }
 
-export type ExecFn = (command: string, args: string[]) => Promise<ExecResult>;
+export interface ExecOptions {
+  /** The child's whole environment; this process's own when absent. */
+  env?: NodeJS.ProcessEnv;
+}
+
+export type ExecFn = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
 
 export interface WslDistro {
   name: string;
@@ -17,6 +22,9 @@ export interface WslDistro {
   state: string;
   version: number;
 }
+
+/** The distro Muse runs in when nobody named one and no probe has said otherwise. */
+export const FALLBACK_DISTRO = "Ubuntu";
 
 export interface ServePlan {
   command: string;
@@ -39,12 +47,14 @@ export function decodeCliOutput(raw: Buffer): string {
 export async function defaultExec(
   command: string,
   args: string[],
+  options: ExecOptions = {},
 ): Promise<ExecResult> {
   try {
     const { stdout } = await execFileAsync(command, args, {
       encoding: "buffer",
       windowsHide: true,
       timeout: 30000,
+      ...(options.env ? { env: options.env } : {}),
     });
     return { stdout: decodeCliOutput(stdout as Buffer), exitCode: 0 };
   } catch (error) {
@@ -108,15 +118,10 @@ export function toWindowsPath(wslPath: string): string {
 export async function resolveMuseInDistro(
   exec: ExecFn,
   distro: string,
+  options?: ExecOptions,
 ): Promise<string | null> {
-  const result = await exec("wsl", [
-    "-d",
-    distro,
-    "--",
-    "sh",
-    "-lc",
-    "command -v muse",
-  ]);
+  const args = ["-d", distro, "--", "sh", "-lc", "command -v muse"];
+  const result = await (options ? exec("wsl", args, options) : exec("wsl", args));
   if (result.exitCode !== 0) {
     return null;
   }
@@ -146,7 +151,7 @@ export function planServe(options: {
     ...(options.yoloEnabled ? ["--trust-workspace"] : []),
   ];
   if (platform === "win32" && options.runtime !== "native") {
-    const distro = options.distro ?? "Ubuntu";
+    const distro = options.distro ?? FALLBACK_DISTRO;
     if (options.musePath) {
       return {
         command: "wsl",
@@ -186,7 +191,7 @@ export function planHostCommand(options: {
 }): { command: string; args: string[] } {
   const platform = options.platform ?? process.platform;
   if (platform === "win32" && options.runtime !== "native") {
-    return { command: "wsl", args: ["-d", options.distro ?? "Ubuntu", "-e", options.program, ...options.args] };
+    return { command: "wsl", args: ["-d", options.distro ?? FALLBACK_DISTRO, "-e", options.program, ...options.args] };
   }
   return { command: options.program, args: options.args };
 }
@@ -216,14 +221,26 @@ export interface EnvironmentProbe {
   native: NativeMuse | null;
   wslAvailable: boolean;
   distros: WslDistro[];
+  /** The distro WSL starts when none is named. */
   defaultDistro: string | null;
+  /** The distro Muse runs in on WSL: the one asked for, else `Ubuntu`, else the default one when Muse is only there. */
+  museDistro: string | null;
   musePath: string | null;
 }
 
 export async function probeEnvironment(
   exec: ExecFn = defaultExec,
   platform: string = process.platform,
-  options: { preference?: RuntimePreference; findNative?: () => NativeMuse | null } = {},
+  options: {
+    preference?: RuntimePreference;
+    findNative?: () => NativeMuse | null;
+    /** A distro Muse was pinned to. Only that one is looked in. */
+    distro?: string;
+    /** A Muse path Muse was pinned to. An absolute Linux path is checked where it would run, not looked up on PATH. */
+    musePath?: string | null;
+    /** The environment for the calls into WSL, so they see what Muse will. */
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<EnvironmentProbe> {
   if (platform !== "win32") {
     const found = await exec("sh", ["-lc", "command -v muse"]);
@@ -231,24 +248,41 @@ export async function probeEnvironment(
       found.exitCode === 0
         ? (found.stdout.split("\n").map((l) => l.trim()).find((l) => l.length > 0) ?? null)
         : null;
-    return { platform, runtime: "posix", native: null, wslAvailable: false, distros: [], defaultDistro: null, musePath };
+    return { platform, runtime: "posix", native: null, wslAvailable: false, distros: [], defaultDistro: null, museDistro: null, musePath };
   }
   const preference = options.preference ?? "auto";
   const native = (options.findNative ?? (() => findNativeMuse()))();
   // Native Muse needs no WSL at all, so WSL is not even started to look.
   if (native && preference !== "wsl") {
-    return { platform, runtime: "native", native, wslAvailable: false, distros: [], defaultDistro: null, musePath: native.binary };
+    return { platform, runtime: "native", native, wslAvailable: false, distros: [], defaultDistro: null, museDistro: null, musePath: native.binary };
   }
   if (preference === "native") {
-    return { platform, runtime: "native", native: null, wslAvailable: false, distros: [], defaultDistro: null, musePath: null };
+    return { platform, runtime: "native", native: null, wslAvailable: false, distros: [], defaultDistro: null, museDistro: null, musePath: null };
   }
-  const listed = await exec("wsl", ["-l", "-v"]);
+  const execOptions = options.env ? { env: options.env } : undefined;
+  const run = (args: string[]) => (execOptions ? exec("wsl", args, execOptions) : exec("wsl", args));
+  const pinned = options.distro?.trim() || null;
+  const listed = await run(["-l", "-v"]);
   if (listed.exitCode !== 0) {
-    return { platform, runtime: "wsl", native, wslAvailable: false, distros: [], defaultDistro: null, musePath: null };
+    return { platform, runtime: "wsl", native, wslAvailable: false, distros: [], defaultDistro: null, museDistro: pinned, musePath: null };
   }
   const distros = parseWslList(listed.stdout);
   const def = defaultDistro(distros);
-  const musePath = def ? await resolveMuseInDistro(exec, def.name) : null;
+  // Muse runs where it was pinned. Otherwise it runs in the `Ubuntu` Ancilla has always started it in, and where
+  // that has no Muse (or no `Ubuntu` exists), in the default distro. The probe and the spawn then name the same one.
+  const candidates = pinned
+    ? [pinned]
+    : [distros.some((d) => d.name === FALLBACK_DISTRO) ? FALLBACK_DISTRO : undefined, def?.name]
+        .filter((name, index, all): name is string => Boolean(name) && all.indexOf(name) === index);
+  const configured = options.musePath?.startsWith("/") ? options.musePath : null;
+  for (const candidate of candidates) {
+    const musePath = configured
+      ? (await run(["-d", candidate, "-e", "test", "-x", configured])).exitCode === 0 ? configured : null
+      : await resolveMuseInDistro(exec, candidate, execOptions);
+    if (musePath) {
+      return { platform, runtime: "wsl", native, wslAvailable: true, distros, defaultDistro: def?.name ?? null, museDistro: candidate, musePath };
+    }
+  }
   return {
     platform,
     runtime: "wsl",
@@ -256,6 +290,7 @@ export async function probeEnvironment(
     wslAvailable: true,
     distros,
     defaultDistro: def ? def.name : null,
-    musePath,
+    museDistro: candidates[0] ?? null,
+    musePath: null,
   };
 }

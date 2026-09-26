@@ -122,7 +122,8 @@ async function start(connection: FakeConnection, extra: Partial<ConstructorParam
     exec: async () => ({ stdout: "", exitCode: 127 }),
     ...extra,
   });
-  after(() => server.close());
+  // A test that closes the server itself (to restart it on the same data) is not failed by closing it again.
+  after(() => server.close().catch(() => undefined));
   const bound = await server.listen();
   return { server, base: `http://127.0.0.1:${bound.port}` };
 }
@@ -159,16 +160,16 @@ async function waitFor(cond: () => boolean | Promise<boolean>, what: string): Pr
 }
 
 /**
- * Opens the real `/api/events` SSE stream, waits for it to be live, runs `drive`, then counts how many
- * `plan-usage` events arrived. Uses the server's actual public event API rather than a test-only hook.
+ * Opens the real `/api/events` SSE stream, waits for it to be live, runs `drive`, then returns every payload of
+ * `type` that arrived. Uses the server's actual public event API rather than a test-only hook.
  */
-async function countPlanUsageEvents(base: string, drive: () => Promise<void>): Promise<number> {
+async function sseEvents(base: string, type: string, drive: () => Promise<void>): Promise<any[]> {
   const res = await fetch(`${base}/api/events`);
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let sawHello = false;
-  let planUsageCount = 0;
+  const payloads: any[] = [];
   let stop = false;
   const pump = (async () => {
     while (!stop) {
@@ -189,8 +190,8 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
         if (payload.type === "hello") {
           sawHello = true;
         }
-        if (payload.type === "plan-usage") {
-          planUsageCount += 1;
+        if (payload.type === type) {
+          payloads.push(payload);
         }
       }
     }
@@ -203,10 +204,55 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
   stop = true;
   await reader.cancel().catch(() => undefined);
   await pump.catch(() => undefined);
-  return planUsageCount;
+  return payloads;
+}
+
+async function countPlanUsageEvents(base: string, drive: () => Promise<void>): Promise<number> {
+  return (await sseEvents(base, "plan-usage", drive)).length;
+}
+
+/**
+ * A `wsl.exe` whose `-l -v` lists `distros` (the first one WSL's default) and that finds Muse at
+ * /home/u/.local/bin/muse in the distros named in `museIn`, whether looked up on PATH or checked as a pinned binary.
+ * Every call, and the environment it was given, is recorded in `probe`.
+ */
+function fakeWsl(distros: string[], museIn: string[], probe: { calls: string[][]; envs: (NodeJS.ProcessEnv | undefined)[] }): ExecFn {
+  return async (command, args, options) => {
+    probe.calls.push([command, ...args]);
+    probe.envs.push(options?.env);
+    if (command !== "wsl") {
+      return { stdout: "", exitCode: 127 };
+    }
+    if (args[0] === "-l") {
+      const rows = distros.map((name, index) => `${index === 0 ? "*" : " "} ${name}  Running  2`);
+      return { stdout: ["  NAME  STATE  VERSION", ...rows].join("\n") + "\n", exitCode: 0 };
+    }
+    const found = museIn.includes(args[1] ?? "");
+    if (args[2] === "-e" && args[3] === "test") {
+      return { stdout: "", exitCode: found ? 0 : 1 };
+    }
+    return found ? { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+  };
 }
 
 const RANGE = { first: { id: "r", sequence: 1 }, last: { id: "r", sequence: 1 }, stream: { id: "s", kind: "session" } };
+
+/**
+ * Holds every `session/read` until `finish`, then answers all of them with the same snapshot: a refresh reads the
+ * status again after paging, and that read is no newer than the delayed one here.
+ */
+function holdReads(connection: FakeConnection): { started: () => boolean; finish: (value: unknown) => void } {
+  let release!: (value: unknown) => void;
+  const answer = new Promise((resolve) => {
+    release = resolve;
+  });
+  let started = false;
+  connection.replies.set("session/read", () => {
+    started = true;
+    return answer;
+  });
+  return { started: () => started, finish: (value) => release(value) };
+}
 
 describe("read-only recovery of a silent Muse view", () => {
   async function running() {
@@ -257,10 +303,9 @@ describe("read-only recovery of a silent Muse view", () => {
   it("does not let a delayed unavailable read overwrite newer durable item progress", async () => {
     const { connection, base } = await running();
     connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "recovery read starts");
+    await waitFor(started, "recovery read starts");
     connection.notify("item/completed", { sessionId: "s1", viewCursor: "v:4", sourceRange: RANGE,
       item: { itemId: "reply", kind: "agentMessage", turnId: "t1", revision: 1, status: "completed", text: "Progress" } });
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null },
@@ -275,10 +320,9 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("does not let an older successful read clear a newer unavailable notification", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "history read starts");
+    await waitFor(started, "history read starts");
     connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
     finish({ session: { sessionId: "s1", status: "running", activeTurnId: "t1" },
       history: { mode: "inline", items: [] } });
@@ -334,7 +378,8 @@ describe("read-only recovery of a silent Muse view", () => {
     assert.equal(result.json.viewHealth.status, "unavailable");
     assert.equal(result.json.historyUnavailable, true, "a nonempty prefix does not make an unavailable projection complete");
     assert.equal(connection.calls.some((call) => ["session/resume", "turn/start"].includes(call.method)), false);
-    assert.equal(connection.requests.filter((call) => call.method === "session/read").length, 1);
+    const reads = connection.requests.filter((call) => call.method === "session/read");
+    assert.deepEqual(reads.map((call) => call.params?.["excludeItems"]), [false, true], "history once, then the status after paging");
   });
 
   it("does not present the history projection's incomplete open run as a failed turn", async () => {
@@ -354,10 +399,9 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("does not clear a newer turn when a delayed read returns an old idle snapshot", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const result = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "read starts");
+    await waitFor(started, "read starts");
     connection.notify("turn/started", { sessionId: "s1", turnId: "t2" });
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 1 }, history: { items: [] } });
     const reply = await result;
@@ -395,16 +439,315 @@ describe("read-only recovery of a silent Muse view", () => {
 
   it("protects a newly accepted turn even when its started notification is missing", async () => {
     const { connection, base } = await running();
-    let finish!: (value: unknown) => void;
-    connection.replies.set("session/read", () => new Promise((resolve) => { finish = resolve; }));
+    const { started, finish } = holdReads(connection);
     const reading = send(base, "/api/sessions/s1/resume", { refresh: true });
-    await waitFor(() => Boolean(finish), "read starts");
+    await waitFor(started, "read starts");
     connection.replies.set("turn/start", { status: "accepted", disposition: "started", turnId: "t2" });
     assert.equal((await send(base, "/api/turns", { sessionId: "s1", text: "Next task" })).status, 200);
     finish({ session: { sessionId: "s1", status: "idle", activeTurnId: null }, history: { items: [] } });
     const reply = await reading;
     assert.equal(reply.json.msp.activeTurnId, "t2");
     assert.equal(reply.json.session.live.activeTurnId, "t2");
+  });
+});
+
+describe("recovery after host loss, session closes and stale reads", () => {
+  const NOT_LOADED = { session: { sessionId: "s1", status: "notLoaded", activeTurnId: null }, history: { mode: "inline", items: [] }, pendingRequests: [] };
+  const IDLE = { session: { sessionId: "s1", status: "idle", activeTurnId: null } };
+  const started = (turnId: string) => ({ method: "turn/started", params: { sessionId: "s1", turnId } });
+  const ended = (turnId: string, terminal: string, extra: Record<string, unknown> = {}) =>
+    ({ method: "turn/completed", params: { sessionId: "s1", turnId, terminal, ...extra } });
+  const terminals = (reply: { json: any }) =>
+    reply.json.events.filter((e: any) => e.method === "turn/completed").map((e: any) => [e.params.turnId, e.params.terminal]);
+  const resumes = (connection: FakeConnection) => connection.calls.filter((c) => c.method === "session/resume").length;
+  const live = async (base: string) => (await get(base, "/api/sessions")).sessions[0].live;
+
+  /** A thread started and opened here (its session loaded on the host), then left idle. */
+  async function opened(extra: Partial<ConstructorParameters<typeof AncillaServer>[0]> = {}) {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/resume", IDLE);
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    const probe: FactoryProbe = { targets: [], exits: [] };
+    const { base, server } = await start(connection, { hostFactory: fakeFactory(connection, probe), ...extra });
+    await send(base, "/api/sessions", { cwd: "/work/recovery" });
+    assert.equal((await send(base, "/api/sessions/s1/resume", {})).json.readOnly, false);
+    return { connection, base, probe, server };
+  }
+
+  it("loads an idle thread again after its host exited, instead of calling it read-only", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", NOT_LOADED);
+    const before = resumes(connection);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(reply.json.msp.status, "idle");
+    assert.equal(resumes(connection), before + 1, "the session is loaded on the replacement host");
+    assert.equal(probe.targets.length, 2);
+    connection.replies.set("turn/start", { status: "accepted", disposition: "started", turnId: "t1" });
+    assert.equal((await send(base, "/api/turns", { sessionId: "s1", text: "Carry on" })).status, 200, "and the next prompt goes through");
+    assert.equal((await live(base)).activeTurnId, "t1");
+  });
+
+  it("loads an idle thread again after a settings change restarted its host", async () => {
+    const { connection, base, probe } = await opened();
+    assert.equal((await send(base, "/api/sandbox-settings", { disabled: true }, "PATCH")).status, 200);
+    connection.replies.set("session/read", NOT_LOADED);
+    const before = resumes(connection);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(resumes(connection), before + 1);
+    assert.ok(probe.targets.at(-1)?.args.includes("--disable-sandbox"), "on a host carrying the new setting");
+  });
+
+  it("loads an idle thread again after the server itself restarted on the same data", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ancilla-restart-"));
+    const first = new FakeConnection();
+    first.replies.set("session/start", { session: { sessionId: "s1" } });
+    first.replies.set("session/resume", IDLE);
+    first.replies.set("view/page", { events: [], nextCursor: null });
+    const { base, server } = await start(first, { dataDir });
+    await send(base, "/api/sessions", { cwd: "/work/recovery" });
+    await send(base, "/api/sessions/s1/resume", {});
+    await server.close();
+
+    const second = new FakeConnection();
+    second.replies.set("session/read", NOT_LOADED);
+    second.replies.set("session/resume", IDLE);
+    second.replies.set("view/page", { events: [], nextCursor: null });
+    const { base: base2 } = await start(second, { dataDir });
+    const reply = await send(base2, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.readOnly, false);
+    assert.equal(reply.json.readOnlyReason, null);
+    assert.equal(resumes(second), 1, "a server that knows of nothing running loads the session");
+  });
+
+  it("stays read-only, with the other client's reason, only while another Muse client holds the lease", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("session/resume", new MspTestError("session is loaded by another host", "sessionInUse"));
+    const held = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(held.status, 200);
+    assert.equal(held.json.readOnly, true);
+    assert.match(held.json.readOnlyReason, /another host/);
+    connection.replies.set("session/resume", new MspTestError("", "sessionInUse"));
+    const unexplained = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(unexplained.json.readOnly, true);
+    assert.equal(unexplained.json.readOnlyReason, "Another Muse session has this thread open.", "read-only always says why");
+    connection.replies.set("session/resume", IDLE);
+    const released = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(released.json.readOnly, false);
+    assert.equal(released.json.readOnlyReason, null);
+  });
+
+  it("never loads a session that is waiting on the user, or whose turn this server still knows to be running", async () => {
+    const { connection, base, probe } = await opened();
+    probe.exits[0]?.({ code: 1, signal: null });
+    connection.replies.set("session/read", { ...NOT_LOADED, pendingRequests: [{ kind: "approval", approvalId: "a1" }] });
+    const before = resumes(connection);
+    const waiting = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(waiting.status, 200);
+    assert.equal(waiting.json.readOnly, false, "unloaded is not read-only either");
+    assert.equal(resumes(connection), before, "a question the log still holds is for opening the thread to bring back");
+
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const running = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(running.json.msp.activeTurnId, "t1");
+    assert.equal(resumes(connection), before, "a running turn is never reattached by a refresh");
+  });
+
+  it("does not bring back a turn that session/closed ended while a read was in flight", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const { started: reading, finish } = holdReads(connection);
+    const refresh = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(reading, "read in flight");
+    connection.notify("session/closed", { sessionId: "s1" });
+    assert.equal((await live(base)).activeTurnId, null);
+    finish({ session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "inline", items: [] } });
+    const reply = await refresh;
+    assert.equal(reply.json.msp.activeTurnId, null, "the older snapshot is not applied");
+    assert.equal(reply.json.pendingComplete, false);
+    assert.equal((await live(base)).activeTurnId, null);
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "failed", { reason: "incomplete" })], nextCursor: null });
+    const later = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(later.json.msp.activeTurnId, null);
+    assert.equal((await send(base, "/api/sessions/s1", { settled: true }, "PATCH")).status, 200, "nothing is left running to block settling");
+  });
+
+  it("ends a turn whose host exits while its read is still in flight, keeping the host's failure", async () => {
+    const { connection, base, probe } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "inline", items: [] } });
+    let fail!: (error: Error) => void;
+    connection.replies.set("approval/listPending", () => new Promise((_, reject) => { fail = reject; }));
+    const refresh = send(base, "/api/sessions/s1/resume", { refresh: true });
+    await waitFor(() => Boolean(fail), "listPending in flight");
+    probe.exits[0]?.({ code: 1, signal: null });
+    fail(new Error("connection closed"));
+    const reply = await refresh;
+    assert.equal(reply.json.msp.activeTurnId, null);
+    const state = await live(base);
+    assert.equal(state.activeTurnId, null);
+    assert.equal(state.lastTerminal, "failed");
+    assert.match(state.lastError, /host exited/);
+  });
+
+  it("does not lend a stopped turn an older turn's outcome from a partial prefix", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", { events: [
+      started("t0"), ended("t0", "failed", { error: { message: "rate limited" } }), started("t1"),
+    ], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, null);
+    assert.equal(reply.json.historyUnavailable, true);
+    assert.equal(reply.json.session.live.lastTerminal, null, "t1's outcome is unknown, not t0's");
+    assert.equal(reply.json.session.live.lastError, null);
+    assert.deepEqual(terminals(reply), [["t0", "failed"]], "t0's real failure stays in the transcript");
+
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t2" });
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "completed")], nextCursor: null });
+    const reverse = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reverse.json.session.live.lastTerminal, null, "nor is t1's completion t2's outcome");
+  });
+
+  it("takes neither outcome nor failure from a read that does not have the session loaded", async () => {
+    const { connection, base } = await opened();
+    connection.replies.set("session/resume", new MspTestError("held by the TUI", "sessionInUse"));
+    connection.replies.set("session/read", NOT_LOADED);
+    connection.replies.set("view/page", { events: [started("t9"), ended("t9", "failed", { reason: "incomplete" })], nextCursor: null });
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, true);
+    assert.equal(reply.json.readOnlyReason, "held by the TUI");
+    assert.equal(reply.json.msp.activeTurnId, null);
+    assert.equal(reply.json.session.live.lastTerminal, null, "a run going elsewhere is not a failure here");
+    assert.equal(reply.json.session.live.lastError, null);
+  });
+
+  it("drops a frozen prefix's stand-in for a run that has since stopped, until the projection says how it ended", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const frozen = { events: [started("t1"), ended("t1", "failed", { reason: "incomplete" })], nextCursor: null };
+    connection.replies.set("session/read", { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", frozen);
+    const running = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.deepEqual(terminals(running), [], "the open run's stand-in is not a failure");
+
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    const stopped = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(stopped.json.msp.activeTurnId, null);
+    assert.deepEqual(terminals(stopped), [], "the frozen prefix still says nothing about the outcome");
+    assert.equal(stopped.json.session.live.lastTerminal, null);
+    assert.equal(stopped.json.session.live.lastError, null);
+
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "inline", items: [] } });
+    connection.replies.set("view/page", { events: [started("t1"), ended("t1", "failed", { error: { message: "The provider refused" } })], nextCursor: null });
+    const known = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.deepEqual(terminals(known), [["t1", "failed"]], "a real failure, once served, is shown");
+    assert.equal(known.json.session.live.lastTerminal, "failed");
+    assert.equal(known.json.session.live.lastError, "The provider refused");
+  });
+
+  it("recognises a turn that started while the pages were read, and holds its stand-in back", async () => {
+    const { connection, base } = await opened();
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    const page = { events: [started("t1"), ended("t1", "completed"), started("t2"), ended("t2", "failed", { reason: "incomplete" })], nextCursor: null };
+    connection.replies.set("view/page", page);
+    connection.replies.set("session/read", (params: Record<string, unknown>) => ({
+      session: { sessionId: "s1", status: "running", activeTurnId: params["excludeItems"] ? "t2" : "t1" },
+      history: { mode: "none", noneReason: "projectionUnavailable" },
+    }));
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.msp.activeTurnId, "t2", "the status read after paging is the newer one");
+    assert.equal(reply.json.session.live.activeTurnId, "t2");
+    assert.deepEqual(terminals(reply), [["t1", "completed"]]);
+    assert.equal(reply.json.session.live.lastTerminal, null, "a run under way has no outcome yet");
+
+    connection.notify("turn/started", { sessionId: "s1", turnId: "t1" });
+    connection.replies.set("session/read", (params: Record<string, unknown>) => {
+      if (params["excludeItems"]) {
+        throw new MspTestError("busy", "internal");
+      }
+      return { session: { sessionId: "s1", status: "running", activeTurnId: "t1" }, history: { mode: "none", noneReason: "projectionUnavailable" } };
+    });
+    const unread = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(unread.status, 200, "a failed second read keeps the first");
+    assert.equal(unread.json.msp.activeTurnId, "t1");
+    assert.deepEqual(terminals(unread), [], "a turn the page shows starting after the one read as running may be open too");
+  });
+
+  it("keeps a newer live goal over an older one from a stale prefix", async () => {
+    const { connection, base } = await opened();
+    const goal = (status: string, percentComplete: number, viewCursor: string) =>
+      ({ method: "session/goalChanged", params: { sessionId: "s1", goal: { objective: "Ship v2", status, percentComplete }, viewCursor } });
+    connection.notify("session/goalChanged", { sessionId: "s1", goal: { objective: "Ship v2", status: "complete", percentComplete: 100 }, viewCursor: "v:s1:9", sourceRange: RANGE });
+    connection.replies.set("session/read", { ...IDLE, history: { mode: "none", noneReason: "projectionUnavailable" } });
+    connection.replies.set("view/page", { events: [goal("active", 10, "v:s1:3")], nextCursor: null });
+    const stale = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(stale.json.session.live.goal.status, "complete");
+    assert.equal(stale.json.session.live.goal.percentComplete, 100);
+    connection.replies.set("view/page", { events: [goal("active", 60, "v:s1:12")], nextCursor: null });
+    const newer = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(newer.json.session.live.goal.percentComplete, 60, "a prefix that reaches past the live goal counts");
+  });
+
+  it("clears an unavailable view on an idle thread when Muse says it is healthy, and tells the clients", async () => {
+    const { connection, base } = await opened();
+    const unavailable = { status: "unavailable", reason: "projectionUnavailable" };
+    const statuses = await sseEvents(base, "session-status", async () => {
+      connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+      assert.deepEqual((await live(base)).viewHealth, unavailable);
+      connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "healthy" });
+    });
+    assert.equal((await live(base)).viewHealth, null);
+    assert.deepEqual(statuses.map((status) => status.live.viewHealth), [unavailable, null]);
+  });
+
+  it("clears an unavailable view on an idle thread on any durable record, or on served history", async () => {
+    const { connection, base } = await opened();
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.notify("session/modelChanged", { sessionId: "s1", modelId: "m1", viewCursor: "v:9", sourceRange: RANGE });
+    assert.equal((await live(base)).viewHealth, null, "with no turn running, any durable record means the view is written again");
+
+    connection.notify("session/viewHealthChanged", { sessionId: "s1", health: "unavailable", noneReason: "projectionUnavailable" });
+    connection.replies.set("session/resume", new MspTestError("held by the TUI", "sessionInUse"));
+    connection.replies.set("session/read", NOT_LOADED);
+    const reply = await send(base, "/api/sessions/s1/resume", { refresh: true });
+    assert.equal(reply.json.readOnly, true);
+    assert.equal(reply.json.viewHealth, null, "served history means the projection works, loaded here or not");
+  });
+
+  it("opens a thread whose fallback read fails as incomplete rather than failed", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/resume", { session: { sessionId: "s1", status: "idle", activeTurnId: null, turnCount: 0 } });
+    connection.replies.set("view/page", { events: [], nextCursor: null });
+    connection.replies.set("session/read", new MspTestError("read failed", "internal"));
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work/proj" });
+    const fresh = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.json.msp.status, "idle");
+    assert.equal(fresh.json.historyUnavailable, true);
+    assert.equal(fresh.json.readOnly, false);
+
+    connection.replies.set("session/resume", new MspTestError("in use by the TUI", "sessionInUse"));
+    connection.replies.set("view/page", new MspTestError("in use", "sessionInUse"));
+    const held = await send(base, "/api/sessions/s1/resume", {});
+    assert.equal(held.status, 200);
+    assert.equal(held.json.readOnly, true);
+    assert.equal(held.json.readOnlyReason, "in use by the TUI");
+    assert.equal(held.json.historyUnavailable, true);
   });
 });
 
@@ -662,7 +1005,7 @@ describe("AncillaServer", () => {
       sessions: [{ sessionId: "s1", workspaceRoot: "/work/proj", name: "Wire up the updater", title: "fix the updater please" }],
       nextCursor: null,
     });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     connection.notify("item/completed", {
       sessionId: "s1",
@@ -672,7 +1015,7 @@ describe("AncillaServer", () => {
     assert.equal((await read()).title, "fix the updater please");
 
     await send(base, "/api/discover", {});
-    assert.equal((await read()).title, "Wire up the updater", "the name Muse shows in its own CLI wins");
+    assert.equal((await read()).title, "Wire up the updater", "with titles shared, the name Muse shows in its own CLI wins");
 
     await send(base, "/api/sessions/s1", { title: "Updater work" }, "PATCH");
     await send(base, "/api/discover", {});
@@ -1063,10 +1406,10 @@ describe("AncillaServer", () => {
     assert.equal(count, 1, "a same-timestamp re-read must not re-emit plan-usage");
   });
 
-  it("gives Muse the name typed here, and takes the name Muse settles on", async () => {
+  it("gives Muse the name typed here, and takes the name Muse settles on, when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const read = async () => (await get(base, "/api/sessions")).sessions[0];
 
@@ -1090,14 +1433,15 @@ describe("AncillaServer", () => {
     assert.equal(session.title, "Local only");
   });
 
-  it("can keep generated and typed titles local without writing rename records to Muse", async () => {
+  it("keeps generated and typed titles local by default, writing no rename records to Muse", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const exec: ExecFn = async () => ({
       stdout: JSON.stringify({ payload_type: "run.terminal.completed", payload: { kind: "run_terminal", terminal: "completed", text: "Parallel code investigation" } }),
       exitCode: 0,
     });
-    const { base } = await start(connection, { syncSessionNames: false, exec });
+    // No syncSessionNames: what a runtime.json without the key, or none at all, gives.
+    const { base } = await start(connection, { exec });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
     connection.notify("item/completed", {
@@ -1114,6 +1458,47 @@ describe("AncillaServer", () => {
     await send(base, "/api/sessions/s1", { title: "My investigation" }, "PATCH");
     assert.equal(await titleOf(), "My investigation");
     assert.equal(connection.calls.filter((c) => c.method === "session/rename").length, 0);
+  });
+
+  it("stops sending titles to a host whose Muse reports the rename-broken event log, and says so once", async () => {
+    const decodeFailure = "event log failed: record decode failed: payload decode failed: missing field kind";
+    const renames = (connection: FakeConnection) => connection.calls.filter((c) => c.method === "session/rename").length;
+    const logged: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      logged.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const connection = new FakeConnection();
+      connection.replies.set("session/start", { session: { sessionId: "s1" } });
+      connection.replies.set("session/rename", new MspTestError(decodeFailure, "internal"));
+      const { base } = await start(connection, { syncSessionNames: true });
+      await send(base, "/api/sessions", { cwd: "/work/proj" });
+      assert.equal((await send(base, "/api/sessions/s1", { title: "First" }, "PATCH")).status, 200);
+      assert.equal((await send(base, "/api/sessions/s1", { title: "Second" }, "PATCH")).status, 200);
+      assert.equal(renames(connection), 1, "no title goes to that host again");
+      assert.equal((await get(base, "/api/sessions")).sessions[0].title, "Second", "the local title stands");
+      assert.equal(logged.filter((line) => /missing field kind/.test(line)).length, 1);
+
+      // The failure can also show up in the turn: a workflow that could not be admitted to the broken log.
+      const second = new FakeConnection();
+      second.replies.set("session/start", { session: { sessionId: "s1" } });
+      second.replies.set("session/rename", new MspTestError("ephemeral", "unsupported"));
+      const { base: base2 } = await start(second, { syncSessionNames: true });
+      await send(base2, "/api/sessions", { cwd: "/work/proj" });
+      await send(base2, "/api/sessions/s1", { title: "First" }, "PATCH");
+      await send(base2, "/api/sessions/s1", { title: "Second" }, "PATCH");
+      assert.equal(renames(second), 2, "an ordinary refusal does not stop titles");
+      second.notify("turn/completed", { sessionId: "s1", turnId: "t1", terminal: "failed",
+        error: { message: `workflow cancel registration failed before admission: ${decodeFailure}` } });
+      await send(base2, "/api/sessions/s1", { title: "Third" }, "PATCH");
+      assert.equal(renames(second), 2);
+      assert.equal((await get(base2, "/api/sessions")).sessions[0].title, "Third");
+      assert.equal(logged.filter((line) => /missing field kind/.test(line)).length, 2, "once per host");
+    } finally {
+      process.stderr.write = write;
+    }
   });
 
   it("keeps thread-title settings behind a switch and a model choice", async () => {
@@ -1380,7 +1765,7 @@ describe("AncillaServer", () => {
     assert.deepEqual(probe.targets.map((t) => t.args), [["serve", "--disable-sandbox", "--trust-workspace"]]);
   });
 
-  it("upgrades an echo title with one muse exec call, and pushes the name back", async () => {
+  it("upgrades an echo title with one muse exec call, and pushes the name back when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     let release!: () => void;
@@ -1396,7 +1781,7 @@ describe("AncillaServer", () => {
         exitCode: 0,
       };
     };
-    const { base } = await start(connection, { exec });
+    const { base } = await start(connection, { exec, syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
     connection.notify("item/completed", {
@@ -1496,6 +1881,110 @@ describe("AncillaServer", () => {
     const session = (await get(base, "/api/sessions")).sessions[0];
     assert.equal(session.title, "Mine");
     assert.equal(session.titleSource, "user");
+  });
+
+  it("checks \\\\wsl.localhost\\ folders against the distro Muse is started in, not WSL's default", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/list", { sessions: [], nextCursor: null });
+    const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const hosts: FactoryProbe = { targets: [], exits: [] };
+    // WSL's default is Debian; Muse lives in Ubuntu, and nothing in runtime.json says which.
+    const { base } = await start(connection, {
+      platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["Debian", "Ubuntu"], ["Ubuntu"], wsl), hostFactory: fakeFactory(connection, hosts),
+    });
+    const env = await get(base, "/api/env");
+    assert.equal(env.museFound, true);
+    assert.equal(env.defaultDistro, "Ubuntu", "the app shows the distro Muse runs in");
+    const added = await send(base, "/api/projects", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" });
+    assert.equal(added.status, 200);
+    assert.equal(added.json.warning, null);
+    assert.equal((await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" })).status, 200);
+    assert.deepEqual(hosts.targets[0]?.args.slice(0, 2), ["-d", "Ubuntu"], "the host starts where the check looked");
+    const other = await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Debian\\home\\u\\proj" });
+    assert.equal(other.status, 400);
+    assert.equal(other.json.error, "This folder belongs to WSL Debian, but Muse is running in Ubuntu.");
+
+    // With Muse only in the default distro, that is where it runs, and the check follows.
+    const only = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const debianHosts: FactoryProbe = { targets: [], exits: [] };
+    const { base: base2 } = await start(connection, {
+      platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["Debian", "Ubuntu"], ["Debian"], only), hostFactory: fakeFactory(connection, debianHosts),
+    });
+    assert.equal((await get(base2, "/api/env")).defaultDistro, "Debian");
+    assert.equal((await send(base2, "/api/sessions", { cwd: "\\\\wsl.localhost\\Debian\\home\\u\\proj" })).status, 200);
+    assert.deepEqual(debianHosts.targets[0]?.args.slice(0, 2), ["-d", "Debian"]);
+    const refused = await send(base2, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" });
+    assert.equal(refused.json.error, "This folder belongs to WSL Ubuntu, but Muse is running in Debian.");
+  });
+
+  it("probes the pinned distro and binary from runtime.json, so a working Muse is never reported missing", async () => {
+    const connection = new FakeConnection();
+    const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const { base } = await start(connection, {
+      platform: "win32", runtime: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["docker-desktop", "Ubuntu-24.04"], ["Ubuntu-24.04"], wsl),
+    });
+    const env = await get(base, "/api/env");
+    assert.equal(env.museFound, true);
+    assert.equal(env.musePath, "/home/u/.local/bin/muse");
+    assert.equal(env.defaultDistro, "Ubuntu-24.04");
+    assert.deepEqual(wsl.calls, [
+      ["wsl", "-l", "-v"],
+      ["wsl", "-d", "Ubuntu-24.04", "-e", "test", "-x", "/home/u/.local/bin/muse"],
+    ], "only the pinned distro is looked in, for the pinned binary");
+
+    const missing = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const { base: base2 } = await start(connection, {
+      platform: "win32", runtime: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["docker-desktop", "Ubuntu-24.04"], [], missing),
+    });
+    const gone = await get(base2, "/api/env");
+    assert.equal(gone.museFound, false, "a pinned binary that is not there is reported as missing");
+    assert.equal(gone.musePath, null);
+    assert.equal(gone.defaultDistro, "Ubuntu-24.04");
+  });
+
+  it("carries runtime.json's wslEnv into WSL processes only, over the Windows values of the same names", async () => {
+    const saved = { backend: process.env["TBH_CREDENTIAL_BACKEND"], wslenv: process.env["WSLENV"], bashEnv: process.env["BASH_ENV"] };
+    process.env["TBH_CREDENTIAL_BACKEND"] = "keyring";
+    process.env["WSLENV"] = "USERPROFILE/p";
+    delete process.env["BASH_ENV"];
+    try {
+      const connection = new FakeConnection();
+      connection.replies.set("session/start", { session: { sessionId: "s1" } });
+      const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+      const hosts: FactoryProbe = { targets: [], exits: [] };
+      const wslEnv = { TBH_CREDENTIAL_BACKEND: "file", BASH_ENV: "/home/u/.config/muse/runtime-env.sh" };
+      const { base } = await start(connection, {
+        platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse", wslEnv,
+        exec: fakeWsl(["Ubuntu"], ["Ubuntu"], wsl), hostFactory: fakeFactory(connection, hosts),
+      });
+      assert.equal((await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" })).status, 200);
+      const target = hosts.targets[0];
+      assert.equal(target?.env?.["TBH_CREDENTIAL_BACKEND"], "file", "runtime.json wins over the Windows value");
+      assert.equal(target?.env?.["BASH_ENV"], "/home/u/.config/muse/runtime-env.sh");
+      assert.equal(target?.env?.["WSLENV"], "USERPROFILE/p:TBH_CREDENTIAL_BACKEND/u:BASH_ENV/u");
+      assert.ok(wsl.envs.length > 0 && wsl.envs.every((env) => env?.["TBH_CREDENTIAL_BACKEND"] === "file"), "the probe's calls into WSL see the same");
+      assert.equal(process.env["TBH_CREDENTIAL_BACKEND"], "keyring", "the server's own environment is untouched");
+      assert.equal(process.env["BASH_ENV"], undefined);
+      assert.equal(process.env["WSLENV"], "USERPROFILE/p");
+
+      // Native Muse is a Windows process: none of it applies there.
+      const native: FactoryProbe = { targets: [], exits: [] };
+      const { base: base2 } = await start(connection, {
+        platform: "win32", runtime: "native", musePath: "C:\\muse\\muse.exe", wslEnv, hostFactory: fakeFactory(connection, native),
+      });
+      assert.equal((await send(base2, "/api/sessions", { cwd: "D:\\work\\proj" })).status, 200);
+      assert.equal(native.targets[0]?.command, "C:\\muse\\muse.exe");
+      assert.equal(native.targets[0]?.env, undefined);
+    } finally {
+      for (const [name, value] of [["TBH_CREDENTIAL_BACKEND", saved.backend], ["WSLENV", saved.wslenv], ["BASH_ENV", saved.bashEnv]] as const) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+    }
   });
 
   it("spawns one host per workspace under concurrency and respawns after a crash", async () => {
@@ -2074,10 +2563,10 @@ describe("slash commands, skills and shell", () => {
     assert.equal(empty.status, 400, "a message with neither text nor a file is refused");
   });
 
-  it("lets Muse's own name replace a title derived from a /skill prompt", async () => {
+  it("lets Muse's own name replace a title derived from a /skill prompt when titles are shared", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const { base } = await start(connection);
+    const { base } = await start(connection, { syncSessionNames: true });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     connection.notify("item/completed", {
       sessionId: "s1",
@@ -2162,7 +2651,7 @@ describe("slash commands, skills and shell", () => {
         exitCode: 0,
       };
     };
-    const { base } = await start(connection, { exec });
+    const { base } = await start(connection, { exec, syncSessionNames: true });
     await send(base, "/api/title-settings", { enabled: false }, "PATCH");
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const titleOf = async () => (await get(base, "/api/sessions")).sessions[0].title;
@@ -2183,7 +2672,7 @@ describe("slash commands, skills and shell", () => {
       sessions: [{ sessionId: "s1", workspaceRoot: "/work/proj", title: "fix the updater please" }],
       nextCursor: null,
     });
-    const { base: base2 } = await start(second, { exec });
+    const { base: base2 } = await start(second, { exec, syncSessionNames: true });
     await send(base2, "/api/title-settings", { enabled: false }, "PATCH");
     await send(base2, "/api/sessions", { cwd: "/work/proj" });
     await send(base2, "/api/discover", {});
