@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
+import { agentActivityView } from "../src/model/agents.js";
 import { buildTurns } from "../src/model/fold.js";
 import { ZOOM_MAX, ZOOM_MIN } from "../src/model/store.js";
 import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
@@ -941,6 +942,52 @@ describe("AncillaController", () => {
     assert.equal(fold?.activeTurnId, "live-1", "events buffered before the overlap still land");
     assert.ok(fold?.items["i1"], "events buffered during the overlap still land");
     stop();
+  });
+
+  it("rereads a background thread that missed a dropped stream when it is opened, so a finished agent stops working", async () => {
+    const client = new FakeClient();
+    const other: SessionSummary = { ...SESSION, sessionId: "s2", title: "Other" };
+    client.listSessions = async () => [SESSION, other];
+    const workflow = (revision: number, status: string, child: Record<string, unknown>): ViewEvent => ({
+      method: "item/updated",
+      params: { item: { itemId: "wf-1", kind: "workflow", revision, status, turnId: "t1", workflowRunId: "run-1",
+        children: [{ childId: "c1", attempt: 1, label: "bg-reader", ...child }] } },
+    });
+    // The lead turn ended; its workflow child carries on in the background.
+    let events: ViewEvent[] = [
+      { method: "turn/started", params: { turnId: "t1" } },
+      workflow(1, "inProgress", { status: "started" }),
+      { method: "turn/completed", params: { turnId: "t1", terminal: "completed" } },
+    ];
+    const calls: [string, { refresh?: boolean } | undefined][] = [];
+    client.loadTranscript = async (sessionId: string, options?: { refresh?: boolean }) => {
+      calls.push([sessionId, options]);
+      return load({ session: sessionId === "s1" ? SESSION : other, events: sessionId === "s1" ? events : [] });
+    };
+    const { controller, stop } = await started(client);
+    try {
+      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 1);
+      controller.openThread("s2");
+      await settle();
+      // The child finishes while the stream is down, and nothing replays that.
+      events = [...events, workflow(2, "completed", { status: "terminal", terminal: "completed" })];
+      calls.length = 0;
+      client.handler?.({ type: "connection", state: "lost" });
+      client.handler?.({ type: "hello", version: "x" });
+      await settle();
+      assert.deepEqual(calls, [["s2", undefined]], "the open thread reloads at once");
+      controller.openThread("s1");
+      await settle();
+      await settle();
+      assert.deepEqual(calls.at(-1), ["s1", { refresh: true }], "the other on opening, read in place while its agent may run");
+      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 0);
+      controller.openThread("s2");
+      controller.openThread("s1");
+      await settle();
+      assert.equal(calls.length, 2, "once reread, it is not read again on every visit");
+    } finally {
+      stop();
+    }
   });
 
   it("echoes a sent prompt, marks the turn running, then drops the echo", async () => {
