@@ -79,7 +79,7 @@ function SidebarTop() {
     <div data-drag-region {...drag} className="flex flex-col gap-px px-2 pt-2 pb-1.5">
       <div className="mb-2 flex h-8 items-center gap-2 pr-0.5 pl-1.5">
         <Logo size={20} />
-        <span className="text-[14px] font-semibold tracking-[-0.01em] text-fg">Helicon</span>
+        <span className="text-[14px] font-semibold tracking-[-0.01em] text-fg">Ancilla</span>
         <span className="flex-1" />
         <Tip label="Hide sidebar" shortcut={[MOD, "B"]}>
           <IconButton label="Hide sidebar" onClick={() => controller.toggleSidebar()}>
@@ -811,13 +811,13 @@ function SidebarFooter() {
   const hostError = useApp((s) => s.hostError);
   const status =
     connection === "lost"
-      ? { dot: "bg-warn", text: "Reconnecting to Helicon" }
+      ? { dot: "bg-warn", text: "Reconnecting to Ancilla" }
       : hostError
         ? { dot: "bg-danger", text: "Muse needs attention" }
         : env?.platform === "win32" && env.runtime !== "native"
           ? { dot: "bg-ok", text: `Muse in WSL (${env.defaultDistro ?? "Ubuntu"})` }
           : { dot: "bg-ok", text: "Muse ready" };
-  const detail = hostError ?? (env?.musePath ? `${env.musePath}  |  Helicon ${env.version}` : `Helicon ${env?.version ?? ""}`);
+  const detail = hostError ?? (env?.musePath ? `${env.musePath}  |  Ancilla ${env.version}` : `Ancilla ${env?.version ?? ""}`);
   return (
     <div className="flex h-11 shrink-0 items-center gap-0.5 border-t border-line px-2">
       <Tip label={detail} side="top" align="start">
@@ -858,7 +858,7 @@ export function updateSummary(updates: UpdateState, autoUpdate: boolean, paused:
     case "downloading":
       return `Downloading version ${version}${updates.progress !== null ? `, ${Math.round(updates.progress * 100)}%` : ""}`;
     case "ready":
-      return autoUpdate && !paused ? `Version ${version} installs when you close Helicon` : `Version ${version} is ready to install`;
+      return autoUpdate && !paused ? `Version ${version} installs when you close Ancilla` : `Version ${version} is ready to install`;
     case "installing":
       return "Installing the update";
     case "error":
@@ -868,7 +868,7 @@ export function updateSummary(updates: UpdateState, autoUpdate: boolean, paused:
       return paused ? "Up to date. Updates are paused." : ago && ago !== "now" ? `Up to date, checked ${ago} ago` : "Up to date";
     }
     default:
-      return paused ? "Updates are paused" : autoUpdate ? "Helicon updates itself" : "Automatic updates are off";
+      return paused ? "Updates are paused" : autoUpdate ? "Ancilla updates itself" : "Automatic updates are off";
   }
 }
 
@@ -888,7 +888,7 @@ function UpdatesMenu() {
   const busy = status === "checking" || status === "downloading" || status === "installing";
   return (
     <Menu>
-      <Tip label={status === "ready" ? `Helicon ${version} is ready to install` : waiting ? `Helicon ${version} is available` : "Updates"} side="top">
+      <Tip label={status === "ready" ? `Ancilla ${version} is ready to install` : waiting ? `Ancilla ${version} is available` : "Updates"} side="top">
         <MenuTrigger asChild>
           <IconButton label="Updates" className="relative">
             <DownloadSimpleIcon size={15} />
@@ -903,7 +903,7 @@ function UpdatesMenu() {
       </Tip>
       <MenuContent side="top" align="start" className="w-[290px]">
         <div className="px-2 pt-1.5 pb-2">
-          <p className="text-sm font-medium text-fg">Helicon {updates.currentVersion ?? ""}</p>
+          <p className="text-sm font-medium text-fg">Ancilla {updates.currentVersion ?? ""}</p>
           <p className="mt-0.5 text-xs text-muted">{updateSummary(updates, autoUpdate, paused, now)}</p>
           {status === "downloading" && updates.progress !== null ? (
             <div className="mt-2 h-1 overflow-hidden rounded-full bg-active" role="progressbar" aria-valuenow={Math.round(updates.progress * 100)}>
@@ -930,7 +930,7 @@ function UpdatesMenu() {
         <MenuCheck
           checked={autoUpdate}
           onChange={(on) => controller.setAutoUpdate(on)}
-          description="Download new versions in the background and install them when Helicon closes"
+          description="Download new versions in the background and install them when Ancilla closes"
         >
           Automatic updates
         </MenuCheck>
@@ -943,7 +943,7 @@ function UpdatesMenu() {
 }
 
 export const CODE_THEME_LABELS: Record<CodeTheme, string> = {
-  helicon: "Helicon",
+  ancilla: "Ancilla",
   ayu: "Ayu",
   github: "GitHub",
   vercel: "Vercel",
@@ -973,7 +973,7 @@ function ThemeMenu() {
         <p className="px-2.5 pt-1 pb-1.5 text-2xs font-medium text-subtle">Code</p>
         <MenuRadioGroup
           value={codeTheme}
-          onValueChange={(v) => controller.setCodeTheme(CODE_THEMES.includes(v as CodeTheme) ? (v as CodeTheme) : "helicon")}
+          onValueChange={(v) => controller.setCodeTheme(CODE_THEMES.includes(v as CodeTheme) ? (v as CodeTheme) : "ancilla")}
         >
           {CODE_THEMES.map((name) => (
             <MenuOption

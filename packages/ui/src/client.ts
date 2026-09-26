@@ -5,7 +5,7 @@ import type {
   FileEntry,
   FileListing,
   GoalAction,
-  HeliconEvent,
+  AncillaEvent,
   IfBusy,
   ModelOption,
   OutgoingAttachment,
@@ -26,20 +26,20 @@ import type {
 } from "./types.js";
 import { listedPrice } from "./model/pricing.js";
 
-/** An error from the Helicon server, carrying the MSP error kind when there is one. */
-export class HeliconError extends Error {
+/** An error from the Ancilla server, carrying the MSP error kind when there is one. */
+export class AncillaError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly kind: string | null = null,
   ) {
     super(message);
-    this.name = "HeliconError";
+    this.name = "AncillaError";
   }
 }
 
 export function errorKind(error: unknown): string | null {
-  return error instanceof HeliconError ? error.kind : null;
+  return error instanceof AncillaError ? error.kind : null;
 }
 
 export function errorMessage(error: unknown): string {
@@ -49,7 +49,7 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-export type EventHandler = (event: HeliconEvent) => void;
+export type EventHandler = (event: AncillaEvent) => void;
 
 export interface TurnOptions {
   ifBusy?: IfBusy;
@@ -69,7 +69,7 @@ export interface ApprovalDecisionInput {
 }
 
 /** Everything the UI needs from a transport. The web and desktop shells both implement it over REST and SSE. */
-export interface HeliconClient {
+export interface AncillaClient {
   probeEnvironment(refresh?: boolean): Promise<EnvironmentStatus>;
   listProjects(): Promise<ProjectView[]>;
   /** `create` makes the folder first when it does not exist. */
@@ -111,7 +111,7 @@ export interface HeliconClient {
   setTitleSettings(patch: { enabled?: boolean; modelId?: string | null }): Promise<TitleSettings>;
   getSandboxSettings(): Promise<SandboxSettings>;
   setSandboxSettings(patch: { disabled?: boolean }): Promise<SandboxSettings>;
-  /** Every aonia profile Helicon can run, with its non-secret identity. */
+  /** Every aonia profile Ancilla can run, with its non-secret identity. */
   listAccounts(): Promise<import("./types.js").AccountView[]>;
   /** Makes a profile; `seedFromDefault` copies settings.json and trust.json from the default login. */
   createAccount(id: string, options?: { name?: string; seedFromDefault?: boolean }): Promise<{ id: string; name: string }>;
@@ -131,7 +131,7 @@ export interface HeliconClient {
   compact(sessionId: string): Promise<{ noop: boolean; reason: string | null }>;
   /** Runs a shell command in the session's workspace; its output arrives as a `userShell` item. */
   runShell(sessionId: string, command: string): Promise<void>;
-  /** Runs a `!` command in the workspace from Helicon itself, for hosts that cannot run one. */
+  /** Runs a `!` command in the workspace from Ancilla itself, for hosts that cannot run one. */
   runShellProxy(sessionId: string, command: string): Promise<import("./types.js").ShellRun>;
   /** Branches a thread into a new one carrying every completed turn. */
   forkSession(sessionId: string): Promise<SessionSummary>;

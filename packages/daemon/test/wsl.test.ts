@@ -21,9 +21,9 @@ const SAMPLE_WSL_LIST = `  NAME                   STATE           VERSION
 
 describe("wsl paths", () => {
   it("translates Windows and WSL paths both ways", () => {
-    assert.equal(toWslPath("D:\\work\\helicon"), "/mnt/d/work/helicon");
+    assert.equal(toWslPath("D:\\work\\ancilla"), "/mnt/d/work/ancilla");
     assert.equal(toWslPath("C:/proj"), "/mnt/c/proj");
-    assert.equal(toWindowsPath("/mnt/d/work/helicon"), "D:\\work\\helicon");
+    assert.equal(toWindowsPath("/mnt/d/work/ancilla"), "D:\\work\\ancilla");
     assert.throws(() => toWslPath("relative/path"), /absolute Windows path/);
     assert.throws(() => toWindowsPath("/home/harjot"), /\/mnt\/<drive>/);
   });
@@ -66,16 +66,16 @@ describe("serve planning", () => {
       platform: "win32",
       distro: "Ubuntu",
       musePath: "/home/harjot/.local/bin/muse",
-      cwd: "D:\\work\\helicon",
+      cwd: "D:\\work\\ancilla",
     });
     assert.deepEqual(direct, {
       command: "wsl",
       args: ["-d", "Ubuntu", "--", "/home/harjot/.local/bin/muse", "serve"],
-      cwd: "D:\\work\\helicon",
+      cwd: "D:\\work\\ancilla",
       viaWsl: true,
       distro: "Ubuntu",
     });
-    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\helicon" });
+    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\ancilla" });
     assert.deepEqual(loginShell.args, ["-d", "Ubuntu", "--", "sh", "-lc", "muse serve"]);
   });
 
@@ -95,11 +95,11 @@ describe("serve planning", () => {
       platform: "win32",
       distro: "Ubuntu",
       musePath: "/home/harjot/.local/bin/muse",
-      cwd: "D:\\work\\helicon",
+      cwd: "D:\\work\\ancilla",
       sandboxDisabled: true,
     });
     assert.deepEqual(direct.args, ["-d", "Ubuntu", "--", "/home/harjot/.local/bin/muse", "serve", "--disable-sandbox"]);
-    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\helicon", sandboxDisabled: true });
+    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\ancilla", sandboxDisabled: true });
     assert.deepEqual(loginShell.args, ["-d", "Ubuntu", "--", "sh", "-lc", "muse serve --disable-sandbox"]);
     const native = planServe({ platform: "linux", cwd: "/work/proj", sandboxDisabled: true });
     assert.deepEqual(native.args, ["serve", "--disable-sandbox"]);
@@ -110,7 +110,7 @@ describe("serve planning", () => {
       platform: "win32",
       distro: "Ubuntu",
       musePath: "/home/harjot/.local/bin/muse",
-      cwd: "D:\\work\\helicon",
+      cwd: "D:\\work\\ancilla",
       yoloEnabled: true,
     });
     assert.deepEqual(direct.args, [
@@ -122,7 +122,7 @@ describe("serve planning", () => {
       "--disable-sandbox",
       "--trust-workspace",
     ]);
-    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\helicon", yoloEnabled: true });
+    const loginShell = planServe({ platform: "win32", cwd: "D:\\work\\ancilla", yoloEnabled: true });
     assert.deepEqual(loginShell.args, ["-d", "Ubuntu", "--", "sh", "-lc", "muse serve --disable-sandbox --trust-workspace"]);
     const native = planServe({ platform: "linux", cwd: "/work/proj", yoloEnabled: true });
     assert.deepEqual(native.args, ["serve", "--disable-sandbox", "--trust-workspace"]);

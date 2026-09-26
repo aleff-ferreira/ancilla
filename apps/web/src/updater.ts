@@ -2,7 +2,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import type { AppUpdater } from "@helicon/ui";
+import type { AppUpdater } from "@ancilla/ui";
 
 // The plugin waits forever by default, and a stalled download would hold every later update action behind it.
 const CHECK_TIMEOUT_MS = 30_000;

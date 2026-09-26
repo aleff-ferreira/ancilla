@@ -1,19 +1,19 @@
 import { IconContext, type IconProps } from "@phosphor-icons/react";
 import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import type { HeliconController } from "../model/controller.js";
+import type { AncillaController } from "../model/controller.js";
 import type { AppState } from "../model/store.js";
 
-const ControllerContext = createContext<HeliconController | null>(null);
+const ControllerContext = createContext<AncillaController | null>(null);
 
 /**
  * The one icon style for every surface that renders the product: the desktop and web apps, and the
- * live demos on the landing page, which mount these components without HeliconApp. Bold is the
+ * live demos on the landing page, which mount these components without AncillaApp. Bold is the
  * Phosphor weight whose stroke matches the line icons at the 11 to 16 px sizes the UI uses; a
  * decorative icon can still ask for another weight on its own.
  */
 const ICON_DEFAULTS: IconProps = { weight: "bold", size: 24 };
 
-export function ControllerProvider(props: { controller: HeliconController; children: ReactNode }) {
+export function ControllerProvider(props: { controller: AncillaController; children: ReactNode }) {
   return (
     <ControllerContext.Provider value={props.controller}>
       <IconContext.Provider value={ICON_DEFAULTS}>{props.children}</IconContext.Provider>
@@ -21,10 +21,10 @@ export function ControllerProvider(props: { controller: HeliconController; child
   );
 }
 
-export function useController(): HeliconController {
+export function useController(): AncillaController {
   const controller = useContext(ControllerContext);
   if (!controller) {
-    throw new Error("Helicon: useController outside of <ControllerProvider>.");
+    throw new Error("Ancilla: useController outside of <ControllerProvider>.");
   }
   return controller;
 }

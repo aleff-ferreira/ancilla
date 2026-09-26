@@ -10,7 +10,7 @@
     "declaration": false,
     "sourceMap": false,
     "paths": {
-      "@helicon/ui": ["../../packages/ui/src/index.ts"]
+      "@ancilla/ui": ["../../packages/ui/src/index.ts"]
     }
   },
   "include": ["src", "vite.config.ts"]

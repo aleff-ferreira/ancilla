@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# macos-release.sh — ship Helicon for macOS.
+# macos-release.sh — ship Ancilla for macOS.
 #
 # Phase 1: commit the macOS work on prod and push it.
 # Phase 2: backfill macOS assets onto v0.1.0..v0.9.0 (skips tags that already
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-REPO="$HOME/Documents/Projects/helicon"
+REPO="$HOME/Documents/Projects/ancilla"
 BRANCH="prod"
 BACKFILL_WORKFLOW="Release macOS backfill"
 RELEASE_WORKFLOW="Release"
@@ -92,7 +92,7 @@ wait_for_runs() {
       tag="${item#*:}"
       read -r state conclusion <<< "$(run_state "$id")"
       if [ "$state" = "completed" ]; then
-        say "$tag run $id: $conclusion (https://github.com/HarjjotSinghh/helicon/actions/runs/$id)"
+        say "$tag run $id: $conclusion (https://github.com/aleff-ferreira/ancilla/actions/runs/$id)"
         [ "$conclusion" = "success" ] || failed=1
       else
         still="$still $item"
@@ -164,7 +164,7 @@ for tag in $TAGS; do
   known=$(known_runs "$BACKFILL_WORKFLOW")
   gh workflow run "$BACKFILL_WORKFLOW" --ref "$BRANCH" -f tag="$tag"
   id=$(wait_for_new_run "$BACKFILL_WORKFLOW" "$known") || die "no run appeared for $tag"
-  say "$tag run $id: https://github.com/HarjjotSinghh/helicon/actions/runs/$id"
+  say "$tag run $id: https://github.com/aleff-ferreira/ancilla/actions/runs/$id"
   pending="$pending $id:$tag"
 done
 pending="$(printf '%s' "$pending" | sed 's/^ *//')"
@@ -194,7 +194,7 @@ else
     confirm "Tag $NEXT_TAG and push it?" || die "aborted"
   fi
   # Annotated with -m: a bare `git tag` can open $EDITOR and hang headless.
-  git tag -a "$NEXT_TAG" -m "Helicon $NEXT_TAG"
+  git tag -a "$NEXT_TAG" -m "Ancilla $NEXT_TAG"
   git push origin "$NEXT_TAG"
 fi
 if gh release view "$NEXT_TAG" >/dev/null 2>&1; then
@@ -204,7 +204,7 @@ else
   say "waiting for the Release workflow to publish $NEXT_TAG"
   known=$(known_runs "$RELEASE_WORKFLOW")
   id=$(wait_for_new_run "$RELEASE_WORKFLOW" "$known") || die "no Release run appeared for $NEXT_TAG"
-  say "Release run $id: https://github.com/HarjjotSinghh/helicon/actions/runs/$id"
+  say "Release run $id: https://github.com/aleff-ferreira/ancilla/actions/runs/$id"
   wait_for_runs "$id:$NEXT_TAG" || die "Release run failed"
   verify_latest_json "$NEXT_TAG"
 fi

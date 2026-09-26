@@ -60,7 +60,7 @@ describe("formatting", () => {
   });
 
   it("shortens long paths from the middle", () => {
-    assert.equal(shortenPath("D:\\Projects\\helicon", 48), "D:\\Projects\\helicon");
+    assert.equal(shortenPath("D:\\Projects\\ancilla", 48), "D:\\Projects\\ancilla");
     const short = shortenPath("D:\\Projects\\clients\\acme\\platform\\packages\\ui\\src", 32);
     assert.ok(short.startsWith("D:\\...\\"));
     assert.ok(short.endsWith("src"));

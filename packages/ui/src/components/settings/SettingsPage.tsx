@@ -4,7 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
-import type { HeliconController } from "../../model/controller.js";
+import type { AncillaController } from "../../model/controller.js";
 import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type AccountLoginState, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
 import type { AccountView, ApprovalMode, ReasoningEffort } from "../../types.js";
 import { LEVELS, MODES } from "../composer/Composer.js";
@@ -104,7 +104,7 @@ const GROUPS: readonly { value: GroupBy; label: string }[] = [
 const INPUT_CLASS =
   "h-9 w-full rounded-lg border border-line bg-sunken px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
-function AddAccountModal(props: { open: boolean; onOpenChange: (open: boolean) => void; controller: HeliconController }) {
+function AddAccountModal(props: { open: boolean; onOpenChange: (open: boolean) => void; controller: AncillaController }) {
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [seedFromDefault, setSeedFromDefault] = useState(false);
@@ -172,7 +172,7 @@ function AddAccountModal(props: { open: boolean; onOpenChange: (open: boolean) =
   );
 }
 
-function RenameAccountModal(props: { account: AccountView | null; onOpenChange: (open: boolean) => void; controller: HeliconController }) {
+function RenameAccountModal(props: { account: AccountView | null; onOpenChange: (open: boolean) => void; controller: AncillaController }) {
   const [name, setName] = useState("");
 
   useEffect(() => {
@@ -212,7 +212,7 @@ function RenameAccountModal(props: { account: AccountView | null; onOpenChange: 
   );
 }
 
-function RemoveAccountModal(props: { account: AccountView | null; onOpenChange: (open: boolean) => void; controller: HeliconController }) {
+function RemoveAccountModal(props: { account: AccountView | null; onOpenChange: (open: boolean) => void; controller: AncillaController }) {
   async function submit() {
     const account = props.account;
     if (!account) return;
@@ -254,7 +254,7 @@ function OpenLinkButton(props: { href: string; children: ReactNode }) {
 }
 
 /** The device-code sign-in modal: a code to enter on Meta's own page, or a fallback message under WSL. */
-function DeviceLoginModal(props: { login: AccountLoginState | null; controller: HeliconController }) {
+function DeviceLoginModal(props: { login: AccountLoginState | null; controller: AncillaController }) {
   const login = props.login;
   const isFallback = login !== null && "fallback" in login;
   const isDone = login !== null && "status" in login && login.status === "done";
@@ -312,7 +312,7 @@ function DeviceLoginModal(props: { login: AccountLoginState | null; controller: 
   );
 }
 
-/** Everything Helicon lets you set, in one place: the menus around the app are shortcuts into this. */
+/** Everything Ancilla lets you set, in one place: the menus around the app are shortcuts into this. */
 export function SettingsPage() {
   const controller = useController();
   const prefs = useApp((s) => s.prefs);
@@ -453,7 +453,7 @@ export function SettingsPage() {
                   Accounts share one login
                 </span>
               }
-              description="META_API_KEY is set in Helicon's environment. Every account inherits it, so they all use the same Meta login. Unset it in your environment to keep accounts separate."
+              description="META_API_KEY is set in Ancilla's environment. Every account inherits it, so they all use the same Meta login. Unset it in your environment to keep accounts separate."
               descriptionClassName="text-warn-text"
             />
           ) : null}
@@ -533,8 +533,8 @@ export function SettingsPage() {
             label="Answer approvals for me"
             description={
               bypassAll
-                ? "Every request is allowed once, in every thread, without showing you the command. Off when Helicon closes."
-                : "Muse asks whenever it cannot resolve a command, whatever its permission mode. This answers those for you, until Helicon closes."
+                ? "Every request is allowed once, in every thread, without showing you the command. Off when Ancilla closes."
+                : "Muse asks whenever it cannot resolve a command, whatever its permission mode. This answers those for you, until Ancilla closes."
             }
           >
             <Toggle
@@ -607,7 +607,7 @@ export function SettingsPage() {
 
         {updates ? (
           <Section title="Updates">
-            <Row label={`Helicon ${updates.currentVersion ?? ""}`} description={updateSummary(updates, prefs.autoUpdate, prefs.updatesPaused, now)}>
+            <Row label={`Ancilla ${updates.currentVersion ?? ""}`} description={updateSummary(updates, prefs.autoUpdate, prefs.updatesPaused, now)}>
               <div className="flex flex-wrap items-center gap-2">
                 {updates.status === "ready" ? (
                   <Button size="sm" variant="primary" onClick={() => controller.restartToUpdate()}>
@@ -625,7 +625,7 @@ export function SettingsPage() {
               </div>
             </Row>
             {updates.error ? <Row label="Last error" description={updates.error} /> : null}
-            <Row label="Automatic updates" description="Download new versions in the background and install them when Helicon closes.">
+            <Row label="Automatic updates" description="Download new versions in the background and install them when Ancilla closes.">
               <Toggle checked={prefs.autoUpdate} label="Automatic updates" onChange={(on) => controller.setAutoUpdate(on)} />
             </Row>
             <Row label="Pause updates" description="No checking, downloading or installing until you resume.">
@@ -635,12 +635,12 @@ export function SettingsPage() {
         ) : null}
 
         <Section title="Environment">
-          <Row label="What's new" description="The release notes for this version, as they appear after Helicon updates itself.">
+          <Row label="What's new" description="The release notes for this version, as they appear after Ancilla updates itself.">
             <Button size="sm" variant="secondary" onClick={() => controller.setWhatsNewOpen(true)}>
               <ScrollIcon size={13} /> Read
             </Button>
           </Row>
-          <Fact label="Helicon" value={env?.version ?? "Unknown"} />
+          <Fact label="Ancilla" value={env?.version ?? "Unknown"} />
           <Fact label="Platform" value={env?.platform ?? "Unknown"} />
           {env?.platform === "win32" ? (
             <Fact
@@ -658,7 +658,7 @@ export function SettingsPage() {
         open={confirmBypass}
         onOpenChange={setConfirmBypass}
         title="Answer approvals for you?"
-        description="Every approval Muse raises, in any thread, is allowed once without showing you the command first. Muse asks about the commands it could not resolve, so these are the ones nothing else has checked. This lasts until you close Helicon."
+        description="Every approval Muse raises, in any thread, is allowed once without showing you the command first. Muse asks about the commands it could not resolve, so these are the ones nothing else has checked. This lasts until you close Ancilla."
       >
         <div className="mt-6 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setConfirmBypass(false)}>

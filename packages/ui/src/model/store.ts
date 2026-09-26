@@ -50,7 +50,7 @@ export class Store<T> {
 export type GroupBy = "project" | "status";
 export type ThemePref = "system" | "light" | "dark";
 /** Syntax colours for code blocks, independent of the app's own light or dark theme. */
-export const CODE_THEMES = ["helicon", "ayu", "github", "vercel", "cursor", "catppuccin"] as const;
+export const CODE_THEMES = ["ancilla", "ayu", "github", "vercel", "cursor", "catppuccin"] as const;
 export type CodeTheme = (typeof CODE_THEMES)[number];
 
 /** Interface zoom as a factor of 1, in fixed steps from 70% to 200%. */
@@ -137,7 +137,7 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
   return {
     groupBy: "project",
     theme: "system",
-    codeTheme: "helicon",
+    codeTheme: "ancilla",
     sidebarWidth: DEFAULT_SIDEBAR_WIDTH,
     sidebarCollapsed: false,
     collapsedProjects: [],
@@ -181,7 +181,7 @@ export interface ThreadState {
   fold: ThreadFold;
   /** Files sent with this thread's prompts; Muse's own view keeps metadata only. */
   attachments: AttachmentView[];
-  /** `!` commands Helicon ran itself, which Muse's transcript never sees. */
+  /** `!` commands Ancilla ran itself, which Muse's transcript never sees. */
   shellRuns: ShellRun[];
   /**
    * The thread shows a turn running, but its stream went quiet and reloading from history did not
@@ -228,7 +228,7 @@ export interface AppState {
   /** Keys of in-flight user actions, for disabling buttons: `send:<id>`, `approval:<id>`... */
   busy: Record<string, true>;
   /**
-   * Approvals Helicon answers for you rather than showing. Muse asks whenever it cannot resolve a
+   * Approvals Ancilla answers for you rather than showing. Muse asks whenever it cannot resolve a
    * command's argv, whatever its own mode says, so this is the only way to stop being asked. It is
    * deliberately not a preference: a bypass lasts as long as the app is open and no longer.
    */
@@ -246,9 +246,9 @@ export interface AppState {
   picker: ComposerPicker | null;
   /** The subscription window Muse last reported; null until a host has seen one. */
   planUsage: PlanUsage | null;
-  /** Every account Helicon can run; null until the first load answers. */
+  /** Every account Ancilla can run; null until the first load answers. */
   accounts: import("../types.js").AccountView[] | null;
-  /** True when META_API_KEY in Helicon's environment makes every account share one Meta login. */
+  /** True when META_API_KEY in Ancilla's environment makes every account share one Meta login. */
   metaApiKeyInherited: boolean;
   /** The in-app device-code login in progress, if any; null once closed or never started. */
   accountLogin: AccountLoginState | null;

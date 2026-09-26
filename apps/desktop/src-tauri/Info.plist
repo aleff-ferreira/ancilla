@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
   <key>NSDocumentsFolderUsageDescription</key>
-  <string>Helicon runs Muse Code in the project folders you add, and shows their files.</string>
+  <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
   <key>NSDesktopFolderUsageDescription</key>
-  <string>Helicon runs Muse Code in the project folders you add, and shows their files.</string>
+  <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
   <key>NSDownloadsFolderUsageDescription</key>
-  <string>Helicon runs Muse Code in the project folders you add, and shows their files.</string>
+  <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
   <key>NSRemovableVolumesUsageDescription</key>
-  <string>Helicon runs Muse Code in the project folders you add, and shows their files.</string>
+  <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
   <key>NSNetworkVolumesUsageDescription</key>
-  <string>Helicon runs Muse Code in the project folders you add, and shows their files.</string>
+  <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
 </dict>
 </plist>

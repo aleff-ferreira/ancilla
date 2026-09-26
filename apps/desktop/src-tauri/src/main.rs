@@ -32,29 +32,29 @@ impl Drop for ServerGuard {
     }
 }
 
-/// Windows gets Helicon's own title bar, drawn by the UI; macOS keeps the native traffic
+/// Windows gets Ancilla's own title bar, drawn by the UI; macOS keeps the native traffic
 /// lights overlaid on the UI, so the sidebar runs the full height of the window; other
 /// platforms keep the native frame.
 const CUSTOM_FRAME: bool = cfg!(windows);
 
 /// Tells the UI, before it loads, to draw the window controls and drag regions.
-const FRAME_SCRIPT: &str = "window.__HELICON_FRAME__ = 'custom';";
+const FRAME_SCRIPT: &str = "window.__ANCILLA_FRAME__ = 'custom';";
 
 /// Tells the UI, before it loads, that the macOS traffic lights float over the sidebar.
 #[cfg(target_os = "macos")]
-const OVERLAY_SCRIPT: &str = "window.__HELICON_TITLEBAR__ = 'overlay';";
+const OVERLAY_SCRIPT: &str = "window.__ANCILLA_TITLEBAR__ = 'overlay';";
 
 /// Where the server's port is remembered between launches, inside the app's data folder.
 const PORT_FILE: &str = "server-port";
 
 /// Shown the instant the window opens, while the local server starts. System colors follow the OS theme.
-const SPLASH_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Helicon</title><style>html{color-scheme:light dark;background:Canvas;color:GrayText;font:13px system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}</style><body>Starting Helicon</body>";
+const SPLASH_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:GrayText;font:13px system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}</style><body>Starting Ancilla</body>";
 
-const MISSING_NODE_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Helicon</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Helicon needs Node.js</h1><p>Helicon could not start its local server because its bundled Node.js is missing and Node.js 22 or newer was not found on this computer. Reinstall Helicon, or install Node.js 22 or newer, then open Helicon again.</p></main>";
+const MISSING_NODE_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla needs Node.js</h1><p>Ancilla could not start its local server because its bundled Node.js is missing and Node.js 22 or newer was not found on this computer. Reinstall Ancilla, or install Node.js 22 or newer, then open Ancilla again.</p></main>";
 
-const MISSING_SERVER_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Helicon</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Helicon is missing files</h1><p>The bundled Helicon server was not found next to the app. Reinstall Helicon to restore it.</p></main>";
+const MISSING_SERVER_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla is missing files</h1><p>The bundled Ancilla server was not found next to the app. Reinstall Ancilla to restore it.</p></main>";
 
-const SERVER_FAILED_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Helicon</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Helicon could not start</h1><p>Its local server did not come up. The server log in the Helicon app log folder has the details. Close Helicon and open it again to retry.</p></main>";
+const SERVER_FAILED_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla could not start</h1><p>Its local server did not come up. The server log in the Ancilla app log folder has the details. Close Ancilla and open it again to retry.</p></main>";
 
 enum BootError {
     NodeMissing,
@@ -183,7 +183,7 @@ fn bundled_node_in(dir: &Path) -> Option<PathBuf> {
 /// The bundled Node.js first, so users need nothing installed. Without it (a source build, or a damaged
 /// install), Node.js the way a terminal sees it. GUI apps on macOS start with a minimal PATH that misses
 /// Homebrew, ~/.local/bin and everything a version manager adds through the shell's rc files, so
-/// plain `node` fails for most users when Helicon is opened from the Finder rather than a terminal.
+/// plain `node` fails for most users when Ancilla is opened from the Finder rather than a terminal.
 fn find_node() -> Option<PathBuf> {
     if let Some(bundled) = bundled_node().filter(|node| node_runs(node)) {
         return Some(bundled);
@@ -436,7 +436,7 @@ fn boot_server(app: &tauri::AppHandle) -> Result<String, BootError> {
 }
 
 /// WKWebView swallows Cmd+/− for its own page zoom before JS sees them. A native View menu
-/// takes those keys and emits `helicon://zoom` so the UI can step Helicon's zoom instead.
+/// takes those keys and emits `ancilla://zoom` so the UI can step Ancilla's zoom instead.
 #[cfg(target_os = "macos")]
 fn install_zoom_menu(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -450,7 +450,7 @@ fn install_zoom_menu(app: &tauri::App) -> tauri::Result<()> {
     let zoom_reset = MenuItemBuilder::with_id("zoom-reset", "Actual Size")
         .accelerator("CmdOrCtrl+0")
         .build(app)?;
-    let app_menu = SubmenuBuilder::new(app, "Helicon")
+    let app_menu = SubmenuBuilder::new(app, "Ancilla")
         .about(None)
         .separator()
         .hide()
@@ -492,12 +492,12 @@ fn install_zoom_menu(app: &tauri::App) -> tauri::Result<()> {
             "zoom-reset" => "reset",
             _ => return,
         };
-        let _ = app.emit("helicon://zoom", step);
+        let _ = app.emit("ancilla://zoom", step);
     });
     Ok(())
 }
 
-/// Web and mail links that belong in the user's browser or mail app. Helicon's own local server, the inline
+/// Web and mail links that belong in the user's browser or mail app. Ancilla's own local server, the inline
 /// splash and error pages, and Tauri's internal schemes stay in the window.
 fn is_external_link(url: &Url) -> bool {
     match url.scheme() {
@@ -519,13 +519,13 @@ fn main() {
             install_zoom_menu(app)?;
             // Open the window at once on a splash page; the server can take a few seconds to probe WSL.
             let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(SPLASH_PAGE.parse()?))
-                .title("Helicon")
+                .title("Ancilla")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(880.0, 560.0)
                 // Native file-drop consumes HTML5 DnD (sidebar reorder, composer attach) on Windows.
                 .disable_drag_drop_handler()
                 // A link meant for the browser (`target="_blank"`, or one that would navigate the app away)
-                // opens in the user's default browser instead of doing nothing or replacing Helicon.
+                // opens in the user's default browser instead of doing nothing or replacing Ancilla.
                 .on_new_window(|url, _features| {
                     if is_external_link(&url) {
                         let _ = tauri_plugin_opener::open_url(url.as_str(), None::<&str>);
@@ -585,7 +585,7 @@ fn main() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Helicon failed to start");
+        .expect("Ancilla failed to start");
 }
 
 #[cfg(test)]
@@ -602,8 +602,8 @@ mod tests {
     #[test]
     fn sends_only_outside_links_to_the_browser() {
         let external = |u: &str| super::is_external_link(&u.parse::<tauri::Url>().unwrap());
-        assert!(external("https://github.com/HarjjotSinghh/helicon/pull/90"));
-        assert!(external("mailto:hi@helicon.sh"));
+        assert!(external("https://github.com/aleff-ferreira/ancilla/pull/90"));
+        assert!(external("mailto:hi@example.com"));
         assert!(!external("http://127.0.0.1:52314/threads/abc"));
         assert!(!external("http://localhost:5173/"));
         assert!(!external("http://ipc.localhost/plugin"));
@@ -613,15 +613,15 @@ mod tests {
 
     #[test]
     fn strips_windows_verbatim_prefixes() {
-        assert_eq!(plain_path(Path::new(r"\\?\D:\apps\helicon\server.cjs")), PathBuf::from(r"D:\apps\helicon\server.cjs"));
+        assert_eq!(plain_path(Path::new(r"\\?\D:\apps\ancilla\server.cjs")), PathBuf::from(r"D:\apps\ancilla\server.cjs"));
         assert_eq!(plain_path(Path::new(r"\\?\UNC\host\share\x")), PathBuf::from(r"\\host\share\x"));
-        assert_eq!(plain_path(Path::new("/usr/lib/helicon")), PathBuf::from("/usr/lib/helicon"));
+        assert_eq!(plain_path(Path::new("/usr/lib/ancilla")), PathBuf::from("/usr/lib/ancilla"));
     }
 
     #[test]
     fn parses_the_listening_line() {
         assert_eq!(
-            parse_listening_url("helicon-server listening on http://127.0.0.1:52314\n"),
+            parse_listening_url("ancilla-server listening on http://127.0.0.1:52314\n"),
             Some("http://127.0.0.1:52314".to_string())
         );
         assert_eq!(parse_listening_url("noise without url"), None);
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn finds_bundled_resources_under_their_relative_path() {
-        let root = std::env::temp_dir().join(format!("helicon-res-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ancilla-res-{}", std::process::id()));
         std::fs::create_dir_all(root.join("resources")).unwrap();
         std::fs::write(root.join("resources").join("server.cjs"), "").unwrap();
         assert_eq!(find_resource(&root, "server.cjs"), Some(root.join("resources").join("server.cjs")));
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn finds_the_bundled_node_beside_the_executable() {
-        let dir = std::env::temp_dir().join(format!("helicon-sidecar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ancilla-sidecar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(bundled_node_in(&dir), None);
         let name = if cfg!(windows) { "node.exe" } else { "node" };
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn keeps_the_server_port_between_launches_while_it_is_free() {
-        let dir = std::env::temp_dir().join(format!("helicon-port-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ancilla-port-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let first = stable_port(Some(&dir));
         assert_ne!(first, 0);
@@ -711,7 +711,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_probe_answers_come_from_the_last_path_line() {
-        let root = std::env::temp_dir().join(format!("helicon-probe-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("ancilla-probe-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let node = root.join("node");
         std::fs::write(&node, "").unwrap();
@@ -726,7 +726,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn well_known_homes_only_list_installs_that_exist() {
-        let home = std::env::temp_dir().join(format!("helicon-home-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("ancilla-home-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".volta/bin")).unwrap();
         std::fs::write(home.join(".volta/bin/node"), "").unwrap();
         let nodes = well_known_nodes_in(&home);
@@ -738,7 +738,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn nvm_resolves_to_the_newest_installed_version() {
-        let home = std::env::temp_dir().join(format!("helicon-nvm-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("ancilla-nvm-{}", std::process::id()));
         for version in ["v18.20.4", "v20.11.0", "v20.9.0"] {
             let dir = home.join(".nvm/versions/node").join(version).join("bin");
             std::fs::create_dir_all(&dir).unwrap();

@@ -104,7 +104,7 @@ export function CommandPalette() {
             </Item>
             {updates?.status === "ready" ? (
               <Item value="Restart to update" keywords={["update", "install", "version"]} icon={<ArrowClockwiseIcon size={15} />} onSelect={() => run(() => controller.restartToUpdate())}>
-                Restart to install Helicon {updates.update?.version ?? ""}
+                Restart to install Ancilla {updates.update?.version ?? ""}
               </Item>
             ) : null}
             {updates ? (

@@ -29,7 +29,7 @@ import { ContextMeter } from "./ContextPanel.js";
 import { SlashMenu, slashOptionId, type SlashMenuState } from "./SlashMenu.js";
 import { SwapIcon } from "../ui/sourced.js";
 
-const DRAFT_PREFIX = "helicon.draft.";
+const DRAFT_PREFIX = "ancilla.draft.";
 
 function readDraft(key: string): string {
   try {
@@ -393,7 +393,7 @@ export function Composer(props: ComposerProps) {
         <div className="flex items-center gap-1.5 px-4 pt-2.5 text-xs text-muted">
           <TerminalWindowIcon size={13} className="shrink-0" />
           <span className="truncate">
-            Helicon runs this{props.cwd ? ` in ${basename(props.cwd)}` : ""}; the output stays here until you send it to Muse
+            Ancilla runs this{props.cwd ? ` in ${basename(props.cwd)}` : ""}; the output stays here until you send it to Muse
           </span>
         </div>
       ) : null}
@@ -813,7 +813,7 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
           <div className="mt-1 flex items-start gap-3 border-t border-line px-2 pt-2.5 pb-1">
             <label htmlFor={bypassId} className="min-w-0 flex-1 cursor-default">
               <span className="block text-sm text-fg">Answer approvals for me</span>
-              <span className="block text-xs text-muted">Allowed once each, in every thread, until you close Helicon.</span>
+              <span className="block text-xs text-muted">Allowed once each, in every thread, until you close Ancilla.</span>
             </label>
             <Switch.Root
               id={bypassId}
@@ -860,7 +860,7 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
         open={confirmingBypass}
         onOpenChange={(next) => (next ? controller.setPicker("confirmBypass") : controller.closePicker("confirmBypass"))}
         title="Answer approvals for you?"
-        description="Every approval Muse raises, in any thread, is allowed once without showing you the command first. Muse asks about the commands it could not resolve, so these are the ones nothing else has checked. This lasts until you close Helicon."
+        description="Every approval Muse raises, in any thread, is allowed once without showing you the command first. Muse asks about the commands it could not resolve, so these are the ones nothing else has checked. This lasts until you close Ancilla."
       >
         <div className="mt-6 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => controller.closePicker("confirmBypass")}>

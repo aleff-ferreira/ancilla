@@ -1,16 +1,16 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { parseRuntimePreference } from "@helicon/daemon";
+import { parseRuntimePreference } from "@ancilla/daemon";
 
 function usage(): string {
   return [
-    "helicon-server: local bridge between the Helicon UI and Muse MSP hosts.",
+    "ancilla-server: local bridge between the Ancilla UI and Muse MSP hosts.",
     "",
     "Options:",
     "  --port <n>        HTTP port (default 3127, 0 picks a free port)",
     "  --host <addr>     bind address (default 127.0.0.1)",
-    "  --data-dir <dir>  sqlite directory, or :memory: (default ~/.helicon)",
+    "  --data-dir <dir>  sqlite directory, or :memory: (default ~/.ancilla)",
     "  --static <dir>    serve a built frontend from this directory",
     "  --token <value>   require a token for non-loopback access",
     "  --allow-origin <o>  browser origin allowed to connect from another site (repeatable)",
@@ -45,9 +45,9 @@ async function main(): Promise<void> {
     process.stdout.write(usage() + "\n");
     return;
   }
-  const { HeliconServer } = await import("./server.js");
+  const { AncillaServer } = await import("./server.js");
   const portRaw = flagValue(argv, "--port");
-  const dataDir = flagValue(argv, "--data-dir") ?? join(homedir(), ".helicon");
+  const dataDir = flagValue(argv, "--data-dir") ?? join(homedir(), ".ancilla");
   // Machine-local runtime selection survives replacing the bundled server on an app update.
   const runtimeFile = join(dataDir, "runtime.json");
   const local = dataDir !== ":memory:" && existsSync(runtimeFile)
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   if (dataDir !== ":memory:") {
     mkdirSync(dataDir, { recursive: true });
   }
-  const server = new HeliconServer({
+  const server = new AncillaServer({
     port: portRaw ? Number.parseInt(portRaw, 10) : 3127,
     host: flagValue(argv, "--host") ?? "127.0.0.1",
     dataDir,
@@ -75,12 +75,12 @@ async function main(): Promise<void> {
     token: flagValue(argv, "--token"),
     allowOrigins: flagValues(argv, "--allow-origin"),
     distro: flagValue(argv, "--distro") ?? local.distro,
-    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? process.env["HELICON_MUSE_RUNTIME"] ?? local.runtime),
+    runtime: parseRuntimePreference(flagValue(argv, "--runtime") ?? process.env["ANCILLA_MUSE_RUNTIME"] ?? local.runtime),
     musePath: flagValue(argv, "--muse") ?? local.musePath,
     syncSessionNames: local.syncSessionNames,
   });
   const bound = await server.listen();
-  process.stdout.write(`helicon-server listening on http://${bound.host}:${bound.port}\n`);
+  process.stdout.write(`ancilla-server listening on http://${bound.host}:${bound.port}\n`);
   const shutdown = () => {
     void server.close().then(() => process.exit(0));
   };
@@ -89,6 +89,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error) => {
-  process.stderr.write(`helicon-server failed: ${String(error)}\n`);
+  process.stderr.write(`ancilla-server failed: ${String(error)}\n`);
   process.exit(1);
 });

@@ -126,7 +126,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   );
 });
 
-/** The Helicon mark, drawn to match the app icon and favicon: the arch on a navy tile. */
+/** The Ancilla mark, drawn to match the app icon and favicon: the arch on a navy tile. */
 export function Logo(props: { size?: number; className?: string }) {
   const size = props.size ?? 22;
   return (

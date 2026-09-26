@@ -48,14 +48,14 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev xvfb
       - run: npm ci
         if: steps.guard.outputs.ready == 'true'
-      - run: npm run build --workspace @helicon/daemon --workspace @helicon/ui --workspace @helicon/server
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
         if: steps.guard.outputs.ready == 'true'
       - name: Build the AppImage
         if: steps.guard.outputs.ready == 'true'
         env:
-          HELICON_NODE_TARGET: x86_64-unknown-linux-gnu
+          ANCILLA_NODE_TARGET: x86_64-unknown-linux-gnu
         # No updater signing key on a pull request, so the updater artifacts are left out.
-        run: npm run tauri --workspace helicon-desktop -- build --target x86_64-unknown-linux-gnu --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: npm run tauri --workspace ancilla-desktop -- build --target x86_64-unknown-linux-gnu --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Check what the bundle contains
         if: steps.guard.outputs.ready == 'true'
         run: |
@@ -67,7 +67,7 @@ jobs:
           image=$(realpath "$image")
           (cd "$bundle" && "$image" --appimage-extract >/dev/null)
           root="$bundle/squashfs-root"
-          test -x "$root/usr/bin/helicon" || { echo "no helicon binary in the bundle"; exit 1; }
+          test -x "$root/usr/bin/ancilla" || { echo "no ancilla binary in the bundle"; exit 1; }
           test -x "$root/usr/bin/node" || { echo "the Node.js sidecar is missing from the bundle"; exit 1; }
           "$root/usr/bin/node" --version
           find "$root" -name server.cjs -print -quit | grep . || { echo "server.cjs is missing from the bundle"; exit 1; }
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -uo pipefail
           root=apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/squashfs-root
-          xvfb-run -a "$root/AppRun" > /tmp/helicon-stdout.log 2>&1 &
+          xvfb-run -a "$root/AppRun" > /tmp/ancilla-stdout.log 2>&1 &
           app=$!
           # The app writes its port file next to its database once the server is listening.
           for _ in $(seq 1 60); do
@@ -92,7 +92,7 @@ jobs:
             sleep 2
           done
           echo "--- app output"
-          cat /tmp/helicon-stdout.log || true
+          cat /tmp/ancilla-stdout.log || true
           echo "--- server log"
           find "$HOME/.local/share" -name "server.log" -exec cat {} \; 2>/dev/null || true
           kill "$app" 2>/dev/null || true

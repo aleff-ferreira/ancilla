@@ -1,8 +1,8 @@
 {
-  "name": "helicon-desktop",
+  "name": "ancilla-desktop",
   "private": true,
   "version": "0.17.1",
-  "description": "Helicon desktop shell (Tauri): window plus local server sidecar",
+  "description": "Ancilla desktop shell (Tauri): window plus local server sidecar",
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",

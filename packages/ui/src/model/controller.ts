@@ -1,10 +1,10 @@
-import { errorKind, errorMessage, type HeliconClient } from "../client.js";
+import { errorKind, errorMessage, type AncillaClient } from "../client.js";
 import type {
   ApprovalMode,
   ApprovalRequest,
   AttachmentView,
   GoalAction,
-  HeliconEvent,
+  AncillaEvent,
   OutgoingAttachment,
   OutputRange,
   ReasoningEffort,
@@ -81,7 +81,7 @@ export interface Platform {
   focused(): boolean;
 }
 
-const PREFS_KEY = "helicon.prefs.v1";
+const PREFS_KEY = "ancilla.prefs.v1";
 
 export function browserPlatform(): Platform {
   return {
@@ -291,7 +291,7 @@ const TASK_FAILURES: Record<TaskAction, string> = {
   stopAll: "Could not stop the background tasks",
 };
 
-export class HeliconController {
+export class AncillaController {
   readonly store: Store<AppState>;
   private readonly pending = new Map<string, ViewEvent[]>();
   private readonly loading = new Map<string, ViewEvent[]>();
@@ -347,7 +347,7 @@ export class HeliconController {
   private notifier: Notifier | null = null;
 
   constructor(
-    readonly client: HeliconClient,
+    readonly client: AncillaClient,
     private readonly platform: Platform = browserPlatform(),
   ) {
     const fallback = defaultPrefs(new Date(platform.now()).toISOString());
@@ -418,8 +418,8 @@ export class HeliconController {
         if (next.status === "ready" && previous !== "ready") {
           this.toast(
             "info",
-            `Helicon ${next.update?.version ?? ""} is ready`,
-            this.state.prefs.autoUpdate && !this.state.prefs.updatesPaused ? "It installs when you close Helicon." : "Restart Helicon to install it.",
+            `Ancilla ${next.update?.version ?? ""} is ready`,
+            this.state.prefs.autoUpdate && !this.state.prefs.updatesPaused ? "It installs when you close Ancilla." : "Restart Ancilla to install it.",
             { label: "Restart now", run: () => this.restartToUpdate() },
           );
         }
@@ -822,7 +822,7 @@ export class HeliconController {
 
   // ---------------------------------------------------------------- events
 
-  private onEvent(event: HeliconEvent): void {
+  private onEvent(event: AncillaEvent): void {
     switch (event.type) {
       case "hello": {
         const wasLost = this.state.connection === "lost";
@@ -2394,7 +2394,7 @@ export class HeliconController {
       }
       this.setBusy(key, true);
       try {
-        // Helicon runs `!` itself: Muse's own host has no sandbox for these, so it never runs them at all.
+        // Ancilla runs `!` itself: Muse's own host has no sandbox for these, so it never runs them at all.
         this.addShellRun(sessionId, await this.client.runShellProxy(sessionId, command));
         return true;
       } catch (error) {
@@ -2440,7 +2440,7 @@ export class HeliconController {
     });
   }
 
-  /** Keeps a command Helicon ran in the thread it belongs to, whoever started it. */
+  /** Keeps a command Ancilla ran in the thread it belongs to, whoever started it. */
   private addShellRun(sessionId: string, run: import("../types.js").ShellRun): void {
     this.update((s) => {
       const thread = s.threads[sessionId];
@@ -2727,7 +2727,7 @@ export class HeliconController {
     // The failed `!` item says the environment is broken, which makes the agent refuse; tell it that its own shell is fine.
     const text =
       `Run this with your shell tool and show me the output:\n\n${fence}sh\n${command}\n${fence}\n\n` +
-      "That failure came from Helicon's `!` path, not from your tools: your own shell works here.";
+      "That failure came from Ancilla's `!` path, not from your tools: your own shell works here.";
     return this.sendToThread(sessionId, text, {}, false);
   }
 

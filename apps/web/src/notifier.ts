@@ -1,5 +1,5 @@
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import type { Notifier, NotifyPermission } from "@helicon/ui";
+import type { Notifier, NotifyPermission } from "@ancilla/ui";
 
 function asPermission(value: string): NotifyPermission {
   return value === "granted" || value === "denied" ? value : "default";

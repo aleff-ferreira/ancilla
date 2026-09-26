@@ -140,7 +140,7 @@ export function basename(path: string): string {
   return parts[parts.length - 1] || trimmed;
 }
 
-/** Keep the tail of a long path readable: `D:\...\helicon\packages\ui`. */
+/** Keep the tail of a long path readable: `D:\...\ancilla\packages\ui`. */
 export function shortenPath(path: string, max = 48): string {
   if (path.length <= max) {
     return path;

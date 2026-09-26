@@ -1,5 +1,5 @@
 import {
-  HeliconError,
+  AncillaError,
   parseAccounts,
   parseModelList,
   parseSandboxSettings,
@@ -16,8 +16,8 @@ import {
   type FileEntry,
   type FileListing,
   type GoalAction,
-  type HeliconClient,
-  type HeliconEvent,
+  type AncillaClient,
+  type AncillaEvent,
   type ModelOption,
   type OutputRange,
   type PlanUsage,
@@ -37,7 +37,7 @@ import {
   type UserInputAnswer,
   type WorkflowAction,
   type YoloSettings,
-} from "@helicon/ui";
+} from "@ancilla/ui";
 
 /** Which daemon this page talks to. An empty base is the origin that served the page. */
 export interface Daemon {
@@ -45,7 +45,7 @@ export interface Daemon {
   token: string | null;
 }
 
-const DAEMON_KEY = "helicon:daemon";
+const DAEMON_KEY = "ancilla:daemon";
 
 function stored(): Daemon | null {
   try {
@@ -127,10 +127,10 @@ async function call<T>(method: string, path: string, body?: unknown, timeoutMs =
       signal: abort.signal,
     });
   } catch {
-    throw new HeliconError(
+    throw new AncillaError(
       abort.signal.aborted
-        ? "The local Helicon server took too long to answer."
-        : "The local Helicon server is not reachable. Is it still running?",
+        ? "The local Ancilla server took too long to answer."
+        : "The local Ancilla server is not reachable. Is it still running?",
       0,
     );
   } finally {
@@ -145,7 +145,7 @@ async function call<T>(method: string, path: string, body?: unknown, timeoutMs =
   }
   if (!response.ok) {
     const failure = (data ?? {}) as { error?: unknown; kind?: unknown };
-    throw new HeliconError(
+    throw new AncillaError(
       typeof failure.error === "string" ? failure.error : `${method} ${path} failed with ${response.status}.`,
       response.status,
       typeof failure.kind === "string" ? failure.kind : null,
@@ -156,8 +156,8 @@ async function call<T>(method: string, path: string, body?: unknown, timeoutMs =
 
 const enc = encodeURIComponent;
 
-/** The Helicon client over the local server's REST API and server-sent events. */
-export class WebHeliconClient implements HeliconClient {
+/** The Ancilla client over the local server's REST API and server-sent events. */
+export class WebAncillaClient implements AncillaClient {
   private readonly handlers = new Set<EventHandler>();
   private source: EventSource | null = null;
   private watchdog: ReturnType<typeof setTimeout> | null = null;
@@ -483,10 +483,10 @@ export class WebHeliconClient implements HeliconClient {
       return;
     }
     const source = new EventSource(url("/api/events"), { withCredentials: Boolean(daemon.base) });
-    source.addEventListener("helicon", (message) => {
+    source.addEventListener("ancilla", (message) => {
       this.touch();
       try {
-        this.dispatch(JSON.parse((message as MessageEvent<string>).data) as HeliconEvent);
+        this.dispatch(JSON.parse((message as MessageEvent<string>).data) as AncillaEvent);
       } catch {
         /* ignore malformed frames */
       }
@@ -527,7 +527,7 @@ export class WebHeliconClient implements HeliconClient {
     }
   }
 
-  private dispatch(event: HeliconEvent): void {
+  private dispatch(event: AncillaEvent): void {
     for (const handler of [...this.handlers]) {
       handler(event);
     }

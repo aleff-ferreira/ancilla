@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { HeliconError, type EventHandler, type HeliconClient } from "../src/client.js";
-import { HeliconController, staleThreadReason, type Platform } from "../src/model/controller.js";
+import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
+import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
 import { buildTurns } from "../src/model/fold.js";
 import { ZOOM_MAX, ZOOM_MIN } from "../src/model/store.js";
 import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
@@ -14,7 +14,7 @@ const SESSION: SessionSummary = {
   titleSource: "auto",
   turnCount: 3,
   modelId: "muse-spark-1.3",
-  origin: "helicon",
+  origin: "ancilla",
   archived: false,
   createdAt: "2026-09-11T00:00:00.000Z",
   activityAt: "2026-09-11T00:00:00.000Z",
@@ -39,7 +39,7 @@ function load(overrides: Partial<TranscriptLoad> = {}): TranscriptLoad {
   };
 }
 
-class FakeClient implements HeliconClient {
+class FakeClient implements AncillaClient {
   handler: EventHandler | null = null;
   sent: {
     sessionId: string;
@@ -371,14 +371,14 @@ async function flushMicrotasks(ticks = 20): Promise<void> {
 }
 
 async function started(client: FakeClient, hash = "#/t/s1") {
-  const controller = new HeliconController(client, platform(hash));
+  const controller = new AncillaController(client, platform(hash));
   const stop = controller.start();
   await settle();
   await settle();
   return { controller, stop };
 }
 
-describe("HeliconController", () => {
+describe("AncillaController", () => {
   it("boots, lists threads and opens the one in the URL", async () => {
     const client = new FakeClient();
     const { controller, stop } = await started(client);
@@ -714,7 +714,7 @@ describe("HeliconController", () => {
       focused: () => false,
     };
 
-    const controller = new HeliconController(client, shared);
+    const controller = new AncillaController(client, shared);
     const stop = controller.start();
     await settle();
     await settle();
@@ -802,7 +802,7 @@ describe("HeliconController", () => {
       focused: () => false,
     };
 
-    const first = new HeliconController(client, shared);
+    const first = new AncillaController(client, shared);
     const stopFirst = first.start();
     await settle();
     await settle();
@@ -811,7 +811,7 @@ describe("HeliconController", () => {
     await settle();
     stopFirst();
 
-    const second = new HeliconController(client, shared);
+    const second = new AncillaController(client, shared);
     const stopSecond = second.start();
     await settle();
     await settle();
@@ -1021,7 +1021,7 @@ describe("HeliconController", () => {
   it("releases the guard when the first send fails, so a retry goes", async () => {
     const client = new FakeClient();
     client.sendResult = async () => {
-      throw new HeliconError("turn rejected", 409, "turnRejected");
+      throw new AncillaError("turn rejected", 409, "turnRejected");
     };
     const { controller, stop } = await started(client);
     assert.equal(await controller.send("check the vault"), false);
@@ -1052,7 +1052,7 @@ describe("HeliconController", () => {
   it("reports a failed send and hands the text back", async () => {
     const client = new FakeClient();
     client.sendResult = async () => {
-      throw new HeliconError("input too large", 409, "inputTooLarge");
+      throw new AncillaError("input too large", 409, "inputTooLarge");
     };
     const { controller, stop } = await started(client);
     assert.equal(await controller.send("x".repeat(10)), false);
@@ -1065,7 +1065,7 @@ describe("HeliconController", () => {
   it("gives a failed first prompt to the new thread's composer", async () => {
     const client = new FakeClient();
     client.sendResult = async () => {
-      throw new HeliconError("turn rejected", 409, "turnRejected");
+      throw new AncillaError("turn rejected", 409, "turnRejected");
     };
     const { controller, stop } = await started(client, "");
     // The new-thread composer unmounts on navigation, so it must not take the text back itself.
@@ -1082,7 +1082,7 @@ describe("HeliconController", () => {
   it("hands the files back with the prompt when a first send fails", async () => {
     const client = new FakeClient();
     client.sendResult = async () => {
-      throw new HeliconError("turn rejected", 409, "turnRejected");
+      throw new AncillaError("turn rejected", 409, "turnRejected");
     };
     const { controller, stop } = await started(client, "");
     const attachments = [{ name: "shot.png", mediaType: "image/png", base64: "AAAA" }];
@@ -1261,7 +1261,7 @@ describe("HeliconController", () => {
 
     assert.equal(await controller.send("/compact"), true);
     assert.equal(await controller.send("! git status"), true);
-    assert.deepEqual(client.actions, ["compact", "shell-proxy:git status"], "Helicon runs `!` itself now");
+    assert.deepEqual(client.actions, ["compact", "shell-proxy:git status"], "Ancilla runs `!` itself now");
     client.compactNoop = true;
     assert.equal(await controller.send("/compact"), true);
     assert.equal(controller.store.get().toasts.at(-1)?.title, "Nothing to compact yet");
@@ -1327,13 +1327,13 @@ describe("HeliconController", () => {
 
   it("falls back to asking the model for a goal on a host without goal commands", async () => {
     const client = new FakeClient();
-    client.goalError = new HeliconError("no such method", 409, "methodNotFound");
+    client.goalError = new AncillaError("no such method", 409, "methodNotFound");
     const { controller, stop } = await started(client);
     assert.equal(await controller.send("/goal Ship the release"), true);
     assert.equal(client.sent.at(-1)?.displayText, "/goal Ship the release");
     assert.match(client.sent.at(-1)?.text ?? "", /create_goal tool\. Objective: Ship the release/);
 
-    client.goalError = new HeliconError("goal is finished", 409, "goalNotPaused");
+    client.goalError = new AncillaError("goal is finished", 409, "goalNotPaused");
     assert.equal(await controller.goalAction("s1", "pause"), false);
     assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not pause the goal");
     stop();
@@ -1368,7 +1368,7 @@ describe("HeliconController", () => {
       "workflow:s1:retry:run-1:c1@2",
     ]);
 
-    client.workflowError = new HeliconError("stale", 409, "stale_attempt");
+    client.workflowError = new AncillaError("stale", 409, "stale_attempt");
     assert.equal(await controller.workflowAction("s1", "skip", "run-1", { childId: "c1", attempt: 1 }), false);
     assert.equal(controller.store.get().toasts.at(-1)?.title, "That agent already moved on");
     stop();
@@ -1451,7 +1451,7 @@ describe("HeliconController", () => {
 
   it("loads the account list and creates an account", async () => {
     const client = new FakeClient();
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
     await controller.loadAccounts();
     assert.deepEqual(controller.store.get().accounts?.map((a) => a.id), []);
     assert.equal(await controller.createAccount("work", "Work"), true);
@@ -1461,7 +1461,7 @@ describe("HeliconController", () => {
 
   it("flips metaApiKeyInherited when the client reports it", async () => {
     const client = new FakeClient();
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
     assert.equal(controller.store.get().metaApiKeyInherited, false);
     client.metaApiKeyInherited = true;
     await controller.loadAccountsHealth();
@@ -1471,7 +1471,7 @@ describe("HeliconController", () => {
   it("refreshes metaApiKeyInherited as part of loadAccounts", async () => {
     const client = new FakeClient();
     client.metaApiKeyInherited = true;
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
     await controller.loadAccounts();
     await settle();
     assert.equal(controller.store.get().metaApiKeyInherited, true);
@@ -1480,7 +1480,7 @@ describe("HeliconController", () => {
   it("begins a device-code login, waits, then flips to done once hasLogin turns true", async () => {
     const client = new FakeClient();
     client.accounts = [{ id: "work", name: "Work", hasLogin: false, email: null, lastUsedAt: null }];
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
 
     const login = controller.beginLogin("work");
     // The modal opens right away with an empty marker, before the server has answered.
@@ -1507,7 +1507,7 @@ describe("HeliconController", () => {
     const client = new FakeClient();
     client.accounts = [{ id: "work", name: "Work", hasLogin: false, email: null, lastUsedAt: null }];
     client.loginAccountResult = { fallback: "In-app login is not available when Muse runs in WSL." };
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
 
     await controller.beginLogin("work");
     const login = controller.store.get().accountLogin;
@@ -1518,7 +1518,7 @@ describe("HeliconController", () => {
   it("cancelLogin clears the state and stops the poll", async () => {
     const client = new FakeClient();
     client.accounts = [{ id: "work", name: "Work", hasLogin: false, email: null, lastUsedAt: null }];
-    const controller = new HeliconController(client, platform());
+    const controller = new AncillaController(client, platform());
 
     await controller.beginLogin("work");
     assert.ok(controller.store.get().accountLogin);
@@ -1644,7 +1644,7 @@ describe("HeliconController", () => {
     assert.deepEqual(panel(), { tabs: ["README.md"], active: "README.md", tree: false, line: null });
     controller.closeFile("s1", "README.md");
     assert.deepEqual(panel(), { tabs: [], active: null, tree: true, line: null });
-    assert.equal(controller.openFile("s1", "https://helicon.sh"), false, "a web link is not a file");
+    assert.equal(controller.openFile("s1", "https://example.com"), false, "a web link is not a file");
     controller.toggleFiles();
     assert.equal(controller.store.get().prefs.filesOpen, false);
     stop();
@@ -1664,7 +1664,7 @@ describe("HeliconController", () => {
     assert.equal(controller.store.get().fileVersions[key], 1, "a view of the file reloads after a save");
 
     controller.setFileDraft("/work/app", "README.md", "# mine", 200);
-    client.writeError = new HeliconError("changed", 409, "fileChanged");
+    client.writeError = new AncillaError("changed", 409, "fileChanged");
     assert.equal(await controller.saveFile("/work/app", "README.md"), null);
     const toast = controller.store.get().toasts.at(-1);
     assert.equal(toast?.title, "This file changed on disk");
@@ -1850,7 +1850,7 @@ describe("HeliconController", () => {
           type: "msp", sessionId: "s1", method: "item/completed", at: 2,
           params: { sessionId: "s1", item: {
             itemId: "u9", kind: "userMessage", status: "completed", revision: 1,
-            turnId: "t9", commandId: "t9", text: `${text}\n\n@.helicon/attachments/report.pdf[Image #1]`,
+            turnId: "t9", commandId: "t9", text: `${text}\n\n@.ancilla/attachments/report.pdf[Image #1]`,
           } },
         });
         controller.flush();
@@ -1949,7 +1949,7 @@ describe("HeliconController", () => {
     controller.setZoom(1.234);
     assert.equal(controller.store.get().prefs.zoom, 1.23);
     stop();
-    const revived = new HeliconController(client, { ...platform(), loadPrefs: () => ({ zoom: 99 }) });
+    const revived = new AncillaController(client, { ...platform(), loadPrefs: () => ({ zoom: 99 }) });
     assert.equal(revived.store.get().prefs.zoom, 1);
   });
 
@@ -2065,7 +2065,7 @@ describe("stale thread watchdog", () => {
 
   async function startedWatching(client: FakeClient) {
     const watch = watchPlatform();
-    const controller = new HeliconController(client, watch.fake);
+    const controller = new AncillaController(client, watch.fake);
     const stop = controller.start();
     await settle();
     await settle();

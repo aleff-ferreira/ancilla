@@ -101,7 +101,7 @@ export function nativeReleaseInfo(muse: NativeMuse, files: FileProbe = realFiles
 const UPDATE_INTERVAL_S = 3600;
 
 /**
- * Helicon runs Muse's binary directly, which skips the launcher's hourly update check. This starts that check the
+ * Ancilla runs Muse's binary directly, which skips the launcher's hourly update check. This starts that check the
  * way the launcher does, hidden and in the background, when the hour has passed. A new binary is used from the next
  * `muse serve`. Never throws.
  */
@@ -133,7 +133,7 @@ export function refreshNativeMuse(muse: NativeMuse, env: NodeJS.ProcessEnv = pro
   }
 }
 
-/** Parses `--runtime` / `HELICON_MUSE_RUNTIME`. Anything unrecognised means `auto`. */
+/** Parses `--runtime` / `ANCILLA_MUSE_RUNTIME`. Anything unrecognised means `auto`. */
 export function parseRuntimePreference(value: string | null | undefined): RuntimePreference {
   const lower = value?.trim().toLowerCase();
   return lower === "native" || lower === "windows" ? "native" : lower === "wsl" ? "wsl" : "auto";

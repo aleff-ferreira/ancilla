@@ -1,4 +1,4 @@
-import { PLACEHOLDER_TITLE } from "@helicon/daemon";
+import { PLACEHOLDER_TITLE } from "@ancilla/daemon";
 
 /** First meaningful line of the opening prompt, capped for the sidebar. */
 export function deriveTitle(text: string): string | null {
@@ -43,7 +43,7 @@ export function limitTitleText(text: string, budget: number): string {
   return `${text.slice(0, head)}${TRUNCATED}${tail > 0 ? text.slice(-tail) : ""}`;
 }
 
-const TITLE_PROMPT_HEAD = `Generate a title that will help the user recognize this Helicon thread weeks later.
+const TITLE_PROMPT_HEAD = `Generate a title that will help the user recognize this Ancilla thread weeks later.
 Reply with ONLY the title text: no quotes, no JSON, no labels, no trailing punctuation.
 
 Before answering, silently reduce the request to:

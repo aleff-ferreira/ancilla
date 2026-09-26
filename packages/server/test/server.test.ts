@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAonia } from "@harjjotsinghh/aonia";
 import {
-  HeliconServer,
+  AncillaServer,
   deriveTitle,
   eventsFromHistory,
   mergeSessionSkills,
@@ -20,7 +20,7 @@ import {
   type LoginSpawn,
   type OpenTarget,
 } from "../src/server.js";
-import type { ExecFn, ServeTarget } from "@helicon/daemon";
+import type { ExecFn, ServeTarget } from "@ancilla/daemon";
 
 interface Call {
   method: string;
@@ -111,8 +111,8 @@ function fakeFactory(connection: FakeConnection, probe?: FactoryProbe): (target:
   };
 }
 
-async function start(connection: FakeConnection, extra: Partial<ConstructorParameters<typeof HeliconServer>[0]> = {}) {
-  const server = new HeliconServer({
+async function start(connection: FakeConnection, extra: Partial<ConstructorParameters<typeof AncillaServer>[0]> = {}) {
+  const server = new AncillaServer({
     port: 0,
     dataDir: ":memory:",
     platform: "linux",
@@ -408,7 +408,7 @@ describe("read-only recovery of a silent Muse view", () => {
   });
 });
 
-describe("HeliconServer", () => {
+describe("AncillaServer", () => {
   it("serves health, projects, sessions and turns", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1", modelId: "muse-spark-1.3" } });
@@ -468,21 +468,21 @@ describe("HeliconServer", () => {
 
   it("answers an allowed origin and refuses one nobody listed", async () => {
     const connection = new FakeConnection();
-    const { base } = await start(connection, { allowOrigins: ["https://helicon.example"] });
+    const { base } = await start(connection, { allowOrigins: ["https://ancilla.example"] });
     const blocked = await fetch(`${base}/api/health`, { headers: { origin: "https://evil.example" } });
     assert.equal(blocked.status, 403);
     // Nothing to read even by accident: a refused origin gets no CORS headers at all.
     assert.equal(blocked.headers.get("access-control-allow-origin"), null);
-    const allowed = await fetch(`${base}/api/health`, { headers: { origin: "https://helicon.example" } });
+    const allowed = await fetch(`${base}/api/health`, { headers: { origin: "https://ancilla.example" } });
     assert.equal(allowed.status, 200);
-    assert.equal(allowed.headers.get("access-control-allow-origin"), "https://helicon.example");
+    assert.equal(allowed.headers.get("access-control-allow-origin"), "https://ancilla.example");
     assert.equal(allowed.headers.get("access-control-allow-credentials"), "true");
   });
 
   it("answers a preflight for an allowed origin", async () => {
     const connection = new FakeConnection();
-    const { base } = await start(connection, { allowOrigins: ["https://helicon.example"] });
-    const res = await fetch(`${base}/api/turns`, { method: "OPTIONS", headers: { origin: "https://helicon.example" } });
+    const { base } = await start(connection, { allowOrigins: ["https://ancilla.example"] });
+    const res = await fetch(`${base}/api/turns`, { method: "OPTIONS", headers: { origin: "https://ancilla.example" } });
     assert.equal(res.status, 204);
     assert.match(res.headers.get("access-control-allow-methods") ?? "", /POST/);
   });
@@ -498,21 +498,21 @@ describe("HeliconServer", () => {
     });
     assert.equal(res.status, 200);
     const cookie = res.headers.get("set-cookie") ?? "";
-    assert.match(cookie, /helicon_token=secret/);
+    assert.match(cookie, /ancilla_token=secret/);
     assert.match(cookie, /HttpOnly/);
     // EventSource cannot send a header, so the cookie alone has to be enough.
-    assert.equal((await fetch(`${base}/api/health`, { headers: { cookie: "helicon_token=secret" } })).status, 200);
+    assert.equal((await fetch(`${base}/api/health`, { headers: { cookie: "ancilla_token=secret" } })).status, 200);
   });
 
   it("takes a token from the URL only when no other site is asking", async () => {
     const connection = new FakeConnection();
-    const { base } = await start(connection, { token: "secret", allowOrigins: ["https://helicon.example"] });
+    const { base } = await start(connection, { token: "secret", allowOrigins: ["https://ancilla.example"] });
     // No origin at all: curl, the desktop shell, the page this daemon served itself.
     assert.equal((await fetch(`${base}/api/health?token=secret`)).status, 200);
     // Its own page writing back still counts as itself, origin header and all.
     assert.equal((await fetch(`${base}/api/health?token=secret`, { headers: { origin: base } })).status, 200);
     // Another site holding the same link gets nothing, so sharing the URL hands over no access.
-    const cross = await fetch(`${base}/api/health?token=secret`, { headers: { origin: "https://helicon.example" } });
+    const cross = await fetch(`${base}/api/health?token=secret`, { headers: { origin: "https://ancilla.example" } });
     assert.equal(cross.status, 401);
   });
 
@@ -1001,7 +1001,7 @@ describe("HeliconServer", () => {
   it("tracks plan usage per account and keeps the newest as the default", async () => {
     const work = new FakeConnection();
     const personal = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     await aonia.createProfile("personal");
@@ -1508,7 +1508,7 @@ describe("HeliconServer", () => {
   it("accepts an injected aonia and still starts a plain host with no account", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const probe: FactoryProbe = { targets: [], exits: [] };
     const { base } = await start(connection, {
       hostFactory: fakeFactory(connection, probe),
@@ -1523,7 +1523,7 @@ describe("HeliconServer", () => {
   it("spawns a per-account host with the profile environment merged over process.env", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     const work = await aonia.createProfile("work");
     const probe: FactoryProbe = { targets: [], exits: [] };
@@ -1545,7 +1545,7 @@ describe("HeliconServer", () => {
     const connection = new FakeConnection();
     let n = 0;
     connection.replies.set("session/start", () => ({ session: { sessionId: `s${++n}` } }));
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     await aonia.createProfile("personal");
@@ -1560,7 +1560,7 @@ describe("HeliconServer", () => {
 
   it("rejects a session for an account that does not exist", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, { aonia: createAonia({ home, platform: "linux", musePath: "muse" }) });
     const res = await send(base, "/api/sessions", { cwd: "/work/proj", accountId: "ghost" });
     assert.equal(res.status, 400);
@@ -1569,7 +1569,7 @@ describe("HeliconServer", () => {
   it("puts a session back on its account after the host is forgotten", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     const probe: FactoryProbe = { targets: [], exits: [] };
@@ -1583,7 +1583,7 @@ describe("HeliconServer", () => {
 
   it("lists, creates, renames and removes accounts through aonia", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, { aonia: createAonia({ home, platform: "linux", musePath: "muse" }) });
 
     assert.deepEqual((await get(base, "/api/accounts")).accounts, []);
@@ -1609,7 +1609,7 @@ describe("HeliconServer", () => {
 
   it("rejects a bad account id and a duplicate", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, { aonia: createAonia({ home, platform: "linux", musePath: "muse" }) });
     assert.equal((await send(base, "/api/accounts", { id: "Not Valid" })).status, 400);
     await send(base, "/api/accounts", { id: "work" });
@@ -1618,7 +1618,7 @@ describe("HeliconServer", () => {
 
   it("reports metaApiKeyInherited from the aonia doctor finding", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, {
       aonia: createAonia({ home, platform: "linux", musePath: "muse", env: { META_API_KEY: "x" } }),
     });
@@ -1628,7 +1628,7 @@ describe("HeliconServer", () => {
 
   it("reports metaApiKeyInherited false when META_API_KEY is not set", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, {
       aonia: createAonia({ home, platform: "linux", musePath: "muse", env: {} }),
     });
@@ -1638,7 +1638,7 @@ describe("HeliconServer", () => {
 
   it("logs an account in: resolves url and code from staged stdout, through the server's own muse path", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     const calls: { command: string; args: string[]; env: Record<string, string> }[] = [];
@@ -1666,7 +1666,7 @@ describe("HeliconServer", () => {
 
   it("returns a WSL fallback for the login route instead of spawning", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     let spawned = false;
@@ -1691,7 +1691,7 @@ describe("HeliconServer", () => {
 
   it("kills the first login child when a second login call arrives for the same account", async () => {
     const connection = new FakeConnection();
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     const children: FakeLoginChild[] = [];
@@ -1722,7 +1722,7 @@ describe("HeliconServer", () => {
   it("sets a project's default account", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const { base } = await start(connection, { aonia: createAonia({ home, platform: "linux", musePath: "muse" }) });
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     const res = await send(base, "/api/projects/default-account", { cwd: "/work/proj", accountId: "work" }, "PATCH");
@@ -1736,7 +1736,7 @@ describe("HeliconServer", () => {
     // host that reused one id across two sessions would leak the first session's account onto the second.
     let n = 0;
     connection.replies.set("session/start", () => ({ session: { sessionId: `s${++n}` } }));
-    const home = await mkdtemp(join(tmpdir(), "helicon-aonia-"));
+    const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
     const { base } = await start(connection, { hostFactory: fakeFactory(connection), aonia });
@@ -1760,8 +1760,8 @@ describe("file viewer", () => {
     const { mkdtemp, mkdir, writeFile, symlink } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
-    const root = await mkdtemp(join(tmpdir(), "helicon-files-"));
-    const outside = await mkdtemp(join(tmpdir(), "helicon-outside-"));
+    const root = await mkdtemp(join(tmpdir(), "ancilla-files-"));
+    const outside = await mkdtemp(join(tmpdir(), "ancilla-outside-"));
     await mkdir(join(root, "docs"));
     await mkdir(join(root, "node_modules", "pkg"), { recursive: true });
     await writeFile(join(root, "README.md"), "# Title\n\nBody\n");
@@ -2097,7 +2097,7 @@ describe("slash commands, skills and shell", () => {
     await send(base, "/api/sessions", { cwd: "/work/proj" });
     connection.replies.set("session/list", {
       sessions: [
-        { sessionId: "s1", workspaceRoot: "/work/proj", name: "pebble-caliban", title: "So far, I have been developing and working on my project Helicon on Windows only. It goes on and on.", turnCount: 9 },
+        { sessionId: "s1", workspaceRoot: "/work/proj", name: "pebble-caliban", title: "So far, I have been developing and working on my project Ancilla on Windows only. It goes on and on.", turnCount: 9 },
         { sessionId: "s2", workspaceRoot: "/work/proj", title: "``` Set up this Mac from my private repo", turnCount: 0 },
       ],
       nextCursor: null,
@@ -2243,7 +2243,7 @@ describe("wire helpers", () => {
     assert.equal(deriveTitle("```\nSet up this Mac\nmore"), "Set up this Mac");
     assert.equal(deriveTitle("``` Fix login"), "Fix login");
     assert.equal(deriveTitle("```python\nprint(1)"), "print(1)");
-    assert.equal(deriveTitle("Use `helicon.db` here"), "Use `helicon.db` here");
+    assert.equal(deriveTitle("Use `ancilla.db` here"), "Use `ancilla.db` here");
     assert.equal(deriveTitle("```\n```"), null);
   });
 

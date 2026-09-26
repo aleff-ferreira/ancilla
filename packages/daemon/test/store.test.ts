@@ -1,19 +1,19 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { HeliconStore } from "../src/store.js";
+import { AncillaStore } from "../src/store.js";
 
-describe("HeliconStore", () => {
+describe("AncillaStore", () => {
   it("groups sessions under projects by directory", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
-    const project = store.upsertProject("D:\\work\\helicon");
-    assert.equal(project.displayName, "helicon");
+    const project = store.upsertProject("D:\\work\\ancilla");
+    assert.equal(project.displayName, "ancilla");
     assert.equal(project.pinned, false);
-    const same = store.upsertProject("D:\\work\\helicon");
+    const same = store.upsertProject("D:\\work\\ancilla");
     assert.equal(same.id, project.id);
     const session = store.recordSession({ id: "s1", projectId: project.id });
     assert.equal(session.turnCount, 0);
-    assert.equal(session.origin, "helicon");
+    assert.equal(session.origin, "ancilla");
     store.recordTurn("t1", "s1");
     store.updateTurnStatus("t1", "completed");
     const sessions = store.listSessionsByProject(project.id);
@@ -22,8 +22,8 @@ describe("HeliconStore", () => {
     assert.equal(sessions[0]?.id, "s1");
   });
 
-  it("keeps the commands Helicon ran for a thread", () => {
-    const store = new HeliconStore();
+  it("keeps the commands Ancilla ran for a thread", () => {
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/p");
     store.recordSession({ id: "s1", projectId: project.id });
@@ -57,7 +57,7 @@ describe("HeliconStore", () => {
   });
 
   it("keeps the bytes of files sent with a prompt", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/p");
     store.recordSession({ id: "s1", projectId: project.id });
@@ -83,7 +83,7 @@ describe("HeliconStore", () => {
   });
 
   it("never lets a weaker title source overwrite a stronger one", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/p");
     const created = store.recordSession({ id: "s1", projectId: project.id });
@@ -97,7 +97,7 @@ describe("HeliconStore", () => {
   });
 
   it("archives sessions and hides projects without deleting them", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/p");
     store.recordSession({ id: "s1", projectId: project.id });
@@ -116,7 +116,7 @@ describe("HeliconStore", () => {
   });
 
   it("orders projects by their latest session activity", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const a = store.upsertProject("/work/a");
     const b = store.upsertProject("/work/b");
@@ -131,7 +131,7 @@ describe("HeliconStore", () => {
   });
 
   it("keeps the order the user dragged projects into", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     store.upsertProject("/work/a");
     store.upsertProject("/work/b");
@@ -146,7 +146,7 @@ describe("HeliconStore", () => {
   });
 
   it("pins projects to the top of the sidebar order", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     store.upsertProject("D:\\work\\b");
     store.upsertProject("D:\\work\\a");
@@ -157,7 +157,7 @@ describe("HeliconStore", () => {
   });
 
   it("keeps thread-title settings, defaulting on and merging patches", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     assert.deepEqual(store.getTitleSettings(), { enabled: true, modelId: null });
     assert.deepEqual(store.setTitleSettings({ modelId: "m1" }), { enabled: true, modelId: "m1" });
@@ -167,7 +167,7 @@ describe("HeliconStore", () => {
   });
 
   it("keeps sandbox settings, defaulting to sandbox-on", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     assert.deepEqual(store.getSandboxSettings(), { disabled: false });
     assert.deepEqual(store.setSandboxSettings({ disabled: true }), { disabled: true });
@@ -177,7 +177,7 @@ describe("HeliconStore", () => {
   });
 
   it("keeps YOLO settings, defaulting to off", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     assert.deepEqual(store.getYoloSettings(), { enabled: false });
     assert.deepEqual(store.setYoloSettings({ enabled: true }), { enabled: true });
@@ -187,7 +187,7 @@ describe("HeliconStore", () => {
   });
 
   it("records each session's sandbox posture at creation, never on touch", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/p");
     const created = store.recordSession({ id: "s1", projectId: project.id, sandboxDisabled: true });
@@ -199,7 +199,7 @@ describe("HeliconStore", () => {
   });
 
   it("records a session's account and reads it back, defaulting to null", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/proj");
     const noAccount = store.recordSession({ id: "s1", projectId: project.id });
@@ -211,7 +211,7 @@ describe("HeliconStore", () => {
   });
 
   it("never overwrites a session's account on a later touch", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/proj");
     store.recordSession({ id: "s1", projectId: project.id, accountId: "work" });
@@ -220,7 +220,7 @@ describe("HeliconStore", () => {
   });
 
   it("sets and clears a project's default account", () => {
-    const store = new HeliconStore();
+    const store = new AncillaStore();
     after(() => store.close());
     const project = store.upsertProject("/work/proj");
     assert.equal(project.defaultAccountId, null);

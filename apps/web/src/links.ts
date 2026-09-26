@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-/** A web or mail link that belongs outside Helicon: not the local server this page came from. */
+/** A web or mail link that belongs outside Ancilla: not the local server this page came from. */
 export function externalHref(href: string, origin: string): string | null {
   let url: URL;
   try {

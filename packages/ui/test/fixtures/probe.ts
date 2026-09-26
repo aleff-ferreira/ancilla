@@ -30,7 +30,7 @@ export const liveEvents: ViewEvent[] = [
   {
     "method": "session/approvalModeChanged",
     "params": {
-      "clientName": "helicon_probe",
+      "clientName": "ancilla_probe",
       "commandId": "01a090c3-a411-7000-af99-8973e9766bf4",
       "mode": "onRequest",
       "sessionId": "01a090c3-7bfd-7783-a745-f0a4449690bc",
@@ -864,7 +864,7 @@ export const historyEvents: ViewEvent[] = [
   {
     "method": "session/approvalModeChanged",
     "params": {
-      "clientName": "helicon_probe",
+      "clientName": "ancilla_probe",
       "commandId": "01a090c3-a411-7000-af99-8973e9766bf4",
       "mode": "onRequest",
       "sessionId": "01a090c3-7bfd-7783-a745-f0a4449690bc",

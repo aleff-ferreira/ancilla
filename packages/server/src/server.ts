@@ -6,8 +6,8 @@ import { homedir } from "node:os";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import type { Readable } from "node:stream";
 import {
-  HeliconMspHost,
-  HeliconStore,
+  AncillaMspHost,
+  AncillaStore,
   SessionManager,
   isApprovalMode,
   isGoalAction,
@@ -40,13 +40,13 @@ import {
   type SessionSkill,
   type SubscriptionUsage,
   type TurnImage,
-} from "@helicon/daemon";
+} from "@ancilla/daemon";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
-export const HELICON_VERSION = "0.17.1";
+export const ANCILLA_VERSION = "0.17.1";
 
 export interface HostExit {
   code: number | null;
@@ -77,7 +77,7 @@ export type HostFactory = (target: ServeTarget) => HostHandle;
 export type OpenTarget = "files" | "editor";
 export type Opener = (path: string, target: OpenTarget) => Promise<void>;
 
-const realHostFactory: HostFactory = (target) => new HeliconMspHost(target);
+const realHostFactory: HostFactory = (target) => new AncillaMspHost(target);
 
 /** The shape of a spawned `muse login` child the route needs: readable output and a way to kill it. */
 export interface LoginChild {
@@ -273,7 +273,7 @@ function lastLines(text: string): string {
 }
 
 /** Runs a command to completion; rejects with the tail of its stderr. */
-/** Output kept from a `!` command Helicon runs itself, and how long it may run. */
+/** Output kept from a `!` command Ancilla runs itself, and how long it may run. */
 const MAX_SHELL_OUTPUT = 64 * 1024;
 const SHELL_TIMEOUT_MS = 2 * 60_000;
 
@@ -473,7 +473,7 @@ export function defaultOpener(platform: string): Opener {
       let args: string[];
       if (platform === "win32") {
         if (CMD_UNSAFE.test(path)) {
-          rejectOpen(new HttpError(400, "That folder path contains characters Helicon will not pass to the shell."));
+          rejectOpen(new HttpError(400, "That folder path contains characters Ancilla will not pass to the shell."));
           return;
         }
         [command, args] = target === "editor" ? ["cmd.exe", ["/d", "/c", "code", path]] : ["explorer.exe", [path]];
@@ -624,7 +624,7 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 const MAX_BODY_BYTES = 96 * 1024 * 1024;
 /** Where a non-image attachment lands inside the workspace, so Muse's own tools can open it. */
-const ATTACHMENT_DIR = [".helicon", "attachments"];
+const ATTACHMENT_DIR = [".ancilla", "attachments"];
 
 interface PreparedAttachment {
   name: string;
@@ -635,9 +635,9 @@ interface PreparedAttachment {
   bytes: Buffer;
 }
 
-export class HeliconServer {
+export class AncillaServer {
   private readonly server: Server;
-  private readonly store: HeliconStore;
+  private readonly store: AncillaStore;
   private readonly aonia: Aonia;
   private readonly hosts = new Map<string, ManagedHost>();
   private readonly starting = new Map<string, Promise<ManagedHost>>();
@@ -718,7 +718,7 @@ export class HeliconServer {
       platform: options.platform ?? process.platform,
       distro: options.distro,
       musePath: options.musePath,
-      runtime: options.runtime ?? parseRuntimePreference(process.env["HELICON_MUSE_RUNTIME"]),
+      runtime: options.runtime ?? parseRuntimePreference(process.env["ANCILLA_MUSE_RUNTIME"]),
       syncSessionNames: options.syncSessionNames ?? true,
       findNativeMuse: options.findNativeMuse,
       hostFactory: options.hostFactory ?? realHostFactory,
@@ -729,8 +729,8 @@ export class HeliconServer {
       loginSpawn: options.loginSpawn ?? defaultLoginSpawn,
     };
     this.opener = options.opener ?? defaultOpener(this.options.platform);
-    this.store = new HeliconStore(
-      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, "helicon.db"),
+    this.store = new AncillaStore(
+      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, "ancilla.db"),
     );
     this.aonia = options.aonia ?? createAonia(this.options.musePath ? { musePath: this.options.musePath } : {});
     this.server = createServer((req, res) => {
@@ -798,12 +798,12 @@ export class HeliconServer {
     }
     this.changeTimer = setTimeout(() => {
       this.changeTimer = null;
-      this.emit("helicon", { type: "sessions-changed" });
+      this.emit("ancilla", { type: "sessions-changed" });
     }, 120);
   }
 
   /** What the event stream authenticates with, since EventSource cannot be given a header. */
-  private static readonly AUTH_COOKIE = "helicon_token";
+  private static readonly AUTH_COOKIE = "ancilla_token";
 
   /**
    * The origin of a request that came from a different site. A browser sends `Origin` on its own
@@ -859,7 +859,7 @@ export class HeliconServer {
     if (!this.options.token) {
       return true;
     }
-    if (this.cookie(req, HeliconServer.AUTH_COOKIE) === this.options.token) {
+    if (this.cookie(req, AncillaServer.AUTH_COOKIE) === this.options.token) {
       return true;
     }
     if (req.headers["authorization"] === `Bearer ${this.options.token}`) {
@@ -965,7 +965,7 @@ export class HeliconServer {
       // cookies are only accepted over HTTPS, which is why a remote daemon needs TLS or a tunnel.
       const cross = this.foreignOrigin(req) !== null;
       const cookie = [
-        `${HeliconServer.AUTH_COOKIE}=${encodeURIComponent(this.options.token)}`,
+        `${AncillaServer.AUTH_COOKIE}=${encodeURIComponent(this.options.token)}`,
         "Path=/",
         "HttpOnly",
         "Max-Age=604800",
@@ -981,7 +981,7 @@ export class HeliconServer {
     if (method === "GET" && path === "/api/health") {
       this.json(res, 200, {
         ok: true,
-        version: HELICON_VERSION,
+        version: ANCILLA_VERSION,
         hosts: [...this.hosts.values()].map((h) => ({
           key: h.key,
           serverVersion: h.serverVersion,
@@ -1194,7 +1194,7 @@ export class HeliconServer {
         at: nowIso(),
       });
       this.store.updateSession(sessionId, { activityAt: nowIso() });
-      this.emit("helicon", { type: "shell-run", sessionId, run });
+      this.emit("ancilla", { type: "shell-run", sessionId, run });
       this.json(res, 200, { run });
       return true;
     }
@@ -1745,7 +1745,7 @@ export class HeliconServer {
       defaultDistro: probe.defaultDistro,
       museFound: probe.musePath !== null,
       musePath: probe.musePath,
-      version: HELICON_VERSION,
+      version: ANCILLA_VERSION,
       persistent: this.options.dataDir !== ":memory:",
     };
     this.envCache = { at: Date.now(), value };
@@ -1766,7 +1766,7 @@ export class HeliconServer {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
     this.sinks.add(sink);
-    sink("helicon", { type: "hello", version: HELICON_VERSION });
+    sink("ancilla", { type: "hello", version: ANCILLA_VERSION });
     const heartbeat = setInterval(() => {
       if (res.writableEnded) {
         clearInterval(heartbeat);
@@ -1848,7 +1848,7 @@ export class HeliconServer {
   }
 
   private emitStatus(sessionId: string): void {
-    this.emit("helicon", { type: "session-status", sessionId, live: this.liveView(sessionId) });
+    this.emit("ancilla", { type: "session-status", sessionId, live: this.liveView(sessionId) });
   }
 
   private summary(record: SessionRecord, cwd: string): Record<string, unknown> {
@@ -2133,7 +2133,7 @@ export class HeliconServer {
           paths: new Map(),
           error:
             result.exitCode === 0
-              ? "Muse listed its skills in a form Helicon does not understand."
+              ? "Muse listed its skills in a form Ancilla does not understand."
               : "Could not list Muse skills. Check that muse runs in a terminal.",
         };
     this.skillCache.set(key, listing);
@@ -2186,7 +2186,7 @@ export class HeliconServer {
     const record = this.store.recordSession({
       id: forked.sessionId,
       projectId: found.session.projectId,
-      origin: "helicon",
+      origin: "ancilla",
       // The fork carries its source's name until the user renames it.
       title: `${found.session.title} (fork)`,
       titleSource: "auto",
@@ -2223,7 +2223,7 @@ export class HeliconServer {
     const record = this.store.recordSession({
       id: started.sessionId,
       projectId: project.id,
-      origin: "helicon",
+      origin: "ancilla",
       modelId: raw ? str(raw["modelId"]) : null,
       createdAt: normalizeIso(raw?.["createdAt"]),
       // The creating host's own flags, not the live switch: a flip's restart may still be closing the old host.
@@ -2241,7 +2241,7 @@ export class HeliconServer {
 
   /**
    * Files posted with a prompt. Images are the one non-text part MSP takes, so they go straight to the model;
-   * anything else is written into the workspace under `.helicon/attachments` and mentioned in the prompt,
+   * anything else is written into the workspace under `.ancilla/attachments` and mentioned in the prompt,
    * which is how Muse reaches a file. Every one is kept here too, so a reopened thread can show it.
    */
   private async prepareAttachments(
@@ -2687,7 +2687,7 @@ export class HeliconServer {
       const project = this.store.upsertProject(root);
       const existing = this.store.getSession(sessionId);
       // Muse names its own sessions, and that name is what the user sees in the CLI, so it wins here too.
-      // Only a title the user typed in Helicon outranks it. MSP `title` is just the first-prompt echo,
+      // Only a title the user typed in Ancilla outranks it. MSP `title` is just the first-prompt echo,
       // so it is only a fallback, sanitized like any other derived title.
       const keepOurs = existing?.titleSource === "user" ||
         (!this.options.syncSessionNames && existing !== null && existing.titleSource !== "placeholder");
@@ -2889,7 +2889,7 @@ export class HeliconServer {
       return pending;
     }
     if (this.closed) {
-      throw new HttpError(503, "Helicon is shutting down.");
+      throw new HttpError(503, "Ancilla is shutting down.");
     }
     const startup = this.spawnHost(key, cwd, accountId);
     this.starting.set(key, startup);
@@ -2905,10 +2905,10 @@ export class HeliconServer {
     const handle = this.options.hostFactory(target);
     let started: { fingerprintWarning?: unknown; initializeResult?: unknown } | null;
     try {
-      started = (await handle.start(HELICON_VERSION)) as typeof started;
+      started = (await handle.start(ANCILLA_VERSION)) as typeof started;
     } catch (error) {
       this.lastHostError = error instanceof Error ? error.message : String(error);
-      this.emit("helicon", { type: "host", key, state: "failed", message: this.lastHostError });
+      this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
       throw new HttpError(502, `Could not start Muse: ${this.lastHostError}`);
     }
     this.lastHostError = null;
@@ -2947,7 +2947,7 @@ export class HeliconServer {
     const detail = managed.handle.recentStderr?.trim();
     const message = `The Muse host exited (${exit.code ?? exit.signal ?? "unknown"}).${detail ? ` ${detail}` : ""}`;
     this.lastHostError = message;
-    this.emit("helicon", { type: "host", key: managed.key, state: "exited", message });
+    this.emit("ancilla", { type: "host", key: managed.key, state: "exited", message });
     this.forgetHost(managed, message);
   }
 
@@ -2996,7 +2996,7 @@ export class HeliconServer {
       }
       const message = "The Muse host restarted to apply a settings change.";
       this.forgetHost(managed, message);
-      this.emit("helicon", { type: "host", key: managed.key, state: "restarted", message });
+      this.emit("ancilla", { type: "host", key: managed.key, state: "restarted", message });
     }
   }
 
@@ -3198,7 +3198,7 @@ export class HeliconServer {
       this.sessionHosts.set(event.sessionId, hostKey);
       this.noteNotification(event.sessionId, notification.method);
       this.track(event.sessionId, notification.method, params);
-      this.emit("helicon", event);
+      this.emit("ancilla", event);
     } catch (error) {
       this.forwardFailures += 1;
       this.lastForwardFailure = `${notification.method}: ${error instanceof Error ? error.message : String(error)}`;
@@ -3226,7 +3226,7 @@ export class HeliconServer {
 
   /** Everything worth reading later goes to stderr, which is where the daemon's log ends up. */
   private log(message: string): void {
-    process.stderr.write(`[helicon] ${new Date().toISOString()} ${message}\n`);
+    process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
   }
 
   private track(sessionId: string, method: string, params: Record<string, unknown>): void {
@@ -3469,7 +3469,7 @@ export class HeliconServer {
       changed = true;
     }
     if (changed) {
-      this.emit("helicon", { type: "plan-usage", usage, accountId });
+      this.emit("ancilla", { type: "plan-usage", usage, accountId });
     }
   }
 

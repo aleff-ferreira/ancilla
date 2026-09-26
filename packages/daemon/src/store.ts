@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   status TEXT NOT NULL DEFAULT 'active',
   turn_count INTEGER NOT NULL DEFAULT 0,
   model_id TEXT,
-  origin TEXT NOT NULL DEFAULT 'helicon',
+  origin TEXT NOT NULL DEFAULT 'ancilla',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -250,7 +250,7 @@ export interface AddAttachmentInput {
   bytes: Uint8Array;
 }
 
-/** A `!` command Helicon ran itself, with what it printed. */
+/** A `!` command Ancilla ran itself, with what it printed. */
 export interface ShellRunRecord {
   id: string;
   sessionId: string;
@@ -299,7 +299,7 @@ function toAttachment(row: Row): AttachmentRecord {
   };
 }
 
-export class HeliconStore {
+export class AncillaStore {
   private readonly db: DatabaseSync;
 
   constructor(path = ":memory:") {
@@ -431,7 +431,7 @@ export class HeliconStore {
     return rows.map((row) => this.toProject(row));
   }
 
-  /** A `!` command Helicon ran itself in the workspace, kept so a reopened thread still shows it. */
+  /** A `!` command Ancilla ran itself in the workspace, kept so a reopened thread still shows it. */
   addShellRun(input: ShellRunRecord): ShellRunRecord {
     this.db
       .prepare(
@@ -625,7 +625,7 @@ export class HeliconStore {
           titleSource,
           input.turnCount ?? 0,
           input.modelId ?? null,
-          input.origin ?? "helicon",
+          input.origin ?? "ancilla",
           input.sandboxDisabled === undefined || input.sandboxDisabled === null ? null : input.sandboxDisabled ? 1 : 0,
           input.accountId ?? null,
           input.createdAt ?? now,
@@ -778,7 +778,7 @@ export class HeliconStore {
   private getTurn(id: string): TurnRecord {
     const row = this.db.prepare(`SELECT * FROM turns WHERE id = ?`).get(id) as Row | undefined;
     if (!row) {
-      throw new Error(`HeliconStore: unknown turn ${id}.`);
+      throw new Error(`AncillaStore: unknown turn ${id}.`);
     }
     return {
       id: String(row["id"]),

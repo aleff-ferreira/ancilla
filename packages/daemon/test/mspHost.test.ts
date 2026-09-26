@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
-  HELICON_CLIENT_NAME,
-  HeliconMspHost,
+  ANCILLA_CLIENT_NAME,
+  AncillaMspHost,
   classifyServeExit,
   serveExitMessage,
 } from "../src/mspHost.js";
@@ -43,7 +43,7 @@ function makeSpawn(connection: FakeConnection, opts?: { fingerprintWarning?: unk
         close: async () => ({ code: 0, signal: null }),
       };
     },
-  }) as unknown) as ConstructorParameters<typeof HeliconMspHost>[1];
+  }) as unknown) as ConstructorParameters<typeof AncillaMspHost>[1];
   return { spawn, calls };
 }
 
@@ -57,19 +57,19 @@ describe("classifyServeExit", () => {
   });
 });
 
-describe("HeliconMspHost", () => {
-  it("identifies as helicon and surfaces the fingerprint warning", async () => {
+describe("AncillaMspHost", () => {
+  it("identifies as ancilla and surfaces the fingerprint warning", async () => {
     const connection = makeConnection();
     const { spawn, calls } = makeSpawn(connection, {
       fingerprintWarning: { mismatch: true },
     });
-    const host = new HeliconMspHost(
+    const host = new AncillaMspHost(
       { command: "muse", args: ["serve"], cwd: "/tmp" },
       spawn,
     );
     const started = await host.start("0.1.0");
     assert.equal(calls.length, 1);
-    assert.equal(calls[0]?.clientName, HELICON_CLIENT_NAME);
+    assert.equal(calls[0]?.clientName, ANCILLA_CLIENT_NAME);
     assert.equal(calls[0]?.clientVersion, "0.1.0");
     assert.deepEqual(started.fingerprintWarning, { mismatch: true });
   });
@@ -77,7 +77,7 @@ describe("HeliconMspHost", () => {
   it("refuses connection use before start and closes cleanly", async () => {
     const connection = makeConnection();
     const { spawn } = makeSpawn(connection);
-    const host = new HeliconMspHost(
+    const host = new AncillaMspHost(
       { command: "muse", args: ["serve"], cwd: "/tmp" },
       spawn,
     );

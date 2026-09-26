@@ -3,7 +3,7 @@ import type { ThreadFold } from "./fold.js";
 /**
  * A thread's goal, the way Muse keeps working toward an objective across turns. Muse reports the goal
  * block live (`session/goalChanged`: objective, status, percent, current and next work); its goal tools
- * return the full record, with when it started, its token count and budget. Helicon adds what neither
+ * return the full record, with when it started, its token count and budget. Ancilla adds what neither
  * says outright: how long it has run, and how many turns and tokens its work took.
  */
 

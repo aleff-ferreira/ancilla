@@ -226,7 +226,7 @@ export async function writeProjectFile(
   if (baseMtimeMs !== null && Math.round(info.mtimeMs) !== baseMtimeMs) {
     throw new FileError(409, "This file changed on disk since you opened it.", "fileChanged");
   }
-  const temp = join(abs, `..`, `.${basename(abs)}.helicon-${process.pid}-${Date.now()}.tmp`);
+  const temp = join(abs, `..`, `.${basename(abs)}.ancilla-${process.pid}-${Date.now()}.tmp`);
   try {
     await writeFile(temp, bytes, { mode: info.mode });
     await rename(temp, abs);

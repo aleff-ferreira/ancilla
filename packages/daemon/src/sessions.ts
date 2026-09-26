@@ -58,7 +58,7 @@ export type NotificationHandler = (notification: MspNotification) => void;
 export type ProtocolErrorHandler = (error: unknown) => void;
 
 /**
- * The slice of the SDK connection Helicon uses. `command` mints a `commandId` for
+ * The slice of the SDK connection Ancilla uses. `command` mints a `commandId` for
  * state-changing verbs; `request` sends read-only queries (lists, reads, pages) as-is.
  */
 export interface CommandConnection {

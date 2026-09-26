@@ -94,7 +94,7 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
   const costs = useMemo(() => turnCosts(fold, models), [fold.meta.calls, models]);
   const echoes = fold.echoes.filter((e) => e.disposition !== "queued");
   // Files the server kept for this thread, grouped by the turn they were sent with.
-  // Turns and the commands Helicon ran share one timeline: a command's output caused the prompt after it.
+  // Turns and the commands Ancilla ran share one timeline: a command's output caused the prompt after it.
   const timeline = useMemo(() => {
     let last = 0;
     const blocks = turns.map((turn, index) => {
@@ -595,7 +595,7 @@ function PromptBubble(props: { item: MspItem; sentAt: number | null; files?: Att
 }
 
 /**
- * A `!` command Helicon ran itself. Muse never saw it, so its output stays here until the user hands it over.
+ * A `!` command Ancilla ran itself. Muse never saw it, so its output stays here until the user hands it over.
  */
 function ShellRunRow(props: { run: ShellRun; sessionId: string }) {
   const controller = useController();

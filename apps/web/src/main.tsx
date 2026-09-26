@@ -1,12 +1,12 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { HeliconApp } from "@helicon/ui";
+import { AncillaApp } from "@ancilla/ui";
 import { Connect } from "./Connect.js";
 import { desktopFrame, titlebarOverlay, bindDesktopZoom } from "./frame.js";
 import { bindDesktopLinks } from "./links.js";
 import { appNotifier } from "./notifier.js";
 import { desktopUpdater } from "./updater.js";
-import { WebHeliconClient } from "./webClient.js";
+import { WebAncillaClient } from "./webClient.js";
 import "./theme.css";
 
 bindDesktopZoom();
@@ -14,7 +14,7 @@ bindDesktopLinks();
 
 const root = document.getElementById("root");
 if (!root) {
-  throw new Error("Helicon: missing #root element.");
+  throw new Error("Ancilla: missing #root element.");
 }
 
 /**
@@ -35,8 +35,8 @@ function Root() {
     );
   }
   return (
-    <HeliconApp
-      client={new WebHeliconClient()}
+    <AncillaApp
+      client={new WebAncillaClient()}
       frame={desktopFrame()}
       titlebarOverlay={titlebarOverlay()}
       updater={desktopUpdater()}

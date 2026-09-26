@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the desktop app icon set from the Helicon mark.
+"""Regenerate the desktop app icon set from the Ancilla mark.
 
 Treatment (locked): navy rounded tile (#1A1A2E, radius 16.8%%) + light mark
 (#EFF0F2, 48%% of tile height), no dot. iOS gets the opaque square variant,
@@ -24,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICONS = os.path.join(ROOT, "apps", "desktop", "src-tauri", "icons")
-MARK_PNG = os.path.join(ROOT, "assets", "social", "helicon-mark-2048.png")
+MARK_PNG = os.path.join(ROOT, "assets", "social", "ancilla-mark-2048.png")
 MARK_INK = (602, 521, 1444, 1439)
 
 TILE = "#1A1A2E"

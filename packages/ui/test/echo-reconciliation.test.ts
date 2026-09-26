@@ -9,7 +9,7 @@ function echo(extra: Partial<LocalEcho> = {}): LocalEcho {
 function prompt(extra: Partial<MspItem> = {}): ViewEvent {
   return { method: "item/completed", params: { item: {
     itemId: "user", kind: "userMessage", revision: 2, status: "completed", turnId: "turn", commandId: "turn",
-    text: "Review the attached report\n\n@.helicon/attachments/report.pdf[Image #1]", ...extra,
+    text: "Review the attached report\n\n@.ancilla/attachments/report.pdf[Image #1]", ...extra,
   } } };
 }
 function load(events: ViewEvent[]): TranscriptLoad {

@@ -83,16 +83,16 @@ describe("web client", () => {
     const { currentDaemon } = await freshClient();
 
     assert.equal(currentDaemon().token, "secret");
-    assert.deepEqual(JSON.parse(world.storage["helicon:daemon"] as string), { base: "", token: "secret" });
+    assert.deepEqual(JSON.parse(world.storage["ancilla:daemon"] as string), { base: "", token: "secret" });
     // The whole point: the credential stops being part of a URL anyone could copy.
     assert.deepEqual(world.replaced, ["/"]);
   });
 
   it("sends the token as a header, never in the path", async () => {
-    const world = browser({ stored: { "helicon:daemon": JSON.stringify({ base: "", token: "secret" }) } });
-    const { WebHeliconClient } = await freshClient();
+    const world = browser({ stored: { "ancilla:daemon": JSON.stringify({ base: "", token: "secret" }) } });
+    const { WebAncillaClient } = await freshClient();
 
-    await new WebHeliconClient().listProjects();
+    await new WebAncillaClient().listProjects();
 
     const call = world.calls.at(-1);
     assert.equal(call?.url, "/api/projects");
@@ -102,10 +102,10 @@ describe("web client", () => {
 
   it("addresses a daemon elsewhere absolutely, and sends its cookie with it", async () => {
     const world = browser({
-      stored: { "helicon:daemon": JSON.stringify({ base: "https://box.example:3127", token: "secret" }) },
+      stored: { "ancilla:daemon": JSON.stringify({ base: "https://box.example:3127", token: "secret" }) },
     });
-    const { WebHeliconClient } = await freshClient();
-    const client = new WebHeliconClient();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
 
     await client.listProjects();
     assert.equal(world.calls.at(-1)?.url, "https://box.example:3127/api/projects");
@@ -118,10 +118,10 @@ describe("web client", () => {
   });
 
   it("earns the cookie before opening the stream", async () => {
-    const world = browser({ stored: { "helicon:daemon": JSON.stringify({ base: "", token: "secret" }) } });
-    const { WebHeliconClient } = await freshClient();
+    const world = browser({ stored: { "ancilla:daemon": JSON.stringify({ base: "", token: "secret" }) } });
+    const { WebAncillaClient } = await freshClient();
 
-    const stop = new WebHeliconClient().subscribe(() => undefined);
+    const stop = new WebAncillaClient().subscribe(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // EventSource cannot carry a header, so /api/auth has to come first or the stream is refused.
@@ -134,8 +134,8 @@ describe("web client", () => {
 
   it("reads and writes the thread-title switch", async () => {
     const world = browser();
-    const { WebHeliconClient } = await freshClient();
-    const client = new WebHeliconClient();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
 
     assert.deepEqual(await client.getTitleSettings(), { enabled: true, modelId: null });
     assert.equal(world.calls.at(-1)?.url, "/api/title-settings");
@@ -149,8 +149,8 @@ describe("web client", () => {
 
   it("reads and writes the sandbox switch", async () => {
     const world = browser();
-    const { WebHeliconClient } = await freshClient();
-    const client = new WebHeliconClient();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
 
     assert.deepEqual(await client.getSandboxSettings(), { disabled: false });
     assert.equal(world.calls.at(-1)?.url, "/api/sandbox-settings");
@@ -164,8 +164,8 @@ describe("web client", () => {
 
   it("reads and writes the YOLO switch", async () => {
     const world = browser();
-    const { WebHeliconClient } = await freshClient();
-    const client = new WebHeliconClient();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
 
     assert.deepEqual(await client.getYoloSettings(), { enabled: false });
     assert.equal(world.calls.at(-1)?.url, "/api/yolo-settings");
@@ -179,11 +179,11 @@ describe("web client", () => {
 
   it("rebuilds a stream that has gone quiet", async () => {
     browser();
-    const { WebHeliconClient } = await freshClient();
+    const { WebAncillaClient } = await freshClient();
     mock.timers.enable({ apis: ["setTimeout"] });
     let stop = () => undefined as void;
     try {
-      stop = new WebHeliconClient().subscribe(() => undefined);
+      stop = new WebAncillaClient().subscribe(() => undefined);
       await Promise.resolve();
       assert.equal(FakeEventSource.made.length, 1, "one stream to begin with");
 

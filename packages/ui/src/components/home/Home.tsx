@@ -177,7 +177,7 @@ export function Welcome() {
       <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 pb-[10vh]">
         <div className="w-full max-w-[540px]">
           <FolderArt label="Add your first project" onActivate={() => input.current?.focus()} />
-          <h1 className={cn(DISPLAY, "mt-8")}>Welcome to Helicon</h1>
+          <h1 className={cn(DISPLAY, "mt-8")}>Welcome to Ancilla</h1>
           <p className="mt-3 text-md leading-relaxed text-pretty text-muted">
             Point Muse at a project and start a thread. Threads live in the sidebar, grouped by project, and tell you when
             they need you.
@@ -237,7 +237,7 @@ export function Onboarding() {
       title: "Muse for Windows",
       detail: env.museFound
         ? `Found at ${env.musePath}.`
-        : "Install Muse from PowerShell. No WSL needed. Already use Muse inside WSL? Set WSL up and Helicon uses it there.",
+        : "Install Muse from PowerShell. No WSL needed. Already use Muse inside WSL? Set WSL up and Ancilla uses it there.",
       command: env.museFound ? undefined : install,
     });
   } else if (windows) {
@@ -260,7 +260,7 @@ export function Onboarding() {
   steps.push({
     ok: null,
     title: "Signed in to Muse",
-    detail: "Run this once in a terminal. Helicon uses your own login and never sees your credentials.",
+    detail: "Run this once in a terminal. Ancilla uses your own login and never sees your credentials.",
     command: "muse login",
   });
   return (
@@ -269,7 +269,7 @@ export function Onboarding() {
         <Logo size={40} />
         <h1 className={cn(DISPLAY, "mt-7")}>Set up Muse</h1>
         <p className="mt-3 text-md leading-relaxed text-muted">
-          Helicon drives the Muse Code CLI on this computer. Finish these steps, then check again.
+          Ancilla drives the Muse Code CLI on this computer. Finish these steps, then check again.
         </p>
         <ol className="mt-8 flex flex-col gap-2.5">
           {steps.map((step, index) => (
@@ -312,7 +312,7 @@ export function BootScreen() {
       <div className="flex flex-col items-center gap-5">
         <Logo size={36} />
         <span className="flex items-center gap-2 text-sm text-subtle">
-          <Spinner size={12} /> Starting Helicon
+          <Spinner size={12} /> Starting Ancilla
         </span>
       </div>
     </div>
@@ -326,8 +326,8 @@ export function BootError() {
     <div className="flex h-full items-center justify-center bg-bg px-6">
       <div className="w-full max-w-[480px]">
         <Logo size={36} />
-        <h1 className={cn(DISPLAY, "mt-6 text-3xl")}>Helicon could not reach its server</h1>
-        <p className="mt-3 text-sm break-words text-muted">{message ?? "The local Helicon server did not answer."}</p>
+        <h1 className={cn(DISPLAY, "mt-6 text-3xl")}>Ancilla could not reach its server</h1>
+        <p className="mt-3 text-sm break-words text-muted">{message ?? "The local Ancilla server did not answer."}</p>
         <div className="mt-6">
           <Button variant="primary" onClick={() => controller.retryBoot()}>
             <ArrowsClockwiseIcon size={14} /> Try again

@@ -8,7 +8,7 @@
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
- * Helicon tokens. Restrained palette: cool-tinted neutrals (hue 255) plus one blue accent,
+ * Ancilla tokens. Restrained palette: cool-tinted neutrals (hue 255) plus one blue accent,
  * the blue of the app icon, reserved for action, live state and focus. Every text token
  * clears 4.5:1 on every surface in both themes (checked with a WCAG script).
  */
@@ -301,7 +301,7 @@
     border-radius: 9999px;
     border: 1.5px solid color-mix(in oklch, currentColor 22%, transparent);
     border-top-color: currentColor;
-    animation: helicon-spin 0.9s linear infinite;
+    animation: ancilla-spin 0.9s linear infinite;
   }
 
   /* Loading copy only ("Thinking", "Working"): a sheen that says the agent is mid-step. */
@@ -318,11 +318,11 @@
     background-clip: text;
     -webkit-background-clip: text;
     color: transparent;
-    animation: helicon-sheen 2.4s linear infinite;
+    animation: ancilla-sheen 2.4s linear infinite;
   }
 
   .attention-pulse {
-    animation: helicon-pulse 1.8s var(--ease-in-out) infinite;
+    animation: ancilla-pulse 1.8s var(--ease-in-out) infinite;
   }
 
   /* Popovers grow from their trigger; tooltips after the first skip the animation.
@@ -332,56 +332,56 @@
       --radix-dropdown-menu-content-transform-origin,
       var(--radix-tooltip-content-transform-origin, var(--radix-popover-content-transform-origin, center))
     );
-    animation: helicon-pop-in 150ms var(--ease-out);
+    animation: ancilla-pop-in 150ms var(--ease-out);
   }
   .pop[data-state="closed"] {
-    animation: helicon-pop-out 110ms ease-in forwards;
+    animation: ancilla-pop-out 110ms ease-in forwards;
   }
   .pop[data-state="instant-open"] {
     animation: none;
   }
   .modal-pop {
-    animation: helicon-modal-in 200ms var(--ease-out);
+    animation: ancilla-modal-in 200ms var(--ease-out);
   }
   .modal-pop[data-state="closed"] {
-    animation: helicon-pop-out 120ms ease-in forwards;
+    animation: ancilla-pop-out 120ms ease-in forwards;
   }
   /* A panel off the right edge: it arrives from the side it lives on, and leaves the same way. */
   .sheet-in {
-    animation: helicon-sheet-in 220ms var(--ease-out);
+    animation: ancilla-sheet-in 220ms var(--ease-out);
   }
   .sheet-in[data-state="closed"] {
-    animation: helicon-sheet-out 160ms ease-in forwards;
+    animation: ancilla-sheet-out 160ms ease-in forwards;
   }
   .overlay-fade {
-    animation: helicon-fade-in 180ms var(--ease-out);
+    animation: ancilla-fade-in 180ms var(--ease-out);
   }
   .overlay-fade[data-state="closed"] {
-    animation: helicon-fade-out 120ms ease-in forwards;
+    animation: ancilla-fade-out 120ms ease-in forwards;
   }
   .toast-in {
-    animation: helicon-toast-in 260ms var(--ease-out);
+    animation: ancilla-toast-in 260ms var(--ease-out);
   }
   /* Something new arrived in the transcript or dock. */
   .enter-up {
-    animation: helicon-enter-up 220ms var(--ease-out);
+    animation: ancilla-enter-up 220ms var(--ease-out);
   }
 
   /* Each word of a streaming reply resolves as it lands, instead of snapping in. */
-  .prose-helicon.streaming .tok {
+  .prose-ancilla.streaming .tok {
     display: inline-block;
-    animation: helicon-token-in 180ms var(--ease-out) both;
+    animation: ancilla-token-in 180ms var(--ease-out) both;
   }
 
   /* Beautiful UI LoadingState "Drive": a chevron wavefront through a 3x3 pixel grid. */
   .pixel-loader > span {
     opacity: 0.15;
-    animation: helicon-pixel 650ms ease-in-out infinite both;
+    animation: ancilla-pixel 650ms ease-in-out infinite both;
   }
 
   /* A caret at the end of a reply that is still streaming (Beautiful UI StreamText). */
-  .prose-helicon.streaming > :last-child:is(p, h1, h2, h3, h4, blockquote)::after,
-  .prose-helicon.streaming > :is(ul, ol):last-child > li:last-child::after {
+  .prose-ancilla.streaming > :last-child:is(p, h1, h2, h3, h4, blockquote)::after,
+  .prose-ancilla.streaming > :is(ul, ol):last-child > li:last-child::after {
     content: "";
     display: inline-block;
     width: 2px;
@@ -394,88 +394,88 @@
   }
 
   /* Agent prose. Product scale: 15px, 1.6 leading, measured column. */
-  .prose-helicon {
+  .prose-ancilla {
     font-size: var(--text-md);
     line-height: 1.65;
     color: var(--fg);
     overflow-wrap: anywhere;
   }
-  .prose-helicon > :first-child {
+  .prose-ancilla > :first-child {
     margin-top: 0;
   }
-  .prose-helicon > :last-child {
+  .prose-ancilla > :last-child {
     margin-bottom: 0;
   }
-  .prose-helicon p {
+  .prose-ancilla p {
     margin: 0 0 0.75em;
     text-wrap: pretty;
   }
-  .prose-helicon h1,
-  .prose-helicon h2,
-  .prose-helicon h3,
-  .prose-helicon h4 {
+  .prose-ancilla h1,
+  .prose-ancilla h2,
+  .prose-ancilla h3,
+  .prose-ancilla h4 {
     font-weight: 600;
     line-height: 1.3;
     margin: 1.25em 0 0.5em;
     text-wrap: balance;
     letter-spacing: -0.01em;
   }
-  .prose-helicon h1 {
+  .prose-ancilla h1 {
     font-size: 1.35em;
   }
-  .prose-helicon h2 {
+  .prose-ancilla h2 {
     font-size: 1.2em;
   }
-  .prose-helicon h3 {
+  .prose-ancilla h3 {
     font-size: 1.05em;
   }
-  .prose-helicon h4 {
+  .prose-ancilla h4 {
     font-size: 1em;
     color: var(--fg-muted);
   }
-  .prose-helicon ul,
-  .prose-helicon ol {
+  .prose-ancilla ul,
+  .prose-ancilla ol {
     margin: 0 0 0.75em;
     padding-inline-start: 1.35em;
   }
-  .prose-helicon ul {
+  .prose-ancilla ul {
     list-style: disc;
   }
-  .prose-helicon ol {
+  .prose-ancilla ol {
     list-style: decimal;
   }
-  .prose-helicon li {
+  .prose-ancilla li {
     margin: 0.2em 0;
     padding-inline-start: 0.15em;
   }
-  .prose-helicon li::marker {
+  .prose-ancilla li::marker {
     color: var(--fg-subtle);
   }
-  .prose-helicon a {
+  .prose-ancilla a {
     color: var(--accent-text);
     text-decoration-line: underline;
     text-decoration-thickness: from-font;
     text-underline-offset: 2px;
     text-decoration-color: color-mix(in oklch, var(--accent-text) 40%, transparent);
   }
-  .prose-helicon a:hover {
+  .prose-ancilla a:hover {
     text-decoration-color: currentColor;
   }
-  .prose-helicon strong {
+  .prose-ancilla strong {
     font-weight: 600;
   }
-  .prose-helicon blockquote {
+  .prose-ancilla blockquote {
     margin: 0 0 0.75em;
     padding: 0.25em 0 0.25em 0.9em;
     border-inline-start: 1px solid var(--border-strong);
     color: var(--fg-muted);
   }
-  .prose-helicon hr {
+  .prose-ancilla hr {
     border: 0;
     border-top: 1px solid var(--border);
     margin: 1.25em 0;
   }
-  .prose-helicon :not(pre) > code {
+  .prose-ancilla :not(pre) > code {
     font-size: 0.86em;
     padding: 0.12em 0.36em;
     border-radius: 5px;
@@ -483,20 +483,20 @@
     color: var(--fg);
     overflow-wrap: anywhere;
   }
-  .prose-helicon table {
+  .prose-ancilla table {
     width: 100%;
     border-collapse: collapse;
     font-size: var(--text-sm);
     margin: 0 0 0.9em;
   }
-  .prose-helicon th,
-  .prose-helicon td {
+  .prose-ancilla th,
+  .prose-ancilla td {
     border-bottom: 1px solid var(--border);
     padding: 0.45em 0.6em;
     text-align: start;
     vertical-align: top;
   }
-  .prose-helicon th {
+  .prose-ancilla th {
     font-weight: 600;
     color: var(--fg-muted);
   }
@@ -555,13 +555,13 @@
   }
 }
 
-@keyframes helicon-spin {
+@keyframes ancilla-spin {
   to {
     transform: rotate(360deg);
   }
 }
 
-@keyframes helicon-sheen {
+@keyframes ancilla-sheen {
   from {
     background-position: 100% 0;
   }
@@ -570,14 +570,14 @@
   }
 }
 
-@keyframes helicon-pop-in {
+@keyframes ancilla-pop-in {
   from {
     opacity: 0;
     scale: 0.96;
   }
 }
 
-@keyframes helicon-pop-out {
+@keyframes ancilla-pop-out {
   to {
     opacity: 0;
     scale: 0.97;
@@ -585,47 +585,47 @@
 }
 
 /* Tailwind 4 centers with the `translate` property, so only `transform` moves here. */
-@keyframes helicon-modal-in {
+@keyframes ancilla-modal-in {
   from {
     opacity: 0;
     transform: translateY(6px) scale(0.98);
   }
 }
 
-@keyframes helicon-fade-in {
+@keyframes ancilla-fade-in {
   from {
     opacity: 0;
   }
 }
 
-@keyframes helicon-sheet-in {
+@keyframes ancilla-sheet-in {
   from {
     opacity: 0;
     transform: translateX(18px);
   }
 }
 
-@keyframes helicon-sheet-out {
+@keyframes ancilla-sheet-out {
   to {
     opacity: 0;
     transform: translateX(18px);
   }
 }
 
-@keyframes helicon-fade-out {
+@keyframes ancilla-fade-out {
   to {
     opacity: 0;
   }
 }
 
-@keyframes helicon-toast-in {
+@keyframes ancilla-toast-in {
   from {
     opacity: 0;
     transform: translateY(8px) scale(0.98);
   }
 }
 
-@keyframes helicon-enter-up {
+@keyframes ancilla-enter-up {
   from {
     opacity: 0;
     transform: translateY(6px);
@@ -633,7 +633,7 @@
 }
 
 /* The swatch beside each code theme in the picker: its keyword colour, so the menu shows what it changes. */
-.code-swatch-helicon {
+.code-swatch-ancilla {
   background: oklch(0.5 0.17 20);
 }
 .code-swatch-ayu {
@@ -771,14 +771,14 @@
   --sh-comment: #7f849c;
 }
 
-@keyframes helicon-token-in {
+@keyframes ancilla-token-in {
   from {
     opacity: 0;
     filter: blur(3px);
   }
 }
 
-@keyframes helicon-pixel {
+@keyframes ancilla-pixel {
   0%,
   100% {
     opacity: 0.15;
@@ -792,7 +792,7 @@
   }
 }
 
-@keyframes helicon-pulse {
+@keyframes ancilla-pulse {
   0%,
   100% {
     opacity: 1;
@@ -822,7 +822,7 @@
   .sheet-in,
   /* The exit rule carries an attribute, so it outranks a bare .sheet-in here. */
   .sheet-in[data-state="closed"],
-  .prose-helicon.streaming .tok {
+  .prose-ancilla.streaming .tok {
     animation: none;
   }
   .pixel-loader > span {

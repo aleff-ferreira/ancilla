@@ -14,7 +14,7 @@ function session(id: string, patch: Partial<SessionSummary> = {}, live: Partial<
     titleSource: "auto",
     turnCount: 1,
     modelId: null,
-    origin: "helicon",
+    origin: "ancilla",
     archived: false,
     createdAt: BASE,
     activityAt: "2026-09-02T00:00:00.000Z",

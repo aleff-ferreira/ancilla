@@ -1,19 +1,19 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Helicon",
+  "productName": "Ancilla",
   "version": "0.17.1",
-  "identifier": "app.helicon.desktop",
+  "identifier": "app.ancilla.desktop",
   "build": {
     "frontendDist": "../../web/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run fetch:node --workspace helicon-desktop && npm run dev --workspace @helicon/web",
-    "beforeBuildCommand": "npm run build --workspace @helicon/web && npm run bundle:server --workspace helicon-desktop && npm run fetch:node --workspace helicon-desktop"
+    "beforeDevCommand": "npm run fetch:node --workspace ancilla-desktop && npm run dev --workspace @ancilla/web",
+    "beforeBuildCommand": "npm run build --workspace @ancilla/web && npm run bundle:server --workspace ancilla-desktop && npm run fetch:node --workspace ancilla-desktop"
   },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "Helicon",
+        "title": "Ancilla",
         "width": 1280,
         "height": 820,
         "minWidth": 880,
@@ -38,8 +38,8 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBOEFGNzkyMDBBNkZERkEKUldUNi9hWUFrdmVLYXV1aFFUeXpWWVJ3UXhZY3psT0hGSUxieUVrUkwxSmh0Wjg3WHJ0NkM1U0UK",
       "endpoints": [
-        "https://helicon.sh/api/update/{{target}}/{{current_version}}",
-        "https://github.com/HarjjotSinghh/helicon/releases/latest/download/latest.json"
+        "https://example.com/api/update/{{target}}/{{current_version}}",
+        "https://github.com/aleff-ferreira/ancilla/releases/latest/download/latest.json"
       ],
       "windows": { "installMode": "passive" }
     }

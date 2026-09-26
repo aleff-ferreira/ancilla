@@ -230,11 +230,11 @@ export function Modal(props: {
         <RDialog.Overlay className="overlay-fade fixed inset-0 z-[var(--z-overlay)] bg-[oklch(0.1_0.01_255/0.45)]" />
         <RDialog.Content
           onOpenAutoFocus={(event) => {
-            const demo = (event.target as HTMLElement | null)?.closest?.(".helicon-app");
+            const demo = (event.target as HTMLElement | null)?.closest?.(".ancilla-app");
             if (demo && !demo.contains(document.activeElement)) event.preventDefault();
           }}
           onFocusOutside={(event) => {
-            const demo = (event.currentTarget as HTMLElement).closest(".helicon-app");
+            const demo = (event.currentTarget as HTMLElement).closest(".ancilla-app");
             if (!demo) return;
             const next = event.target as Node | null;
             if (next && !demo.contains(next)) event.preventDefault();

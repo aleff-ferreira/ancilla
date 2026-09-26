@@ -9,7 +9,7 @@ const uiEntry = fileURLToPath(new URL("../../packages/ui/src/index.ts", import.m
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@helicon/ui": uiEntry },
+    alias: { "@ancilla/ui": uiEntry },
     dedupe: ["react", "react-dom"],
   },
   server: {

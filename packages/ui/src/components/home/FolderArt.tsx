@@ -1,5 +1,5 @@
 // via Rare UI FolderComponent (rareui.com), MIT (c) 2026 Swami Malode.
-// Adapted: themed through Helicon tokens for light and dark, fixed small scale, reduced motion
+// Adapted: themed through Ancilla tokens for light and dark, fixed small scale, reduced motion
 // holds the resting pose, and the click hands off to the caller instead of toggling locally.
 import { motion, useReducedMotion } from "motion/react";
 import { useState } from "react";

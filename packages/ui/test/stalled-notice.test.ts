@@ -12,7 +12,7 @@ describe("StalledNotice", () => {
   it("distinguishes automatic saved-progress recovery from restored live updates", () => {
     const markup = render({ checkedAt: 1_790_395_260_000, progressAt: null });
     assert.match(markup, /Syncing saved progress/);
-    assert.match(markup, /Muse’s live feed is unavailable\. Helicon checks saved progress automatically without resending your task\./);
+    assert.match(markup, /Muse’s live feed is unavailable\. Ancilla checks saved progress automatically without resending your task\./);
     assert.match(markup, /Reload results/);
     assert.match(markup, /Last checked/);
     assert.doesNotMatch(markup, /This thread stopped receiving updates|Progress updated|spin-ring/);

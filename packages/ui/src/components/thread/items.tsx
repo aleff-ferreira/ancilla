@@ -50,7 +50,7 @@ const TOOL_ICONS: Record<ToolKind, (props: { size: number; className?: string })
  * One work-log row: icon, label, an inline chip for what it acted on, and an expandable body.
  * Hovering swaps the icon for the disclosure chevron.
  * Layout via Beautiful UI ToolChips (beautifului.dev), MIT (c) 2026 Shane Levine.
- * Adapted: Helicon tokens, Phosphor icons, real tool data, Collapse body.
+ * Adapted: Ancilla tokens, Phosphor icons, real tool data, Collapse body.
  */
 function Row(props: {
   icon: ReactNode;
@@ -637,7 +637,7 @@ export const ShellRow = memo(function ShellRow(props: { item: MspItem; sessionId
             {noSandbox ? (
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
                 <p className="text-xs text-pretty text-muted">
-                  Muse can't sandbox <code className="font-mono">!</code> commands when Helicon hosts it, so this one never started. The
+                  Muse can't sandbox <code className="font-mono">!</code> commands when Ancilla hosts it, so this one never started. The
                   agent's own shell works.
                 </p>
                 {props.sessionId && item.commandText ? <AskToRun sessionId={props.sessionId} command={item.commandText} /> : null}

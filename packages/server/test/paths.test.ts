@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PathError, resolveUserPath } from "../src/paths.js";
-import { HeliconServer } from "../src/server.js";
+import { AncillaServer } from "../src/server.js";
 
 async function request(base: string, path: string, body?: unknown, method = body === undefined ? "GET" : "POST") {
   const res = await fetch(`${base}${path}`, {
@@ -27,7 +27,7 @@ describe("typed paths", () => {
   });
 
   it("lists folders for the picker, creates missing ones and refuses to clone into a full folder", async () => {
-    const root = await mkdtemp(join(tmpdir(), "helicon-fs-"));
+    const root = await mkdtemp(join(tmpdir(), "ancilla-fs-"));
     after(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "beta"));
     await mkdir(join(root, "Alpha"));
@@ -35,7 +35,7 @@ describe("typed paths", () => {
     await writeFile(join(root, "notes.txt"), "");
     await writeFile(join(root, "beta", "README.md"), "");
 
-    const server = new HeliconServer({
+    const server = new AncillaServer({
       port: 0,
       dataDir: ":memory:",
       platform: process.platform === "win32" ? "win32" : "linux",

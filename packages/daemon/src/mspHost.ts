@@ -17,7 +17,7 @@ export interface ServeExit {
   signal: string | null;
 }
 
-export const HELICON_CLIENT_NAME = "helicon";
+export const ANCILLA_CLIENT_NAME = "ancilla";
 export const SDK_TIER_OFF_EXIT_CODE = 5;
 
 export type ServeExitClass = "clean" | "sdk-tier-off" | "signalled" | "error";
@@ -50,7 +50,7 @@ export function serveExitMessage(exitClass: ServeExitClass): string {
 
 const STDERR_TAIL_LINES = 12;
 
-export class HeliconMspHost {
+export class AncillaMspHost {
   private handshake: MspHandshake | null = null;
   private msp: MspSession | null = null;
   private stderrTail: string[] = [];
@@ -80,7 +80,7 @@ export class HeliconMspHost {
     } as Parameters<SpawnMspConnection>[0]);
     try {
       this.msp = await this.handshake.initialize({
-        clientInfo: { name: HELICON_CLIENT_NAME, version: clientVersion },
+        clientInfo: { name: ANCILLA_CLIENT_NAME, version: clientVersion },
         // `!` commands in the composer run through session/userShell, which the host grants per connection.
         capabilities: { requestedCapabilities: ["userShell"] },
       });
@@ -103,7 +103,7 @@ export class HeliconMspHost {
 
   get connection(): CommandConnection {
     if (!this.msp) {
-      throw new Error("HeliconMspHost: call start() before using the connection.");
+      throw new Error("AncillaMspHost: call start() before using the connection.");
     }
     return this.msp.connection as unknown as CommandConnection;
   }
@@ -120,7 +120,7 @@ export class HeliconMspHost {
 
   async close(): Promise<ServeExit> {
     if (!this.msp) {
-      throw new Error("HeliconMspHost: call start() before close().");
+      throw new Error("AncillaMspHost: call start() before close().");
     }
     this.closing = true;
     const exit = await this.msp.close();

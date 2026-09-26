@@ -1,32 +1,32 @@
 import { useEffect, useState, type ReactElement } from "react";
-import type { HeliconClient } from "../client";
-import { AddProjectDialog } from "../components/sidebar/AddProjectDialog";
-import { WhatsNew } from "../components/app/WhatsNew";
-import { BootError, BootScreen, NewThread, Onboarding, Welcome } from "../components/home/Home";
-import { CommandPalette } from "../components/palette/CommandPalette";
-import { isTyping } from "../components/requests/Requests";
-import { SettingsPage } from "../components/settings/SettingsPage";
-import { Sidebar } from "../components/sidebar/Sidebar";
-import { ThreadView } from "../components/thread/ThreadView";
-import { UsagePage } from "../components/usage/UsagePage";
-import { TooltipProvider } from "../components/ui/overlays";
-import { cn, isMac } from "../components/ui/primitives";
-import { Toasts } from "../components/ui/Toasts";
-import { HeliconController, type Platform } from "../model/controller";
-import type { Notifier } from "../model/notify";
-import type { AppUpdater } from "../model/updates";
-import { zoomStepFromKey, type ZoomStep } from "../model/zoom-shortcut";
-import { ControllerProvider, useApp, useController } from "./context";
-import { FrameProvider, FrameStrip, WindowControls, type WindowFrame } from "./frame";
+import type { AncillaClient } from "../client.js";
+import { AddProjectDialog } from "../components/sidebar/AddProjectDialog.js";
+import { WhatsNew } from "../components/app/WhatsNew.js";
+import { BootError, BootScreen, NewThread, Onboarding, Welcome } from "../components/home/Home.js";
+import { CommandPalette } from "../components/palette/CommandPalette.js";
+import { isTyping } from "../components/requests/Requests.js";
+import { SettingsPage } from "../components/settings/SettingsPage.js";
+import { Sidebar } from "../components/sidebar/Sidebar.js";
+import { ThreadView } from "../components/thread/ThreadView.js";
+import { UsagePage } from "../components/usage/UsagePage.js";
+import { TooltipProvider } from "../components/ui/overlays.js";
+import { cn, isMac } from "../components/ui/primitives.js";
+import { Toasts } from "../components/ui/Toasts.js";
+import { AncillaController, type Platform } from "../model/controller.js";
+import type { Notifier } from "../model/notify.js";
+import type { AppUpdater } from "../model/updates.js";
+import { zoomStepFromKey, type ZoomStep } from "../model/zoom-shortcut.js";
+import { ControllerProvider, useApp, useController } from "./context.js";
+import { FrameProvider, FrameStrip, WindowControls, type WindowFrame } from "./frame.js";
 
 declare global {
   interface WindowEventMap {
-    "helicon-zoom-step": CustomEvent<ZoomStep>;
+    "ancilla-zoom-step": CustomEvent<ZoomStep>;
   }
 }
 
-export interface HeliconAppProps {
-  client: HeliconClient;
+export interface AncillaAppProps {
+  client: AncillaClient;
   platform?: Platform;
   /** Present when a desktop shell wants the UI to draw the window's title bar. */
   frame?: WindowFrame;
@@ -38,10 +38,10 @@ export interface HeliconAppProps {
   notifier?: Notifier;
 }
 
-/** The whole Helicon interface. Web and desktop shells mount this with their transport. */
-export function HeliconApp(props: HeliconAppProps) {
+/** The whole Ancilla interface. Web and desktop shells mount this with their transport. */
+export function AncillaApp(props: AncillaAppProps) {
   const [controller] = useState(() => {
-    const created = new HeliconController(props.client, props.platform);
+    const created = new AncillaController(props.client, props.platform);
     if (props.updater) {
       created.attachUpdater(props.updater);
     }
@@ -95,7 +95,7 @@ function ZoomSync() {
   const zoom = useApp((s) => s.prefs.zoom);
   useEffect(() => {
     // CSS `zoom` on <html> breaks Radix `position: fixed` menus in WKWebView (the desktop
-    // shell). The desktop page listens for `helicon-zoom` and uses the webview's own zoom
+    // shell). The desktop page listens for `ancilla-zoom` and uses the webview's own zoom
     // instead. Browsers keep CSS zoom; engines that lack it fall back to the root font size.
     // The pre-paint script in index.html applies the same split so a reload never flashes 100%.
     const root = document.documentElement;
@@ -106,7 +106,7 @@ function ZoomSync() {
         style.zoom = "";
       }
       root.style.fontSize = "";
-      window.dispatchEvent(new CustomEvent("helicon-zoom", { detail: zoom }));
+      window.dispatchEvent(new CustomEvent("ancilla-zoom", { detail: zoom }));
       return;
     }
     if ("zoom" in style) {
@@ -119,7 +119,7 @@ function ZoomSync() {
   return null;
 }
 
-function applyZoomStep(controller: HeliconController, step: ZoomStep) {
+function applyZoomStep(controller: AncillaController, step: ZoomStep) {
   if (step === "in") {
     controller.zoomIn();
   } else if (step === "out") {
@@ -175,10 +175,10 @@ function GlobalShortcuts() {
       }
     };
     window.addEventListener("keydown", onKey, true);
-    window.addEventListener("helicon-zoom-step", onMenuZoom);
+    window.addEventListener("ancilla-zoom-step", onMenuZoom);
     return () => {
       window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("helicon-zoom-step", onMenuZoom);
+      window.removeEventListener("ancilla-zoom-step", onMenuZoom);
     };
   }, [controller]);
   return null;

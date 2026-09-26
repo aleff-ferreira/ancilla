@@ -6,9 +6,9 @@ describe("desktop links", () => {
   const origin = "http://127.0.0.1:52314";
   it("sends outside web and mail links to the browser", () => {
     assert.equal(externalHref("https://github.com/o/r/pull/90", origin), "https://github.com/o/r/pull/90");
-    assert.equal(externalHref("mailto:hi@helicon.sh", origin), "mailto:hi@helicon.sh");
+    assert.equal(externalHref("mailto:hi@example.com", origin), "mailto:hi@example.com");
   });
-  it("keeps Helicon's own pages and file links in the app", () => {
+  it("keeps Ancilla's own pages and file links in the app", () => {
     assert.equal(externalHref("/threads/abc", origin), null);
     assert.equal(externalHref("src/app.ts#L3", origin), null);
     assert.equal(externalHref("http://127.0.0.1:52314/api/files/raw", origin), null);

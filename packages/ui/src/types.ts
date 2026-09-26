@@ -317,7 +317,7 @@ export interface DirectoryListing {
   entries: { name: string }[];
 }
 
-/** A `!` command Helicon ran itself in the workspace, with what it printed. */
+/** A `!` command Ancilla ran itself in the workspace, with what it printed. */
 export interface ShellRun {
   id: string;
   sessionId: string;
@@ -357,7 +357,7 @@ export interface UsageThread {
   lastAt: string;
 }
 
-/** Every model call Helicon has seen, bucketed; the UI puts prices on it. */
+/** Every model call Ancilla has seen, bucketed; the UI puts prices on it. */
 export interface UsageReport {
   since: string;
   days: number;
@@ -474,7 +474,7 @@ export interface TranscriptLoad {
   truncated: boolean;
   /** Every file attached to this thread's prompts, in send order. */
   attachments?: AttachmentView[];
-  /** Every `!` command Helicon ran itself for this thread. */
+  /** Every `!` command Ancilla ran itself for this thread. */
   shellRuns?: ShellRun[];
   pending: { approvals: ApprovalRequest[]; userInputs: UserInputRequest[] };
   readOnly: boolean;
@@ -485,7 +485,7 @@ export interface TranscriptLoad {
   viewHealth?: { status: string; reason: string | null } | null;
 }
 
-export type HeliconEvent =
+export type AncillaEvent =
   | { type: "hello"; version: string }
   | { type: "msp"; sessionId: string; method: string; params: Record<string, unknown>; at: number }
   | { type: "session-status"; sessionId: string; live: LiveView | null }

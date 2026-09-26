@@ -292,7 +292,7 @@ export const Markdown = memo(function Markdown(props: { text: string; className?
   const mode = streamRenderMode(props.text.length, props.stream ?? false);
   const shown = useSampledText(props.text, mode === "sampled", STREAM_SAMPLE_MS);
   return (
-    <div className={cn("prose-helicon", props.className)}>
+    <div className={cn("prose-ancilla", props.className)}>
       <ReactMarkdown remarkPlugins={PLUGINS} rehypePlugins={mode === "words" ? STREAM_PLUGINS : undefined} components={COMPONENTS}>
         {shown}
       </ReactMarkdown>

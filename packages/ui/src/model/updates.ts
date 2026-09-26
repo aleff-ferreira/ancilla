@@ -15,7 +15,7 @@ export interface AppUpdater {
   check(): Promise<AvailableUpdate | null>;
   /** Downloads the update the last check found. `fraction` runs from 0 to 1 when the size is known. */
   download(onProgress: (fraction: number | null) => void): Promise<void>;
-  /** Installs the downloaded update. On Windows the app quits and the installer takes over; `restart` reopens Helicon after. */
+  /** Installs the downloaded update. On Windows the app quits and the installer takes over; `restart` reopens Ancilla after. */
   install(options: { restart: boolean }): Promise<void>;
   /** Reopens the app, for platforms where installing does not. */
   relaunch(): Promise<void>;
@@ -131,7 +131,7 @@ export class UpdateManager {
     return this.run(() => this.fetch());
   }
 
-  /** Installs the downloaded update and reopens Helicon on the new version. */
+  /** Installs the downloaded update and reopens Ancilla on the new version. */
   restart(): Promise<void> {
     return this.run(async () => {
       if (this.state.status !== "ready") {

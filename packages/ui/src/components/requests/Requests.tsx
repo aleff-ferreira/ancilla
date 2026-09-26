@@ -160,7 +160,7 @@ export function ApprovalPanel(props: { request: ApprovalRequest; primary: boolea
           })}
           {choices.length === 0 ? <p className="text-xs text-muted">No choices were offered. Decide in the Muse terminal.</p> : null}
           {!armed && primaryChoice ? (
-            <Tip label="Allow this and everything else this thread asks, until you close Helicon">
+            <Tip label="Allow this and everything else this thread asks, until you close Ancilla">
               <button
                 type="button"
                 onClick={() => controller.setThreadBypass(request.sessionId, true)}
@@ -210,7 +210,7 @@ function answerFor(question: UserInputQuestion, picks: Picks, custom: Custom): U
  * Muse's questions, one at a time. Single-choice answers advance on their own; the last one
  * sends. A "something else" row takes a free-text answer.
  * via Beautiful UI ApprovalCard (beautifului.dev), MIT (c) 2026 Shane Levine.
- * Adapted: real MSP questions and answers, Helicon tokens, crossfade instead of a measured slide.
+ * Adapted: real MSP questions and answers, Ancilla tokens, crossfade instead of a measured slide.
  */
 export function QuestionPanel(props: { request: UserInputRequest; keyboard: boolean }) {
   const controller = useController();
@@ -528,9 +528,9 @@ export function StalledNotice(props: {
       <div className="min-w-0 flex-1">
         <p role="status" className="text-sm font-medium text-fg">{syncing ? "Syncing saved progress" : "This thread stopped receiving updates"}</p>
         <p className="mt-0.5 text-xs text-muted">
-          {syncing ? "Muse’s live feed is unavailable. Helicon checks saved progress automatically without resending your task." : <>
+          {syncing ? "Muse’s live feed is unavailable. Ancilla checks saved progress automatically without resending your task." : <>
             Live updates are unavailable. Muse may still be working, or may already have finished.
-            Helicon checks saved results without sending your task again. You can refresh the results now.
+            Ancilla checks saved results without sending your task again. You can refresh the results now.
           </>}
         </p>
         {props.historySync ? (

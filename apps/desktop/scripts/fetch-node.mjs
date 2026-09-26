@@ -1,4 +1,4 @@
-// Downloads the Node.js runtime Helicon ships as a Tauri sidecar, so users do not install Node themselves.
+// Downloads the Node.js runtime Ancilla ships as a Tauri sidecar, so users do not install Node themselves.
 // Tauri wants one file per target triple in src-tauri/binaries (node-<triple>[.exe]); a universal macOS
 // build also wants node-universal-apple-darwin, which lipo makes from the two halves.
 import { createHash } from "node:crypto";
@@ -30,7 +30,7 @@ function hostTriple() {
   return null;
 }
 
-const target = process.env.HELICON_NODE_TARGET || process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
+const target = process.env.ANCILLA_NODE_TARGET || process.env.TAURI_ENV_TARGET_TRIPLE || hostTriple();
 
 async function exists(path) {
   return stat(path).then(
@@ -81,7 +81,7 @@ async function place(source, triple) {
 }
 
 if (!target) {
-  throw new Error("cannot tell which Node.js build to bundle; set HELICON_NODE_TARGET to a target triple");
+  throw new Error("cannot tell which Node.js build to bundle; set ANCILLA_NODE_TARGET to a target triple");
 }
 
 await rm(binariesDir, { recursive: true, force: true });

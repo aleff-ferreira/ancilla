@@ -1,5 +1,5 @@
 // via beUI AnimatedToastStack (beui.dev), MIT (c) 2026 Saurabh Chauhan.
-// Adapted: driven by the Helicon store, project tokens, no backdrop blur, chronological stack.
+// Adapted: driven by the Ancilla store, project tokens, no backdrop blur, chronological stack.
 import { CheckIcon, InfoIcon, WarningCircleIcon, XIcon } from "./icons.js";
 import { AnimatePresence, motion, useReducedMotion, type Transition } from "motion/react";
 import { useApp, useController } from "../../app/context.js";
