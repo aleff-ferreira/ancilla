@@ -268,6 +268,11 @@ export interface ResearchRunState {
   nextAgentId: number;
   /** The `seq` of the last event this run emitted, so a resumed run keeps `(runId, seq)` unique. */
   eventSeq: number;
+  /**
+   * How the supervisor loop ended, recorded when research ends so a run resumed at the writing phase still knows
+   * whether it is writing a salvage report (`partial`) or a finished one. Absent until the loop has ended.
+   */
+  loopExit?: { salvage: boolean; reason: string | null };
 }
 
 export interface ResearchOutcome {
@@ -297,4 +302,10 @@ export interface ResearchDeps {
   checkpoint(state: ResearchRunState): Promise<void> | void;
   now(): number;
   log?(message: string): void;
+  /**
+   * Ends a salvage write. The run's own signal has already fired by the time a stop-and-write report is written,
+   * so the host hands the engine a second signal for the moment the user (or a shutdown) no longer wants that
+   * report either. Optional: without it a salvage write runs to its timeout.
+   */
+  hardStop?: AbortSignal;
 }

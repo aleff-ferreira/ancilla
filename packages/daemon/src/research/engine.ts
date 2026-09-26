@@ -151,7 +151,11 @@ async function draft(ctx: RunContext): Promise<void> {
 
 type WriteResult = { ok: true; report: string } | { ok: false; error: string };
 
-/** Two attempts with upstream's rejection rules, then the deterministic citation pass. */
+/**
+ * Two attempts with upstream's rejection rules, then the deterministic citation pass. A rejected answer gets the
+ * second attempt with a nudge and so does a transport failure worth retrying; a failure that would not change on
+ * a second call (an `invalid_output`, say) ends the attempts at once.
+ */
 async function write(ctx: RunContext, salvage: boolean): Promise<WriteResult> {
   const { state } = ctx;
   const registry = buildFinalRegistry(state.registry, state.curated);
@@ -181,7 +185,7 @@ async function write(ctx: RunContext, salvage: boolean): Promise<WriteResult> {
     try {
       text = await ctx.complete("writer", attempt === 1 ? prompt : `${prompt}\n\n${WRITER_RETRY_NUDGE}`);
     } catch (error) {
-      if (error instanceof ResearchFailure && !error.fatal) {
+      if (error instanceof ResearchFailure && error.retryable) {
         lastReason = `${error.kind}: ${error.message}`;
         ctx.log(`writer attempt ${attempt} failed (${lastReason})`);
         continue;
@@ -257,8 +261,10 @@ async function cancel(ctx: RunContext): Promise<ResearchOutcome> {
     await ctx.checkpoint();
     return { status: "cancelled", report: null, state, failure: "cancelled" };
   }
-  // The run's signal has fired, so the salvage write gets its own; the writer timeout bounds it.
-  ctx.writeSignal = new AbortController().signal;
+  // The run's signal has fired, so the salvage write gets its own; the writer timeout bounds it, and the host's
+  // `hardStop` (a second stop, or a shutdown) ends it early when one is given.
+  const salvageSignal = new AbortController().signal;
+  ctx.writeSignal = ctx.deps.hardStop ? AbortSignal.any([ctx.deps.hardStop, salvageSignal]) : salvageSignal;
   state.phase = "writing";
   await ctx.checkpoint();
   try {
@@ -325,12 +331,16 @@ export async function runResearch(
       if (loopExit.kind === "aborted") {
         return await finish(ctx, { status: "failed", report: null, state, failure: loopExit.reason });
       }
+      // Recorded before the phase checkpoint, so a run resumed at the writing phase still ends `partial` when
+      // the loop ended in a salvage rather than a finished round.
+      state.loopExit = { salvage: loopExit.salvage, reason: loopExit.reason };
       await setPhase(ctx, "writing");
     }
 
     ctx.checkCancelled();
-    const salvage = loopExit?.salvage ?? false;
-    return await writeAndFinish(ctx, salvage, loopExit?.reason ?? null);
+    // A resumed run has no loop exit of its own and takes the one its checkpoint recorded.
+    const exit = loopExit ?? state.loopExit ?? null;
+    return await writeAndFinish(ctx, exit?.salvage ?? false, exit?.reason ?? null);
   } catch (error) {
     if (error instanceof RunCancelled) return cancel(ctx);
     if (error instanceof ResearchFailure) {

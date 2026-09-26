@@ -1,5 +1,6 @@
 import {
   ResearchFailure,
+  addUsage,
   type ExecFn,
   type ExecResult,
   type ModelClient,
@@ -108,12 +109,18 @@ export interface ParsedExecOutput {
  * text wins, concatenated `run.output.delta` chunks stand in when the terminal record is missing, and anything
  * that is not JSON is skipped. Usage and the model id are taken from whichever event carries them; the title path
  * never needed either, so their exact shape is read leniently and null stands for "not reported".
+ *
+ * Usage, in particular, is UNVERIFIED against a real `muse exec` stream: it is not known whether the terminal
+ * record carries the call's totals, whether each delta carries its own increment, or both. The reading here
+ * follows the safer assumption for a total that appears twice: a terminal record's usage is taken as the call's
+ * total and wins outright; only when the terminal record carries none are the deltas' usages summed.
  */
 export function parseExecOutput(stdout: string): ParsedExecOutput {
   let terminalText: string | null = null;
   let terminal: string | null = null;
   let deltas = "";
-  let usage: TokenUsage | null = null;
+  let terminalUsage: TokenUsage | null = null;
+  let deltaUsage: TokenUsage | null = null;
   let modelId: string | null = null;
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -132,16 +139,21 @@ export function parseExecOutput(stdout: string): ParsedExecOutput {
       continue;
     }
     const found = usageOf(payload["usage"] !== undefined || payload["promptTokens"] !== undefined ? payload : record["usage"]);
-    if (found) {
-      usage = usage ? { ...found, inputTokens: usage.inputTokens + found.inputTokens, outputTokens: usage.outputTokens + found.outputTokens, cachedInputTokens: usage.cachedInputTokens + found.cachedInputTokens, totalTokens: usage.totalTokens + found.totalTokens } : found;
-    }
     const model = payload["modelId"] ?? payload["model"] ?? record["modelId"];
     if (typeof model === "string" && model) {
       modelId = model;
     }
     const text = typeof payload["text"] === "string" ? payload["text"] : "";
     const payloadType = record["payload_type"];
-    if (payloadType === "run.terminal.completed" || payload["kind"] === "run_terminal") {
+    const isTerminal = payloadType === "run.terminal.completed" || payload["kind"] === "run_terminal";
+    if (found) {
+      if (isTerminal) {
+        terminalUsage = found;
+      } else {
+        deltaUsage = deltaUsage ? addUsage(deltaUsage, found) : found;
+      }
+    }
+    if (isTerminal) {
       const outcome = payload["terminal"];
       if (outcome !== undefined && outcome !== "completed") {
         terminal = typeof outcome === "string" ? outcome : String(outcome);
@@ -154,7 +166,7 @@ export function parseExecOutput(stdout: string): ParsedExecOutput {
       deltas += text;
     }
   }
-  return { text: terminalText ?? (deltas || null), usage, modelId, terminal };
+  return { text: terminalText ?? (deltas || null), usage: terminalUsage ?? deltaUsage, modelId, terminal };
 }
 
 /** The failure kind a failed `muse exec` maps to, read off its exit and whatever it printed. */
