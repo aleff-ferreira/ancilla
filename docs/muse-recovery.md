@@ -143,7 +143,10 @@ yourself:
 2. If the feed stalls, **Syncing saved progress** appears and **Last checked** advances about every 15 seconds, while
    the transcript and the Agents panel keep filling in.
 3. The server's `/api/health` shows how long each session's feed has been quiet (`diagnostics.sessions`). For the web
-   server that is `http://127.0.0.1:3127/api/health`.
+   server on its default port that is `http://127.0.0.1:3127/api/health`; if you started it with `--token`, the
+   endpoint needs that token like the rest of the API (sign in on that address first, or send
+   `Authorization: Bearer <token>`). The desktop app's server picks its own port and keeps it in the `server-port`
+   file in the app's [data directory](#runtime-configuration).
 4. When the run finishes, the notice disappears and the turn shows its real outcome. The thread holds one copy of your
    prompt, and Muse's own session history shows no extra turn.
 

@@ -201,18 +201,19 @@ apps/web         the same UI in a browser, against a local or remote server
 Your code, prompts, threads and files stay where they are. Ancilla talks to the `muse` CLI on your own computer, with
 your own login, and keeps its state in SQLite beside it. There is no account, no telemetry and no analytics in the app.
 
-The one request Ancilla itself makes is the desktop app's **update check**: soon after launch and every six hours it
-fetches `latest.json` from this repository's
+The only request Ancilla makes on its own schedule is the desktop app's **update check**: soon after launch and every
+six hours it fetches `latest.json` from this repository's
 [GitHub Releases](https://github.com/aleff-ferreira/ancilla/releases). A newer version's installer is downloaded from
 the same release, and its signature is verified before it installs. **Pause updates** in Settings stops the automatic
-checks. The web app has no updater. The desktop window's content security policy only lets the
-interface connect to Ancilla's own server on `127.0.0.1`.
+checks. The web app has no updater.
 
-Other traffic happens because of Muse or because you asked for it:
+Other traffic happens because of Muse or because of what you open:
 
 - **Muse Code itself** talks to Meta's services under your login; that is what running an agent means. Features that
   call `muse` for you, like generated thread titles (one `muse exec` call on your plan, and a switch in Settings) and
   in-app `muse login`, go the same way.
+- **Images in Markdown** that point at a web address, in Muse's replies or in a Markdown file you preview, load from
+  that address, the same way a browser shows them. The interface does not block or proxy them.
 - **Adding a project from a Git URL** runs `git clone` on your machine.
 - **The web app** connects to the server address you give it on `#/connect`.
 - **Links in replies** open in your default browser.
