@@ -3,5 +3,6 @@ export * from "./config.js";
 export * from "./view.js";
 export * from "./engine.js";
 export * from "./citations.js";
+export * from "./notes.js";
 export * from "./parse.js";
 export * from "./prompts/index.js";

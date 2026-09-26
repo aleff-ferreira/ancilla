@@ -130,9 +130,13 @@ export class RunContext {
   }
 }
 
-/** Whether any worker delivered findings of task value (upstream `_has_research_findings`). */
+/**
+ * Whether any worker delivered findings of task value (upstream `_has_research_findings`): a completed worker
+ * with findings text or saved sources, a verified registry entry, or a verified curated source. Failure notes
+ * are notes, not findings, and a source nobody fetched cannot be cited, so neither makes a report worth writing.
+ */
 export function hasFindings(state: ResearchRunState): boolean {
-  if (state.registry.length > 0 || state.curated.length > 0) return true;
+  if (state.registry.some((entry) => entry.verified) || state.curated.some((source) => source.verified)) return true;
   return state.rounds.some((round) =>
     round.results.some((result) => result.status === "completed" && (result.findingsChars > 0 || result.savedCount > 0)),
   );

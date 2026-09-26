@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { RunContext } from "../src/research/context.js";
 import { mapWithLimit, runSupervisorLoop } from "../src/research/supervisor.js";
-import type { ResearchConfig, ResearchRunState } from "../src/research/index.js";
+import { NOTE_CHAR_CAP, ResearchFailure, type ResearchConfig, type ResearchRunState } from "../src/research/index.js";
 import {
   FakeClock,
   FakeModel,
@@ -11,6 +11,7 @@ import {
   completedResult,
   decision,
   failedResult,
+  fetchCall,
   makeHarness,
   researchingState,
   saved,
@@ -228,13 +229,68 @@ describe("supervisor loop workers", () => {
     assert.equal(run.harness.checkpoints[run.harness.checkpoints.length - 1]?.rounds[2]?.exit, "research complete");
   });
 
+  it("caps each note at NOTE_CHAR_CAP when it is written, keeping the header and the sources block", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({ supervisor: [decision("CONTINUE_RESEARCH", ["Long"]), decision("RESEARCH_COMPLETE", [])] });
+    model.onCall = () => clock.advanceMinutes(4);
+    const url = "https://example.org/long";
+    const worker = new FakeWorker(() => completedResult("x".repeat(20_000), [saved(url, "Long source", "supports it")], [fetchCall(url)]));
+    const run = loop(testConfig(), model, worker, clock);
+    await runSupervisorLoop(run.ctx);
+    assert.equal(run.state.notes.length, 1);
+    const note = run.state.notes[0] ?? "";
+    assert.ok(note.length <= NOTE_CHAR_CAP, `the note is ${note.length} chars`);
+    assert.match(note, /^## Worker A1 \(round 1, research\): Long\n\nxxx/);
+    assert.match(note, /…\[truncated\]\n\nSources saved by this worker:\n\[A1-S1\] Long source \(https:\/\/example.org\/long\) - verified - supports it$/);
+    // A failure note is capped the same way.
+    const clock2 = new FakeClock();
+    const failing = new FakeWorker(() => failedResult(`other: ${"e".repeat(20_000)}`));
+    const run2 = loop(testConfig(), busySupervisor(clock2, 0.5), failing, clock2);
+    await runSupervisorLoop(run2.ctx);
+    assert.ok(run2.state.notes.length > 0);
+    assert.ok(run2.state.notes.every((n) => n.length <= NOTE_CHAR_CAP && /…\[truncated\]$/.test(n)));
+  });
+
+  it("retries a decision only on a retryable failure, never on invalid_output", async () => {
+    const clock = new FakeClock();
+    const invalid = new FakeModel({ supervisor: [new ResearchFailure("invalid_output", "muse exec printed no answer."), decision("CONTINUE_RESEARCH", ["A"])] });
+    const run = loop(testConfig(), invalid, new FakeWorker(verifiedWorkerScript()), clock);
+    const exit = await runSupervisorLoop(run.ctx);
+    assert.equal(invalid.counts.supervisor, 1, "an invalid_output is not retried");
+    assert.equal(exit.kind, "aborted");
+    assert.match(exit.reason, /supervisor decision failed/);
+    assert.ok(run.harness.logs.some((line) => /not retried/.test(line)));
+
+    const clock2 = new FakeClock();
+    const flaky = new FakeModel({ supervisor: [new ResearchFailure("rate_limited", "429"), decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])] });
+    flaky.onCall = () => clock2.advanceMinutes(4);
+    const run2 = loop(testConfig(), flaky, new FakeWorker(verifiedWorkerScript()), clock2);
+    const exit2 = await runSupervisorLoop(run2.ctx);
+    assert.equal(flaky.counts.supervisor, 3, "a rate limit gets the second attempt");
+    assert.equal(exit2.kind === "write" && exit2.reason, "research complete");
+  });
+
+  it("does not salvage from failure notes alone: failed or empty workers, then a silent supervisor, abort", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({ supervisor: [decision("CONTINUE_RESEARCH", ["Empty", "Broken"]), "no json", "still nothing"] });
+    model.onCall = () => clock.advanceMinutes(2);
+    const worker = new FakeWorker((task) => (task.agentId === 1 ? completedResult("", []) : failedResult("other: boom")));
+    const run = loop(testConfig({ windowMaxMinutes: 10, salvageFraction: 0.1 }), model, worker, clock);
+    const exit = await runSupervisorLoop(run.ctx);
+    assert.equal(run.state.notes.length, 2, "an empty completion and a failure both leave a note");
+    assert.equal(exit.kind, "aborted");
+    assert.match(exit.reason, /supervisor decision failed with no findings to write from/);
+    assert.equal(model.counts.supervisor, 3);
+  });
+
   it("aborts when the supervisor fails twice before anything was found", async () => {
     const clock = new FakeClock();
     const model = new FakeModel({ supervisor: ["no json here", "still nothing"] });
     const run = loop(testConfig(), model, new FakeWorker(), clock);
     const exit = await runSupervisorLoop(run.ctx);
     assert.equal(exit.kind, "aborted");
-    assert.match(exit.reason, /supervisor decision failed twice/);
+    assert.match(exit.reason, /supervisor decision failed/);
+    assert.equal(model.counts.supervisor, 2);
     assert.match(model.calls[1]?.prompt ?? "", /did not contain a valid fenced JSON decision/);
   });
 });

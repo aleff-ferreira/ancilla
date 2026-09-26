@@ -10,6 +10,7 @@
  */
 
 import type { FinalRegistryEntry } from "../citations.js";
+import { NOTES_BLOCK_CHAR_BUDGET, notesBlock } from "../notes.js";
 import { formatPromptDate } from "./common.js";
 
 export interface WriterPromptInput {
@@ -52,9 +53,31 @@ export function buildCuratedTextBlock(registry: FinalRegistryEntry[]): string {
     : "(No additional source text - the sources are already covered in the research findings above.)";
 }
 
+/** The curated sources without their excerpts: what the writer gets when the excerpts would not fit the budget. */
+export function buildCuratedListBlock(registry: FinalRegistryEntry[]): string {
+  const parts = registry
+    .filter((entry) => (entry.excerpt ?? "").trim())
+    .map((entry) => `[${entry.code}] ${(entry.title ?? "").trim() || "Untitled"} (${entry.url})${entry.reason ? ` - ${entry.reason}` : ""}`);
+  if (parts.length === 0) return "(No additional source text - the sources are already covered in the research findings above.)";
+  return `(Source excerpts were left out to keep this prompt within its budget; cite these sources from the research findings above.)\n${parts.join("\n")}`;
+}
+
+/**
+ * The material blocks of the writer prompt, budgeted: the notes are compacted oldest first (see `notes.ts`), and
+ * when the notes and the curated excerpts together still exceed the budget the excerpts give way, because the
+ * findings already cite every source and the registry keeps each source's title, URL and relevance.
+ */
+export function writerMaterial(notes: string[], registry: FinalRegistryEntry[], budget: number = NOTES_BLOCK_CHAR_BUDGET): { notes: string; curated: string; excerptsDropped: boolean } {
+  const block = notes.length > 0 ? notesBlock(notes, budget) : "(no research findings were collected)";
+  const full = buildCuratedTextBlock(registry);
+  if (block.length + full.length <= budget) return { notes: block, curated: full, excerptsDropped: false };
+  return { notes: block, curated: buildCuratedListBlock(registry), excerptsDropped: true };
+}
+
 export function buildWriterPrompt(input: WriterPromptInput): string {
   const lang = input.targetLanguage;
-  const notes = input.notes.length > 0 ? input.notes.join("\n\n---\n\n") : "(no research findings were collected)";
+  const material = writerMaterial(input.notes, input.registry);
+  const notes = material.notes;
   const draft = input.draft?.trim() ? input.draft.trim() : "(no draft was written)";
   const reflection = input.lastReflection?.trim() ? input.lastReflection.trim() : "(no supervisor reflection is available)";
   const salvageNote = input.salvage
@@ -212,7 +235,7 @@ ${buildSourceRegistryBlock(input.registry)}
 </SOURCE REGISTRY>
 
 <CURATED SOURCE FULL TEXT>
-${buildCuratedTextBlock(input.registry)}
+${material.curated}
 </CURATED SOURCE FULL TEXT>
 
 Write the final report now. Answer with the report itself, as Markdown, and nothing else.

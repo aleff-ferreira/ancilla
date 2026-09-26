@@ -10,7 +10,8 @@
 
 import { RESEARCH_LIMITS } from "./config.js";
 import { assignCodes, normalizeUrl } from "./citations.js";
-import { RunContext, RunCancelled, shouldSalvage } from "./context.js";
+import { RunContext, RunCancelled, hasFindings, shouldSalvage } from "./context.js";
+import { capNote, capText } from "./notes.js";
 import { parseDecision, type ParsedDecision, type ParsedDelegation } from "./parse.js";
 import { DEFAULT_TARGET_LANGUAGE } from "./prompts/common.js";
 import { SUPERVISOR_RETRY_NUDGE, buildSupervisorPrompt } from "./prompts/supervisor.js";
@@ -68,8 +69,11 @@ function preDecisionExit(ctx: RunContext): string | null {
 }
 
 /**
- * One supervisor decision, two attempts as upstream. A fatal failure propagates and ends the run; two non-fatal
- * failures yield null and the caller decides what a silent supervisor means.
+ * One supervisor decision, two attempts as upstream. A fatal failure propagates and ends the run; a transport
+ * failure that is worth retrying (timeout, rate limit, unavailable) gets the second attempt, an answer without a
+ * usable decision gets it with a nudge, and any other failure (an `invalid_output`, say) ends the attempts at once
+ * because the same call would fail the same way. A null result means the caller decides what a silent supervisor
+ * means.
  */
 async function decide(ctx: RunContext, round: number, notice: string | null): Promise<ParsedDecision | null> {
   const { state, config } = ctx;
@@ -98,7 +102,9 @@ async function decide(ctx: RunContext, round: number, notice: string | null): Pr
       if (error instanceof ResearchFailure && !error.fatal) {
         lastReason = `${error.kind}: ${error.message}`;
         ctx.log(`supervisor decision attempt ${attempt} failed (${lastReason})`);
-        continue;
+        if (error.retryable) continue;
+        ctx.log(`supervisor decision not retried: ${error.kind} failures do not change on a second call`);
+        return null;
       }
       throw error;
     }
@@ -168,7 +174,8 @@ function mergeResult(ctx: RunContext, round: SupervisorRound, delegation: Delega
   const header = `## Worker A${delegation.agentId} (round ${round.round}, ${kind}): ${delegation.topic}`;
   const body = findings || "(the worker completed without written findings)";
   const sources = lines.length > 0 ? `\n\nSources saved by this worker:\n${lines.join("\n")}` : "";
-  state.notes.push(`${header}\n\n${body}${sources}`);
+  // Capped when written: every later supervisor and writer prompt carries every note (see `notes.ts`).
+  state.notes.push(capNote(header, body, sources));
   return { verified };
 }
 
@@ -258,7 +265,7 @@ async function runWorker(ctx: RunContext, round: SupervisorRound, delegation: De
     state.usage = addUsage(state.usage, result.usage);
     const error = result.error?.trim() || result.status;
     summary.error = error;
-    state.notes.push(failureNote(delegation, error));
+    state.notes.push(capText(failureNote(delegation, error)));
     ctx.emit("subagent_failed", { agentId: delegation.agentId, status: result.status, error }, options);
   }
   return summary;
@@ -303,8 +310,9 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
       const decision = await decide(ctx, roundNumber, notice);
       if (!decision) {
         // Upstream ends research gracefully when the supervisor fails twice; writing from nothing is not graceful.
-        const reason = "supervisor decision failed twice";
-        if (shouldSalvage(ctx) || state.notes.length > 0) {
+        // Only real findings count: failure notes and unverified sources are notes too, but not evidence.
+        const reason = "supervisor decision failed";
+        if (hasFindings(state)) {
           if (previous && previous.exit === null) previous.exit = reason;
           return { kind: "write", reason, salvage: true };
         }

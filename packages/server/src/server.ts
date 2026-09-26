@@ -44,7 +44,6 @@ import {
   type ResearchRunRecord,
   type ResearchRunState,
   type ResearchRunView,
-  type WorkerTask,
   type Project,
   type ServeTarget,
   type ReasoningEffort,
@@ -60,6 +59,8 @@ import { wslSpawnEnv } from "./runtimeConfig.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import {
   MuseExecModelClient,
+  MuseModelClient,
+  MuseSessionModelClient,
   MuseSessionWorkerRunner,
   ResearchJobManager,
   museExecArgs,
@@ -68,6 +69,7 @@ import {
   type ResearchEngine,
   type ResearchThread,
   type SessionNotificationHandler,
+  type TurnSession,
   type WorkerSessionHandle,
   type WorkerUpdate,
 } from "./research/index.js";
@@ -795,8 +797,6 @@ export class AncillaServer {
   private readonly researchJobs: ResearchJobManager;
   /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
   private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
-  /** Sessions a research run started to do its searching. Their approvals are decided by policy, never shown. */
-  private readonly researchWorkerSessions = new Set<string>();
 
   constructor(options: ServerOptions = {}) {
     this.options = {
@@ -832,19 +832,33 @@ export class AncillaServer {
       store: this.store,
       engine: options.researchEngine ?? runResearch,
       globalWorkerCap: options.researchMaxWorkers,
+      // `muse exec` while the prompt fits the command line, a turn in the run's control session when it does not.
       createModelClient: (run, thread) =>
-        new MuseExecModelClient({
-          exec: this.options.exec,
-          plan: (args) => this.planMuseExec(args, thread.accountId),
-          models: run.config.models,
-          fallbackModelId: thread.modelId,
+        new MuseModelClient({
+          exec: new MuseExecModelClient({
+            exec: this.options.exec,
+            plan: (args) => this.planMuseExec(args, thread.accountId),
+            models: run.config.models,
+            fallbackModelId: thread.modelId,
+            platform: this.options.platform,
+            log: (message) => this.log(message),
+          }),
+          session: new MuseSessionModelClient({
+            host: {
+              startControlSession: (modelId) => this.startResearchSession(thread, "Research control", modelId),
+              subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
+              log: (message) => this.log(message),
+            },
+            models: run.config.models,
+            fallbackModelId: thread.modelId,
+          }),
           platform: this.options.platform,
           log: (message) => this.log(message),
         }),
       createWorkerRunner: (run, thread, onWorkerUpdate) =>
         new MuseSessionWorkerRunner({
           host: {
-            startWorkerSession: (task, modelId) => this.startResearchWorkerSession(thread, task, modelId),
+            startWorkerSession: (task, modelId) => this.startResearchSession(thread, `Research worker A${task.agentId}`, modelId),
             subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
             onWorkerUpdate,
             log: (message) => this.log(message),
@@ -3342,11 +3356,13 @@ export class AncillaServer {
   }
 
   /**
-   * A worker session for one delegated research task, on the thread's own host so it shares the thread's folder
-   * and account. Recorded archived under `research-worker`, so it never reaches the sidebar; its usage still
-   * lands under the project. The approval mode is the host's default: the runner decides every request itself.
+   * A session a research run uses, on the thread's own host so it shares the thread's folder and account: a
+   * worker session for one delegated task, or the run's control session for the tool-less model calls that do
+   * not fit a command line. Recorded archived under `research-worker`, so it never reaches the sidebar; its usage
+   * still lands under the project. The approval mode is the host's default: the runner decides every request
+   * itself, and `isResearchSession` keeps such requests out of the live state clients see.
    */
-  private async startResearchWorkerSession(thread: ResearchThread, task: WorkerTask, modelId: string | null): Promise<WorkerSessionHandle> {
+  private async startResearchSession(thread: ResearchThread, title: string, modelId: string | null): Promise<WorkerSessionHandle & TurnSession> {
     if (this.closed) {
       throw new Error("Ancilla is shutting down.");
     }
@@ -3357,11 +3373,10 @@ export class AncillaServer {
       ...(modelId ? { modelId } : {}),
     });
     const raw = asRecord(asRecord(started.raw)?.["session"]);
-    this.researchWorkerSessions.add(started.sessionId);
     this.store.recordSession({
       id: started.sessionId,
       projectId: project.id,
-      title: `Research worker A${task.agentId}`,
+      title,
       titleSource: "auto",
       origin: "research-worker",
       modelId: raw ? str(raw["modelId"]) : null,
@@ -3390,6 +3405,15 @@ export class AncillaServer {
       "utf8",
     );
     return [...RESEARCH_DIR, run.id, "report.md"].join("/");
+  }
+
+  /**
+   * Whether a session belongs to a research run (a worker or the control session). Read from the store rather
+   * than from memory, so a session started before a restart is still known as one: its approvals and prompts
+   * are decided by the runner and never wait on the user, and its messages never earn a title.
+   */
+  private isResearchSession(sessionId: string): boolean {
+    return this.store.getSession(sessionId)?.origin === "research-worker";
   }
 
   /** The thread a run belongs to, as the adapters need it. */
@@ -3443,13 +3467,17 @@ export class AncillaServer {
       if (!commandId) {
         throw new HttpError(400, "commandId is required.");
       }
-      const existing = this.store.getResearchRunByCommand(commandId);
-      if (existing) {
-        this.json(res, 200, { run: this.researchJobs.view(existing, false) });
-        return true;
-      }
       if (!sessionId) {
         throw new HttpError(400, "sessionId is required.");
+      }
+      const existing = this.store.getResearchRunByCommand(commandId);
+      if (existing) {
+        // A repeated start is idempotent for its own thread only; the same handle on another thread is a clash.
+        if (existing.sessionId !== sessionId) {
+          throw new HttpError(409, `commandId ${commandId} already belongs to a research run on another session.`);
+        }
+        this.json(res, 200, { run: this.researchJobs.view(existing, false) });
+        return true;
       }
       if (!question) {
         throw new HttpError(400, "question is required.");
@@ -3466,8 +3494,17 @@ export class AncillaServer {
       if (!thread) {
         throw new HttpError(404, "Unknown session.");
       }
-      if (this.store.listResearchRuns(sessionId).some((run) => run.status === "queued" || run.status === "running")) {
-        throw new HttpError(409, "This thread already has a research run in progress.");
+      for (const run of this.store.listResearchRuns(sessionId)) {
+        if (run.status !== "queued" && run.status !== "running") {
+          continue;
+        }
+        if (this.researchJobs.isActive(run.id)) {
+          throw new HttpError(409, "This thread already has a research run in progress.");
+        }
+        // A row still in flight for a run nobody is running is stale: it is closed out here rather than blocking
+        // the thread until the next restart would have done the same.
+        this.researchJobs.markInterrupted(run, "The run was found in flight without a job running it.");
+        this.log(`research: run ${run.id} was recorded in flight but not running; marked interrupted.`);
       }
       const config = resolveResearchConfig(overrides as Partial<ResearchConfig> | null, settings.config);
       const record = this.store.createResearchRun({ id: uuidv7(), sessionId, commandId, question, config, createdAt: nowIso() });
@@ -4007,8 +4044,8 @@ export class AncillaServer {
       }
       case "approval/requested": {
         const id = str(params["approvalId"]);
-        // A research worker's approvals are decided by the runner's policy; nothing waits on the user.
-        if (id && !live.pendingApprovals.has(id) && !this.researchWorkerSessions.has(sessionId)) {
+        // A research session's approvals are decided by the runner's policy; nothing waits on the user.
+        if (id && !live.pendingApprovals.has(id) && !this.isResearchSession(sessionId)) {
           live.pendingApprovals.add(id);
           changed = true;
           this.wake(sessionId);
@@ -4022,7 +4059,8 @@ export class AncillaServer {
       }
       case "userInput/requested": {
         const id = str(params["userInputId"]);
-        if (id && !live.pendingInputs.has(id)) {
+        // A research session's prompts are declined by the runner; nothing waits on the user.
+        if (id && !live.pendingInputs.has(id) && !this.isResearchSession(sessionId)) {
           live.pendingInputs.add(id);
           changed = true;
           this.wake(sessionId);
@@ -4071,7 +4109,7 @@ export class AncillaServer {
       }
       case "item/completed": {
         const item = asRecord(params["item"]);
-        if (item && item["kind"] === "userMessage" && !this.researchWorkerSessions.has(sessionId)) {
+        if (item && item["kind"] === "userMessage" && !this.isResearchSession(sessionId)) {
           this.maybeTitle(sessionId, item);
         }
         break;

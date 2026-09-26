@@ -51,13 +51,23 @@ export interface ResearchThread {
 
 /**
  * What a stop asked for, handed to the engine as the abort reason (`signal.reason`) and on the input object it
- * was started with. ASSUMPTION: the engine reads one of the two to decide whether to write a salvage report
- * from what it has (`partial`) or to return `cancelled`; until it does, every stop comes back `cancelled`.
+ * was started with: the engine reads `stopWritesReport` at the moment of cancellation to decide between a
+ * salvage report (`partial`) and `cancelled`.
  */
 export interface ResearchStopRequest {
   type: "stop";
   writeReport: boolean;
 }
+
+/**
+ * The abort reason a shutdown carries. The worker runner reads it off `signal.reason` and cancels its turn at
+ * once instead of interrupting and waiting out the grace period, so a closing server is not held up by hosts.
+ */
+export interface ResearchShutdownRequest {
+  type: "shutdown";
+}
+
+export type ResearchAbortReason = ResearchStopRequest | ResearchShutdownRequest;
 
 /** The engine's input; `stopWritesReport` is set just before the abort so the engine can read it at cancellation. */
 export interface ResearchJobInput extends ResearchInput {
@@ -84,6 +94,8 @@ interface Job {
   runId: string;
   thread: ResearchThread;
   controller: AbortController;
+  /** Ends a salvage write the first stop asked for: a second stop, or a shutdown, aborts it. */
+  hardStop: AbortController;
   input: ResearchJobInput;
   live: LiveRunOverlay;
   /** Resolves once the engine has returned and the outcome is persisted. */
@@ -176,6 +188,9 @@ class CappedWorkerRunner implements WorkerRunner {
 export class ResearchJobManager {
   private readonly jobs = new Map<string, Job>();
   private readonly slots: Semaphore;
+  /** Set when `close()` begins: no new job starts. */
+  private closing = false;
+  /** Set when `close()` has returned: the store may be closed by then, so nothing is written or broadcast any more. */
   private closed = false;
 
   constructor(private readonly options: ResearchJobManagerOptions) {
@@ -203,19 +218,7 @@ export class ResearchJobManager {
   markInterruptedOnBoot(): ResearchRunRecord[] {
     const marked: ResearchRunRecord[] = [];
     for (const run of this.options.store.listRunningResearchRuns()) {
-      const at = this.nowIso();
-      const seq = this.options.store.lastResearchEventSeq(run.id) + 1;
-      this.options.store.appendResearchEvent({
-        type: "run_interrupted",
-        runId: run.id,
-        seq,
-        at,
-        phase: run.state?.phase ?? null,
-        round: run.state?.rounds.length ?? null,
-        agentId: null,
-        payload: { reason: "The server stopped while the run was in flight." },
-      });
-      const updated = this.options.store.updateResearchRun(run.id, { status: "interrupted", endedAt: at, failure: run.failure ?? "interrupted: the server stopped while the run was in flight." });
+      const updated = this.markInterrupted(run, "The server stopped while the run was in flight.");
       if (updated) {
         marked.push(updated);
         this.options.log?.(`research: run ${run.id} was in flight when the server last stopped; marked interrupted.`);
@@ -224,9 +227,37 @@ export class ResearchJobManager {
     return marked;
   }
 
+  /**
+   * A row that says `queued` or `running` for a run this manager is not running is stale: its process is gone,
+   * or its bookkeeping threw before the terminal status landed. It becomes `interrupted` with an event, and the
+   * thread is free to start another run. A run this manager is running is left alone.
+   */
+  markInterrupted(run: ResearchRunRecord, reason: string): ResearchRunRecord | null {
+    if (this.jobs.has(run.id)) {
+      return null;
+    }
+    const at = this.nowIso();
+    const seq = this.options.store.lastResearchEventSeq(run.id) + 1;
+    this.options.store.appendResearchEvent({
+      type: "run_interrupted",
+      runId: run.id,
+      seq,
+      at,
+      phase: run.state?.phase ?? null,
+      round: run.state?.rounds.length ?? null,
+      agentId: null,
+      payload: { reason },
+    });
+    return this.options.store.updateResearchRun(run.id, {
+      status: "interrupted",
+      endedAt: at,
+      failure: run.failure ?? `interrupted: ${reason.charAt(0).toLowerCase()}${reason.slice(1)}`,
+    });
+  }
+
   /** Starts the engine for a queued run. Returns once the job is registered; the run finishes on its own. */
   start(record: ResearchRunRecord, thread: ResearchThread): ResearchRunView {
-    if (this.closed) {
+    if (this.closing || this.closed) {
       throw new Error("The research job manager is closed.");
     }
     if (this.jobs.has(record.id)) {
@@ -237,6 +268,7 @@ export class ResearchJobManager {
       runId: record.id,
       thread,
       controller,
+      hardStop: new AbortController(),
       input: { runId: record.id, question: record.question, stopWritesReport: false },
       live: { phase: null, round: null, workers: new Map() },
       done: Promise.resolve(),
@@ -252,30 +284,46 @@ export class ResearchJobManager {
 
   /**
    * Stops a run. The engine sees the abort and comes back with `cancelled`, or `partial` when it could write from
-   * what it had and was asked to. A run that is not in flight is left as it is, so a repeated stop is harmless.
+   * what it had and was asked to. A second stop that no longer wants a report ends the salvage write the first
+   * one started, through the job's `hardStop`. A run that is not in flight is left as it is, and a repeated stop
+   * that changes nothing is harmless.
    */
   stop(runId: string, writeReport: boolean): boolean {
     const job = this.jobs.get(runId);
-    if (!job || job.controller.signal.aborted) {
+    if (!job) {
       return false;
     }
-    job.input.stopWritesReport = writeReport;
-    const reason: ResearchStopRequest = { type: "stop", writeReport };
-    this.options.log?.(`research: run ${runId} stop requested (writeReport=${writeReport}).`);
-    job.controller.abort(reason);
-    return true;
+    if (!job.controller.signal.aborted) {
+      job.input.stopWritesReport = writeReport;
+      const reason: ResearchStopRequest = { type: "stop", writeReport };
+      this.options.log?.(`research: run ${runId} stop requested (writeReport=${writeReport}).`);
+      job.controller.abort(reason);
+      return true;
+    }
+    if (!writeReport && !job.hardStop.signal.aborted) {
+      this.options.log?.(`research: run ${runId} stopped again without a report; ending the salvage write.`);
+      job.hardStop.abort({ type: "stop", writeReport: false } satisfies ResearchStopRequest);
+      return true;
+    }
+    return false;
   }
 
   /**
-   * Aborts every job and waits for each to persist its outcome, but not past `timeoutMs`: a worker whose host
-   * never answers the interrupt must not hold the whole shutdown; the run is marked interrupted at the next boot.
+   * Aborts every job (with the shutdown reason, so workers cancel at once) and waits for each to persist its
+   * outcome, but not past `timeoutMs`: a worker whose host never answers must not hold the whole shutdown, and
+   * the run is marked interrupted at the next boot instead. Once this returns nothing is written or broadcast
+   * any more, because the store is closed right after.
    */
   async close(timeoutMs = CLOSE_TIMEOUT_MS): Promise<void> {
-    this.closed = true;
+    this.closing = true;
     const jobs = [...this.jobs.values()];
+    const shutdown: ResearchShutdownRequest = { type: "shutdown" };
     for (const job of jobs) {
       if (!job.controller.signal.aborted) {
-        job.controller.abort({ type: "stop", writeReport: false } satisfies ResearchStopRequest);
+        job.controller.abort(shutdown);
+      }
+      if (!job.hardStop.signal.aborted) {
+        job.hardStop.abort(shutdown);
       }
     }
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -287,6 +335,7 @@ export class ResearchJobManager {
     if (timer) {
       clearTimeout(timer);
     }
+    this.closed = true;
     for (const job of jobs) {
       if (this.jobs.has(job.runId)) {
         this.options.log?.(`research: run ${job.runId} did not finish within ${timeoutMs} ms of shutdown.`);
@@ -304,98 +353,136 @@ export class ResearchJobManager {
     return new Date(this.options.now?.() ?? Date.now()).toISOString();
   }
 
+  /** A store write that must not take the run down: nothing after close, and a throw is logged, not raised. */
+  private persist<T>(job: Job, what: string, write: () => T): T | null {
+    if (this.closed) {
+      return null;
+    }
+    try {
+      return write();
+    } catch (error) {
+      this.options.log?.(`research: run ${job.runId} could not ${what}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * The engine promises an outcome for everything but a programming error, and the bookkeeping around it can
+   * still throw (a closed store, a bad report path). Whatever happens, the job ends with a terminal status in the
+   * store while the store is open, its controllers aborted so no worker outlives it, and its entry removed.
+   */
   private async execute(job: Job, record: ResearchRunRecord): Promise<void> {
     const { store } = this.options;
-    const startedAt = this.nowIso();
-    store.updateResearchRun(job.runId, { status: "running", startedAt });
-    this.scheduleBroadcast(job);
-    const model = this.options.createModelClient(record, job.thread);
-    const worker = new CappedWorkerRunner(
-      this.options.createWorkerRunner(record, job.thread, (update) => this.onWorkerUpdate(job, update)),
-      this.slots,
-    );
-    const deps = {
-      model,
-      worker,
-      events: { emit: (event: ResearchEvent) => this.onEvent(job, event) },
-      checkpoint: (state: ResearchRunState) => {
-        store.updateResearchRun(job.runId, { state });
-        job.live.phase = state.phase;
-        job.live.round = state.rounds.length;
-        this.scheduleBroadcast(job);
-      },
-      now: () => this.options.now?.() ?? Date.now(),
-      log: (message: string) => this.options.log?.(`research: run ${job.runId}: ${message}`),
-    };
     let outcome: ResearchOutcome | null = null;
     let failure: string | null = null;
     try {
+      const startedAt = this.nowIso();
+      this.persist(job, "mark itself running", () => store.updateResearchRun(job.runId, { status: "running", startedAt }));
+      this.scheduleBroadcast(job);
+      const model = this.options.createModelClient(record, job.thread);
+      const worker = new CappedWorkerRunner(
+        this.options.createWorkerRunner(record, job.thread, (update) => this.onWorkerUpdate(job, update)),
+        this.slots,
+      );
+      const deps = {
+        model,
+        worker,
+        events: { emit: (event: ResearchEvent) => this.onEvent(job, event) },
+        checkpoint: (state: ResearchRunState) => {
+          this.persist(job, "checkpoint", () => store.updateResearchRun(job.runId, { state }));
+          job.live.phase = state.phase;
+          job.live.round = state.rounds.length;
+          this.scheduleBroadcast(job);
+        },
+        now: () => this.options.now?.() ?? Date.now(),
+        log: (message: string) => this.options.log?.(`research: run ${job.runId}: ${message}`),
+        hardStop: job.hardStop.signal,
+      };
       outcome = await this.options.engine(job.input, record.config, deps, job.controller.signal);
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
       this.options.log?.(`research: run ${job.runId} threw: ${failure}`);
     }
-    const endedAt = this.nowIso();
-    let status: ResearchStatus;
-    if (outcome) {
-      status = outcome.status;
-      store.updateResearchRun(job.runId, {
-        status,
-        state: outcome.state,
-        report: outcome.report,
-        failure: outcome.failure,
-        endedAt,
-      });
-      job.live.phase = outcome.state.phase;
-      job.live.round = outcome.state.rounds.length;
-    } else {
-      status = job.controller.signal.aborted ? "cancelled" : "failed";
-      store.updateResearchRun(job.runId, { status, failure: `other: ${failure ?? "the engine stopped without an outcome."}`, endedAt });
-      // The engine emits its own terminal event; when it threw instead, the log still gets one.
-      this.onEvent(job, {
-        type: status === "cancelled" ? "run_cancelled" : "run_failed",
-        runId: job.runId,
-        seq: job.lastSeq + 1,
-        at: endedAt,
-        phase: job.live.phase,
-        round: job.live.round,
-        agentId: null,
-        payload: { error: failure ?? "the engine stopped without an outcome." },
-      });
-    }
-    if (outcome?.report) {
-      const current = store.getResearchRun(job.runId);
-      if (current) {
-        try {
-          const reportPath = await this.options.writeReport(job.thread, current, outcome.report, outcome.state);
-          if (reportPath) {
-            store.updateResearchRun(job.runId, { reportPath });
+    // Read before the controllers are aborted below: a throw that followed a stop is the stop's doing.
+    const stopped = job.controller.signal.aborted;
+    try {
+      if (!job.controller.signal.aborted) {
+        // Only a throw gets here with a live signal; a worker still running must not outlive the run.
+        job.controller.abort({ type: "stop", writeReport: false } satisfies ResearchStopRequest);
+      }
+      if (!job.hardStop.signal.aborted) {
+        job.hardStop.abort({ type: "stop", writeReport: false } satisfies ResearchStopRequest);
+      }
+      const endedAt = this.nowIso();
+      let status: ResearchStatus;
+      if (outcome) {
+        const finished = outcome;
+        status = finished.status;
+        this.persist(job, "store its outcome", () =>
+          store.updateResearchRun(job.runId, {
+            status: finished.status,
+            state: finished.state,
+            report: finished.report,
+            failure: finished.failure,
+            endedAt,
+          }),
+        );
+        job.live.phase = finished.state.phase;
+        job.live.round = finished.state.rounds.length;
+      } else {
+        status = stopped ? "cancelled" : "failed";
+        const message = failure ?? "the engine stopped without an outcome.";
+        this.persist(job, "store its failure", () =>
+          store.updateResearchRun(job.runId, { status, failure: status === "cancelled" ? `cancelled: ${message}` : `other: ${message}`, endedAt }),
+        );
+        // The engine emits its own terminal event; when it threw instead, the log still gets one.
+        this.onEvent(job, {
+          type: status === "cancelled" ? "run_cancelled" : "run_failed",
+          runId: job.runId,
+          seq: job.lastSeq + 1,
+          at: endedAt,
+          phase: job.live.phase,
+          round: job.live.round,
+          agentId: null,
+          payload: { error: message },
+        });
+      }
+      if (outcome?.report && !this.closed) {
+        const current = store.getResearchRun(job.runId);
+        if (current) {
+          try {
+            const reportPath = await this.options.writeReport(job.thread, current, outcome.report, outcome.state);
+            if (reportPath) {
+              this.persist(job, "store its report path", () => store.updateResearchRun(job.runId, { reportPath }));
+            }
+          } catch (error) {
+            // The report is in the store either way; the file is a convenience for the Files panel.
+            this.options.log?.(`research: run ${job.runId} could not write its report file: ${error instanceof Error ? error.message : String(error)}`);
           }
-        } catch (error) {
-          // The report is in the store either way; the file is a convenience for the Files panel.
-          this.options.log?.(`research: run ${job.runId} could not write its report file: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      this.options.log?.(`research: run ${job.runId} ended ${status}.`);
+    } catch (error) {
+      this.options.log?.(`research: run ${job.runId} bookkeeping failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.jobs.delete(job.runId);
+      if (job.timer) {
+        clearTimeout(job.timer);
+        job.timer = null;
+      }
+      this.broadcastNow(job);
     }
-    this.options.log?.(`research: run ${job.runId} ended ${status}.`);
-    this.jobs.delete(job.runId);
-    if (job.timer) {
-      clearTimeout(job.timer);
-      job.timer = null;
-    }
-    this.broadcastNow(job);
   }
 
   private onEvent(job: Job, event: ResearchEvent): void {
+    if (this.closed) {
+      return;
+    }
     // The engine numbers its events; one it left unnumbered, or numbered behind, still lands after the last.
     const seq = Number.isFinite(event.seq) && event.seq > job.lastSeq ? event.seq : job.lastSeq + 1;
     const stored: ResearchEvent = { ...event, runId: job.runId, seq, at: event.at || this.nowIso() };
     job.lastSeq = seq;
-    try {
-      this.options.store.appendResearchEvent(stored);
-    } catch (error) {
-      this.options.log?.(`research: run ${job.runId} could not store event ${stored.type}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    this.persist(job, `store event ${stored.type}`, () => this.options.store.appendResearchEvent(stored));
     if (stored.phase) {
       job.live.phase = stored.phase;
     }
@@ -409,20 +496,18 @@ export class ResearchJobManager {
     const { store } = this.options;
     const known = job.live.workers.get(update.agentId);
     job.live.workers.set(update.agentId, update);
-    try {
+    this.persist(job, `record worker A${update.agentId}`, () => {
       if (!known) {
         store.addResearchWorker({ runId: job.runId, workerSessionId: update.workerSessionId, round: update.round, agentId: update.agentId, status: update.state });
       } else if (known.state !== update.state) {
         store.updateResearchWorker(job.runId, update.workerSessionId, update.state);
       }
-    } catch (error) {
-      this.options.log?.(`research: run ${job.runId} could not record worker A${update.agentId}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    });
     this.scheduleBroadcast(job);
   }
 
   private scheduleBroadcast(job: Job): void {
-    if (job.timer) {
+    if (job.timer || this.closed) {
       return;
     }
     job.timer = setTimeout(() => {
@@ -433,7 +518,16 @@ export class ResearchJobManager {
   }
 
   private broadcastNow(job: Job): void {
-    const record = this.options.store.getResearchRun(job.runId);
+    if (this.closed) {
+      return;
+    }
+    let record: ResearchRunRecord | null = null;
+    try {
+      record = this.options.store.getResearchRun(job.runId);
+    } catch (error) {
+      this.options.log?.(`research: run ${job.runId} could not be read for its broadcast: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     if (!record) {
       return;
     }

@@ -9,6 +9,7 @@ import {
   briefText,
   completedResult,
   decision,
+  failedResult,
   fetchCall,
   makeHarness,
   saved,
@@ -344,6 +345,116 @@ describe("runResearch", () => {
     assert.equal(outcome.state.startedAt, "2026-09-26T12:00:00.000Z");
     assert.equal(outcome.state.researchDeadlineAt, "2026-09-26T12:10:00.000Z");
     for (const event of harness.events) assert.ok(event.at >= "2026-09-26T12:00:00.000Z" && event.at < "2026-09-26T13:00:00.000Z");
+  });
+
+  it("ends a salvage write when the host's hardStop fires", async () => {
+    const clock = new FakeClock();
+    const controller = new AbortController();
+    const hardStop = new AbortController();
+    let writerSignal: AbortSignal | null = null;
+    const model = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["Early"]), decision("CONTINUE_RESEARCH", ["Later"])],
+      writer: [
+        (request) =>
+          new Promise<string>((_resolve, reject) => {
+            writerSignal = request.signal;
+            request.signal.addEventListener("abort", () => reject(new ResearchFailure("cancelled", "stopped")), { once: true });
+            // The second stop lands while the salvage writer is still working.
+            queueMicrotask(() => hardStop.abort({ type: "stop", writeReport: false }));
+          }),
+      ],
+    });
+    const worker = new FakeWorker(verifiedWorkerScript());
+    worker.onStart = (task) => {
+      if (task.agentId === 2) controller.abort({ type: "stop", writeReport: true });
+    };
+    const harness = makeHarness(model, worker, clock);
+    harness.deps.hardStop = hardStop.signal;
+    const outcome = await runResearch({ ...INPUT, stopWritesReport: true }, testConfig(), harness.deps, controller.signal);
+    assert.equal(outcome.status, "cancelled");
+    assert.equal(outcome.report, null);
+    assert.equal(model.counts.writer, 1);
+    assert.equal((writerSignal as AbortSignal | null)?.aborted, true, "the writer's signal followed the hard stop");
+    assert.ok(harness.events.some((e) => e.type === "run_cancelled" && /salvage/.test(String(e.payload.reason))));
+    assert.equal(outcome.state.phase, "done");
+  });
+
+  it("keeps the salvage exit on resume: a run resumed at the writing phase after a salvage still ends partial", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["Good"]), decision("CONTINUE_RESEARCH", ["Bad one", "Bad two"])],
+      writer: ["# Salvaged\n\nClaim [A1-S1]."],
+    });
+    model.onCall = () => clock.advanceMinutes(3);
+    const worker = new FakeWorker((task) =>
+      task.agentId === 1
+        ? completedResult("useful findings (https://a.org)", [saved("https://a.org", "A")], [fetchCall("https://a.org")])
+        : failedResult("timeout: worker hung", "timed_out"),
+    );
+    const harness = makeHarness(model, worker, clock);
+    const first = await runResearch(INPUT, testConfig({ windowMaxMinutes: 10, salvageFraction: 0.6 }), harness.deps, new AbortController().signal);
+    assert.equal(first.status, "partial");
+    assert.match(first.failure ?? "", /stalled after 2 consecutive failed rounds/);
+    assert.deepEqual(first.state.loopExit, { salvage: true, reason: first.failure });
+    const checkpoint = harness.checkpoints.find((s) => s.phase === "writing") as ResearchRunState;
+    assert.equal(checkpoint?.loopExit?.salvage, true, "the loop exit is checkpointed before the writer runs");
+
+    const model2 = new FakeModel({ writer: ["# Salvaged again\n\nClaim [A1-S1]."] });
+    const harness2 = makeHarness(model2, new FakeWorker(), clock);
+    const resumed = await runResearch(INPUT, testConfig(), harness2.deps, new AbortController().signal, checkpoint);
+    assert.equal(resumed.status, "partial");
+    assert.equal(resumed.failure, first.failure);
+    assert.equal(resumed.report, "# Salvaged again\n\nClaim [1].\n\n## Sources\n\n[1] A (https://a.org)");
+    assert.match(model2.calls[0]?.prompt ?? "", /Research was stopped before the supervisor concluded/);
+    assert.equal(model2.counts.supervisor, 0);
+  });
+
+  it("retries the writer only on a retryable failure, never on invalid_output", async () => {
+    const clock = new FakeClock();
+    const invalid = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])],
+      writer: [new ResearchFailure("invalid_output", "muse exec printed no answer."), REPORT],
+    });
+    invalid.onCall = () => clock.advanceMinutes(2);
+    const harness = makeHarness(invalid, new FakeWorker(verifiedWorkerScript()), clock);
+    const outcome = await runResearch(INPUT, testConfig(), harness.deps, new AbortController().signal);
+    assert.equal(invalid.counts.writer, 1, "an invalid_output is not retried");
+    assert.equal(outcome.status, "partial");
+    assert.equal(outcome.report, null);
+    assert.match(outcome.failure ?? "", /^Final report generation failed: invalid_output: muse exec printed no answer/);
+
+    const clock2 = new FakeClock();
+    const flaky = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])],
+      writer: [new ResearchFailure("timeout", "slow"), REPORT],
+    });
+    flaky.onCall = () => clock2.advanceMinutes(2);
+    const harness2 = makeHarness(flaky, new FakeWorker(verifiedWorkerScript()), clock2);
+    const retried = await runResearch(INPUT, testConfig(), harness2.deps, new AbortController().signal);
+    assert.equal(flaky.counts.writer, 2, "a timeout gets the second attempt");
+    assert.equal(retried.status, "completed");
+  });
+
+  it("fails, instead of writing an uncited salvage report, when only failure notes exist and the supervisor goes silent", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({
+      brief: [briefText()],
+      supervisor: [decision("CONTINUE_RESEARCH", ["Empty", "Broken"]), "no json", "still nothing"],
+      writer: ["# Uncited\n\nMade up."],
+    });
+    model.onCall = () => clock.advanceMinutes(2);
+    const worker = new FakeWorker((task) => (task.agentId === 1 ? completedResult("", []) : failedResult("other: boom")));
+    const harness = makeHarness(model, worker, clock);
+    const outcome = await runResearch(INPUT, testConfig({ windowMaxMinutes: 10, salvageFraction: 0.1 }), harness.deps, new AbortController().signal);
+    assert.equal(outcome.status, "failed");
+    assert.equal(outcome.report, null);
+    assert.equal(model.counts.writer, 0, "nothing worth writing from, so the writer is never called");
+    assert.match(outcome.failure ?? "", /supervisor decision failed with no findings to write from/);
+    assert.equal(harness.events[harness.events.length - 1]?.type, "run_failed");
   });
 
   it("marks the run failed when the loop trips the breaker", async () => {

@@ -12,6 +12,7 @@
  * only sub-agent kinds here are web research and web discovery.
  */
 
+import { notesBlock } from "../notes.js";
 import type { SupervisorRound } from "../types.js";
 import { formatPromptDate, jsonFence, yearOf } from "./common.js";
 
@@ -70,7 +71,8 @@ export function buildSupervisorPrompt(input: SupervisorPromptInput): string {
   const minMinutes = Math.round(input.windowMinMinutes);
   const maxMinutes = Math.round(input.windowMaxMinutes);
   const remaining = Math.max(0, input.windowMaxMinutes - input.elapsedMinutes);
-  const notes = input.notes.length > 0 ? input.notes.join("\n\n---\n\n") : "(no research findings yet; this is the first round)";
+  // Oldest notes are compacted first when the block outgrows its budget; see `notes.ts`.
+  const notes = input.notes.length > 0 ? notesBlock(input.notes) : "(no research findings yet; this is the first round)";
   const rounds = input.rounds.length > 0 ? input.rounds.map(roundSummary).join("\n\n") : "(none yet)";
   const draft = input.draft?.trim()
     ? `<Draft Report>\n${input.draft.trim()}\n</Draft Report>`

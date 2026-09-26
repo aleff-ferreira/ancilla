@@ -4,7 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { AncillaStore, ProjectFolderError } from "../src/store.js";
+import { AncillaStore, ProjectFolderError, researchStateProblem } from "../src/store.js";
 import { DEFAULT_RESEARCH_CONFIG, type ResearchEvent, type ResearchRunState } from "../src/research/index.js";
 
 describe("AncillaStore", () => {
@@ -515,8 +515,29 @@ describe("AncillaStore", () => {
         store.listResearchWorkers("r1").map((w) => [w.agentId, w.status]),
         [[1, "completed"], [2, "working"]],
       );
-      assert.deepEqual(store.listSessionsByProject(project.id).map((s) => s.id), ["s1", "s2"], "worker sessions stay out of the sidebar");
+      // Sorted: the two threads were recorded within the same millisecond, so their listing order is not fixed.
+      assert.deepEqual(store.listSessionsByProject(project.id).map((s) => s.id).sort(), ["s1", "s2"], "worker sessions stay out of the sidebar");
       assert.equal(store.getSession("w1")?.origin, "research-worker");
+    });
+
+    it("returns state null for a stored state the engine did not write", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      seed(store);
+      store.createResearchRun({ id: "r1", sessionId: "s1", commandId: "c1", question: "a", config: DEFAULT_RESEARCH_CONFIG });
+      const stored = (state: unknown) => store.updateResearchRun("r1", { state: state as ResearchRunState })?.state;
+      assert.equal(stored({}), null, "an empty object is not a state");
+      assert.equal(stored({ ...stateFor("r1"), version: 2 }), null, "another version is not read");
+      assert.equal(stored({ ...stateFor("r1"), rounds: "none" }), null, "rounds must be an array");
+      assert.equal(stored({ ...stateFor("r1"), notes: null }), null, "notes must be an array");
+      assert.equal(stored(stateFor("r1"))?.phase, "researching", "a well-formed state still round-trips");
+      assert.equal(stored(null), null);
+      assert.equal(store.getResearchRun("r1")?.status, "queued", "the rest of the row is unaffected");
+      assert.equal(researchStateProblem({}), "state version null is not 1");
+      assert.equal(researchStateProblem({ version: 1, rounds: [], registry: [], curated: [], notes: "x" }), "state.notes is not an array");
+      assert.equal(researchStateProblem("text"), "state is not an object");
+      assert.equal(researchStateProblem(null), null);
+      assert.equal(researchStateProblem(stateFor("r1")), null);
     });
 
     it("keeps research settings clamped and merged", () => {

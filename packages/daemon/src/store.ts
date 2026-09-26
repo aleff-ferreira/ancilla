@@ -367,6 +367,32 @@ export interface ResearchRunPatch {
   endedAt?: string | null;
 }
 
+/**
+ * A stored research state is trusted only when it has the shape the engine writes: version 1 with its four list
+ * fields present. Anything else (an older or hand-edited row, a `{}`) comes back as null, which every reader
+ * treats as "no checkpoint yet" instead of dereferencing a field that is not there; `researchStateProblem` says
+ * why for a log line.
+ */
+export function researchStateProblem(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value === null ? null : "state is not an object";
+  }
+  const record = value as Record<string, unknown>;
+  if (record["version"] !== 1) {
+    return `state version ${JSON.stringify(record["version"] ?? null)} is not 1`;
+  }
+  for (const field of ["rounds", "registry", "curated", "notes"]) {
+    if (!Array.isArray(record[field])) {
+      return `state.${field} is not an array`;
+    }
+  }
+  return null;
+}
+
+export function readResearchState(value: unknown): ResearchRunState | null {
+  return value !== null && researchStateProblem(value) === null ? (value as ResearchRunState) : null;
+}
+
 /** A row in `research_workers`: which Muse session did which delegated task. */
 export interface ResearchWorkerRecord {
   runId: string;
@@ -1194,8 +1220,7 @@ export class AncillaStore {
     }
     let state: ResearchRunState | null = null;
     try {
-      const parsed = JSON.parse(String(row["state"] ?? "null")) as unknown;
-      state = typeof parsed === "object" && parsed !== null ? (parsed as ResearchRunState) : null;
+      state = readResearchState(JSON.parse(String(row["state"] ?? "null")));
     } catch {
       state = null;
     }
