@@ -476,6 +476,28 @@ describe("the demo client", () => {
     assert.equal((await client.getResearch(dropped.runId)).status, "cancelled");
   });
 
+  it("stops the research timers with the rest when disposed", async () => {
+    const { client } = clientFor("running");
+    const phases: string[] = [];
+    client.subscribe((event) => {
+      if (event.type === "research-run") phases.push(event.run.phase);
+    });
+    await client.listSessions();
+    await client.whenListed();
+    await Promise.resolve();
+    researchSteps(3);
+    assert.ok(phases.length > 0, "the seeded run was moving");
+    const seen = phases.length;
+    const before = await client.getResearch(RESEARCH_RUNS.running);
+    client.dispose();
+    researchSteps(40);
+    assert.equal(phases.length, seen, "nothing was broadcast after dispose");
+    const after = await client.getResearch(RESEARCH_RUNS.running);
+    assert.equal(after.status, before.status);
+    assert.equal(after.phase, before.phase);
+    assert.deepEqual(after.workers, before.workers, "the run stopped where it was");
+  });
+
   it("keeps one heartbeat revision in history and streams the background task's output", async () => {
     const { client } = clientFor("running");
     const before = workflowEvents((await client.loadTranscript(THREADS.audit)) as unknown as SeedThread).length;

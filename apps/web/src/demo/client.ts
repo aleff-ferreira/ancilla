@@ -411,6 +411,10 @@ export class DemoAncillaClient implements AncillaClient {
     for (const id of this.threads.keys()) {
       this.cancelTimers(id);
     }
+    // The research runs move on timers of their own, which would otherwise keep broadcasting to nobody.
+    for (const runId of [...this.researchTimers.keys()]) {
+      this.clearResearchTimer(runId);
+    }
   }
 
   // ------------------------------------------------------------------------------------ environment
@@ -1144,14 +1148,15 @@ export class DemoAncillaClient implements AncillaClient {
     if (!this.threads.has(sessionId)) {
       throw Object.assign(new Error("That thread is not in the demo."), { status: 404 });
     }
-    const repeat = [...this.research.values()].find((run) => run.runId === sampleId(`research:${commandId}`));
+    // The run is named after the command, so a retried POST gets the run it already started rather than a second one.
+    const runId = sampleId(`research:${commandId}`);
+    const repeat = this.research.get(runId);
     if (repeat) {
       return this.researchSummary(repeat);
     }
     if (this.researchFor(sessionId).some(researchLive)) {
       throw new AncillaError("This thread already has a research run going.", 409);
     }
-    const runId = sampleId(`research:${commandId}`);
     const merged: ResearchConfig = { ...this.researchSettings.config, ...(config ?? {}), models: { ...this.researchSettings.config.models, ...(config?.models ?? {}) } };
     const run: ResearchRunView = {
       runId,

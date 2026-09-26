@@ -171,9 +171,10 @@ function GlobalShortcuts() {
         event.preventDefault();
         controller.toggleFiles();
       } else if (mod && event.shiftKey && !event.altKey && key === "r") {
-        // Opens the composer's research popover; the composer decides whether a run can start from here.
+        // Opens the research popover of the composer on screen, or closes it; the controller knows whether there
+        // is one and whether its trigger is on, so the chord never leaves a picker waiting to pop open later.
         event.preventDefault();
-        controller.setPicker(controller.store.get().picker === "research" ? null : "research");
+        controller.toggleResearchPicker();
       } else if (event.altKey && !mod && (event.key === "ArrowUp" || event.key === "ArrowDown") && !isTyping(event.target)) {
         const state = controller.store.get();
         const ordered = Object.values(state.sessions).sort((a, b) => (a.activityAt < b.activityAt ? 1 : -1));

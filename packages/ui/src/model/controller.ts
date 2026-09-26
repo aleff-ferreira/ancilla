@@ -24,7 +24,7 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
-import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchLive } from "./research.js";
+import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction } from "./research.js";
 import { projectForCwd } from "./status.js";
 import {
   INIT_PROMPT,
@@ -910,7 +910,9 @@ export class AncillaController {
     } else {
       this.returnRoute = null;
     }
-    this.update((s) => ({ ...s, route }));
+    // The research picker belongs to the composer that was on screen; another route mounts another composer, or none.
+    const moved = routeToHash(route) !== routeToHash(previous);
+    this.update((s) => ({ ...s, route, picker: moved && s.picker === "research" ? null : s.picker }));
     if (push) {
       const hash = routeToHash(route);
       if (this.platform.readHash() !== hash) {
@@ -1074,6 +1076,8 @@ export class AncillaController {
         sessions: load.session && !load.session.archived && (!s.sessionsLoaded || s.sessions[sessionId])
           ? { ...s.sessions, [sessionId]: load.session }
           : s.sessions,
+        // A stop the stream never answered, because the connection dropped, is answered by the reload.
+        researchStopping: settleStopping(s.researchStopping, load.researchRuns ?? []),
       }));
       // Whatever was already waiting when the thread opened counts too, not only what arrives next.
       this.autoAllow([sessionId]);
@@ -3044,23 +3048,45 @@ export class AncillaController {
     }
   }
 
-  /** Stops a run; with `writeReport` the server still writes a report from what the workers found. */
+  /**
+   * Stops a run; with `writeReport` the server still writes a report from what the workers found. The row says the
+   * run is stopping from here until the stream reports how it ended: the route answers with the run as it was when
+   * the stop was taken, before the workers had wound down, so that answer only lands when it is fresher than what
+   * the row already shows.
+   */
   async stopResearch(runId: string, writeReport: boolean): Promise<boolean> {
     const key = `research-stop:${runId}`;
     if (this.state.busy[key]) {
       return false;
     }
     this.setBusy(key, true);
+    this.setResearchStopping(runId, writeReport ? "write" : "now");
     try {
       const run = await this.client.stopResearch(runId, writeReport);
       this.mergeResearchRun(run.sessionId, run);
       return true;
     } catch (error) {
+      this.setResearchStopping(runId, null);
       this.toast("error", "Could not stop the research run", errorMessage(error));
       return false;
     } finally {
       this.setBusy(key, false);
     }
+  }
+
+  private setResearchStopping(runId: string, action: ResearchStopAction | null): void {
+    this.update((s) => {
+      if ((s.researchStopping[runId] ?? null) === action) {
+        return s;
+      }
+      const researchStopping = { ...s.researchStopping };
+      if (action) {
+        researchStopping[runId] = action;
+      } else {
+        delete researchStopping[runId];
+      }
+      return { ...s, researchStopping };
+    });
   }
 
   /** Reads a run with its report, which the stream and the transcript load leave out, and keeps it on the run. */
@@ -3085,6 +3111,36 @@ export class AncillaController {
   /** What Stop does on a research run from now on: the switch in the composer popover. */
   setResearchStopWrites(writes: boolean): void {
     this.update((s) => (s.researchStopWrites === writes ? s : { ...s, researchStopWrites: writes }));
+  }
+
+  /**
+   * Ctrl/Cmd+Shift+R: opens the research popover of the composer on screen, or closes it. It stays shut when no
+   * composer is mounted (the settings and usage pages, or no project yet) and when the composer's trigger is off
+   * (a live run in the thread, the feature off, a read-only thread, a thread still starting): the picker is only
+   * a flag the composer reads, and one raised while the trigger is off would pop the popover open the moment the
+   * trigger came back.
+   */
+  toggleResearchPicker(): void {
+    if (this.state.picker === "research") {
+      this.setPicker(null);
+    } else if (this.researchTriggerEnabled()) {
+      this.setPicker("research");
+    }
+  }
+
+  /** Whether the composer on screen has a research trigger, and it would open: the composer's own conditions, read off the state. */
+  researchTriggerEnabled(): boolean {
+    const s = this.state;
+    if (!s.sessionsLoaded || s.researchSettings?.enabled === false || s.busy["start"]) {
+      return false;
+    }
+    const route = s.route;
+    if (route.kind === "thread") {
+      const thread = s.threads[route.sessionId];
+      return Boolean(s.sessions[route.sessionId]) && !thread?.readOnly && !thread?.researchRuns.some(researchLive);
+    }
+    // The new-thread screen mounts its composer only once there is a project to start the thread in.
+    return (route.kind === "home" || route.kind === "new") && s.projects.length > 0;
   }
 
   /** Patches the server's research defaults, showing the change at once and taking it back if the server refuses. */
@@ -3113,9 +3169,12 @@ export class AncillaController {
   }
 
   /**
-   * Keeps the newest state of a run in its thread, by `runId`. The stream's summaries carry no report, so a report
-   * already read stays on the run as long as the server still says one is available. A run for a thread this app
-   * has not opened is dropped: the thread reads its runs with its transcript when it is opened.
+   * Keeps the newest state of a run in its thread, by `runId`. Newest is not last to arrive: the answer to a stop
+   * or a read is a snapshot that can land after the stream has moved on, so a run that has ended is never taken
+   * back to running, and between two pictures of a live run the more advanced one stays. The stream's summaries
+   * carry no report, so a report already read stays on the run as long as the server still says one is available.
+   * A run for a thread this app has not opened is dropped: the thread reads its runs with its transcript when it
+   * is opened. Once a run has ended, a stop waiting on it is answered.
    */
   private mergeResearchRun(sessionId: string, run: ResearchRunView): void {
     this.update((s) => {
@@ -3125,9 +3184,12 @@ export class AncillaController {
       }
       const index = thread.researchRuns.findIndex((existing) => existing.runId === run.runId);
       const previous = index >= 0 ? thread.researchRuns[index] : undefined;
+      if (previous && (researchEnded(previous) ? researchLive(run) : !researchSnapshotCurrent(previous, run))) {
+        return s;
+      }
       const kept = run.report === null && run.reportAvailable && previous?.report ? { ...run, report: previous.report } : run;
       const researchRuns = index >= 0 ? thread.researchRuns.map((existing, i) => (i === index ? kept : existing)) : [...thread.researchRuns, kept];
-      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } } };
+      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } }, researchStopping: settleStopping(s.researchStopping, [kept]) };
     });
   }
 

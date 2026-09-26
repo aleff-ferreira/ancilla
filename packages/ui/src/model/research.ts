@@ -1,4 +1,4 @@
-import type { ResearchConfig, ResearchRunView, ResearchWorkerState, ResearchWorkerView } from "../types.js";
+import type { ResearchConfig, ResearchPhase, ResearchRunView, ResearchWorkerState, ResearchWorkerView } from "../types.js";
 
 /**
  * What the UI says about a DeepResearch run. The view is the server's summary; these are the words for it, kept
@@ -33,6 +33,187 @@ export function researchLive(run: Pick<ResearchRunView, "status">): boolean {
 /** A run that ended with something to read. */
 export function researchReported(run: Pick<ResearchRunView, "status">): boolean {
   return run.status === "completed" || run.status === "partial";
+}
+
+/** A run that has ended, one way or another: nothing said about it afterwards can move it back. */
+export function researchEnded(run: Pick<ResearchRunView, "status">): boolean {
+  return !researchLive(run);
+}
+
+/**
+ * The daemon's ceilings on a run's numbers (`RESEARCH_LIMITS` in packages/daemon/src/research/config.ts), kept
+ * in step by hand like the wire types. The server clamps to them too, so a field that let a value past them would
+ * only have the server quietly change what was typed.
+ */
+export const RESEARCH_LIMITS = {
+  windowMinutes: { min: 0.5, max: 240 },
+  rounds: { min: 1, max: 500 },
+  parallel: { min: 1, max: 12 },
+  workerToolCalls: { min: 1, max: 100 },
+  workerSearches: { min: 1, max: 100 },
+  workerReads: { min: 1, max: 500 },
+  workerSaves: { min: 1, max: 200 },
+  workerWallTimeMinutes: { min: 1, max: 60 },
+} as const;
+
+export interface ResearchRange {
+  readonly min: number;
+  readonly max: number;
+}
+
+/** The window is set in minutes to the half; everything else is a count. */
+export const WINDOW_STEP = 0.5;
+
+/**
+ * A typed number brought inside a range and onto `step`'s grid: what a field settles on when it is left, so a
+ * value past a ceiling lands on the ceiling instead of going back to what the field held. Nothing typed, or
+ * nothing numeric, gives null rather than a guess.
+ */
+export function clampResearchNumber(typed: string | number | null | undefined, range: ResearchRange, step = 1): number | null {
+  if (typed === null || typed === undefined || (typeof typed === "string" && typed.trim() === "")) {
+    return null;
+  }
+  const n = Number(typed);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  return Math.min(range.max, Math.max(range.min, Math.round(n / step) * step));
+}
+
+/** The two ways to stop a run: write a report from what the workers have, or drop it. */
+export type ResearchStopAction = "write" | "now";
+
+export const STOP_ACTIONS: Record<ResearchStopAction, { label: string; title: string }> = {
+  write: { label: "Stop and write from what it has", title: "Stops the workers and writes a report from what they have found" },
+  now: { label: "Stop now, no report", title: "Stops the workers and drops what they have found" },
+};
+
+/** The menu's order: the outcome that keeps the work first. */
+export const STOP_ACTION_ORDER: readonly ResearchStopAction[] = ["write", "now"];
+
+/** What a plain click on Stop does: the switch in the composer popover decides. */
+export function preferredStopAction(stopWrites: boolean): ResearchStopAction {
+  return stopWrites ? "write" : "now";
+}
+
+/** The row's line from the moment a stop is asked for until the run says how it ended. */
+export const STOPPING_LINE: Record<ResearchStopAction, string> = {
+  write: "Stopping, writing the report…",
+  now: "Stopping…",
+};
+
+/**
+ * The stops still waiting for their outcome, less those whose run has ended: the row shows the outcome instead.
+ * Returns the same record when nothing changes, so the store sees no update.
+ */
+export function settleStopping(
+  stopping: Record<string, ResearchStopAction>,
+  runs: readonly Pick<ResearchRunView, "runId" | "status">[],
+): Record<string, ResearchStopAction> {
+  let next = stopping;
+  for (const run of runs) {
+    if (researchEnded(run) && next[run.runId]) {
+      if (next === stopping) {
+        next = { ...stopping };
+      }
+      delete next[run.runId];
+    }
+  }
+  return next;
+}
+
+const PHASE_RANK: Record<ResearchPhase, number> = { scoping: 0, drafting: 1, researching: 2, writing: 3, done: 4 };
+
+/** What only grows while a run goes, most telling first; the later of two snapshots is ahead on the first that differs. */
+const PROGRESS: readonly ((run: ResearchRunView) => number)[] = [
+  (run) => (run.status === "queued" ? 0 : 1),
+  (run) => PHASE_RANK[run.phase],
+  (run) => run.round,
+  (run) => run.workers.length,
+  (run) => run.workers.reduce((calls, worker) => calls + worker.toolCalls, 0),
+];
+
+/**
+ * Whether `next` is at least as recent a picture of a live run as `current`. The answer to a stop or a read can
+ * cross the stream's events, and none of them is numbered, so recency is read off what only grows while a run
+ * goes. A tie goes to `next`, the one that arrived last.
+ */
+export function researchSnapshotCurrent(current: ResearchRunView, next: ResearchRunView): boolean {
+  for (const measure of PROGRESS) {
+    const before = measure(current);
+    const after = measure(next);
+    if (before !== after) {
+      return after > before;
+    }
+  }
+  return true;
+}
+
+/** The popover's fields as typed: null until the user touches one, so an untouched field sends nothing. */
+export interface ResearchTyped {
+  windowMin: string | null;
+  windowMax: string | null;
+  parallel: string | null;
+}
+
+export const NOTHING_TYPED: ResearchTyped = { windowMin: null, windowMax: null, parallel: null };
+
+/**
+ * The overrides a run is posted with: the fields the user touched in the popover, clamped, and none that only
+ * repeat the loaded defaults. Untouched fields are the server's to fill from its settings, which is also why the
+ * popover sends nothing for the fields it could not show before the settings had loaded. A maximum typed below
+ * the minimum in force lowers the minimum with it, since the server would otherwise lift the maximum back up.
+ */
+export function popoverOverrides(typed: ResearchTyped, defaults: ResearchConfig | null): Partial<ResearchConfig> | null {
+  const config: Partial<ResearchConfig> = {};
+  const min = clampResearchNumber(typed.windowMin, RESEARCH_LIMITS.windowMinutes, WINDOW_STEP);
+  const max = clampResearchNumber(typed.windowMax, RESEARCH_LIMITS.windowMinutes, WINDOW_STEP);
+  const parallel = clampResearchNumber(typed.parallel, RESEARCH_LIMITS.parallel);
+  if (min !== null && min !== defaults?.windowMinMinutes) {
+    config.windowMinMinutes = min;
+  }
+  if (max !== null && max !== defaults?.windowMaxMinutes) {
+    config.windowMaxMinutes = max;
+  }
+  const floor = min ?? defaults?.windowMinMinutes ?? null;
+  if (max !== null && min === null && floor !== null && max < floor) {
+    config.windowMinMinutes = max;
+  }
+  if (parallel !== null && parallel !== defaults?.maxParallel) {
+    config.maxParallel = parallel;
+  }
+  return Object.keys(config).length > 0 ? config : null;
+}
+
+/** The run whose report the thread shows on sight: the newest that ended with one. Older reports are read on request. */
+export function newestReportedRun(runs: readonly ResearchRunView[]): string | null {
+  let newest: ResearchRunView | null = null;
+  for (const run of runs) {
+    if (researchReported(run) && (newest === null || (Date.parse(run.createdAt) || 0) >= (Date.parse(newest.createdAt) || 0))) {
+      newest = run;
+    }
+  }
+  return newest?.runId ?? null;
+}
+
+export type ReportView = "report" | "reading" | "read" | "none";
+
+/**
+ * What the row shows where the report goes: the report; a spinner while a read is out, which the newest finished
+ * run starts on sight; a Read button for an older run, or after a read failed, so a failure never leaves a spinner
+ * behind; or a line saying the run left nothing.
+ */
+export function reportView(run: Pick<ResearchRunView, "report" | "reportAvailable">, state: { latest: boolean; reading: boolean; failed: boolean }): ReportView {
+  if (run.report) {
+    return "report";
+  }
+  if (!run.reportAvailable) {
+    return "none";
+  }
+  if (state.reading || (state.latest && !state.failed)) {
+    return "reading";
+  }
+  return "read";
 }
 
 /** Zeroes for the optimistic row before the server has answered with its defaults. */
