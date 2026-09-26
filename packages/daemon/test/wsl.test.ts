@@ -156,4 +156,64 @@ describe("environment probe", () => {
     assert.equal(probe.wslAvailable, false);
     assert.equal(probe.musePath, null);
   });
+
+  const TWO_DISTROS = `  NAME      STATE           VERSION
+* Debian    Running         2
+  Ubuntu    Running         2
+`;
+
+  /** A `wsl` that lists two distros, Debian the default, with muse on PATH in the distros named. */
+  function wslWithMuse(museIn: string[], calls: string[][] = []): ExecFn {
+    return async (command, args) => {
+      calls.push([command, ...args]);
+      if (args[0] === "-l") {
+        return { stdout: TWO_DISTROS, exitCode: 0 };
+      }
+      return museIn.includes(args[1] ?? "") ? { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+    };
+  }
+
+  it("looks for muse in Ubuntu before the default distro, and says which one it runs in", async () => {
+    const calls: string[][] = [];
+    const probe = await probeEnvironment(wslWithMuse(["Ubuntu"], calls), "win32", { preference: "wsl" });
+    assert.equal(probe.defaultDistro, "Debian");
+    assert.equal(probe.museDistro, "Ubuntu");
+    assert.equal(probe.musePath, "/home/u/.local/bin/muse");
+    assert.deepEqual(calls.map((call) => call.slice(0, 3)), [["wsl", "-l", "-v"], ["wsl", "-d", "Ubuntu"]]);
+  });
+
+  it("falls back to the default distro when Ubuntu has no muse, and still names a distro when neither has", async () => {
+    const calls: string[][] = [];
+    const probe = await probeEnvironment(wslWithMuse(["Debian"], calls), "win32", { preference: "wsl" });
+    assert.equal(probe.museDistro, "Debian");
+    assert.equal(probe.musePath, "/home/u/.local/bin/muse");
+    assert.deepEqual(calls.map((call) => call.slice(0, 3)), [["wsl", "-l", "-v"], ["wsl", "-d", "Ubuntu"], ["wsl", "-d", "Debian"]]);
+    const none = await probeEnvironment(wslWithMuse([]), "win32", { preference: "wsl" });
+    assert.equal(none.musePath, null);
+    assert.equal(none.museDistro, "Ubuntu", "where a host would be started, so the app can say so");
+  });
+
+  it("checks a pinned binary in the pinned distro, with the environment Muse will get, and looks nowhere else", async () => {
+    const calls: string[][] = [];
+    const envs: (NodeJS.ProcessEnv | undefined)[] = [];
+    const exec: ExecFn = async (command, args, options) => {
+      calls.push([command, ...args]);
+      envs.push(options?.env);
+      if (args[0] === "-l") {
+        return { stdout: TWO_DISTROS, exitCode: 0 };
+      }
+      return { stdout: "", exitCode: args[1] === "Ubuntu-24.04" && args[5] === "/home/u/.local/bin/muse" ? 0 : 1 };
+    };
+    const env = { WSLENV: "BASH_ENV/u", BASH_ENV: "/home/u/env.sh" };
+    const probe = await probeEnvironment(exec, "win32", { preference: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/.local/bin/muse", env });
+    assert.equal(probe.museDistro, "Ubuntu-24.04");
+    assert.equal(probe.musePath, "/home/u/.local/bin/muse");
+    assert.equal(probe.defaultDistro, "Debian");
+    assert.deepEqual(calls, [["wsl", "-l", "-v"], ["wsl", "-d", "Ubuntu-24.04", "-e", "test", "-x", "/home/u/.local/bin/muse"]]);
+    assert.ok(envs.every((given) => given === env), "every call into WSL carries the environment");
+
+    const missing = await probeEnvironment(exec, "win32", { preference: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/bin/muse" });
+    assert.equal(missing.musePath, null, "a pinned binary that is not there is not replaced by a guess");
+    assert.equal(missing.museDistro, "Ubuntu-24.04");
+  });
 });

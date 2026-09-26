@@ -211,6 +211,30 @@ async function countPlanUsageEvents(base: string, drive: () => Promise<void>): P
   return (await sseEvents(base, "plan-usage", drive)).length;
 }
 
+/**
+ * A `wsl.exe` whose `-l -v` lists `distros` (the first one WSL's default) and that finds Muse at
+ * /home/u/.local/bin/muse in the distros named in `museIn`, whether looked up on PATH or checked as a pinned binary.
+ * Every call, and the environment it was given, is recorded in `probe`.
+ */
+function fakeWsl(distros: string[], museIn: string[], probe: { calls: string[][]; envs: (NodeJS.ProcessEnv | undefined)[] }): ExecFn {
+  return async (command, args, options) => {
+    probe.calls.push([command, ...args]);
+    probe.envs.push(options?.env);
+    if (command !== "wsl") {
+      return { stdout: "", exitCode: 127 };
+    }
+    if (args[0] === "-l") {
+      const rows = distros.map((name, index) => `${index === 0 ? "*" : " "} ${name}  Running  2`);
+      return { stdout: ["  NAME  STATE  VERSION", ...rows].join("\n") + "\n", exitCode: 0 };
+    }
+    const found = museIn.includes(args[1] ?? "");
+    if (args[2] === "-e" && args[3] === "test") {
+      return { stdout: "", exitCode: found ? 0 : 1 };
+    }
+    return found ? { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 } : { stdout: "", exitCode: 1 };
+  };
+}
+
 const RANGE = { first: { id: "r", sequence: 1 }, last: { id: "r", sequence: 1 }, stream: { id: "s", kind: "session" } };
 
 /**
@@ -1436,6 +1460,47 @@ describe("AncillaServer", () => {
     assert.equal(connection.calls.filter((c) => c.method === "session/rename").length, 0);
   });
 
+  it("stops sending titles to a host whose Muse reports the rename-broken event log, and says so once", async () => {
+    const decodeFailure = "event log failed: record decode failed: payload decode failed: missing field kind";
+    const renames = (connection: FakeConnection) => connection.calls.filter((c) => c.method === "session/rename").length;
+    const logged: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      logged.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const connection = new FakeConnection();
+      connection.replies.set("session/start", { session: { sessionId: "s1" } });
+      connection.replies.set("session/rename", new MspTestError(decodeFailure, "internal"));
+      const { base } = await start(connection, { syncSessionNames: true });
+      await send(base, "/api/sessions", { cwd: "/work/proj" });
+      assert.equal((await send(base, "/api/sessions/s1", { title: "First" }, "PATCH")).status, 200);
+      assert.equal((await send(base, "/api/sessions/s1", { title: "Second" }, "PATCH")).status, 200);
+      assert.equal(renames(connection), 1, "no title goes to that host again");
+      assert.equal((await get(base, "/api/sessions")).sessions[0].title, "Second", "the local title stands");
+      assert.equal(logged.filter((line) => /missing field kind/.test(line)).length, 1);
+
+      // The failure can also show up in the turn: a workflow that could not be admitted to the broken log.
+      const second = new FakeConnection();
+      second.replies.set("session/start", { session: { sessionId: "s1" } });
+      second.replies.set("session/rename", new MspTestError("ephemeral", "unsupported"));
+      const { base: base2 } = await start(second, { syncSessionNames: true });
+      await send(base2, "/api/sessions", { cwd: "/work/proj" });
+      await send(base2, "/api/sessions/s1", { title: "First" }, "PATCH");
+      await send(base2, "/api/sessions/s1", { title: "Second" }, "PATCH");
+      assert.equal(renames(second), 2, "an ordinary refusal does not stop titles");
+      second.notify("turn/completed", { sessionId: "s1", turnId: "t1", terminal: "failed",
+        error: { message: `workflow cancel registration failed before admission: ${decodeFailure}` } });
+      await send(base2, "/api/sessions/s1", { title: "Third" }, "PATCH");
+      assert.equal(renames(second), 2);
+      assert.equal((await get(base2, "/api/sessions")).sessions[0].title, "Third");
+      assert.equal(logged.filter((line) => /missing field kind/.test(line)).length, 2, "once per host");
+    } finally {
+      process.stderr.write = write;
+    }
+  });
+
   it("keeps thread-title settings behind a switch and a model choice", async () => {
     const connection = new FakeConnection();
     const { base } = await start(connection);
@@ -1816,6 +1881,110 @@ describe("AncillaServer", () => {
     const session = (await get(base, "/api/sessions")).sessions[0];
     assert.equal(session.title, "Mine");
     assert.equal(session.titleSource, "user");
+  });
+
+  it("checks \\\\wsl.localhost\\ folders against the distro Muse is started in, not WSL's default", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("session/list", { sessions: [], nextCursor: null });
+    const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const hosts: FactoryProbe = { targets: [], exits: [] };
+    // WSL's default is Debian; Muse lives in Ubuntu, and nothing in runtime.json says which.
+    const { base } = await start(connection, {
+      platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["Debian", "Ubuntu"], ["Ubuntu"], wsl), hostFactory: fakeFactory(connection, hosts),
+    });
+    const env = await get(base, "/api/env");
+    assert.equal(env.museFound, true);
+    assert.equal(env.defaultDistro, "Ubuntu", "the app shows the distro Muse runs in");
+    const added = await send(base, "/api/projects", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" });
+    assert.equal(added.status, 200);
+    assert.equal(added.json.warning, null);
+    assert.equal((await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" })).status, 200);
+    assert.deepEqual(hosts.targets[0]?.args.slice(0, 2), ["-d", "Ubuntu"], "the host starts where the check looked");
+    const other = await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Debian\\home\\u\\proj" });
+    assert.equal(other.status, 400);
+    assert.equal(other.json.error, "This folder belongs to WSL Debian, but Muse is running in Ubuntu.");
+
+    // With Muse only in the default distro, that is where it runs, and the check follows.
+    const only = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const debianHosts: FactoryProbe = { targets: [], exits: [] };
+    const { base: base2 } = await start(connection, {
+      platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["Debian", "Ubuntu"], ["Debian"], only), hostFactory: fakeFactory(connection, debianHosts),
+    });
+    assert.equal((await get(base2, "/api/env")).defaultDistro, "Debian");
+    assert.equal((await send(base2, "/api/sessions", { cwd: "\\\\wsl.localhost\\Debian\\home\\u\\proj" })).status, 200);
+    assert.deepEqual(debianHosts.targets[0]?.args.slice(0, 2), ["-d", "Debian"]);
+    const refused = await send(base2, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" });
+    assert.equal(refused.json.error, "This folder belongs to WSL Ubuntu, but Muse is running in Debian.");
+  });
+
+  it("probes the pinned distro and binary from runtime.json, so a working Muse is never reported missing", async () => {
+    const connection = new FakeConnection();
+    const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const { base } = await start(connection, {
+      platform: "win32", runtime: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["docker-desktop", "Ubuntu-24.04"], ["Ubuntu-24.04"], wsl),
+    });
+    const env = await get(base, "/api/env");
+    assert.equal(env.museFound, true);
+    assert.equal(env.musePath, "/home/u/.local/bin/muse");
+    assert.equal(env.defaultDistro, "Ubuntu-24.04");
+    assert.deepEqual(wsl.calls, [
+      ["wsl", "-l", "-v"],
+      ["wsl", "-d", "Ubuntu-24.04", "-e", "test", "-x", "/home/u/.local/bin/muse"],
+    ], "only the pinned distro is looked in, for the pinned binary");
+
+    const missing = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+    const { base: base2 } = await start(connection, {
+      platform: "win32", runtime: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/.local/bin/muse",
+      exec: fakeWsl(["docker-desktop", "Ubuntu-24.04"], [], missing),
+    });
+    const gone = await get(base2, "/api/env");
+    assert.equal(gone.museFound, false, "a pinned binary that is not there is reported as missing");
+    assert.equal(gone.musePath, null);
+    assert.equal(gone.defaultDistro, "Ubuntu-24.04");
+  });
+
+  it("carries runtime.json's wslEnv into WSL processes only, over the Windows values of the same names", async () => {
+    const saved = { backend: process.env["TBH_CREDENTIAL_BACKEND"], wslenv: process.env["WSLENV"], bashEnv: process.env["BASH_ENV"] };
+    process.env["TBH_CREDENTIAL_BACKEND"] = "keyring";
+    process.env["WSLENV"] = "USERPROFILE/p";
+    delete process.env["BASH_ENV"];
+    try {
+      const connection = new FakeConnection();
+      connection.replies.set("session/start", { session: { sessionId: "s1" } });
+      const wsl = { calls: [] as string[][], envs: [] as (NodeJS.ProcessEnv | undefined)[] };
+      const hosts: FactoryProbe = { targets: [], exits: [] };
+      const wslEnv = { TBH_CREDENTIAL_BACKEND: "file", BASH_ENV: "/home/u/.config/muse/runtime-env.sh" };
+      const { base } = await start(connection, {
+        platform: "win32", runtime: "wsl", musePath: "/home/u/.local/bin/muse", wslEnv,
+        exec: fakeWsl(["Ubuntu"], ["Ubuntu"], wsl), hostFactory: fakeFactory(connection, hosts),
+      });
+      assert.equal((await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" })).status, 200);
+      const target = hosts.targets[0];
+      assert.equal(target?.env?.["TBH_CREDENTIAL_BACKEND"], "file", "runtime.json wins over the Windows value");
+      assert.equal(target?.env?.["BASH_ENV"], "/home/u/.config/muse/runtime-env.sh");
+      assert.equal(target?.env?.["WSLENV"], "USERPROFILE/p:TBH_CREDENTIAL_BACKEND/u:BASH_ENV/u");
+      assert.ok(wsl.envs.length > 0 && wsl.envs.every((env) => env?.["TBH_CREDENTIAL_BACKEND"] === "file"), "the probe's calls into WSL see the same");
+      assert.equal(process.env["TBH_CREDENTIAL_BACKEND"], "keyring", "the server's own environment is untouched");
+      assert.equal(process.env["BASH_ENV"], undefined);
+      assert.equal(process.env["WSLENV"], "USERPROFILE/p");
+
+      // Native Muse is a Windows process: none of it applies there.
+      const native: FactoryProbe = { targets: [], exits: [] };
+      const { base: base2 } = await start(connection, {
+        platform: "win32", runtime: "native", musePath: "C:\\muse\\muse.exe", wslEnv, hostFactory: fakeFactory(connection, native),
+      });
+      assert.equal((await send(base2, "/api/sessions", { cwd: "D:\\work\\proj" })).status, 200);
+      assert.equal(native.targets[0]?.command, "C:\\muse\\muse.exe");
+      assert.equal(native.targets[0]?.env, undefined);
+    } finally {
+      for (const [name, value] of [["TBH_CREDENTIAL_BACKEND", saved.backend], ["WSLENV", saved.wslenv], ["BASH_ENV", saved.bashEnv]] as const) {
+        if (value === undefined) delete process.env[name]; else process.env[name] = value;
+      }
+    }
   });
 
   it("spawns one host per workspace under concurrency and respawns after a crash", async () => {
