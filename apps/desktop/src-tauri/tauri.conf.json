@@ -30,7 +30,7 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["icons/icon.png"],
-    "resources": ["resources/server.cjs", "resources/frontend"],
+    "resources": ["resources/server.cjs", "resources/frontend", "resources/legal"],
     "externalBin": ["binaries/node"],
     "createUpdaterArtifacts": true
   },

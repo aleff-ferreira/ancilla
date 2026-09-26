@@ -1,6 +1,8 @@
 // Downloads the Node.js runtime Ancilla ships as a Tauri sidecar, so users do not install Node themselves.
 // Tauri wants one file per target triple in src-tauri/binaries (node-<triple>[.exe]); a universal macOS
 // build also wants node-universal-apple-darwin, which lipo makes from the two halves.
+// Node's own LICENSE, which covers the binary and the libraries built into it, comes out of the same archive and
+// is installed with the app from src-tauri/resources/legal.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmod, copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
@@ -13,6 +15,8 @@ const NODE_VERSION = "v22.23.2";
 const here = dirname(fileURLToPath(import.meta.url));
 const appDir = join(here, "..");
 const binariesDir = join(appDir, "src-tauri", "binaries");
+// Shared with bundle-server.mjs, which leaves this file alone so the two can run in either order.
+const licenseOut = join(appDir, "src-tauri", "resources", "legal", "node-LICENSE");
 const cacheDir = join(appDir, ".cache", "node", NODE_VERSION);
 
 const DISTS = {
@@ -47,12 +51,14 @@ async function expectedSha(file) {
   return line.split(/\s+/)[0];
 }
 
-/** The node binary for one triple, downloaded, checksum-verified and extracted into the cache. */
+/** The node binary and Node's LICENSE for one triple, downloaded, checksum-verified and extracted into the cache. */
 async function nodeFor(triple) {
   const dist = DISTS[triple];
   if (!dist) throw new Error(`no Node.js build mapped for target ${triple}`);
   const extracted = join(cacheDir, dist.name, dist.member);
-  if (await exists(extracted)) return extracted;
+  const license = join(cacheDir, dist.name, "LICENSE");
+  // A cache from before the license was extracted has only the binary, so it gets the archive out again.
+  if ((await exists(extracted)) && (await exists(license))) return { binary: extracted, license };
 
   await mkdir(cacheDir, { recursive: true });
   const file = `${dist.name}.${dist.ext}`;
@@ -69,8 +75,10 @@ async function nodeFor(triple) {
     await writeFile(archive, bytes);
   }
   // bsdtar reads zip as well as tar.gz, and ships with Windows 10+ and macOS; Linux uses GNU tar for tar.gz.
-  execFileSync("tar", ["-xf", archive, "-C", cacheDir, `${dist.name}/${dist.member}`], { stdio: "inherit" });
-  return extracted;
+  execFileSync("tar", ["-xf", archive, "-C", cacheDir, `${dist.name}/${dist.member}`, `${dist.name}/LICENSE`], {
+    stdio: "inherit",
+  });
+  return { binary: extracted, license };
 }
 
 async function place(source, triple) {
@@ -78,6 +86,12 @@ async function place(source, triple) {
   await copyFile(source, out);
   await chmod(out, 0o755);
   console.log(`sidecar ready: ${out}`);
+}
+
+async function placeLicense(source) {
+  await mkdir(dirname(licenseOut), { recursive: true });
+  await copyFile(source, licenseOut);
+  console.log(`license ready: ${licenseOut}`);
 }
 
 if (!target) {
@@ -90,14 +104,18 @@ await mkdir(binariesDir, { recursive: true });
 if (target === "universal-apple-darwin") {
   const arm = await nodeFor("aarch64-apple-darwin");
   const intel = await nodeFor("x86_64-apple-darwin");
-  await place(arm, "aarch64-apple-darwin");
-  await place(intel, "x86_64-apple-darwin");
+  await place(arm.binary, "aarch64-apple-darwin");
+  await place(intel.binary, "x86_64-apple-darwin");
   const universal = join(binariesDir, "node-universal-apple-darwin");
-  execFileSync("lipo", ["-create", arm, intel, "-output", universal], { stdio: "inherit" });
+  execFileSync("lipo", ["-create", arm.binary, intel.binary, "-output", universal], { stdio: "inherit" });
   await chmod(universal, 0o755);
   console.log(`sidecar ready: ${universal}`);
+  // Both halves come from the same release, under the same license.
+  await placeLicense(arm.license);
 } else {
-  await place(await nodeFor(target), target);
+  const node = await nodeFor(target);
+  await place(node.binary, target);
+  await placeLicense(node.license);
 }
 
 console.log(`bundled Node.js ${NODE_VERSION} for ${target}`);
