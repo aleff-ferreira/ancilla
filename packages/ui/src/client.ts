@@ -136,6 +136,24 @@ export interface AncillaClient {
   compact(sessionId: string): Promise<{ noop: boolean; reason: string | null }>;
   /** Runs a shell command in the session's workspace; its output arrives as a `userShell` item. */
   runShell(sessionId: string, command: string): Promise<void>;
+
+  // ---------------------------------------------------------------- deep research
+  // POST /api/research {commandId, sessionId, question, config?} -> {run}; 409 when the thread has a live run.
+  startResearch(
+    sessionId: string,
+    question: string,
+    config: Partial<import("./types.js").ResearchConfig> | null,
+    commandId: string,
+  ): Promise<import("./types.js").ResearchRunView>;
+  // POST /api/research/:runId/stop {writeReport} -> {run}. With writeReport the run still writes from what it has.
+  stopResearch(runId: string, writeReport: boolean): Promise<import("./types.js").ResearchRunView>;
+  // GET /api/research?sessionId= -> {runs}
+  listResearch(sessionId: string): Promise<import("./types.js").ResearchRunView[]>;
+  // GET /api/research/:runId -> {run} with the report filled in.
+  getResearch(runId: string): Promise<import("./types.js").ResearchRunView>;
+  // GET /api/research-settings -> settings; PATCH with a partial (config partial is merged and clamped).
+  getResearchSettings(): Promise<import("./types.js").ResearchSettings>;
+  setResearchSettings(patch: { enabled?: boolean; config?: Partial<import("./types.js").ResearchConfig> }): Promise<import("./types.js").ResearchSettings>;
   /** Runs a `!` command in the workspace from Ancilla itself, for hosts that cannot run one. */
   runShellProxy(sessionId: string, command: string): Promise<import("./types.js").ShellRun>;
   /** Branches a thread into a new one carrying every completed turn. */

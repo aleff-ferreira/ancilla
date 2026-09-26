@@ -5,7 +5,7 @@ import { AncillaController, staleThreadReason, type Platform } from "../src/mode
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
 import { swarmView } from "../src/model/swarm.js";
-import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
+import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 
 const SESSION: SessionSummary = {
@@ -37,6 +37,48 @@ function load(overrides: Partial<TranscriptLoad> = {}): TranscriptLoad {
     readOnly: false,
     readOnlyReason: null,
     ...overrides,
+  };
+}
+
+/** A run view with every field filled, for the fake client and for render tests. */
+export function fakeResearchRun(over: Partial<ResearchRunView>): ResearchRunView {
+  return {
+    runId: "run-1",
+    sessionId: "s1",
+    status: "running",
+    phase: "researching",
+    question: "How is geothermal energy developing in Europe?",
+    brief: null,
+    round: 1,
+    maxRounds: 12,
+    createdAt: "2026-09-26T00:00:00.000Z",
+    startedAt: "2026-09-26T00:00:01.000Z",
+    endedAt: null,
+    researchDeadlineAt: "2026-09-26T00:10:01.000Z",
+    workers: [],
+    sources: { registry: 0, verified: 0, curated: 0 },
+    usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
+    failure: null,
+    reportAvailable: false,
+    report: null,
+    reportPath: null,
+    config: {
+      windowMinMinutes: 3,
+      windowMaxMinutes: 10,
+      maxRounds: 12,
+      maxParallel: 3,
+      workerMaxToolCalls: 25,
+      workerMaxSearches: 3,
+      workerMaxReads: 10,
+      workerMaxSaves: 10,
+      workerWallTimeMinutes: 10,
+      draftFirst: false,
+      salvageFraction: 0.6,
+      tokenSoftCap: null,
+      trace: false,
+      models: { supervisor: null, worker: null, writer: null },
+    },
+    ...over,
   };
 }
 
@@ -240,6 +282,32 @@ class FakeClient implements AncillaClient {
   async compact() {
     this.actions.push("compact");
     return { noop: this.compactNoop, reason: this.compactNoop ? "no_compactable_history" : null };
+  }
+  researchRuns: ResearchRunView[] = [];
+  async startResearch(sessionId: string, question: string, config: Partial<ResearchConfig> | null, commandId: string): Promise<ResearchRunView> {
+    void config;
+    const run = fakeResearchRun({ runId: `run-${this.researchRuns.length + 1}-${commandId.slice(0, 4)}`, sessionId, question });
+    this.researchRuns.push(run);
+    return run;
+  }
+  async stopResearch(runId: string): Promise<ResearchRunView> {
+    const run = this.researchRuns.find((r) => r.runId === runId);
+    if (!run) throw new Error("Unknown run.");
+    return { ...run, status: "cancelled" };
+  }
+  async listResearch(sessionId: string): Promise<ResearchRunView[]> {
+    return this.researchRuns.filter((r) => r.sessionId === sessionId);
+  }
+  async getResearch(runId: string): Promise<ResearchRunView> {
+    const run = this.researchRuns.find((r) => r.runId === runId);
+    if (!run) throw new Error("Unknown run.");
+    return run;
+  }
+  async getResearchSettings(): Promise<ResearchSettings> {
+    return { enabled: true, config: fakeResearchRun({}).config };
+  }
+  async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<ResearchSettings> {
+    return { enabled: patch.enabled ?? true, config: { ...fakeResearchRun({}).config, ...(patch.config ?? {}) } as ResearchConfig };
   }
   async runShell(sessionId: string, command: string) {
     this.actions.push(`shell:${sessionId}:${command}`);

@@ -9,6 +9,9 @@ import {
   type ApprovalDecisionInput,
   type ApprovalMode,
   type AttachmentView,
+  type ResearchConfig,
+  type ResearchRunView,
+  type ResearchSettings,
   type DirectoryListing,
   type EnvironmentStatus,
   type EventHandler,
@@ -218,6 +221,26 @@ export class WebAncillaClient implements AncillaClient {
 
   usage(days?: number): Promise<UsageReport> {
     return call<UsageReport>("GET", `/api/usage${days ? `?days=${days}` : ""}`);
+  }
+
+  // ---------------------------------------------------------------- deep research
+  async startResearch(sessionId: string, question: string, config: Partial<ResearchConfig> | null, commandId: string): Promise<ResearchRunView> {
+    return (await call<{ run: ResearchRunView }>("POST", "/api/research", { commandId, sessionId, question, config: config ?? undefined })).run;
+  }
+  async stopResearch(runId: string, writeReport: boolean): Promise<ResearchRunView> {
+    return (await call<{ run: ResearchRunView }>("POST", `/api/research/${enc(runId)}/stop`, { writeReport })).run;
+  }
+  async listResearch(sessionId: string): Promise<ResearchRunView[]> {
+    return (await call<{ runs: ResearchRunView[] }>("GET", `/api/research?sessionId=${enc(sessionId)}`)).runs;
+  }
+  async getResearch(runId: string): Promise<ResearchRunView> {
+    return (await call<{ run: ResearchRunView }>("GET", `/api/research/${enc(runId)}`)).run;
+  }
+  async getResearchSettings(): Promise<ResearchSettings> {
+    return call<ResearchSettings>("GET", "/api/research-settings");
+  }
+  async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<ResearchSettings> {
+    return call<ResearchSettings>("PATCH", "/api/research-settings", patch);
   }
 
   async runShellProxy(sessionId: string, command: string): Promise<ShellRun> {

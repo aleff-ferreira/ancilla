@@ -349,6 +349,87 @@ export interface ShellRun {
   at: string;
 }
 
+// ---------------------------------------------------------------- deep research
+// Wire mirrors of `@ancilla/daemon`'s research view types (packages/daemon/src/research). The UI does not import
+// the daemon package, so these are kept by hand, like SessionSummary.
+
+export interface ResearchModelIds {
+  supervisor: string | null;
+  worker: string | null;
+  writer: string | null;
+}
+
+export interface ResearchConfig {
+  windowMinMinutes: number;
+  windowMaxMinutes: number;
+  maxRounds: number;
+  maxParallel: number;
+  workerMaxToolCalls: number;
+  workerMaxSearches: number;
+  workerMaxReads: number;
+  workerMaxSaves: number;
+  workerWallTimeMinutes: number;
+  draftFirst: boolean;
+  salvageFraction: number;
+  tokenSoftCap: number | null;
+  trace: boolean;
+  models: ResearchModelIds;
+}
+
+export interface ResearchSettings {
+  enabled: boolean;
+  config: ResearchConfig;
+}
+
+export type ResearchStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled" | "interrupted";
+export type ResearchPhase = "scoping" | "drafting" | "researching" | "writing" | "done";
+export type ResearchWorkerState = "queued" | "working" | "completed" | "failed" | "timed_out" | "cancelled";
+
+export interface ResearchUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+}
+
+export interface ResearchWorkerView {
+  agentId: number;
+  round: number;
+  topic: string;
+  discovery: boolean;
+  state: ResearchWorkerState;
+  toolCalls: number;
+  searches: number;
+  reads: number;
+  saved: number;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/** A DeepResearch run as the server reports it; `report` is only filled by `getResearch`. */
+export interface ResearchRunView {
+  runId: string;
+  sessionId: string;
+  status: ResearchStatus;
+  phase: ResearchPhase;
+  question: string;
+  brief: string | null;
+  round: number;
+  maxRounds: number;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  researchDeadlineAt: string | null;
+  workers: ResearchWorkerView[];
+  sources: { registry: number; verified: number; curated: number };
+  usage: ResearchUsage;
+  failure: string | null;
+  reportAvailable: boolean;
+  report: string | null;
+  reportPath: string | null;
+  config: ResearchConfig;
+}
+
 /** One day's tokens for one model, as the server aggregates them for the usage page. */
 export interface UsageBucket {
   day: string;
@@ -511,6 +592,7 @@ export type AncillaEvent =
   | { type: "session-status"; sessionId: string; live: LiveView | null }
   | { type: "sessions-changed" }
   | { type: "shell-run"; sessionId: string; run: ShellRun }
+  | { type: "research-run"; sessionId: string; run: ResearchRunView }
   | { type: "plan-usage"; usage: PlanUsage; accountId: string | null }
   | { type: "host"; key: string; state: string; message: string }
   | { type: "connection"; state: "open" | "lost" };

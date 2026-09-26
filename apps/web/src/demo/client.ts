@@ -4,6 +4,23 @@
  * against a live server. Nothing leaves the browser: no server, no Muse, no model calls.
  */
 import { AncillaError, parseModelList } from "@ancilla/ui";
+
+const DEMO_RESEARCH_CONFIG: ResearchConfig = {
+  windowMinMinutes: 3,
+  windowMaxMinutes: 10,
+  maxRounds: 12,
+  maxParallel: 3,
+  workerMaxToolCalls: 25,
+  workerMaxSearches: 3,
+  workerMaxReads: 10,
+  workerMaxSaves: 10,
+  workerWallTimeMinutes: 10,
+  draftFirst: false,
+  salvageFraction: 0.6,
+  tokenSoftCap: null,
+  trace: false,
+  models: { supervisor: null, worker: null, writer: null },
+};
 import type {
   AccountView,
   AncillaClient,
@@ -40,6 +57,9 @@ import type {
   ViewEvent,
   WorkflowAction,
   YoloSettings,
+  ResearchConfig,
+  ResearchRunView,
+  ResearchSettings,
 } from "@ancilla/ui";
 import { DemoFiles } from "./files.js";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
@@ -1105,6 +1125,26 @@ export class DemoAncillaClient implements AncillaClient {
     });
     this.emit(sessionId, "session/contextUsage", { usedTokens: after, windowTokens: 1_000_000, pressure: "normal" });
     return { noop: false, reason: null };
+  }
+
+  // ---------------------------------------------------------------- deep research (demo: filled in with the feature)
+  async startResearch(): Promise<ResearchRunView> {
+    throw new Error("Deep research is not part of the demo yet.");
+  }
+  async stopResearch(): Promise<ResearchRunView> {
+    throw new Error("Deep research is not part of the demo yet.");
+  }
+  async listResearch(): Promise<ResearchRunView[]> {
+    return [];
+  }
+  async getResearch(): Promise<ResearchRunView> {
+    throw new Error("Deep research is not part of the demo yet.");
+  }
+  async getResearchSettings(): Promise<ResearchSettings> {
+    return { enabled: true, config: DEMO_RESEARCH_CONFIG };
+  }
+  async setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> }): Promise<ResearchSettings> {
+    return { enabled: patch.enabled ?? true, config: { ...DEMO_RESEARCH_CONFIG, ...(patch.config ?? {}) } as ResearchConfig };
   }
 
   async runShell(sessionId: string, command: string): Promise<void> {
