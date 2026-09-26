@@ -442,7 +442,7 @@ export class DemoAncillaClient implements AncillaClient {
     return { cwd: clean, warning: null };
   }
 
-  async addProjectFolder(cwd: string, path: string): Promise<ProjectView> {
+  async addProjectFolder(cwd: string, path: string): Promise<{ project: ProjectView; warning: string | null }> {
     const clean = this.cleanPath(path);
     const project = this.projects.find((candidate) => candidate.cwd === cwd);
     if (!project) {
@@ -455,13 +455,18 @@ export class DemoAncillaClient implements AncillaClient {
     if (standalone && standalone.folders.length > 1) {
       throw new Error(`${standalone.displayName} is a project with folders of its own. Remove its folders first.`);
     }
+    // Never moved out from under another project on the quiet, as the real store refuses too.
+    const other = this.projects.find((candidate) => candidate.cwd !== cwd && candidate.folders.some((folder) => folder.cwd === clean));
+    if (other) {
+      throw new Error(`${basename(clean)} is already a folder of ${other.displayName}. Remove it there first.`);
+    }
     // A project of its own moves in whole; its threads keep their cwd, which is now one of this project's folders.
     this.projects = this.projects.filter((candidate) => candidate.cwd !== clean);
     if (!project.folders.some((folder) => folder.cwd === clean)) {
       project.folders = [...project.folders, { cwd: clean, displayName: basename(clean) }];
     }
     this.broadcast({ type: "sessions-changed" });
-    return { ...project };
+    return { project: { ...project }, warning: null };
   }
 
   async removeProjectFolder(cwd: string, path: string): Promise<ProjectView> {

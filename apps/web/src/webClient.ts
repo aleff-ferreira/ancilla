@@ -199,8 +199,9 @@ export class WebAncillaClient implements AncillaClient {
     await call("DELETE", `/api/projects?cwd=${enc(cwd)}`);
   }
 
-  async addProjectFolder(cwd: string, path: string): Promise<ProjectView> {
-    return (await call<{ project: ProjectView }>("POST", "/api/projects/folders", { cwd, path })).project;
+  async addProjectFolder(cwd: string, path: string): Promise<{ project: ProjectView; warning: string | null }> {
+    const added = await call<{ project: ProjectView; warning?: string | null }>("POST", "/api/projects/folders", { cwd, path });
+    return { project: added.project, warning: added.warning ?? null };
   }
 
   async removeProjectFolder(cwd: string, path: string): Promise<ProjectView> {

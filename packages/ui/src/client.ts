@@ -80,7 +80,8 @@ export interface AncillaClient {
   revealPath(path: string): Promise<void>;
   hideProject(cwd: string): Promise<void>;
   /** Puts `path` inside the project at `cwd`; a project of its own moves under it, threads and all. */
-  addProjectFolder(cwd: string, path: string): Promise<ProjectView>;
+  /** `warning` says why the folder's existing threads could not be listed yet, when they could not. */
+  addProjectFolder(cwd: string, path: string): Promise<{ project: ProjectView; warning: string | null }>;
   /** Takes a folder out of a project; it becomes a project of its own again. */
   removeProjectFolder(cwd: string, path: string): Promise<ProjectView>;
   setPinned(cwd: string, pinned: boolean): Promise<void>;

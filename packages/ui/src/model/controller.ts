@@ -2719,13 +2719,17 @@ export class AncillaController {
   async refreshProject(cwd: string): Promise<void> {
     const project = this.state.projects.find((p) => p.cwd === cwd);
     const folders = project ? project.folders.map((folder) => folder.cwd) : [cwd];
+    // Every folder is asked, whichever fail: the ones that answered still show what they found.
+    const results = await Promise.allSettled(folders.map((folder) => this.client.discover(folder)));
     try {
-      for (const folder of folders) {
-        await this.client.discover(folder);
-      }
       await this.refresh();
     } catch (error) {
       this.toast("error", "Could not refresh that project", errorMessage(error));
+      return;
+    }
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failed) {
+      this.toast("error", "Could not refresh that project", errorMessage(failed.reason));
     }
   }
 
@@ -2737,10 +2741,13 @@ export class AncillaController {
     }
     this.setBusy("addProject", true);
     try {
-      const project = await this.client.addProjectFolder(cwd, folder);
-      this.update((s) => ({ ...s, projects: s.projects.map((p) => (p.cwd === cwd ? project : p)) }));
+      const added = await this.client.addProjectFolder(cwd, folder);
+      this.update((s) => ({ ...s, projects: s.projects.map((p) => (p.cwd === cwd ? added.project : p)) }));
       this.setAddProjectOpen(false);
       await this.refresh();
+      if (added.warning) {
+        this.toast("info", "Folder added", `Muse could not list its threads yet: ${added.warning}`);
+      }
       return true;
     } catch (error) {
       this.toast("error", "Could not add that folder", errorMessage(error));

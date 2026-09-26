@@ -495,16 +495,33 @@ export class AncillaStore {
       throw new ProjectFolderError(`${parent["display_name"]} is itself a folder of another project. Add the folder to that project instead.`);
     }
     this.upsertProject(folderCwd);
-    const folder = this.db.prepare(`SELECT id, display_name FROM projects WHERE cwd = ?`).get(folderCwd) as Row;
+    const folder = this.db.prepare(`SELECT id, display_name, parent_id FROM projects WHERE cwd = ?`).get(folderCwd) as Row;
+    if (folder["parent_id"] === parent["id"]) {
+      return this.getProject(projectCwd) as Project;
+    }
+    if (folder["parent_id"] !== null && folder["parent_id"] !== undefined) {
+      // Never moved out from under another project on the quiet: its threads would leave that project with it.
+      const other = this.db.prepare(`SELECT display_name FROM projects WHERE id = ?`).get(folder["parent_id"]) as Row | undefined;
+      throw new ProjectFolderError(`${folder["display_name"]} is already a folder of ${other?.["display_name"] ?? "another project"}. Remove it there first.`);
+    }
     const nested = this.db.prepare(`SELECT COUNT(*) AS n FROM projects WHERE parent_id = ?`).get(folder["id"]) as Row;
     if (Number(nested["n"]) > 0) {
       throw new ProjectFolderError(`${folder["display_name"]} is a project with folders of its own. Remove its folders first.`);
     }
-    // A folder has no place of its own in the sidebar order, so its pin and position go with its independence.
+    // A folder has no place of its own in the sidebar order, so its pin goes with its independence; its position
+    // is now its place among the project's folders, after the ones already there.
+    const last = this.db.prepare(`SELECT COALESCE(MAX(position), 0) AS n FROM projects WHERE parent_id = ?`).get(parent["id"]) as Row;
     this.db
-      .prepare(`UPDATE projects SET parent_id = ?, hidden = 0, pinned = 0, position = NULL, updated_at = ? WHERE id = ?`)
-      .run(parent["id"], nowIso(), folder["id"]);
+      .prepare(`UPDATE projects SET parent_id = ?, hidden = 0, pinned = 0, position = ?, updated_at = ? WHERE id = ?`)
+      .run(parent["id"], Number(last["n"]) + 1, nowIso(), folder["id"]);
+    // A folder added to a project the user had removed from the sidebar brings the project back with it.
+    this.setHidden(projectCwd, false);
     return this.getProject(projectCwd) as Project;
+  }
+
+  /** Brings back the project a folder belongs to, every folder with it: the one place an unhide by folder goes. */
+  revealProject(cwd: string): void {
+    this.setHidden(this.projectForFolder(cwd)?.cwd ?? cwd, false);
   }
 
   /** Takes a folder out of its project. It becomes a project of its own again, visible, so no thread disappears. */
@@ -517,7 +534,7 @@ export class AncillaStore {
     if (!folder || folder["parent_id"] !== parent["id"]) {
       throw new ProjectFolderError("That folder is not part of this project.");
     }
-    this.db.prepare(`UPDATE projects SET parent_id = NULL, hidden = 0, updated_at = ? WHERE id = ?`).run(nowIso(), folder["id"]);
+    this.db.prepare(`UPDATE projects SET parent_id = NULL, hidden = 0, position = NULL, updated_at = ? WHERE id = ?`).run(nowIso(), folder["id"]);
     return this.getProject(projectCwd) as Project;
   }
 
@@ -877,18 +894,20 @@ export class AncillaStore {
       WHERE (f.id = p.id OR f.parent_id = p.id) AND s.archived = 0), p.created_at)`;
   }
 
-  /** The project's own folder first, then the ones added to it, in the order they were placed or added. */
+  /** The project's own folder first, then the ones added to it, in the order they were added. */
   private foldersOf(row: Row): ProjectFolder[] {
+    const self = { cwd: String(row["cwd"]), displayName: String(row["display_name"]) };
+    // A folder inside a project has none of its own, so it is spared the query.
+    if (row["parent_id"] !== null && row["parent_id"] !== undefined) {
+      return [self];
+    }
     const children = this.db
       .prepare(
         `SELECT cwd, display_name FROM projects WHERE parent_id = ?
          ORDER BY position IS NULL, position, created_at, id`,
       )
       .all(row["id"]) as Row[];
-    return [
-      { cwd: String(row["cwd"]), displayName: String(row["display_name"]) },
-      ...children.map((child) => ({ cwd: String(child["cwd"]), displayName: String(child["display_name"]) })),
-    ];
+    return [self, ...children.map((child) => ({ cwd: String(child["cwd"]), displayName: String(child["display_name"]) }))];
   }
 
   private getTurn(id: string): TurnRecord {

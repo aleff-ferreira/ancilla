@@ -311,6 +311,32 @@ describe("AncillaStore", () => {
     assert.deepEqual(store.listProjects().map((p) => p.cwd).sort(), ["/work/app", "/work/other"]);
   });
 
+  it("keeps a folder with the project that has it, lists folders in the order they were added, and reveals a hidden project a folder joins", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    store.upsertProject("/work/app");
+    store.upsertProject("/work/site");
+    // A row made long before it joins: the order of joining wins, not the age of the row.
+    store.upsertProject("/work/old");
+    store.upsertProject("/work/new");
+    store.addProjectFolder("/work/app", "/work/new");
+    store.addProjectFolder("/work/app", "/work/old");
+    assert.deepEqual(
+      store.getProject("/work/app")?.folders.map((f) => f.cwd),
+      ["/work/app", "/work/new", "/work/old"],
+    );
+    // Adding it again is a no-op; adding it to another project is refused rather than moving its threads.
+    store.addProjectFolder("/work/app", "/work/old");
+    assert.throws(() => store.addProjectFolder("/work/site", "/work/old"), /already a folder of app/);
+    assert.equal(store.getProject("/work/site")?.folders.length, 1);
+    // A project the user removed comes back, folders and all, when a folder is added to it.
+    store.setHidden("/work/app", true);
+    store.addProjectFolder("/work/app", "/work/extra");
+    const shown = store.listProjects().find((p) => p.cwd === "/work/app");
+    assert.deepEqual(shown?.folders.map((f) => f.cwd), ["/work/app", "/work/new", "/work/old", "/work/extra"]);
+    assert.equal(store.listFolders().some((p) => p.cwd === "/work/old"), true);
+  });
+
   it("hides a project's folders with it, and brings them back with it", () => {
     const store = new AncillaStore();
     after(() => store.close());

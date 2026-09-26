@@ -77,7 +77,7 @@ class FakeClient implements AncillaClient {
     }
     const next = { ...project, folders: [...project.folders, { cwd: path, displayName: path.slice(path.lastIndexOf("/") + 1) }] };
     this.projects = this.projects.filter((p) => p.cwd !== path).map((p) => (p.cwd === cwd ? next : p));
-    return next;
+    return { project: next, warning: null };
   }
   async removeProjectFolder(cwd: string, path: string) {
     this.folderCalls.push(`remove ${cwd} ${path}`);

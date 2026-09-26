@@ -2226,8 +2226,7 @@ export class AncillaServer {
    */
   private async addProjectFolder(cwd: string): Promise<Record<string, unknown>> {
     this.store.upsertProject(cwd);
-    const owner = this.store.projectForFolder(cwd)?.cwd ?? cwd;
-    this.store.setHidden(owner, false);
+    this.store.revealProject(cwd);
     let warning: string | null = null;
     let sessions: Record<string, unknown>[] = [];
     try {
@@ -2236,7 +2235,7 @@ export class AncillaServer {
       warning = errorInfo(error).message;
     }
     this.sessionsChanged();
-    const project = this.store.getProject(owner);
+    const project = this.store.projectForFolder(cwd);
     return { project: project ? this.projectView(project) : { cwd, displayName: cwd, folders: [] }, sessions, warning };
   }
 
@@ -2448,7 +2447,7 @@ export class AncillaServer {
   ): Promise<Record<string, unknown>> {
     const project = this.store.upsertProject(cwd);
     // The thread must be visible where it lands: the owning project when the folder is one of a project's folders.
-    this.store.setHidden(this.store.projectForFolder(cwd)?.cwd ?? cwd, false);
+    this.store.revealProject(cwd);
     const host = await this.hostFor(cwd, accountId);
     const started = await host.manager.startSession({
       workspaceRoot: this.hostPathFor(cwd),
