@@ -98,9 +98,16 @@ export interface Prefs {
   updatesPaused: boolean;
   /** Interface zoom as a factor of 1; the desktop shell has no browser chrome to do this. */
   zoom: number;
-  /** The file viewer beside a thread is open. */
+  /**
+   * The file viewer beside a thread is open. Kept in step with `sidePanel === "files"` for the views that still
+   * read it; `sidePanel` is the setting.
+   */
   filesOpen: boolean;
   filesWidth: number;
+  /** What the slot beside a thread shows: the file viewer, the Swarm panel, or nothing. */
+  sidePanel: SidePanel;
+  /** The Swarm panel's width, resizable like the file viewer. */
+  swarmWidth: number;
   /** The version whose release notes were last shown, so an update shows what changed once. */
   lastSeenVersion: string | null;
   /** Session statistics pills above the composer: turns, speed and token usage for the open thread. */
@@ -115,6 +122,47 @@ export interface Prefs {
 export const DEFAULT_FILES_WIDTH = 480;
 export const FILES_WIDTH_MIN = 320;
 export const FILES_WIDTH_MAX = 1200;
+
+export type SidePanel = "none" | "files" | "swarm";
+export const DEFAULT_SWARM_WIDTH = 520;
+export const SWARM_WIDTH_MIN = 400;
+export const SWARM_WIDTH_MAX = 800;
+
+export type SwarmFilter = "all" | "needs" | "failed" | "no-update" | "working" | "done";
+
+/** One thread's Swarm panel: the roster or one agent's inspector, the filter, and what is folded. */
+export interface SwarmPanelState {
+  mode: "roster" | "inspector";
+  inspectId: string | null;
+  filter: SwarmFilter;
+  query: string;
+  timelineOpen: boolean;
+  /** Phases the user opened in the roster; the current phase and failed ones open by default. */
+  openPhases: string[];
+}
+
+export interface SwarmState {
+  panels: Record<string, SwarmPanelState>;
+  activityOpen: boolean;
+  /** Actions sent and not yet confirmed by a revision, by `pendingKey(sessionId, agentId, attempt)`. */
+  pending: Record<string, "retry" | "stop">;
+  /** Skips this client sent, by the same key, so a cancelled attempt reads "Skipped by you". */
+  skipped: string[];
+  /** When each thread was last left or the window hidden, for the "Since you left" recap. */
+  leftAt: Record<string, number>;
+  /** Completion reports closed, as `<sessionId>:<itemId>`. */
+  dismissedReports: string[];
+  /** Recaps closed, by session. */
+  dismissedRecaps: string[];
+}
+
+export function emptySwarmPanel(): SwarmPanelState {
+  return { mode: "roster", inspectId: null, filter: "all", query: "", timelineOpen: true, openPhases: [] };
+}
+
+export function emptySwarmState(): SwarmState {
+  return { panels: {}, activityOpen: false, pending: {}, skipped: [], leftAt: {}, dismissedReports: [], dismissedRecaps: [] };
+}
 
 /** One thread's file viewer: the files it has open as tabs, which one shows, and whether the tree is up instead. */
 export interface FilePanel {
@@ -159,6 +207,8 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     zoom: 1,
     filesOpen: false,
     filesWidth: DEFAULT_FILES_WIDTH,
+    sidePanel: "none",
+    swarmWidth: DEFAULT_SWARM_WIDTH,
     lastSeenVersion: null,
     showTelemetry: false,
     preYolo: null,
@@ -268,6 +318,8 @@ export interface AppState {
   fileVersions: Record<string, number>;
   /** Folders open in each project's file tree. */
   fileTreeOpen: Record<string, string[]>;
+  /** The Swarm panels, the Activity drawer and the agent actions in flight. */
+  swarm: SwarmState;
 }
 
 /** `confirmFullAccess` is the full-access confirmation, which `/permissions full` must still pass through. */
@@ -320,6 +372,7 @@ export function initialState(prefs: Prefs): AppState {
     fileDrafts: {},
     fileVersions: {},
     fileTreeOpen: {},
+    swarm: emptySwarmState(),
     draftHandoff: null,
     updates: null,
     skills: {},
@@ -337,8 +390,13 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
   if (r["effort"] === "ultra") {
     r["effort"] = "max";
   }
+  // The file viewer's switch became the side-panel setting; a saved open viewer opens as the files panel.
+  if (r["sidePanel"] === undefined && r["filesOpen"] === true) {
+    r["sidePanel"] = "files";
+  }
   const pick = <K extends keyof Prefs>(key: K, valid: (v: unknown) => boolean): Prefs[K] =>
     valid(r[key]) ? (r[key] as Prefs[K]) : fallback[key];
+  const sidePanel = pick("sidePanel", (v) => v === "none" || v === "files" || v === "swarm");
   const isApprovalMode = (v: unknown): boolean =>
     v === "onRequest" || v === "promptUnmatched" || v === "denyUnmatched" || v === "allowAll";
   const isPreYolo = (v: unknown): boolean => {
@@ -379,8 +437,10 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     autoUpdate: pick("autoUpdate", (v) => typeof v === "boolean"),
     updatesPaused: pick("updatesPaused", (v) => typeof v === "boolean"),
     zoom: pick("zoom", (v) => typeof v === "number" && Number.isFinite(v) && v >= ZOOM_MIN && v <= ZOOM_MAX),
-    filesOpen: pick("filesOpen", (v) => typeof v === "boolean"),
+    filesOpen: sidePanel === "files",
     filesWidth: pick("filesWidth", (v) => typeof v === "number" && v >= FILES_WIDTH_MIN && v <= FILES_WIDTH_MAX),
+    sidePanel,
+    swarmWidth: pick("swarmWidth", (v) => typeof v === "number" && v >= SWARM_WIDTH_MIN && v <= SWARM_WIDTH_MAX),
     lastSeenVersion: pick("lastSeenVersion", (v) => v === null || typeof v === "string"),
     showTelemetry: pick("showTelemetry", (v) => typeof v === "boolean"),
     preYolo: pick("preYolo", isPreYolo),
