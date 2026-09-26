@@ -266,6 +266,8 @@ export interface ResearchRunState {
   /** Research routes to writing once this instant plus one minute has passed (upstream's rule). */
   researchDeadlineAt: string;
   nextAgentId: number;
+  /** The `seq` of the last event this run emitted, so a resumed run keeps `(runId, seq)` unique. */
+  eventSeq: number;
 }
 
 export interface ResearchOutcome {
@@ -279,6 +281,12 @@ export interface ResearchOutcome {
 export interface ResearchInput {
   runId: string;
   question: string;
+  /**
+   * "Stop and write": when the run's signal aborts and the salvage condition holds (enough of the window elapsed
+   * and at least one worker delivered findings), write a report from what exists and end `partial` instead of
+   * `cancelled`. Read at the moment of cancellation, so a host may set it on this object just before aborting.
+   */
+  stopWritesReport?: boolean;
 }
 
 export interface ResearchDeps {
