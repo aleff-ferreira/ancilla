@@ -14,7 +14,7 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY --repo aleff-ferreira/ancilla < ~/.tauri
 
 The key has no password, so there is no `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secret to add. The workflow passes an empty password when that secret is absent, which is what opens a key made without one. The secret is only needed if the key is ever replaced with one that has a password.
 
-Every release job checks for `TAURI_SIGNING_PRIVATE_KEY` before anything else and stops within seconds, saying so, if it is missing.
+Every release job checks for `TAURI_SIGNING_PRIVATE_KEY` before anything else and stops within seconds, saying so, if it is missing. Once its dependencies are installed, the Windows job also signs a scratch file with the key, so a key that is damaged or needs a password it was not given fails there, before the build, and it adds a warning to the run if the key is not the one whose public half is in `tauri.conf.json`.
 
 > **Back the key up**, somewhere other than this machine: a password manager, an encrypted drive. If it is lost, no later release can be signed with it, and every installed copy of Ancilla stops updating for good; the only way forward is for each user to download and install a new build by hand. If it leaks, replace it (below) as soon as you can.
 
@@ -90,5 +90,5 @@ Afterwards, check that the release page has all three installers and `latest.jso
 Only while you still have the old key; without it, see the warning above.
 
 1. Make a new key: `npx tauri signer generate -w ~/.tauri/ancilla-updater-2.key`.
-2. Put the new public key (the contents of `ancilla-updater-2.key.pub`) in `tauri.conf.json` as `plugins.updater.pubkey`, and release that version with the old key still in the secret. Installed copies check an update against the key they already have, so they accept this one, and from then on trust only the new key. If the build warns that the signing key does not match the configured public key, that is expected for this one release.
+2. Put the new public key (the contents of `ancilla-updater-2.key.pub`) in `tauri.conf.json` as `plugins.updater.pubkey`, and release that version with the old key still in the secret. Installed copies check an update against the key they already have, so they accept this one, and from then on trust only the new key. For this one release the key and the configured public key differ on purpose, so the Windows job's key check warns that the signing key is not the configured one, and the build log has tauri's own warning that the updater secret key does not match `plugins > updater > pubkey`. Both are expected here.
 3. Before the next release, point the secret at the new key: `gh secret set TAURI_SIGNING_PRIVATE_KEY --repo aleff-ferreira/ancilla < ~/.tauri/ancilla-updater-2.key`. Back it up like the first.

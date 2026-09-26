@@ -12,9 +12,9 @@ Helicon is now Ancilla. This release is a fork of [Helicon](https://github.com/H
 
 ### New
 
-- **Your Helicon setup comes with you.** The first time Ancilla starts, it copies what Helicon kept on this machine: your projects, pins, thread titles and Muse runtime choice, `runtime.json` included. The threads themselves live with Muse Code, so they are all still there. Helicon's files are only read, never changed, so the two apps keep working side by side.
+- **Your Helicon setup comes with you.** The first time Ancilla starts, it copies Helicon's database and `runtime.json` from this machine: your projects and their order, pins, thread titles, archived threads, the title, sandbox and YOLO settings, and which runtime, WSL distro and Muse path to use. The threads themselves live with Muse Code, so they are all still there. Helicon's files are only read, never changed, so the two apps keep working side by side. In the desktop app, interface settings such as theme and zoom, and unsent drafts, start fresh.
 - **An Agents panel in every thread.** Below the thread title, a panel counts the subagents and workflow agents Muse Code has started in the thread: how many are working or waiting, and how many finished, failed or stopped. Expanded, it lists each agent's task, phase and status, with duration, tool calls and retries where Muse reports them. It reads the updates Muse already sends, so there are no extra model calls, no polling and no limit on how many agents run. When the thread stops receiving updates, the panel says it is showing the last known activity instead of animating as if nothing had changed.
-- **Third-party notices ship with the app.** Helicon's copyright notice and the licenses of everything Ancilla bundles, Node.js included, are installed with it.
+- **Third-party notices ship with the app.** Every desktop install carries Ancilla's license, which keeps Helicon's copyright notice, and the licenses of everything the build bundles: Node.js, the JavaScript packages and the Rust crates. Settings credits Helicon and links to all of them.
 
 ### Fixed
 

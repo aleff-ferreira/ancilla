@@ -24,7 +24,7 @@ env:
 
     **Unsigned installers.** The Windows installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app: choose More info, then Run anyway. The macOS app is not notarized by Apple yet, so its first launch needs a right-click on the app, then Open.
 
-    **Licenses.** Ancilla is MIT-licensed. It is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon) by Harjot Singh Rana and contributors, whose copyright notice is kept in [NOTICE.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/NOTICE.md). The licenses of the third-party software each build bundles, Node.js among them, are in THIRD_PARTY_NOTICES, which ships inside the app and sits in [this release's source](https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}).
+    **Licenses.** Ancilla is free software under the [MIT License](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE). It is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon) by Harjot Singh Rana and contributors, also MIT: the license keeps Helicon's copyright notice, and [NOTICE.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/NOTICE.md) says what Ancilla changed. The third-party software each build bundles, Node.js among it, is listed with its licenses in [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md), which also ships inside the app.
 
 jobs:
   desktop-windows:
@@ -59,6 +59,51 @@ jobs:
           node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
+      # The first check only sees that the key is there. This one signs a scratch file the way the build signs the
+      # installer, so a damaged key, or one that needs a password the secrets do not give, fails here within a
+      # minute rather than after the whole Windows build. Only here, like the tag check: the other jobs wait for it.
+      - name: Check the updater signing key opens
+        shell: bash
+        # A backstop: nothing here should wait for input, but a prompt on a runner would wait for hours.
+        timeout-minutes: 5
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          scratch=ancilla-signing-check.txt
+          trap 'rm -f "$scratch" "$scratch.sig"' EXIT
+          echo "Ancilla $GITHUB_REF_NAME" > "$scratch"
+          # The CLI itself, with no npx or cmd.exe in between. `tauri signer sign` asks on the terminal when it gets
+          # no password at all, so a key without one gets an empty one as `--password=`: an argument, which reaches it
+          # on Windows too, where an empty variable passed through Git Bash might not.
+          sign=(node node_modules/@tauri-apps/cli/tauri.js signer sign)
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
+            sign+=(--password=)
+          fi
+          if ! "${sign[@]}" "$scratch"; then
+            echo "::error title=The updater signing key does not open::tauri signer sign could not sign with TAURI_SIGNING_PRIVATE_KEY (its error is above). The secret must be the whole of ~/.tauri/ancilla-updater.key, which has no password; only a key that has one also needs TAURI_SIGNING_PRIVATE_KEY_PASSWORD (docs/RELEASING.md)."
+            exit 1
+          fi
+          # A key that opens can still be the wrong one. Only a warning: a release that replaces the key is signed
+          # with the old one on purpose (docs/RELEASING.md). MSYS_NO_PATHCONV keeps Git Bash from rewriting the script.
+          SIG_FILE="$scratch.sig" MSYS_NO_PATHCONV=1 node -e '
+            const fs = require("fs");
+            // A minisign key or signature is base64 of text whose second line, decoded in turn, is a two-byte
+            // algorithm and then the key id, which minisign prints as a little-endian hex number.
+            const keyId = (text) => {
+              const line = Buffer.from(text.trim(), "base64").toString("utf8").split(/\r?\n/)[1];
+              return Buffer.from(Buffer.from(line, "base64").subarray(2, 10)).reverse().toString("hex").toUpperCase();
+            };
+            const conf = JSON.parse(fs.readFileSync("apps/desktop/src-tauri/tauri.conf.json", "utf8"));
+            const signing = keyId(fs.readFileSync(process.env.SIG_FILE, "utf8"));
+            const trusted = keyId(conf.plugins.updater.pubkey);
+            if (signing === trusted) {
+              console.log(`Signing key ${signing} matches plugins.updater.pubkey.`);
+            } else {
+              console.log(`::warning title=The signing key is not the configured one::TAURI_SIGNING_PRIVATE_KEY is key ${signing}, but plugins.updater.pubkey in tauri.conf.json is key ${trusted}. Installed copies accept only an update signed with the key they trust, so unless this release replaces the key (docs/RELEASING.md), the secret holds the wrong key.`);
+            }
+          '
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
@@ -68,8 +113,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Signs the installer for the in-app updater, which also publishes latest.json.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # The key has no password, so this secret is normally absent and this is set but empty, which is what
-          # opens such a key. Set the secret only for a key that has one.
+          # The key has no password, so this secret is normally absent. The bundler then signs with an empty password
+          # either way: it takes this variable when it is set, even to nothing, and when it is not, falls back to empty
+          # because CI is set, as on every runner (tauri-cli's sign_updaters). Set the secret only for a key with one.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
