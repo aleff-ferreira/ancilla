@@ -7,11 +7,27 @@ const execFileAsync = promisify(execFileCallback);
 export interface ExecResult {
   stdout: string;
   exitCode: number;
+  /** What the child wrote to stderr; absent from runners that do not capture it. */
+  stderr?: string;
+  /** True when the child was killed because `ExecOptions.timeoutMs` passed. */
+  timedOut?: boolean;
+  /** True when the child was killed because `ExecOptions.signal` fired. */
+  aborted?: boolean;
 }
+
+/** The longest `defaultExec` waits for a child when nobody says otherwise. */
+export const DEFAULT_EXEC_TIMEOUT_MS = 30000;
+
+/** Enough for a long `muse exec --json` answer (a research report with its event stream) without truncation. */
+export const EXEC_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 
 export interface ExecOptions {
   /** The child's whole environment; this process's own when absent. */
   env?: NodeJS.ProcessEnv;
+  /** How long the child may run before it is killed; `DEFAULT_EXEC_TIMEOUT_MS` when absent. */
+  timeoutMs?: number;
+  /** Kills the child when it fires; the result then says `aborted`. */
+  signal?: AbortSignal;
 }
 
 export type ExecFn = (command: string, args: string[], options?: ExecOptions) => Promise<ExecResult>;
@@ -49,23 +65,30 @@ export async function defaultExec(
   args: string[],
   options: ExecOptions = {},
 ): Promise<ExecResult> {
+  const timeout = options.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   try {
-    const { stdout } = await execFileAsync(command, args, {
+    const { stdout, stderr } = await execFileAsync(command, args, {
       encoding: "buffer",
       windowsHide: true,
-      timeout: 30000,
+      timeout,
+      maxBuffer: EXEC_MAX_BUFFER_BYTES,
       ...(options.env ? { env: options.env } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
-    return { stdout: decodeCliOutput(stdout as Buffer), exitCode: 0 };
+    return { stdout: decodeCliOutput(stdout as Buffer), stderr: decodeCliOutput(stderr as Buffer), exitCode: 0 };
   } catch (error) {
-    const code =
-      typeof (error as { code?: unknown }).code === "number"
-        ? ((error as { code: number }).code as number)
-        : 1;
-    const stdout = (error as { stdout?: unknown }).stdout;
+    const failure = error as { code?: unknown; killed?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; name?: unknown };
+    const aborted = options.signal?.aborted === true || failure.name === "AbortError" || failure.code === "ABORT_ERR";
+    // Node kills a child that outlives `timeout` and reports it killed with no exit code; an abort looks the same
+    // apart from the signal, which is why the abort is checked first.
+    const timedOut = !aborted && failure.killed === true && (failure.code === null || failure.code === undefined);
+    const code = typeof failure.code === "number" ? failure.code : 1;
     return {
-      stdout: Buffer.isBuffer(stdout) ? decodeCliOutput(stdout) : "",
+      stdout: Buffer.isBuffer(failure.stdout) ? decodeCliOutput(failure.stdout) : "",
+      stderr: Buffer.isBuffer(failure.stderr) ? decodeCliOutput(failure.stderr) : "",
       exitCode: code,
+      ...(timedOut ? { timedOut: true } : {}),
+      ...(aborted ? { aborted: true } : {}),
     };
   }
 }

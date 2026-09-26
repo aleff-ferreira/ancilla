@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   decodeCliOutput,
   defaultDistro,
+  defaultExec,
   parseWslList,
   planHostCommand,
   planMuseCli,
@@ -215,5 +216,34 @@ describe("environment probe", () => {
     const missing = await probeEnvironment(exec, "win32", { preference: "wsl", distro: "Ubuntu-24.04", musePath: "/home/u/bin/muse" });
     assert.equal(missing.musePath, null, "a pinned binary that is not there is not replaced by a guess");
     assert.equal(missing.museDistro, "Ubuntu-24.04");
+  });
+});
+
+describe("defaultExec", () => {
+  it("captures stdout and stderr and reports the exit code", async () => {
+    const ok = await defaultExec(process.execPath, ["-e", "process.stdout.write('out'); process.stderr.write('err');"]);
+    assert.deepEqual(ok, { stdout: "out", stderr: "err", exitCode: 0 });
+    const failed = await defaultExec(process.execPath, ["-e", "process.stderr.write('401 unauthorized'); process.exit(3);"]);
+    assert.equal(failed.exitCode, 3);
+    assert.equal(failed.stderr, "401 unauthorized");
+    assert.equal(failed.timedOut, undefined);
+    assert.equal(failed.aborted, undefined);
+  });
+
+  it("kills a child that outlives timeoutMs and says so", async () => {
+    const result = await defaultExec(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { timeoutMs: 200 });
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(result.timedOut, true);
+    assert.equal(result.aborted, undefined);
+  });
+
+  it("kills a child when the signal fires and flags the result aborted", async () => {
+    const controller = new AbortController();
+    const pending = defaultExec(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { signal: controller.signal, timeoutMs: 10000 });
+    setTimeout(() => controller.abort(), 100);
+    const result = await pending;
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(result.aborted, true);
+    assert.equal(result.timedOut, undefined);
   });
 });

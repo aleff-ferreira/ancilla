@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AncillaStore, ProjectFolderError } from "../src/store.js";
+import { DEFAULT_RESEARCH_CONFIG, type ResearchEvent, type ResearchRunState } from "../src/research/index.js";
 
 describe("AncillaStore", () => {
   it("groups sessions under projects by directory", () => {
@@ -376,5 +377,162 @@ describe("AncillaStore", () => {
     assert.deepEqual(projects[0]?.folders, [{ cwd: "/work/old", displayName: "old" }]);
     assert.equal(projects[0]?.pinned, true, "existing rows keep their data");
     assert.deepEqual(store.addProjectFolder("/work/old", "/work/old-docs").folders.map((f) => f.cwd), ["/work/old", "/work/old-docs"]);
+  });
+
+  describe("deep research", () => {
+    function seed(store: AncillaStore): void {
+      const project = store.upsertProject("/work/p");
+      store.recordSession({ id: "s1", projectId: project.id });
+      store.recordSession({ id: "s2", projectId: project.id });
+    }
+
+    function stateFor(runId: string): ResearchRunState {
+      return {
+        version: 1,
+        runId,
+        question: "q",
+        config: DEFAULT_RESEARCH_CONFIG,
+        phase: "researching",
+        brief: "brief",
+        inputLanguage: "en",
+        targetLanguage: "en",
+        draft: null,
+        rounds: [],
+        registry: [],
+        curated: [],
+        notes: [],
+        consecutiveFailures: 0,
+        aborted: false,
+        abortReason: null,
+        usage: { inputTokens: 1, outputTokens: 2, cachedInputTokens: 0, totalTokens: 3 },
+        startedAt: "2026-09-26T10:00:00.000Z",
+        researchDeadlineAt: "2026-09-26T10:10:00.000Z",
+        nextAgentId: 1,
+      };
+    }
+
+    it("round-trips a run with its config, state, report and failure", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      seed(store);
+      const created = store.createResearchRun({
+        id: "r1",
+        sessionId: "s1",
+        commandId: "c1",
+        question: "What is new in SQLite 3.50?",
+        config: { ...DEFAULT_RESEARCH_CONFIG, maxRounds: 4, models: { supervisor: "m-sup", worker: null, writer: null } },
+        createdAt: "2026-09-26T10:00:00.000Z",
+      });
+      assert.equal(created.status, "queued");
+      assert.equal(created.state, null);
+      assert.equal(created.report, null);
+      assert.equal(created.reportPath, null);
+      assert.equal(created.config.maxRounds, 4);
+      assert.equal(created.config.models.supervisor, "m-sup");
+      assert.equal(store.getResearchRunByCommand("c1")?.id, "r1");
+      assert.equal(store.getResearchRunByCommand("nope"), null);
+
+      const running = store.updateResearchRun("r1", { status: "running", startedAt: "2026-09-26T10:00:01.000Z", state: stateFor("r1") });
+      assert.equal(running?.status, "running");
+      assert.equal(running?.startedAt, "2026-09-26T10:00:01.000Z");
+      assert.equal(running?.state?.phase, "researching");
+      assert.equal(running?.state?.usage.totalTokens, 3);
+
+      const done = store.updateResearchRun("r1", {
+        status: "completed",
+        report: "# Report",
+        reportPath: ".ancilla/research/r1/report.md",
+        endedAt: "2026-09-26T10:09:00.000Z",
+      });
+      assert.equal(done?.report, "# Report");
+      assert.equal(done?.reportPath, ".ancilla/research/r1/report.md");
+      assert.equal(done?.endedAt, "2026-09-26T10:09:00.000Z");
+      assert.equal(store.updateResearchRun("r1", { failure: "quota: out of tokens" })?.failure, "quota: out of tokens");
+      assert.equal(store.updateResearchRun("missing", { status: "failed" }), null);
+      assert.throws(() => store.createResearchRun({ id: "r2", sessionId: "s1", commandId: "c1", question: "again", config: DEFAULT_RESEARCH_CONFIG }), /UNIQUE/);
+    });
+
+    it("lists a thread's runs oldest first and finds the ones still in flight", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      seed(store);
+      store.createResearchRun({ id: "r2", sessionId: "s1", commandId: "c2", question: "b", config: DEFAULT_RESEARCH_CONFIG, createdAt: "2026-09-26T11:00:00.000Z" });
+      store.createResearchRun({ id: "r1", sessionId: "s1", commandId: "c1", question: "a", config: DEFAULT_RESEARCH_CONFIG, createdAt: "2026-09-26T10:00:00.000Z" });
+      store.createResearchRun({ id: "r3", sessionId: "s2", commandId: "c3", question: "c", config: DEFAULT_RESEARCH_CONFIG, createdAt: "2026-09-26T12:00:00.000Z" });
+      assert.deepEqual(store.listResearchRuns("s1").map((r) => r.id), ["r1", "r2"]);
+      assert.deepEqual(store.listResearchRuns("s2").map((r) => r.id), ["r3"]);
+      assert.deepEqual(store.listResearchRuns("s9"), []);
+      store.updateResearchRun("r1", { status: "running" });
+      store.updateResearchRun("r3", { status: "completed" });
+      assert.deepEqual(store.listRunningResearchRuns().map((r) => r.id), ["r1", "r2"], "queued and running both count as in flight");
+    });
+
+    it("keeps events once per (run, seq) and pages them in order", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      seed(store);
+      store.createResearchRun({ id: "r1", sessionId: "s1", commandId: "c1", question: "a", config: DEFAULT_RESEARCH_CONFIG });
+      const event = (seq: number, type: ResearchEvent["type"], extra: Partial<ResearchEvent> = {}): ResearchEvent => ({
+        type,
+        runId: "r1",
+        seq,
+        at: `2026-09-26T10:00:0${seq}.000Z`,
+        phase: "researching",
+        round: null,
+        agentId: null,
+        payload: { seq },
+        ...extra,
+      });
+      assert.equal(store.appendResearchEvent(event(2, "scope_started")), true);
+      assert.equal(store.appendResearchEvent(event(1, "run_started", { phase: "scoping" })), true);
+      assert.equal(store.appendResearchEvent(event(3, "subagent_started", { round: 1, agentId: 2 })), true);
+      assert.equal(store.appendResearchEvent(event(2, "run_failed")), false, "a replayed seq is ignored");
+      assert.equal(store.lastResearchEventSeq("r1"), 3);
+      assert.equal(store.lastResearchEventSeq("none"), 0);
+      const all = store.listResearchEvents("r1");
+      assert.deepEqual(all.map((e) => [e.seq, e.type]), [[1, "run_started"], [2, "scope_started"], [3, "subagent_started"]]);
+      assert.equal(all[0]?.phase, "scoping");
+      assert.deepEqual(all[2]?.payload, { seq: 3 });
+      assert.equal(all[2]?.round, 1);
+      assert.equal(all[2]?.agentId, 2);
+      assert.deepEqual(store.listResearchEvents("r1", 1).map((e) => e.seq), [2, 3]);
+      assert.deepEqual(store.listResearchEvents("r1", 0, 2).map((e) => e.seq), [1, 2]);
+    });
+
+    it("records which worker sessions a run used", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      seed(store);
+      const project = store.getProject("/work/p")!;
+      store.createResearchRun({ id: "r1", sessionId: "s1", commandId: "c1", question: "a", config: DEFAULT_RESEARCH_CONFIG });
+      store.recordSession({ id: "w1", projectId: project.id, origin: "research-worker", title: "Research worker A1" });
+      store.updateSession("w1", { archived: true });
+      store.addResearchWorker({ runId: "r1", workerSessionId: "w1", round: 1, agentId: 1, status: "working" });
+      store.addResearchWorker({ runId: "r1", workerSessionId: "w2", round: 1, agentId: 2, status: "working" });
+      store.updateResearchWorker("r1", "w1", "completed");
+      assert.deepEqual(
+        store.listResearchWorkers("r1").map((w) => [w.agentId, w.status]),
+        [[1, "completed"], [2, "working"]],
+      );
+      assert.deepEqual(store.listSessionsByProject(project.id).map((s) => s.id), ["s1", "s2"], "worker sessions stay out of the sidebar");
+      assert.equal(store.getSession("w1")?.origin, "research-worker");
+    });
+
+    it("keeps research settings clamped and merged", () => {
+      const store = new AncillaStore();
+      after(() => store.close());
+      const initial = store.getResearchSettings();
+      assert.equal(initial.enabled, true);
+      assert.equal(initial.config.maxRounds, DEFAULT_RESEARCH_CONFIG.maxRounds);
+      const next = store.setResearchSettings({ enabled: false, config: { maxRounds: 9999, models: { supervisor: "m1", worker: null, writer: null } } });
+      assert.equal(next.enabled, false);
+      assert.equal(next.config.maxRounds, 500, "clamped to the ceiling");
+      assert.equal(next.config.models.supervisor, "m1");
+      const merged = store.setResearchSettings({ config: { windowMaxMinutes: 20 } });
+      assert.equal(merged.enabled, false, "enabled is kept when the patch has no say");
+      assert.equal(merged.config.maxRounds, 500, "earlier config values survive a partial patch");
+      assert.equal(merged.config.windowMaxMinutes, 20);
+      assert.deepEqual(store.getResearchSettings(), merged);
+    });
   });
 });

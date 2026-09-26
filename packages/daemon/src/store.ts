@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { DEFAULT_RESEARCH_SETTINGS, resolveResearchConfig, type ResearchConfig, type ResearchSettings } from "./research/config.js";
+import type { ResearchEvent, ResearchRunState, ResearchStatus, WorkerStatus } from "./research/types.js";
 
 export interface Project {
   id: number;
@@ -43,6 +45,10 @@ export interface SessionRecord {
    * never touch it, so a host that comes back reporting another model can be set right again.
    */
   chosenModelId: string | null;
+  /**
+   * Who made the session: `ancilla` for threads started here, `muse` for ones discovered on a host, and
+   * `research-worker` for the archived sessions a DeepResearch run starts to do its searching.
+   */
   origin: string;
   archived: boolean;
   createdAt: string;
@@ -211,12 +217,24 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_runs (
+  id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), command_id TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL, question TEXT NOT NULL, config TEXT NOT NULL, state TEXT NOT NULL,
+  report TEXT, failure TEXT, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT);
+CREATE TABLE IF NOT EXISTS research_events (
+  run_id TEXT NOT NULL REFERENCES research_runs(id), seq INTEGER NOT NULL, type TEXT NOT NULL,
+  at TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (run_id, seq));
+CREATE TABLE IF NOT EXISTS research_workers (
+  run_id TEXT NOT NULL REFERENCES research_runs(id), worker_session_id TEXT NOT NULL,
+  round INTEGER NOT NULL, agent_id INTEGER NOT NULL, status TEXT NOT NULL, PRIMARY KEY (run_id, worker_session_id));
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_shell_runs_session ON shell_runs(session_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_at ON usage(at);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id, turn_id);
+CREATE INDEX IF NOT EXISTS idx_research_runs_session ON research_runs(session_id);
+CREATE INDEX IF NOT EXISTS idx_research_events_run ON research_events(run_id, seq);
 `;
 
 /** Columns added after the first release; applied in place so existing databases keep their data. */
@@ -242,6 +260,8 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "sessions", column: "chosen_model_id", ddl: "ALTER TABLE sessions ADD COLUMN chosen_model_id TEXT" },
   // A row with a parent is a folder inside that project, never a project of its own. One level deep only.
   { table: "projects", column: "parent_id", ddl: "ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id)" },
+  // Where a research report was written inside the workspace, relative to the project folder; NULL until it was.
+  { table: "research_runs", column: "report_path", ddl: "ALTER TABLE research_runs ADD COLUMN report_path TEXT" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -305,6 +325,55 @@ export interface UsageCall {
 export interface UsageRow extends UsageCall {
   sessionTitle: string | null;
   projectCwd: string | null;
+}
+
+/** One DeepResearch run on a thread. `config` and `state` are kept as JSON text and parsed on the way out. */
+export interface ResearchRunRecord {
+  id: string;
+  sessionId: string;
+  /** The client's idempotency handle: a repeated start with the same one returns this run. */
+  commandId: string;
+  status: ResearchStatus;
+  question: string;
+  config: ResearchConfig;
+  /** The engine's checkpoint; null before the first one. */
+  state: ResearchRunState | null;
+  report: string | null;
+  failure: string | null;
+  /** Where the report was written, relative to the project folder; null until it was. */
+  reportPath: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface CreateResearchRunInput {
+  id: string;
+  sessionId: string;
+  commandId: string;
+  question: string;
+  config: ResearchConfig;
+  status?: ResearchStatus;
+  createdAt?: string;
+}
+
+export interface ResearchRunPatch {
+  status?: ResearchStatus;
+  state?: ResearchRunState | null;
+  report?: string | null;
+  failure?: string | null;
+  reportPath?: string | null;
+  startedAt?: string | null;
+  endedAt?: string | null;
+}
+
+/** A row in `research_workers`: which Muse session did which delegated task. */
+export interface ResearchWorkerRecord {
+  runId: string;
+  workerSessionId: string;
+  round: number;
+  agentId: number;
+  status: "working" | WorkerStatus;
 }
 
 function toAttachment(row: Row): AttachmentRecord {
@@ -421,6 +490,183 @@ export class AncillaStore {
       .prepare(`INSERT INTO settings (key, value) VALUES ('yolo', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
       .run(JSON.stringify(next));
     return next;
+  }
+
+  /** Malformed rows fall back to the defaults rather than refusing every research start. */
+  getResearchSettings(): ResearchSettings {
+    const row = this.db.prepare(`SELECT value FROM settings WHERE key = 'research'`).get() as Row | undefined;
+    if (!row) {
+      return { enabled: DEFAULT_RESEARCH_SETTINGS.enabled, config: resolveResearchConfig(null) };
+    }
+    try {
+      const parsed = JSON.parse(String(row["value"])) as Partial<ResearchSettings>;
+      return {
+        enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : DEFAULT_RESEARCH_SETTINGS.enabled,
+        config: resolveResearchConfig(parsed.config ?? null),
+      };
+    } catch {
+      return { enabled: DEFAULT_RESEARCH_SETTINGS.enabled, config: resolveResearchConfig(null) };
+    }
+  }
+
+  /** A partial config is merged over the stored one and every number clamped, so the row never holds a bad value. */
+  setResearchSettings(patch: { enabled?: boolean; config?: Partial<ResearchConfig> | null }): ResearchSettings {
+    const current = this.getResearchSettings();
+    const next: ResearchSettings = {
+      enabled: patch.enabled ?? current.enabled,
+      config: resolveResearchConfig(patch.config ?? null, current.config),
+    };
+    this.db
+      .prepare(`INSERT INTO settings (key, value) VALUES ('research', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+      .run(JSON.stringify(next));
+    return next;
+  }
+
+  // ---------------------------------------------------------------- deep research
+
+  createResearchRun(input: CreateResearchRunInput): ResearchRunRecord {
+    this.db
+      .prepare(
+        `INSERT INTO research_runs (id, session_id, command_id, status, question, config, state, report, failure, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'null', NULL, NULL, ?)`,
+      )
+      .run(input.id, input.sessionId, input.commandId, input.status ?? "queued", input.question, JSON.stringify(input.config), input.createdAt ?? nowIso());
+    return this.getResearchRun(input.id) as ResearchRunRecord;
+  }
+
+  updateResearchRun(id: string, patch: ResearchRunPatch): ResearchRunRecord | null {
+    const sets: string[] = [];
+    const values: (string | number | null)[] = [];
+    if (patch.status !== undefined) {
+      sets.push("status = ?");
+      values.push(patch.status);
+    }
+    if (patch.state !== undefined) {
+      sets.push("state = ?");
+      values.push(JSON.stringify(patch.state));
+    }
+    if (patch.report !== undefined) {
+      sets.push("report = ?");
+      values.push(patch.report);
+    }
+    if (patch.failure !== undefined) {
+      sets.push("failure = ?");
+      values.push(patch.failure);
+    }
+    if (patch.reportPath !== undefined) {
+      sets.push("report_path = ?");
+      values.push(patch.reportPath);
+    }
+    if (patch.startedAt !== undefined) {
+      sets.push("started_at = ?");
+      values.push(patch.startedAt);
+    }
+    if (patch.endedAt !== undefined) {
+      sets.push("ended_at = ?");
+      values.push(patch.endedAt);
+    }
+    if (sets.length > 0) {
+      values.push(id);
+      this.db.prepare(`UPDATE research_runs SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return this.getResearchRun(id);
+  }
+
+  getResearchRun(id: string): ResearchRunRecord | null {
+    const row = this.db.prepare(`SELECT * FROM research_runs WHERE id = ?`).get(id) as Row | undefined;
+    return row ? this.toResearchRun(row) : null;
+  }
+
+  getResearchRunByCommand(commandId: string): ResearchRunRecord | null {
+    const row = this.db.prepare(`SELECT * FROM research_runs WHERE command_id = ?`).get(commandId) as Row | undefined;
+    return row ? this.toResearchRun(row) : null;
+  }
+
+  /** A thread's runs, oldest first, so a transcript can merge them by time. */
+  listResearchRuns(sessionId: string): ResearchRunRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM research_runs WHERE session_id = ? ORDER BY created_at, id`)
+      .all(sessionId) as Row[];
+    return rows.map((row) => this.toResearchRun(row));
+  }
+
+  /** Runs that were in flight, queued or running, which a starting server must mark interrupted. */
+  listRunningResearchRuns(): ResearchRunRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM research_runs WHERE status IN ('queued', 'running') ORDER BY created_at, id`)
+      .all() as Row[];
+    return rows.map((row) => this.toResearchRun(row));
+  }
+
+  /** Idempotent on (run, seq): an event replayed after a resume is kept once. Returns whether it was new. */
+  appendResearchEvent(event: ResearchEvent): boolean {
+    const payload = JSON.stringify({
+      phase: event.phase,
+      round: event.round,
+      agentId: event.agentId,
+      payload: event.payload,
+    });
+    const result = this.db
+      .prepare(`INSERT OR IGNORE INTO research_events (run_id, seq, type, at, payload) VALUES (?, ?, ?, ?, ?)`)
+      .run(event.runId, event.seq, event.type, event.at, payload);
+    return Number(result.changes) > 0;
+  }
+
+  listResearchEvents(runId: string, afterSeq = 0, limit = 500): ResearchEvent[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM research_events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?`)
+      .all(runId, afterSeq, Math.max(1, limit)) as Row[];
+    return rows.map((row) => {
+      let extra: Record<string, unknown> = {};
+      try {
+        extra = (JSON.parse(String(row["payload"])) as Record<string, unknown>) ?? {};
+      } catch {
+        /* a payload nobody can read is still an event */
+      }
+      return {
+        type: String(row["type"]) as ResearchEvent["type"],
+        runId: String(row["run_id"]),
+        seq: Number(row["seq"]),
+        at: String(row["at"]),
+        phase: (extra["phase"] as ResearchEvent["phase"]) ?? null,
+        round: typeof extra["round"] === "number" ? extra["round"] : null,
+        agentId: typeof extra["agentId"] === "number" ? extra["agentId"] : null,
+        payload: typeof extra["payload"] === "object" && extra["payload"] !== null ? (extra["payload"] as Record<string, unknown>) : {},
+      };
+    });
+  }
+
+  /** The highest event number a run has, so a host-made event can follow the engine's. */
+  lastResearchEventSeq(runId: string): number {
+    const row = this.db.prepare(`SELECT MAX(seq) AS seq FROM research_events WHERE run_id = ?`).get(runId) as Row | undefined;
+    return row && row["seq"] !== null && row["seq"] !== undefined ? Number(row["seq"]) : 0;
+  }
+
+  addResearchWorker(worker: ResearchWorkerRecord): ResearchWorkerRecord {
+    this.db
+      .prepare(
+        `INSERT INTO research_workers (run_id, worker_session_id, round, agent_id, status) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(run_id, worker_session_id) DO UPDATE SET status = excluded.status`,
+      )
+      .run(worker.runId, worker.workerSessionId, worker.round, worker.agentId, worker.status);
+    return worker;
+  }
+
+  updateResearchWorker(runId: string, workerSessionId: string, status: ResearchWorkerRecord["status"]): void {
+    this.db.prepare(`UPDATE research_workers SET status = ? WHERE run_id = ? AND worker_session_id = ?`).run(status, runId, workerSessionId);
+  }
+
+  listResearchWorkers(runId: string): ResearchWorkerRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM research_workers WHERE run_id = ? ORDER BY round, agent_id`)
+      .all(runId) as Row[];
+    return rows.map((row) => ({
+      runId: String(row["run_id"]),
+      workerSessionId: String(row["worker_session_id"]),
+      round: Number(row["round"]),
+      agentId: Number(row["agent_id"]),
+      status: String(row["status"]) as ResearchWorkerRecord["status"],
+    }));
   }
 
   upsertProject(cwd: string): Project {
@@ -936,6 +1182,37 @@ export class AncillaStore {
       activityAt: String(row["activity_at"] ?? row["created_at"]),
       defaultAccountId: row["default_account_id"] === null || row["default_account_id"] === undefined ? null : String(row["default_account_id"]),
       folders: this.foldersOf(row),
+    };
+  }
+
+  private toResearchRun(row: Row): ResearchRunRecord {
+    let config: ResearchConfig;
+    try {
+      config = resolveResearchConfig(JSON.parse(String(row["config"])) as Partial<ResearchConfig>);
+    } catch {
+      config = resolveResearchConfig(null);
+    }
+    let state: ResearchRunState | null = null;
+    try {
+      const parsed = JSON.parse(String(row["state"] ?? "null")) as unknown;
+      state = typeof parsed === "object" && parsed !== null ? (parsed as ResearchRunState) : null;
+    } catch {
+      state = null;
+    }
+    return {
+      id: String(row["id"]),
+      sessionId: String(row["session_id"]),
+      commandId: String(row["command_id"]),
+      status: String(row["status"]) as ResearchStatus,
+      question: String(row["question"]),
+      config,
+      state,
+      report: row["report"] === null || row["report"] === undefined ? null : String(row["report"]),
+      failure: row["failure"] === null || row["failure"] === undefined ? null : String(row["failure"]),
+      reportPath: row["report_path"] === null || row["report_path"] === undefined ? null : String(row["report_path"]),
+      createdAt: String(row["created_at"]),
+      startedAt: row["started_at"] === null || row["started_at"] === undefined ? null : String(row["started_at"]),
+      endedAt: row["ended_at"] === null || row["ended_at"] === undefined ? null : String(row["ended_at"]),
     };
   }
 

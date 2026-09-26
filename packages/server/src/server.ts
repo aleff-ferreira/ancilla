@@ -33,10 +33,18 @@ import {
   toWslPath,
   toWindowsPath,
   ProjectFolderError,
+  resolveResearchConfig,
+  runResearch,
   type ApprovalMode,
   type AttachmentRecord,
   type CommandConnection,
   type ExecFn,
+  type ExecResult,
+  type ResearchConfig,
+  type ResearchRunRecord,
+  type ResearchRunState,
+  type ResearchRunView,
+  type WorkerTask,
   type Project,
   type ServeTarget,
   type ReasoningEffort,
@@ -50,6 +58,19 @@ import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { wslSpawnEnv } from "./runtimeConfig.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
+import {
+  MuseExecModelClient,
+  MuseSessionWorkerRunner,
+  ResearchJobManager,
+  museExecArgs,
+  uuidv7,
+  type MuseExecPlan,
+  type ResearchEngine,
+  type ResearchThread,
+  type SessionNotificationHandler,
+  type WorkerSessionHandle,
+  type WorkerUpdate,
+} from "./research/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
 export const ANCILLA_VERSION = "0.18.0";
@@ -146,7 +167,14 @@ export interface ServerOptions {
   shellRunner?: ShellRunner;
   /** Spawns `muse login` for the device-code route; a thin wrapper over `node:child_process` spawn by default. */
   loginSpawn?: LoginSpawn;
+  /** The DeepResearch engine; the daemon's `runResearch` by default, a fake in tests. */
+  researchEngine?: ResearchEngine;
+  /** Research workers running at once across every run. */
+  researchMaxWorkers?: number;
 }
+
+/** Where a run's report and sources land inside the workspace, beside attachments. */
+const RESEARCH_DIR = [".ancilla", "research"];
 
 interface ManagedHost {
   key: string;
@@ -750,6 +778,8 @@ export class AncillaServer {
       | "findNativeMuse"
       | "aonia"
       | "loginSpawn"
+      | "researchEngine"
+      | "researchMaxWorkers"
     >
   > &
     Pick<ServerOptions, "staticDir" | "token" | "findNativeMuse"> & {
@@ -762,6 +792,11 @@ export class AncillaServer {
     };
   /** `muse login` children in flight, keyed by account id; a reopened modal kills and replaces the old one. */
   private readonly loginChildren = new Map<string, LoginChild>();
+  private readonly researchJobs: ResearchJobManager;
+  /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
+  private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
+  /** Sessions a research run started to do its searching. Their approvals are decided by policy, never shown. */
+  private readonly researchWorkerSessions = new Set<string>();
 
   constructor(options: ServerOptions = {}) {
     this.options = {
@@ -793,6 +828,36 @@ export class AncillaServer {
       this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
     );
     this.aonia = options.aonia ?? createAonia(this.options.musePath ? { musePath: this.options.musePath } : {});
+    this.researchJobs = new ResearchJobManager({
+      store: this.store,
+      engine: options.researchEngine ?? runResearch,
+      globalWorkerCap: options.researchMaxWorkers,
+      createModelClient: (run, thread) =>
+        new MuseExecModelClient({
+          exec: this.options.exec,
+          plan: (args) => this.planMuseExec(args, thread.accountId),
+          models: run.config.models,
+          fallbackModelId: thread.modelId,
+          platform: this.options.platform,
+          log: (message) => this.log(message),
+        }),
+      createWorkerRunner: (run, thread, onWorkerUpdate) =>
+        new MuseSessionWorkerRunner({
+          host: {
+            startWorkerSession: (task, modelId) => this.startResearchWorkerSession(thread, task, modelId),
+            subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
+            onWorkerUpdate,
+            log: (message) => this.log(message),
+          },
+          models: run.config.models,
+          fallbackModelId: thread.modelId,
+        }),
+      broadcast: (run) => this.emit("ancilla", { type: "research-run", sessionId: run.sessionId, run }),
+      writeReport: (thread, run, report, state) => this.writeResearchReport(thread, run, report, state),
+      log: (message) => this.log(message),
+    });
+    // Runs the previous process left in flight cannot be picked up (stage 3's Resume will); they are marked now.
+    this.researchJobs.markInterruptedOnBoot();
     this.server = createServer((req, res) => {
       void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
     });
@@ -819,6 +884,8 @@ export class AncillaServer {
       this.settleTimer = null;
     }
     this.titleQueue.length = 0;
+    // Research jobs go first: their workers still need the hosts to take the interrupts.
+    await this.researchJobs.close();
     for (const sink of [...this.sinks]) {
       this.sinks.delete(sink);
     }
@@ -1471,6 +1538,11 @@ export class AncillaServer {
     if (method === "GET" && path === "/api/title-settings") {
       this.json(res, 200, this.store.getTitleSettings());
       return true;
+    }
+    if (path === "/api/research" || path.startsWith("/api/research/") || path === "/api/research-settings") {
+      if (await this.routeResearch(method, path, url, req, res)) {
+        return true;
+      }
     }
     if (method === "PATCH" && path === "/api/title-settings") {
       const body = await this.readBody(req);
@@ -3006,6 +3078,7 @@ export class AncillaServer {
       truncated,
       attachments: this.store.listAttachments(sessionId).map((record) => this.attachmentView(record)),
       shellRuns: this.store.listShellRuns(sessionId),
+      researchRuns: this.researchViews(sessionId),
       pending: { approvals, userInputs },
       pendingComplete: pending !== null && statusKnown && !superseded,
       // A readable old prefix does not make an unavailable projection a complete replacement.
@@ -3195,27 +3268,7 @@ export class AncillaServer {
     expectedTitle: string,
     modelId: string | null,
   ): Promise<void> {
-    const musePath = await this.cliMusePath();
-    const runtime = await this.museRuntime();
-    const plan = planMuseCli({
-      platform: this.options.platform,
-      distro: this.wslDistro(),
-      musePath,
-      args: [
-        "exec",
-        "--json",
-        "--no-session-log",
-        "--disable-web-tools",
-        "--reasoning-effort",
-        "minimal",
-        "--max-model-steps",
-        "1",
-        ...(modelId ? ["--model", modelId] : []),
-        buildThreadTitlePrompt(firstText),
-      ],
-      runtime,
-    });
-    const result = await this.runPlanned(plan, runtime);
+    const result = await this.museExec({ prompt: buildThreadTitlePrompt(firstText), modelId, accountId: null });
     if (this.closed || result.exitCode !== 0) {
       return;
     }
@@ -3230,6 +3283,239 @@ export class AncillaServer {
     this.store.updateSession(sessionId, { title, titleSource: "auto" });
     await this.renameInMuse(sessionId, title);
     this.sessionsChanged();
+  }
+
+  /**
+   * The process for one `muse exec` call: the binary (or WSL routing) the way every CLI call gets it, plus an
+   * account's folders in the environment when the call is made on that account's behalf. Titles and research
+   * completions both go through here, so there is one place that knows how a one-shot model call is made.
+   */
+  private async planMuseExec(args: string[], accountId: string | null): Promise<MuseExecPlan> {
+    const musePath = await this.cliMusePath();
+    const runtime = await this.museRuntime();
+    const plan = planMuseCli({ platform: this.options.platform, distro: this.wslDistro(), musePath, args, runtime });
+    let profileEnv: Record<string, string> | null = null;
+    if (accountId) {
+      const profile = await this.aonia.getProfile(accountId);
+      profileEnv = this.aonia.envFor(profile);
+    }
+    let env: NodeJS.ProcessEnv | undefined;
+    if (this.options.platform === "win32" && runtime === "wsl") {
+      env = profileEnv ? this.wslEnvFor(profileEnv, PROFILE_WSLENV) : this.wslEnvFor();
+    } else if (profileEnv) {
+      env = { ...process.env, ...profileEnv };
+    }
+    return { command: plan.command, args: plan.args, ...(env ? { env } : {}) };
+  }
+
+  /** One tool-less `muse exec` completion, the prompt as its last argument. */
+  private async museExec(request: {
+    prompt: string;
+    modelId: string | null;
+    accountId?: string | null;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<ExecResult> {
+    const plan = await this.planMuseExec(museExecArgs(request.prompt, request.modelId), request.accountId ?? null);
+    return this.options.exec(plan.command, plan.args, {
+      ...(plan.env ? { env: plan.env } : {}),
+      ...(request.timeoutMs !== undefined ? { timeoutMs: request.timeoutMs } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+  }
+
+  /** Delivers one session's host notifications to a listener until the returned function is called. */
+  private onSessionNotification(sessionId: string, handler: SessionNotificationHandler): () => void {
+    let listeners = this.sessionListeners.get(sessionId);
+    if (!listeners) {
+      listeners = new Set();
+      this.sessionListeners.set(sessionId, listeners);
+    }
+    listeners.add(handler);
+    return () => {
+      const current = this.sessionListeners.get(sessionId);
+      current?.delete(handler);
+      if (current && current.size === 0) {
+        this.sessionListeners.delete(sessionId);
+      }
+    };
+  }
+
+  /**
+   * A worker session for one delegated research task, on the thread's own host so it shares the thread's folder
+   * and account. Recorded archived under `research-worker`, so it never reaches the sidebar; its usage still
+   * lands under the project. The approval mode is the host's default: the runner decides every request itself.
+   */
+  private async startResearchWorkerSession(thread: ResearchThread, task: WorkerTask, modelId: string | null): Promise<WorkerSessionHandle> {
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    const project = this.store.upsertProject(thread.cwd);
+    const host = await this.hostFor(thread.cwd, thread.accountId);
+    const started = await host.manager.startSession({
+      workspaceRoot: this.hostPathFor(thread.cwd),
+      ...(modelId ? { modelId } : {}),
+    });
+    const raw = asRecord(asRecord(started.raw)?.["session"]);
+    this.researchWorkerSessions.add(started.sessionId);
+    this.store.recordSession({
+      id: started.sessionId,
+      projectId: project.id,
+      title: `Research worker A${task.agentId}`,
+      titleSource: "auto",
+      origin: "research-worker",
+      modelId: raw ? str(raw["modelId"]) : null,
+      chosenModelId: modelId,
+      createdAt: normalizeIso(raw?.["createdAt"]),
+      sandboxDisabled: host.target.args.includes("--disable-sandbox"),
+      accountId: thread.accountId,
+    });
+    this.store.updateSession(started.sessionId, { archived: true });
+    this.sessionHosts.set(started.sessionId, host.key);
+    this.liveFor(started.sessionId);
+    return { sessionId: started.sessionId, manager: host.manager };
+  }
+
+  /** report.md and sources.json under `.ancilla/research/<runId>/`; the path comes back relative to the folder. */
+  private async writeResearchReport(thread: ResearchThread, run: ResearchRunRecord, report: string, state: ResearchRunState): Promise<string | null> {
+    if (!thread.cwd) {
+      return null;
+    }
+    const directory = join(this.localPathFor(thread.cwd), ...RESEARCH_DIR, run.id);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "report.md"), report, "utf8");
+    await writeFile(
+      join(directory, "sources.json"),
+      JSON.stringify({ runId: run.id, question: run.question, registry: state.registry, curated: state.curated }, null, 2),
+      "utf8",
+    );
+    return [...RESEARCH_DIR, run.id, "report.md"].join("/");
+  }
+
+  /** The thread a run belongs to, as the adapters need it. */
+  private researchThreadFor(sessionId: string): ResearchThread | null {
+    const found = this.store.findSession(sessionId);
+    if (!found) {
+      return null;
+    }
+    return {
+      sessionId,
+      cwd: found.cwd,
+      accountId: found.session.accountId,
+      modelId: found.session.chosenModelId ?? found.session.modelId,
+    };
+  }
+
+  private researchViews(sessionId: string): ResearchRunView[] {
+    return this.store.listResearchRuns(sessionId).map((run) => this.researchJobs.view(run, false));
+  }
+
+  /** The DeepResearch routes of section 4.5 of the plan. */
+  private async routeResearch(method: string, path: string, url: URL, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    if (method === "GET" && path === "/api/research-settings") {
+      this.json(res, 200, this.store.getResearchSettings());
+      return true;
+    }
+    if (method === "PATCH" && path === "/api/research-settings") {
+      const body = await this.readBody(req);
+      const patch: { enabled?: boolean; config?: Partial<ResearchConfig> } = {};
+      if ("enabled" in body) {
+        if (typeof body["enabled"] !== "boolean") {
+          throw new HttpError(400, "enabled must be a boolean.");
+        }
+        patch.enabled = body["enabled"];
+      }
+      if ("config" in body) {
+        const config = asRecord(body["config"]);
+        if (!config) {
+          throw new HttpError(400, "config must be an object.");
+        }
+        patch.config = config as Partial<ResearchConfig>;
+      }
+      this.json(res, 200, this.store.setResearchSettings(patch));
+      return true;
+    }
+    if (method === "POST" && path === "/api/research") {
+      const body = await this.readBody(req);
+      const commandId = str(body["commandId"])?.trim();
+      const sessionId = str(body["sessionId"]);
+      const question = str(body["question"])?.trim();
+      if (!commandId) {
+        throw new HttpError(400, "commandId is required.");
+      }
+      const existing = this.store.getResearchRunByCommand(commandId);
+      if (existing) {
+        this.json(res, 200, { run: this.researchJobs.view(existing, false) });
+        return true;
+      }
+      if (!sessionId) {
+        throw new HttpError(400, "sessionId is required.");
+      }
+      if (!question) {
+        throw new HttpError(400, "question is required.");
+      }
+      const overrides = body["config"] === undefined || body["config"] === null ? null : asRecord(body["config"]);
+      if (body["config"] !== undefined && body["config"] !== null && !overrides) {
+        throw new HttpError(400, "config must be an object.");
+      }
+      const settings = this.store.getResearchSettings();
+      if (!settings.enabled) {
+        throw new HttpError(400, "Deep research is switched off in Settings.");
+      }
+      const thread = this.researchThreadFor(sessionId);
+      if (!thread) {
+        throw new HttpError(404, "Unknown session.");
+      }
+      if (this.store.listResearchRuns(sessionId).some((run) => run.status === "queued" || run.status === "running")) {
+        throw new HttpError(409, "This thread already has a research run in progress.");
+      }
+      const config = resolveResearchConfig(overrides as Partial<ResearchConfig> | null, settings.config);
+      const record = this.store.createResearchRun({ id: uuidv7(), sessionId, commandId, question, config, createdAt: nowIso() });
+      this.store.updateSession(sessionId, { activityAt: nowIso() });
+      const run = this.researchJobs.start(record, thread);
+      this.json(res, 200, { run });
+      return true;
+    }
+    if (method === "GET" && path === "/api/research") {
+      const sessionId = url.searchParams.get("sessionId");
+      if (!sessionId) {
+        throw new HttpError(400, "sessionId is required.");
+      }
+      this.json(res, 200, { runs: this.researchViews(sessionId) });
+      return true;
+    }
+    const runMatch = path.match(/^\/api\/research\/([^/]+)(?:\/(events|stop|resume))?$/);
+    if (!runMatch) {
+      return false;
+    }
+    const runId = decodeURIComponent(runMatch[1] as string);
+    const action = runMatch[2];
+    const record = this.store.getResearchRun(runId);
+    if (!record) {
+      throw new HttpError(404, "Unknown research run.");
+    }
+    if (method === "GET" && !action) {
+      this.json(res, 200, { run: this.researchJobs.view(record, true) });
+      return true;
+    }
+    if (method === "GET" && action === "events") {
+      const after = Number.parseInt(url.searchParams.get("after") ?? "0", 10);
+      const limit = Number.parseInt(url.searchParams.get("limit") ?? "500", 10);
+      const events = this.store.listResearchEvents(runId, Number.isFinite(after) && after > 0 ? after : 0, Number.isFinite(limit) && limit > 0 ? Math.min(limit, 2000) : 500);
+      this.json(res, 200, { events, nextAfter: events.length > 0 ? events[events.length - 1]!.seq : after });
+      return true;
+    }
+    if (method === "POST" && action === "stop") {
+      const body = await this.readBody(req);
+      this.researchJobs.stop(runId, body["writeReport"] === true);
+      const current = this.store.getResearchRun(runId) ?? record;
+      this.json(res, 200, { run: this.researchJobs.view(current, false) });
+      return true;
+    }
+    if (method === "POST" && action === "resume") {
+      throw new HttpError(501, "Resuming an interrupted research run is not available yet; start a new one.");
+    }
+    return false;
   }
 
   private async managerForSession(sessionId: string): Promise<SessionManager> {
@@ -3596,6 +3882,16 @@ export class AncillaServer {
       }
       this.sessionHosts.set(event.sessionId, hostKey);
       this.noteNotification(event.sessionId, notification.method);
+      const listeners = this.sessionListeners.get(event.sessionId);
+      if (listeners) {
+        for (const listener of [...listeners]) {
+          try {
+            listener(notification.method, params);
+          } catch (error) {
+            this.log(`session listener (${notification.method}) threw: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
       this.track(event.sessionId, notification.method, params, hostKey);
       this.emit("ancilla", event);
     } catch (error) {
@@ -3711,7 +4007,8 @@ export class AncillaServer {
       }
       case "approval/requested": {
         const id = str(params["approvalId"]);
-        if (id && !live.pendingApprovals.has(id)) {
+        // A research worker's approvals are decided by the runner's policy; nothing waits on the user.
+        if (id && !live.pendingApprovals.has(id) && !this.researchWorkerSessions.has(sessionId)) {
           live.pendingApprovals.add(id);
           changed = true;
           this.wake(sessionId);
@@ -3774,7 +4071,7 @@ export class AncillaServer {
       }
       case "item/completed": {
         const item = asRecord(params["item"]);
-        if (item && item["kind"] === "userMessage") {
+        if (item && item["kind"] === "userMessage" && !this.researchWorkerSessions.has(sessionId)) {
           this.maybeTitle(sessionId, item);
         }
         break;
