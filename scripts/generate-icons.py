@@ -34,6 +34,7 @@ import os
 import re
 import sys
 import xml.etree.ElementTree as ET
+from typing import NoReturn
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -52,26 +53,53 @@ RADIUS_FRAC = 86 / 512  # desktop tile corner, kept from the previous icon set
 SVG_RADIUS = 7.5  # corner of the SVG tiles and the UI Logo, in grid units
 
 ICO_SIZES = (16, 24, 32, 48, 64, 128, 256)
-ICNS_SIZES = (32, 64, 128, 256, 512, 1024)  # every size Pillow's writer stores
+# Every size Pillow's ICNS writer stores (ic07-ic14). It has no 16/32 px @1x entries
+# (ic04/ic05), which iconutil adds; harmless while bundle.icon lists only icon.png,
+# since tauri-bundler then builds the shipped .icns itself.
+ICNS_SIZES = (32, 64, 128, 256, 512, 1024)
 
 
 class Mark:
     """The geometry of assets/brand/ancilla-mark.svg, in grid units."""
 
     def __init__(self, path: str) -> None:
-        ns = "{http://www.w3.org/2000/svg}"
-        root = ET.parse(path).getroot()
-        self.grid = float(root.get("viewBox").split()[2])
-        stroke = root.find(f"{ns}path")
-        self.d = " ".join(stroke.get("d").split())
+        def fail(why: str) -> NoReturn:
+            sys.exit(f"{path}: {why}")
+
+        try:
+            root = ET.parse(path).getroot()
+        except (OSError, ET.ParseError) as err:
+            fail(f"cannot read the mark ({err})")
+
+        def find(tag: str) -> ET.Element:
+            # At any depth and with or without the SVG namespace, so a <g> wrapper still parses.
+            for el in root.iter():
+                if el.tag.rpartition("}")[2] == tag:
+                    return el
+            fail(f"no <{tag}>; the mark is one stroke <path> and one node <circle>")
+
+        def number(el: ET.Element, name: str) -> float:
+            try:
+                return float(el.get(name, ""))
+            except ValueError:
+                fail(f"<{el.tag.rpartition('}')[2]}> needs a numeric {name}")
+
+        try:
+            self.grid = float((root.get("viewBox") or "").split()[2])
+        except (IndexError, ValueError):
+            fail("the root <svg> needs a viewBox of four numbers")
+        stroke = find("path")
+        self.d = " ".join((stroke.get("d") or "").split())
         # Only an absolute M/L polyline is understood; curves would need a renderer.
         if not re.fullmatch(r"M[-\d. ,]+(L[-\d. ,]+)+", self.d):
-            sys.exit(f"{path}: the stroke must be an absolute M/L polyline")
+            fail("the stroke must be an absolute M/L polyline")
         nums = [float(n) for n in re.findall(r"-?\d*\.?\d+", self.d)]
+        if len(nums) % 2:
+            fail("the stroke has an odd number of coordinates")
         self.points = list(zip(nums[0::2], nums[1::2]))
-        self.width = float(stroke.get("stroke-width"))
-        node = root.find(f"{ns}circle")
-        self.node = tuple(float(node.get(k)) for k in ("cx", "cy", "r"))
+        self.width = number(stroke, "stroke-width")
+        node = find("circle")
+        self.node = tuple(number(node, k) for k in ("cx", "cy", "r"))
 
 
 def coverage(size: int, grid: float, draw) -> Image.Image:
@@ -106,6 +134,8 @@ def paint(mark: Mark, size: int, colors: tuple[str, str],
         pts = [(x * k, y * k) for x, y in mark.points]
         for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
             n = math.hypot(x1 - x0, y1 - y0)
+            if not n:  # a repeated point: its round join below covers it
+                continue
             nx, ny = -(y1 - y0) / n * r, (x1 - x0) / n * r
             d.polygon([(x0 + nx, y0 + ny), (x1 + nx, y1 + ny),
                        (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)], fill=255)
