@@ -6,10 +6,12 @@ import type {
   MspItem,
   TodoItem,
   TokenTotals,
+  TokenUsage,
   TranscriptLoad,
   UserInputAnswer,
   UserInputRequest,
   ViewEvent,
+  WorkflowChild,
 } from "../types.js";
 
 /**
@@ -104,6 +106,71 @@ export interface ThreadMeta {
   goalPauses: { from: number; to: number | null }[];
 }
 
+/**
+ * What the wire forgets about one attempt of a workflow agent: when each lifecycle step was first seen, and the
+ * usage Muse sends on one revision only. Times come from the live event when it carries one, else from the
+ * `recordedAt` of the revision where the value first changed; a history page carries no event times.
+ */
+export interface ChildTrace {
+  scheduledAt?: number;
+  startedAt?: number;
+  usageAt?: number;
+  completedAt?: number;
+  terminalAt?: number;
+  /** The last revision that changed this attempt; null when no revision carried a time. */
+  lastEventAt: number | null;
+  /** Latched from the one revision that carried it. */
+  usage?: TokenUsage;
+  /** The label, outcome and duration as last sent, kept once a retry drops the attempt from the item. */
+  label?: string;
+  terminal?: string;
+  durationMs?: number;
+  /**
+   * The attempt was first seen already under way, so its earlier steps were not observed (a capped history
+   * page): `scheduledAt` may be read off the UUIDv7 child id, and the other times are upper bounds.
+   */
+  approx: boolean;
+}
+
+export interface RunTrace {
+  /** The first revision seen; approximate when that revision was not the first one. */
+  startedAt: number | null;
+  approx: boolean;
+  /** The revision on which the run stopped being in progress. */
+  endedAt: number | null;
+  /** Keyed by `childId:attempt`; an attempt stays here after a retry replaces it in the item. */
+  children: Record<string, ChildTrace>;
+  /** The epoch minute of every revision that changed a child, newest last, for the pulse. */
+  eventMinutes: number[];
+}
+
+/** When an approval or question was raised and answered, for the time a run spent waiting on the user. */
+export interface RequestTrace {
+  kind: "approval" | "input";
+  itemId: string | null;
+  /** Null for a request that arrived without a time, as from a history page or the load's pending list. */
+  askedAt: number | null;
+  decidedAt: number | null;
+}
+
+/** A tool call still running, or one that ran in the background: when it started and when it last printed. */
+export interface TaskTrace {
+  /** The first revision seen, else the time in the UUIDv7 item id, else null. */
+  firstSeenAt: number | null;
+  /** The start was read off the item id or is otherwise an upper bound. */
+  approx: boolean;
+  /** The last `item/delta` on its output with a time. */
+  lastOutputAt: number | null;
+  endedAt: number | null;
+}
+
+/** Everything the agents view needs that only the order of revisions can tell. */
+export interface SwarmTrace {
+  runs: Record<string, RunTrace>;
+  requests: Record<string, RequestTrace>;
+  tasks: Record<string, TaskTrace>;
+}
+
 export interface ThreadFold {
   items: Record<string, MspItem>;
   /** Small stable index for the agent panel; ordinary text deltas do not replace it. */
@@ -121,9 +188,34 @@ export interface ThreadFold {
   meta: ThreadMeta;
   /** The host unloaded the session; the next command must resume it first. */
   closed: boolean;
+  /** Transition times, latched usage and request times for the agents view; never reset by a partial page. */
+  swarm: SwarmTrace;
 }
 
 export const HIDDEN_KINDS: ReadonlySet<string> = new Set(["reminderChild"]);
+
+/** The pulse only looks back ten minutes, so a run keeps at most this many revision minutes. */
+const EVENT_MINUTES_CAP = 600;
+/** Request times outlive their runs' highlights by this many entries before the oldest are forgotten. */
+const REQUEST_TRACE_CAP = 500;
+
+export function emptySwarm(): SwarmTrace {
+  return { runs: {}, requests: {}, tasks: {} };
+}
+
+/**
+ * The time a UUIDv7 carries in its first 48 bits, in ms since the epoch, or null for any other id. Muse's child
+ * and item ids happen to be UUIDv7, which is off the contract: it only ever stands in for a scheduling time a
+ * capped history dropped, and what it gives is marked approximate.
+ */
+export function uuidTime(id: string): number | null {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return null;
+  }
+  const ms = parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
+  // Anything outside a plausible span is a version nibble that happens to read 7, not a clock.
+  return ms > Date.UTC(2020, 0, 1) && ms < Date.UTC(2100, 0, 1) ? ms : null;
+}
 
 export function emptyFold(): ThreadFold {
   return {
@@ -137,6 +229,7 @@ export function emptyFold(): ThreadFold {
     resolved: {},
     settled: {},
     echoes: [],
+    swarm: emptySwarm(),
     meta: {
       todoList: null,
       branch: null,
@@ -242,6 +335,9 @@ class Draft {
   private echoesCopied = false;
   private callsCopied = false;
   private agentsCopied = false;
+  private swarmCopied = false;
+  /** Runs whose child records this batch has already copied, so a revision with many changes copies once. */
+  private readonly runsCopied = new Set<string>();
 
   /**
    * Only the maps this batch can write to are copied. A long thread holds tens of thousands of items, and copying
@@ -312,9 +408,200 @@ class Draft {
     }
     this.fold.agentItems![item.itemId] = item;
   }
+
+  /** The trace, copied once per batch so the fold on screen keeps the one it had. */
+  swarm(): SwarmTrace {
+    if (!this.swarmCopied) {
+      const base = this.fold.swarm ?? emptySwarm();
+      this.fold.swarm = { runs: { ...base.runs }, requests: { ...base.requests }, tasks: { ...base.tasks } };
+      this.swarmCopied = true;
+    }
+    return this.fold.swarm;
+  }
+
+  /** A run's trace this batch may write to; its child records are copied the first time. */
+  runTrace(itemId: string): RunTrace {
+    const swarm = this.swarm();
+    const current = swarm.runs[itemId];
+    if (current && this.runsCopied.has(itemId)) {
+      return current;
+    }
+    const run: RunTrace = current
+      ? { ...current, children: { ...current.children }, eventMinutes: [...current.eventMinutes] }
+      : { startedAt: null, approx: false, endedAt: null, children: {}, eventMinutes: [] };
+    swarm.runs[itemId] = run;
+    this.runsCopied.add(itemId);
+    return run;
+  }
 }
 
-function upsertItem(draft: Draft, incoming: MspItem): void {
+function childKey(child: { childId: string; attempt: number }): string {
+  return `${child.childId}:${child.attempt}`;
+}
+
+/** The time a revision stands for: the live event's own, else the record time Muse stamped on the item. */
+function revisionTime(item: MspItem, at: number | undefined): number | undefined {
+  if (at !== undefined) {
+    return at;
+  }
+  const recorded = item.recordedAt ? Date.parse(item.recordedAt) : NaN;
+  return Number.isFinite(recorded) ? recorded : undefined;
+}
+
+/**
+ * Stamps what changed in a workflow revision: each attempt's lifecycle steps the first time they show, the usage
+ * Muse sends once, the run's own start and end, and the minute of every revision that moved a child. Unchanged
+ * attempts cost one map lookup and keep their record.
+ */
+function traceWorkflow(draft: Draft, previous: MspItem | undefined, next: MspItem, eventAt: number | undefined): void {
+  const at = revisionTime(next, eventAt);
+  const children = Array.isArray(next.children) ? next.children : [];
+  const before = new Map<string, WorkflowChild>();
+  for (const child of previous?.children ?? []) {
+    before.set(childKey(child), child);
+  }
+  const current = draft.fold.swarm?.runs[next.itemId];
+  const ended = next.status !== "inProgress";
+  const changed: WorkflowChild[] = [];
+  for (const child of children) {
+    const key = childKey(child);
+    const prev = before.get(key);
+    const trace = current?.children[key];
+    if (!trace || !prev || prev.status !== child.status || prev.terminal !== child.terminal || (child.usage !== undefined && trace.usage === undefined)
+      || (child.label !== undefined && trace.label === undefined) || (child.durationMs !== undefined && trace.durationMs === undefined)) {
+      changed.push(child);
+    }
+  }
+  if (current && changed.length === 0 && !(ended && current.endedAt === null) && !(current.startedAt === null && at !== undefined)) {
+    return;
+  }
+  const run = draft.runTrace(next.itemId);
+  if (!current) {
+    run.startedAt = at ?? null;
+    // The first revision seen is the run's start only when it really is the first; later ones are an upper bound.
+    run.approx = next.revision > 1 || at === undefined;
+  } else if (run.startedAt === null && at !== undefined) {
+    run.startedAt = at;
+    run.approx = true;
+  }
+  if (ended && run.endedAt === null) {
+    run.endedAt = at ?? null;
+  }
+  for (const child of changed) {
+    const key = childKey(child);
+    const existing = run.children[key];
+    const trace: ChildTrace = existing ? { ...existing } : { lastEventAt: null, approx: false };
+    if (!existing && child.status !== "scheduled") {
+      // Seen first already under way: the scheduling revision was not loaded. The id's own time stands in for it
+      // on the first attempt; a retry shares the id, so its time says nothing about the retry.
+      const guess = child.attempt === 1 ? uuidTime(child.childId) : null;
+      if (guess !== null && (at === undefined || guess <= at)) {
+        trace.scheduledAt = guess;
+      }
+      trace.approx = true;
+    }
+    if (at !== undefined) {
+      switch (child.status) {
+        case "scheduled":
+          trace.scheduledAt ??= at;
+          break;
+        case "usage":
+          trace.usageAt ??= at;
+          break;
+        case "completed":
+          trace.completedAt ??= at;
+          break;
+        case "terminal":
+          break;
+        default:
+          // `started`, and any lifecycle word this version does not know, is the agent at work.
+          trace.startedAt ??= at;
+          break;
+      }
+      if (child.terminal) {
+        trace.terminalAt ??= at;
+      }
+      trace.lastEventAt = at;
+    }
+    if (child.usage !== undefined) {
+      trace.usage = child.usage;
+    }
+    if (typeof child.label === "string" && child.label.trim()) {
+      trace.label = child.label;
+    }
+    if (typeof child.terminal === "string" && child.terminal) {
+      trace.terminal = child.terminal;
+    }
+    if (typeof child.durationMs === "number" && Number.isFinite(child.durationMs)) {
+      trace.durationMs = child.durationMs;
+    }
+    run.children[key] = trace;
+  }
+  if (changed.length > 0 && at !== undefined) {
+    run.eventMinutes.push(Math.floor(at / 60_000));
+    if (run.eventMinutes.length > EVENT_MINUTES_CAP) {
+      run.eventMinutes.splice(0, run.eventMinutes.length - EVENT_MINUTES_CAP);
+    }
+  }
+}
+
+/**
+ * A tool call is traced while it runs, so that one sent to the background later still knows when it started; a
+ * finished call that never ran in the background drops its trace again, and a long thread keeps only its tasks.
+ */
+function traceTask(draft: Draft, next: MspItem, eventAt: number | undefined): void {
+  const at = revisionTime(next, eventAt);
+  const running = next.status === "inProgress";
+  const background = next.background === true;
+  const current = draft.fold.swarm?.tasks[next.itemId];
+  if (!current) {
+    if (!running && !background) {
+      return;
+    }
+    const guess = uuidTime(next.itemId);
+    draft.swarm().tasks[next.itemId] = {
+      firstSeenAt: at ?? guess,
+      approx: at === undefined,
+      lastOutputAt: null,
+      endedAt: running ? null : at ?? null,
+    };
+    return;
+  }
+  if (running) {
+    return;
+  }
+  if (!background) {
+    delete draft.swarm().tasks[next.itemId];
+    return;
+  }
+  if (current.endedAt === null) {
+    draft.swarm().tasks[next.itemId] = { ...current, endedAt: at ?? null };
+  }
+}
+
+/** Stamps when a request was raised, once; a redelivered or updated request keeps its first time. */
+function traceRequest(draft: Draft, id: string, kind: RequestTrace["kind"], itemId: string | null, at: number | undefined): void {
+  const requests = draft.fold.swarm?.requests;
+  if (requests?.[id]) {
+    return;
+  }
+  const target = draft.swarm().requests;
+  target[id] = { kind, itemId, askedAt: at ?? null, decidedAt: null };
+  const ids = Object.keys(target);
+  for (let i = 0; i < ids.length - REQUEST_TRACE_CAP; i += 1) {
+    delete target[ids[i] as string];
+  }
+}
+
+function traceDecision(draft: Draft, id: string, at: number | undefined): void {
+  const current = draft.fold.swarm?.requests[id];
+  if (!current || current.decidedAt !== null || at === undefined) {
+    return;
+  }
+  draft.swarm().requests[id] = { ...current, decidedAt: at };
+}
+
+function upsertItem(draft: Draft, incoming: MspItem, at?: number): void {
   const d = draft.fold;
   // Subagent children are never rendered, and a plan that runs subagents produces far more of them than of anything
   // else. Keeping them would grow the fold without ever showing a line of it, and every later event pays for that.
@@ -328,6 +615,10 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
     draft.pushOrder(incoming.itemId);
     if (incoming.kind === "userMessage") {
       matchEcho(draft, incoming);
+    } else if (incoming.kind === "workflow") {
+      traceWorkflow(draft, undefined, incoming, at);
+    } else if (incoming.kind === "toolCall") {
+      traceTask(draft, incoming, at);
     }
     return;
   }
@@ -371,6 +662,10 @@ function upsertItem(draft: Draft, incoming: MspItem): void {
   // A later revision can bring the shown text (`displayText`) the first one lacked, so match again.
   if (next.kind === "userMessage") {
     matchEcho(draft, next);
+  } else if (next.kind === "workflow") {
+    traceWorkflow(draft, current, next, at);
+  } else if (next.kind === "toolCall") {
+    traceTask(draft, next, at);
   }
 }
 
@@ -454,7 +749,7 @@ function matchEcho(draft: Draft, item: MspItem): void {
   }
 }
 
-function appendDelta(draft: Draft, params: Record<string, unknown>): void {
+function appendDelta(draft: Draft, params: Record<string, unknown>, at: number | undefined): void {
   const d = draft.fold;
   const id = str(params["itemId"]);
   const delta = typeof params["delta"] === "string" ? params["delta"] : "";
@@ -480,6 +775,15 @@ function appendDelta(draft: Draft, params: Record<string, unknown>): void {
     next.text = (next.text ?? "") + delta;
   } else if (field === "output") {
     next.visibleOutput = (next.visibleOutput ?? "") + delta;
+    // A background task's liveness is its output: the last line with a time is what "no output for" counts from.
+    if (item.kind === "toolCall" && at !== undefined) {
+      const task = d.swarm?.tasks[id];
+      if (task) {
+        draft.swarm().tasks[id] = { ...task, lastOutputAt: at };
+      } else if (item.background === true || item.revision === 0) {
+        draft.swarm().tasks[id] = { firstSeenAt: at, approx: true, lastOutputAt: at, endedAt: null };
+      }
+    }
   } else if (field.startsWith("summary.")) {
     const index = Number(field.slice("summary.".length));
     if (Number.isInteger(index) && index >= 0) {
@@ -527,12 +831,12 @@ function applyOne(draft: Draft, event: ViewEvent): void {
     case "item/completed": {
       const item = asItem(params["item"]);
       if (item) {
-        upsertItem(draft, item);
+        upsertItem(draft, item, event.at);
       }
       break;
     }
     case "item/delta":
-      appendDelta(draft, params);
+      appendDelta(draft, params, event.at);
       trackStream(draft, params, event.at);
       break;
     case "turn/started": {
@@ -631,6 +935,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       const id = str(params["approvalId"]);
       if (id && !d.resolved[id]) {
         d.approvals[id] = { ...d.approvals[id], ...(params as unknown as ApprovalRequest) };
+        traceRequest(draft, id, "approval", str(params["itemId"]), event.at);
       }
       break;
     }
@@ -642,6 +947,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
           decision: str(params["decision"]) ?? "resolved",
           resolvedBy: str(params["resolvedBy"]) ?? "user",
         };
+        traceDecision(draft, id, event.at);
       }
       break;
     }
@@ -649,6 +955,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       const id = str(params["userInputId"]);
       if (id && !d.settled[id]) {
         d.userInputs[id] = params as unknown as UserInputRequest;
+        traceRequest(draft, id, "input", str(params["itemId"]), event.at);
       }
       break;
     }
@@ -660,6 +967,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
           outcome: str(params["outcome"]) ?? "answered",
           answers: Array.isArray(params["answers"]) ? (params["answers"] as UserInputAnswer[]) : [],
         };
+        traceDecision(draft, id, event.at);
       }
       break;
     }
@@ -872,6 +1180,116 @@ function carriedWorkflowLabels(fold: ThreadFold, previous: ThreadFold | null | u
 }
 
 /**
+ * Of two readings of one moment, an exact one beats an approximate one, and the earlier of two alike wins: every
+ * reading is the first revision that showed the change, so each is an upper bound on when it happened.
+ */
+function earlierOf(fresh: number | undefined, freshApprox: boolean, old: number | undefined, oldApprox: boolean): number | undefined {
+  if (fresh === undefined || old === undefined) {
+    return fresh ?? old;
+  }
+  if (freshApprox !== oldApprox) {
+    return freshApprox ? old : fresh;
+  }
+  return Math.min(fresh, old);
+}
+
+function mergeChildTrace(fresh: ChildTrace, old: ChildTrace): ChildTrace {
+  // The flag says the attempt was first seen under way, which makes that first sighting's stamps upper bounds;
+  // every later transition either side observed is exact. A side that saw the attempt from its scheduling on
+  // therefore makes the merged record exact, whatever the other side missed.
+  const merged: ChildTrace = { lastEventAt: null, approx: fresh.approx && old.approx };
+  for (const field of ["scheduledAt", "startedAt", "usageAt", "completedAt", "terminalAt"] as const) {
+    const value = earlierOf(fresh[field], fresh.approx, old[field], old.approx);
+    if (value !== undefined) {
+      merged[field] = value;
+    }
+  }
+  const last = [fresh.lastEventAt, old.lastEventAt].filter((value): value is number => value !== null);
+  merged.lastEventAt = last.length > 0 ? Math.max(...last) : null;
+  const usage = fresh.usage ?? old.usage;
+  if (usage !== undefined) {
+    merged.usage = usage;
+  }
+  for (const field of ["label", "terminal"] as const) {
+    const value = fresh[field] ?? old[field];
+    if (value !== undefined) {
+      merged[field] = value;
+    }
+  }
+  const durationMs = fresh.durationMs ?? old.durationMs;
+  if (durationMs !== undefined) {
+    merged.durationMs = durationMs;
+  }
+  return merged;
+}
+
+function mergeRunTrace(fresh: RunTrace, old: RunTrace): RunTrace {
+  const startedAt = earlierOf(fresh.startedAt ?? undefined, fresh.approx, old.startedAt ?? undefined, old.approx) ?? null;
+  const exact = startedAt !== null && ((fresh.startedAt === startedAt && !fresh.approx) || (old.startedAt === startedAt && !old.approx));
+  const children: Record<string, ChildTrace> = { ...fresh.children };
+  for (const [key, trace] of Object.entries(old.children)) {
+    const current = children[key];
+    children[key] = current ? mergeChildTrace(current, trace) : trace;
+  }
+  return {
+    startedAt,
+    approx: startedAt === null ? fresh.approx || old.approx : !exact,
+    endedAt: fresh.endedAt ?? old.endedAt,
+    children,
+    // Both sides saw the same revisions, so their minutes would double up; the fuller side stands alone.
+    eventMinutes: fresh.eventMinutes.length > 0 ? fresh.eventMinutes : old.eventMinutes,
+  };
+}
+
+/**
+ * A history page replays the revisions it holds, which rebuilds the transition times from their record times; what
+ * the thread already traced from the live stream, or from an earlier fuller page, is not thrown away for that. A
+ * run whose item the fold no longer holds takes its trace with it.
+ */
+function carriedSwarm(fold: ThreadFold, previous: ThreadFold | null | undefined): ThreadFold {
+  const old = previous?.swarm;
+  if (!old || old === fold.swarm) {
+    return fold;
+  }
+  const runs: Record<string, RunTrace> = { ...fold.swarm.runs };
+  for (const [id, trace] of Object.entries(old.runs)) {
+    if (!fold.items[id]) {
+      continue;
+    }
+    const fresh = runs[id];
+    runs[id] = fresh ? mergeRunTrace(fresh, trace) : trace;
+  }
+  const requests: Record<string, RequestTrace> = { ...fold.swarm.requests };
+  for (const [id, trace] of Object.entries(old.requests)) {
+    const fresh = requests[id];
+    requests[id] = fresh
+      ? { ...fresh, askedAt: fresh.askedAt ?? trace.askedAt, decidedAt: fresh.decidedAt ?? trace.decidedAt }
+      : trace;
+  }
+  const tasks: Record<string, TaskTrace> = { ...fold.swarm.tasks };
+  for (const [id, trace] of Object.entries(old.tasks)) {
+    if (!fold.items[id]) {
+      continue;
+    }
+    const fresh = tasks[id];
+    if (!fresh) {
+      tasks[id] = trace;
+      continue;
+    }
+    const firstSeenAt = earlierOf(fresh.firstSeenAt ?? undefined, fresh.approx, trace.firstSeenAt ?? undefined, trace.approx) ?? null;
+    const exact = firstSeenAt !== null && ((fresh.firstSeenAt === firstSeenAt && !fresh.approx) || (trace.firstSeenAt === firstSeenAt && !trace.approx));
+    const outputs = [fresh.lastOutputAt, trace.lastOutputAt].filter((value): value is number => value !== null);
+    tasks[id] = {
+      firstSeenAt,
+      approx: firstSeenAt === null ? fresh.approx || trace.approx : !exact,
+      lastOutputAt: outputs.length > 0 ? Math.max(...outputs) : null,
+      endedAt: fresh.endedAt ?? trace.endedAt,
+    };
+  }
+  return { ...fold, swarm: { runs, requests, tasks } };
+}
+
+/**
  * Muse's history projection writes `failed`/`incomplete` for any run it cannot see the end of, including one that is
  * still running or that finished while the projection was stalled. That record says nothing about how the turn went.
  */
@@ -1049,6 +1467,10 @@ export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null)
   if (partial && previous) {
     // The page's own older revision can hold the labels a newer status-only one on screen lacks.
     fold = carriedWorkflowLabels(fold, snapshot);
+    // The fold grew out of the one on screen, so it holds that trace already; the page's own adds what it saw.
+    fold = carriedSwarm(fold, snapshot);
+  } else {
+    fold = carriedSwarm(fold, previous);
   }
   const activeTurnId = load.msp ? load.msp.activeTurnId : fold.activeTurnId;
   const { approvals, userInputs } = pendingRequests(load, fold, snapshot, previous, activeTurnId);

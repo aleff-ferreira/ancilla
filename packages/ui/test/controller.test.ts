@@ -2,10 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
-import { agentActivityView } from "../src/model/agents.js";
 import { buildTurns } from "../src/model/fold.js";
-import { ZOOM_MAX, ZOOM_MIN } from "../src/model/store.js";
-import type { SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
+import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
+import { swarmView } from "../src/model/swarm.js";
+import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 
 const SESSION: SessionSummary = {
@@ -965,8 +965,9 @@ describe("AncillaController", () => {
       return load({ session: sessionId === "s1" ? SESSION : other, events: sessionId === "s1" ? events : [] });
     };
     const { controller, stop } = await started(client);
+    const working = () => swarmView(controller.store.get().threads.s1!.fold, SESSION, Date.now()).runs[0]?.counts.working;
     try {
-      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 1);
+      assert.equal(working(), 1);
       controller.openThread("s2");
       await settle();
       // The child finishes while the stream is down, and nothing replays that.
@@ -982,7 +983,7 @@ describe("AncillaController", () => {
       await settle();
       await settle();
       assert.deepEqual(calls.at(-1), ["s1", { refresh: true }], "the other on opening, read in place while its agent may run");
-      assert.equal(agentActivityView(controller.store.get().threads.s1!.fold).working, 0);
+      assert.equal(working(), 0);
       assert.notEqual(controller.store.get().threads.s1?.stale, true, "and is live again once read");
       controller.openThread("s2");
       controller.openThread("s1");
@@ -2930,6 +2931,216 @@ describe("stale thread watchdog", () => {
       assert.equal(reads, 2, "the fast cadence stops with the sync");
       setNow(1_015_000 + 91_000); runStaleChecks(); await settle(); await settle();
       assert.equal(reads, 3, "a stream that then stays silent is still caught");
+    } finally {
+      stop();
+    }
+  });
+});
+
+describe("swarm controls", () => {
+  const T = Date.UTC(2026, 8, 26, 14, 2, 0);
+  const workflow = (revision: number, children: Record<string, unknown>[], status = "inProgress"): AncillaEvent => ({
+    type: "msp", sessionId: "s1", method: revision === 1 ? "item/started" : "item/updated", at: T + revision * 1000,
+    params: { item: { itemId: "wf", kind: "workflow", status, revision, turnId: "t9", workflowRunId: "run-1", entryId: "audit", children } },
+  });
+  const task = (revision: number, status: string): AncillaEvent => ({
+    type: "msp", sessionId: "s1", method: status === "inProgress" ? "item/updated" : "item/completed", at: T + revision * 1000,
+    params: { item: { itemId: "task-1", kind: "toolCall", status, revision, tool: "bash", args: JSON.stringify({ command: "npm run docs:build" }), background: true } },
+  });
+  const agentOf = (controller: AncillaController, id: string) => {
+    const thread = controller.store.get().threads["s1"]!;
+    const vm = swarmView(thread.fold, SESSION, Date.now(), { pending: controller.store.get().swarm.pending });
+    const run = vm.runs[0];
+    const agent = run?.agents.find((a) => a.id === id) ?? vm.tasks.find((t) => t.id === id);
+    assert.ok(agent, `no agent ${id}`);
+    return agent;
+  };
+
+  it("migrates the file viewer's switch to the side-panel setting and keeps the two in step", () => {
+    const fallback = defaultPrefs();
+    assert.equal(revivePrefs({ filesOpen: true }, fallback).sidePanel, "files");
+    assert.equal(revivePrefs({ filesOpen: true }, fallback).filesOpen, true);
+    assert.equal(revivePrefs({ sidePanel: "swarm", filesOpen: true }, fallback).sidePanel, "swarm", "the new setting wins over the old switch");
+    assert.equal(revivePrefs({ sidePanel: "swarm", filesOpen: true }, fallback).filesOpen, false);
+    assert.equal(revivePrefs({ filesOpen: false }, fallback).sidePanel, "none");
+    assert.equal(revivePrefs({ swarmWidth: 9_999 }, fallback).swarmWidth, DEFAULT_SWARM_WIDTH);
+    assert.equal(revivePrefs({ swarmWidth: 640 }, fallback).swarmWidth, 640);
+  });
+
+  it("swaps the slot between the file viewer and the Swarm panel, one at a time", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      const prefs = () => controller.store.get().prefs;
+      controller.toggleSwarmPanel();
+      assert.equal(prefs().sidePanel, "swarm");
+      assert.equal(prefs().filesOpen, false);
+      controller.toggleFiles();
+      assert.equal(prefs().sidePanel, "files", "opening files closes the Swarm panel");
+      assert.equal(prefs().filesOpen, true);
+      controller.toggleSwarmPanel(true);
+      assert.equal(prefs().sidePanel, "swarm");
+      assert.equal(prefs().filesOpen, false);
+      controller.toggleSwarmPanel();
+      assert.equal(prefs().sidePanel, "none");
+      controller.openFile("s1", "README.md");
+      assert.equal(prefs().sidePanel, "files", "opening a file shows the viewer");
+      controller.setSwarmWidth(10_000);
+      assert.equal(prefs().swarmWidth, 800);
+      controller.setSwarmWidth(10);
+      assert.equal(prefs().swarmWidth, 400);
+    } finally {
+      stop();
+    }
+  });
+
+  it("keeps a retry pending until the next attempt shows, and a skip until the outcome does", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "scheduled", label: "audit:routes" }, { childId: "c2", attempt: 1, status: "scheduled", label: "audit:schema" }]));
+      client.handler?.(workflow(2, [{ childId: "c1", attempt: 1, status: "terminal", terminal: "failed" }, { childId: "c2", attempt: 1, status: "started" }]));
+      await settle();
+      const failed = agentOf(controller, "c1");
+      assert.equal(failed.state, "failed");
+      assert.equal(await controller.swarmAction("s1", failed, "retry"), true);
+      assert.deepEqual(client.actions.at(-1), "workflow:s1:retry:run-1:c1@1");
+      assert.deepEqual(controller.store.get().swarm.pending, { "s1:c1:1": "retry" });
+      assert.equal(agentOf(controller, "c2").pending, null);
+      client.handler?.(workflow(3, [{ childId: "c1", attempt: 2, status: "scheduled", label: "audit:routes" }, { childId: "c2", attempt: 1, status: "started" }]));
+      await settle();
+      assert.deepEqual(controller.store.get().swarm.pending, {}, "attempt 2 on the wire confirms the retry");
+      assert.equal(agentOf(controller, "c1").attempt, 2);
+
+      const working = agentOf(controller, "c2");
+      assert.equal(await controller.swarmAction("s1", working, "skip"), true);
+      assert.deepEqual(client.actions.at(-1), "workflow:s1:skip:run-1:c2@1");
+      assert.deepEqual(controller.store.get().swarm.pending, { "s1:c2:1": "stop" });
+      assert.deepEqual(controller.store.get().swarm.skipped, ["s1:c2:1"]);
+      assert.equal(agentOf(controller, "c2").pending, "stop");
+      client.handler?.(workflow(4, [{ childId: "c1", attempt: 2, status: "started" }, { childId: "c2", attempt: 1, status: "terminal", terminal: "cancelled" }]));
+      await settle();
+      assert.deepEqual(controller.store.get().swarm.pending, {});
+      const skipped = swarmView(controller.store.get().threads["s1"]!.fold, SESSION, Date.now(), { skipped: controller.store.get().swarm.skipped }).runs[0]!.agents.find((a) => a.id === "c2");
+      assert.equal(skipped?.skippedBy, "you");
+    } finally {
+      stop();
+    }
+  });
+
+  it("clears a pending action the workflow refuses", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
+      await settle();
+      client.workflowError = new AncillaError("stale", 409, "stale_attempt");
+      assert.equal(await controller.swarmAction("s1", agentOf(controller, "c1"), "stop"), false);
+      assert.deepEqual(controller.store.get().swarm.pending, {});
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "That agent already moved on");
+      assert.equal(await controller.swarmAction("s1", { ...agentOf(controller, "c1"), workflowRunId: null }, "retry"), false, "no run id, nothing to send");
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops a background task through the task command and clears the flag when it ends", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(task(1, "inProgress"));
+      await settle();
+      const running = agentOf(controller, "task-1");
+      assert.equal(running.kind, "task");
+      assert.equal(await controller.swarmAction("s1", running, "retry"), false, "a task cannot be retried from here");
+      assert.equal(await controller.swarmAction("s1", running, "stop"), true);
+      assert.equal(client.actions.at(-1), "task:s1:stop:task-1");
+      assert.equal(agentOf(controller, "task-1").pending, "stop");
+      client.handler?.(task(2, "completed"));
+      await settle();
+      assert.deepEqual(controller.store.get().swarm.pending, {});
+      assert.equal(agentOf(controller, "task-1").state, "done");
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops everything in one thread and says what it asked to stop", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
+      client.handler?.(task(1, "inProgress"));
+      await settle();
+      assert.deepEqual(await controller.stopEverything("s1"), { runs: ["audit"], tasks: ["npm run docs:build"] });
+      assert.deepEqual(client.actions.slice(-2), ["workflow:s1:cancel:run-1", "task:s1:stopAll"]);
+      assert.deepEqual(controller.store.get().swarm.pending, { "s1:task-1:1": "stop" });
+      assert.deepEqual(await controller.stopEverything("s2"), { runs: [], tasks: [] }, "a thread this client does not hold has nothing to stop");
+      assert.equal(await controller.stopRun("s1", "wf"), true);
+      assert.equal(client.actions.at(-1), "workflow:s1:cancel:run-1");
+      assert.equal(await controller.stopRun("s1", "nope"), false);
+    } finally {
+      stop();
+    }
+  });
+
+  it("notes when a thread was left, and forgets it once the recap is dismissed", async () => {
+    const client = new FakeClient();
+    const other: SessionSummary = { ...SESSION, sessionId: "s2", title: "Other" };
+    client.listSessions = async () => [SESSION, other];
+    const { controller, stop } = await started(client);
+    try {
+      assert.deepEqual(controller.store.get().swarm.leftAt, {});
+      controller.openThread("s2");
+      await settle();
+      const left = controller.store.get().swarm.leftAt["s1"];
+      assert.ok(typeof left === "number" && left > 0, "leaving the thread notes when");
+      controller.markLeft("s2", 123);
+      assert.equal(controller.store.get().swarm.leftAt["s2"], 123);
+      controller.dismissRecap("s1");
+      assert.equal(controller.store.get().swarm.leftAt["s1"], undefined);
+      assert.deepEqual(controller.store.get().swarm.dismissedRecaps, ["s1"]);
+      controller.markLeft("s1", 456);
+      assert.deepEqual(controller.store.get().swarm.dismissedRecaps, [], "a new absence gets a new recap");
+      controller.dismissReport("s1", "wf");
+      controller.dismissReport("s1", "wf");
+      assert.deepEqual(controller.store.get().swarm.dismissedReports, ["s1:wf"]);
+    } finally {
+      stop();
+    }
+  });
+
+  it("drives the panel state and names the window through the shell", async () => {
+    const client = new FakeClient();
+    const titles: string[] = [];
+    const shell = { ...platform("#/t/s1"), setWindowTitle: (title: string) => { titles.push(title); } };
+    const controller = new AncillaController(client, shell);
+    const stop = controller.start();
+    await settle();
+    await settle();
+    try {
+      const panel = () => controller.store.get().swarm.panels["s1"];
+      assert.equal(panel(), undefined);
+      controller.inspectAgent("s1", "c1");
+      assert.deepEqual(panel(), { mode: "inspector", inspectId: "c1", filter: "all", query: "", timelineOpen: true, openPhases: [] });
+      assert.equal(controller.store.get().prefs.sidePanel, "swarm", "inspecting opens the panel");
+      controller.inspectAgent("s1", null);
+      assert.equal(panel()?.mode, "roster");
+      controller.setSwarmFilter("s1", "failed", "judge:");
+      assert.equal(panel()?.filter, "failed");
+      assert.equal(panel()?.query, "judge:");
+      controller.setSwarmFilter("s1", "all");
+      assert.equal(panel()?.query, "judge:", "the query stays unless given");
+      controller.toggleTimeline("s1");
+      assert.equal(panel()?.timelineOpen, false);
+      controller.togglePhase("s1", "Judge");
+      controller.togglePhase("s1", "Design");
+      controller.togglePhase("s1", "Judge");
+      assert.deepEqual(panel()?.openPhases, ["Design"]);
+      controller.setActivityOpen(true);
+      assert.equal(controller.store.get().swarm.activityOpen, true);
+      controller.setWindowTitle("(1) Probe — Ancilla");
+      assert.deepEqual(titles, ["(1) Probe — Ancilla"]);
     } finally {
       stop();
     }

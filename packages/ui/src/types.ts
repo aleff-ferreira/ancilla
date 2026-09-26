@@ -80,6 +80,11 @@ export interface WorkflowChild {
   /** How long the agent ran. Present once it has stopped. */
   durationMs?: number;
   resultRef?: string;
+  /**
+   * The agent's tokens. Muse sends them on the one revision whose status is `usage`, just before the agent
+   * completes, and leaves them off every later revision; the fold latches them.
+   */
+  usage?: TokenUsage;
 }
 
 /** One MSP transcript item at some revision. Unknown fields are kept and ignored. */
@@ -105,6 +110,8 @@ export interface MspItem {
   failureKind?: string;
   failureReason?: string;
   background?: boolean;
+  /** `toolCall` in the background: who put it there, the user or Muse after a timeout. */
+  backgroundInitiator?: "user" | "timeout";
   summary?: string[];
   commandText?: string;
   exitCode?: number;
@@ -128,6 +135,12 @@ export interface MspItem {
   taskId?: string;
   /** `workflow`, and a `subagent` a workflow owns: the run the workflow controls address. */
   workflowRunId?: string;
+  /** `workflow`: the run's human name, the `name` the launch was given. */
+  entryId?: string;
+  /** `workflow`: the generated script's id, like `generated.workflow.<slug>`. */
+  scriptId?: string;
+  /** `workflow`: what started it, `guidanceAuto` when the model chose to. */
+  triggerSource?: string;
   /** `subagent` and `reminderChild`: the child's own session. */
   childSessionId?: string;
   /** `toolCall` and `userShell`: where the full output is kept when the view truncated it. */

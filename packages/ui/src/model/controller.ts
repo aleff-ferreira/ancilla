@@ -18,8 +18,8 @@ import type {
   ViewEvent,
   WorkflowAction,
 } from "../types.js";
-import { agentActivityView } from "./agents.js";
 import { describeTool, modelDisplayName } from "./format.js";
+import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
 import {
@@ -47,11 +47,14 @@ import {
 import {
   FILES_WIDTH_MAX,
   FILES_WIDTH_MIN,
+  SWARM_WIDTH_MAX,
+  SWARM_WIDTH_MIN,
   Store,
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEPS,
   defaultPrefs,
+  emptySwarmPanel,
   initialState,
   revivePrefs,
   type AppState,
@@ -61,7 +64,10 @@ import {
   type GroupBy,
   type Prefs,
   type Route,
+  type SidePanel,
   type SkillsState,
+  type SwarmFilter,
+  type SwarmPanelState,
   type ThemePref,
   type ThreadState,
   type Toast,
@@ -81,6 +87,8 @@ export interface Platform {
   cancel(handle: unknown): void;
   /** Whether the window has the user's attention; nothing is announced to someone already watching. */
   focused(): boolean;
+  /** Names the window, as `(2) Design the sync engine — Ancilla`; a shell without a title bar leaves it out. */
+  setWindowTitle?(title: string): void;
 }
 
 const PREFS_KEY = "ancilla.prefs.v1";
@@ -158,6 +166,11 @@ export function browserPlatform(): Platform {
     cancel: (handle) => window.clearTimeout(handle as number),
     // A window with no document at all is not one anybody is looking at.
     focused: () => typeof document !== "undefined" && document.hasFocus(),
+    setWindowTitle: (title) => {
+      if (typeof document !== "undefined" && document.title !== title) {
+        document.title = title;
+      }
+    },
   };
 }
 
@@ -860,6 +873,9 @@ export class AncillaController {
     const previous = this.state.route;
     if (previous.kind === "thread") {
       this.markSeen(previous.sessionId, true);
+      if (requested.kind !== "thread" || requested.sessionId !== previous.sessionId) {
+        this.markLeft(previous.sessionId);
+      }
     }
     if (route.kind === "thread" && this.state.sessionsLoaded && !this.state.sessions[route.sessionId]) {
       route = { kind: "home" };
@@ -958,8 +974,7 @@ export class AncillaController {
     if (fold.activeTurnId !== null || Object.keys(fold.approvals).length > 0 || Object.keys(fold.userInputs).length > 0) {
       return true;
     }
-    const agents = agentActivityView(fold);
-    return agents.working + agents.waiting > 0;
+    return swarmBusy(fold);
   }
 
   private async reloadThread(sessionId: string, resume = false): Promise<void> {
@@ -1038,6 +1053,7 @@ export class AncillaController {
       // Whatever was already waiting when the thread opened counts too, not only what arrives next.
       this.autoAllow([sessionId]);
       this.convergeThread(sessionId);
+      this.settlePending(sessionId, fold);
     } catch (error) {
       const buffered = this.loading.get(sessionId) ?? [];
       this.loading.delete(sessionId);
@@ -1251,6 +1267,12 @@ export class AncillaController {
     });
     this.autoAllow(batches.map(([id]) => id));
     this.noteEditedFiles(batches);
+    for (const [id] of batches) {
+      const thread = this.state.threads[id];
+      if (thread) {
+        this.settlePending(id, thread.fold);
+      }
+    }
     const route = this.state.route;
     if (route.kind === "thread" && batches.some(([id]) => id === route.sessionId)) {
       this.markSeen(route.sessionId);
@@ -1914,10 +1936,16 @@ export class AncillaController {
     this.setBusy(key, true);
     // The card goes on the click, not on the host's `approval/resolved`, which can be a second or more behind.
     const decision = (request.availableChoices ?? []).find((c) => c.choiceId === choiceId)?.decision ?? "approved";
+    const decidedAt = this.platform.now();
     this.patchFold(request.sessionId, (f) => {
       const approvals = { ...f.approvals };
       delete approvals[request.approvalId];
-      return { ...f, approvals, resolved: { ...f.resolved, [request.approvalId]: { decision, resolvedBy: by } } };
+      // The wait on the user ends with the click too, so a run's "waited on you" counts to here.
+      const traced = f.swarm.requests[request.approvalId];
+      const swarm = traced && traced.decidedAt === null
+        ? { ...f.swarm, requests: { ...f.swarm.requests, [request.approvalId]: { ...traced, decidedAt } } }
+        : f.swarm;
+      return { ...f, approvals, resolved: { ...f.resolved, [request.approvalId]: { decision, resolvedBy: by } }, swarm };
     });
     try {
       await this.client.decideApproval({
@@ -3312,12 +3340,246 @@ export class AncillaController {
     this.setPrefs({ sidebarCollapsed: !this.state.prefs.sidebarCollapsed });
   }
 
-  // ---------------------------------------------------------------- files
+  // ---------------------------------------------------------------- side panel and swarm
+
+  /** What the slot beside threads shows. `filesOpen` follows it for the views that still read the old switch. */
+  setSidePanel(panel: SidePanel): void {
+    if (this.state.prefs.sidePanel === panel && this.state.prefs.filesOpen === (panel === "files")) {
+      return;
+    }
+    this.setPrefs({ sidePanel: panel, filesOpen: panel === "files" });
+  }
 
   /** Shows or hides the file viewer beside threads; it keeps each thread's open files either way. */
   toggleFiles(open?: boolean): void {
-    this.setPrefs({ filesOpen: open ?? !this.state.prefs.filesOpen });
+    const show = open ?? this.state.prefs.sidePanel !== "files";
+    this.setSidePanel(show ? "files" : "none");
   }
+
+  /** Shows or hides the Swarm panel; it takes the file viewer's slot, so opening one closes the other. */
+  toggleSwarmPanel(open?: boolean): void {
+    const show = open ?? this.state.prefs.sidePanel !== "swarm";
+    this.setSidePanel(show ? "swarm" : "none");
+  }
+
+  setSwarmWidth(width: number): void {
+    this.setPrefs({ swarmWidth: Math.round(Math.min(SWARM_WIDTH_MAX, Math.max(SWARM_WIDTH_MIN, width))) });
+  }
+
+  private patchSwarmPanel(sessionId: string, fn: (panel: SwarmPanelState) => SwarmPanelState): void {
+    this.update((s) => {
+      const current = s.swarm.panels[sessionId] ?? emptySwarmPanel();
+      const next = fn(current);
+      return next === current ? s : { ...s, swarm: { ...s.swarm, panels: { ...s.swarm.panels, [sessionId]: next } } };
+    });
+  }
+
+  /** Opens one agent in the panel's inspector, opening the panel itself when it is closed; null goes back to the roster. */
+  inspectAgent(sessionId: string, agentId: string | null): void {
+    this.patchSwarmPanel(sessionId, (panel) => ({ ...panel, mode: agentId === null ? "roster" : "inspector", inspectId: agentId }));
+    if (agentId !== null) {
+      this.toggleSwarmPanel(true);
+    }
+  }
+
+  setSwarmFilter(sessionId: string, filter: SwarmFilter, query?: string): void {
+    this.patchSwarmPanel(sessionId, (panel) => {
+      const next = { ...panel, filter, query: query ?? panel.query };
+      return next.filter === panel.filter && next.query === panel.query ? panel : next;
+    });
+  }
+
+  toggleTimeline(sessionId: string): void {
+    this.patchSwarmPanel(sessionId, (panel) => ({ ...panel, timelineOpen: !panel.timelineOpen }));
+  }
+
+  togglePhase(sessionId: string, name: string): void {
+    this.patchSwarmPanel(sessionId, (panel) => ({
+      ...panel,
+      openPhases: panel.openPhases.includes(name) ? panel.openPhases.filter((phase) => phase !== name) : [...panel.openPhases, name],
+    }));
+  }
+
+  setActivityOpen(open: boolean): void {
+    this.update((s) => (s.swarm.activityOpen === open ? s : { ...s, swarm: { ...s.swarm, activityOpen: open } }));
+  }
+
+  /** The window's name, through the shell when it can name windows and the document otherwise. */
+  setWindowTitle(title: string): void {
+    if (this.platform.setWindowTitle) {
+      this.platform.setWindowTitle(title);
+    } else if (typeof document !== "undefined" && document.title !== title) {
+      document.title = title;
+    }
+  }
+
+  private setPending(key: string, action: "retry" | "stop" | null): void {
+    this.update((s) => {
+      if ((s.swarm.pending[key] ?? null) === action) {
+        return s;
+      }
+      const pending = { ...s.swarm.pending };
+      if (action) {
+        pending[key] = action;
+      } else {
+        delete pending[key];
+      }
+      return { ...s, swarm: { ...s.swarm, pending } };
+    });
+  }
+
+  /**
+   * Clears the actions a fold now confirms: a retry once a later attempt of the agent shows, a stop once the attempt
+   * or task has an outcome. An action the fold never confirms stays pending, and the row keeps saying so.
+   */
+  private settlePending(sessionId: string, fold: ThreadFold): void {
+    const keys = Object.keys(this.state.swarm.pending).filter((key) => key.startsWith(`${sessionId}:`));
+    if (keys.length === 0) {
+      return;
+    }
+    const attempts = new Map<string, { latest: number; ended: Set<number> }>();
+    for (const item of Object.values(fold.agentItems ?? fold.items)) {
+      if (item.kind !== "workflow" || !Array.isArray(item.children)) continue;
+      for (const child of item.children) {
+        const entry = attempts.get(child.childId) ?? { latest: 0, ended: new Set<number>() };
+        entry.latest = Math.max(entry.latest, child.attempt);
+        if (child.terminal || item.status !== "inProgress") entry.ended.add(child.attempt);
+        attempts.set(child.childId, entry);
+      }
+    }
+    for (const key of keys) {
+      const action = this.state.swarm.pending[key];
+      const rest = key.slice(sessionId.length + 1);
+      const colon = rest.lastIndexOf(":");
+      const agentId = rest.slice(0, colon);
+      const attempt = Number(rest.slice(colon + 1));
+      const known = attempts.get(agentId);
+      const item = fold.items[agentId];
+      const confirmed = known
+        ? action === "retry" ? known.latest > attempt : known.ended.has(attempt) || known.latest > attempt
+        : item !== undefined && item.status !== "inProgress";
+      if (confirmed) {
+        this.setPending(key, null);
+      }
+    }
+  }
+
+  /**
+   * Retry, skip or stop one agent, whatever kind it is. The row shows the action as pending until a revision
+   * confirms it: a new attempt for a retry, an outcome for a skip or stop. A refusal clears it at once.
+   */
+  async swarmAction(sessionId: string, agent: AgentVM, action: "retry" | "skip" | "stop"): Promise<boolean> {
+    const key = pendingKey(sessionId, agent.id, agent.attempt);
+    if (agent.kind === "workflow") {
+      if (!agent.workflowRunId) {
+        this.toast("error", "The workflow did not take that", "This run's id is not known here.");
+        return false;
+      }
+      if (agent.state === "planned") {
+        return false;
+      }
+      const flag = action === "retry" ? "retry" : "stop";
+      this.setPending(key, flag);
+      if (action !== "retry") {
+        this.update((s) => (s.swarm.skipped.includes(key) ? s : { ...s, swarm: { ...s.swarm, skipped: [...s.swarm.skipped, key].slice(-300) } }));
+      }
+      const ok = await this.workflowAction(sessionId, action === "retry" ? "retry" : "skip", agent.workflowRunId, { childId: agent.id, attempt: agent.attempt });
+      if (!ok) {
+        this.setPending(key, null);
+      }
+      return ok;
+    }
+    if (agent.kind === "task") {
+      if (action !== "stop") {
+        return false;
+      }
+      this.setPending(key, "stop");
+      const ok = await this.taskAction(sessionId, "stop", agent.id);
+      if (!ok) {
+        this.setPending(key, null);
+      }
+      return ok;
+    }
+    if (action !== "stop") {
+      return false;
+    }
+    this.setPending(key, "stop");
+    const ok = await this.subagentAction(sessionId, "stop", agent.id);
+    if (!ok) {
+      this.setPending(key, null);
+    }
+    return ok;
+  }
+
+  /** Stops one run by its item; the confirm copy comes from the run's own view-model. */
+  async stopRun(sessionId: string, itemId: string): Promise<boolean> {
+    const item = this.state.threads[sessionId]?.fold.items[itemId];
+    const runId = typeof item?.workflowRunId === "string" ? item.workflowRunId : null;
+    if (!runId) {
+      this.toast("error", "The workflow did not take that", "This run's id is not known here.");
+      return false;
+    }
+    return this.workflowAction(sessionId, "cancel", runId);
+  }
+
+  /**
+   * Stops every live run and background task in one thread. Approvals stay open. Returns what was asked to stop,
+   * by name, since `task/stopAll` does not say what it stopped.
+   */
+  async stopEverything(sessionId: string): Promise<{ runs: string[]; tasks: string[] }> {
+    const thread = this.state.threads[sessionId];
+    const session = this.state.sessions[sessionId] ?? null;
+    if (!thread) {
+      return { runs: [], tasks: [] };
+    }
+    const view = swarmView(thread.fold, session, this.platform.now(), { pending: this.state.swarm.pending, skipped: this.state.swarm.skipped, models: this.state.models });
+    const runs = view.runs.filter((run) => runLive(run) && run.runId !== null);
+    const tasks = view.tasks.filter((task) => task.state === "working" || task.state === "no-update" || task.state === "waiting-on-you");
+    await Promise.all(runs.map((run) => this.workflowAction(sessionId, "cancel", run.runId as string)));
+    if (tasks.length > 0) {
+      for (const task of tasks) {
+        this.setPending(pendingKey(sessionId, task.id, 1), "stop");
+      }
+      if (!(await this.taskAction(sessionId, "stopAll"))) {
+        for (const task of tasks) {
+          this.setPending(pendingKey(sessionId, task.id, 1), null);
+        }
+      }
+    }
+    return { runs: runs.map((run) => run.name), tasks: tasks.map((task) => task.name) };
+  }
+
+  dismissReport(sessionId: string, itemId: string): void {
+    const key = `${sessionId}:${itemId}`;
+    this.update((s) => (s.swarm.dismissedReports.includes(key) ? s : { ...s, swarm: { ...s.swarm, dismissedReports: [...s.swarm.dismissedReports, key].slice(-300) } }));
+  }
+
+  dismissRecap(sessionId: string): void {
+    this.update((s) => (s.swarm.dismissedRecaps.includes(sessionId) ? s : { ...s, swarm: { ...s.swarm, dismissedRecaps: [...s.swarm.dismissedRecaps, sessionId].slice(-300) } }));
+    this.markLeft(sessionId, null);
+  }
+
+  /**
+   * Notes when the user stops looking at a thread, on leaving it or hiding the window, so a recap can say what
+   * happened since. Null forgets it, once the recap is shown or dismissed.
+   */
+  markLeft(sessionId: string, at: number | null = this.platform.now()): void {
+    this.update((s) => {
+      if ((s.swarm.leftAt[sessionId] ?? null) === at) {
+        return s;
+      }
+      const leftAt = { ...s.swarm.leftAt };
+      if (at === null) {
+        delete leftAt[sessionId];
+      } else {
+        leftAt[sessionId] = at;
+      }
+      const dismissedRecaps = at === null ? s.swarm.dismissedRecaps : s.swarm.dismissedRecaps.filter((id) => id !== sessionId);
+      return { ...s, swarm: { ...s.swarm, leftAt, dismissedRecaps } };
+    });
+  }
+
+  // ---------------------------------------------------------------- files
 
   setFilesWidth(width: number): void {
     this.setPrefs({ filesWidth: Math.round(Math.min(FILES_WIDTH_MAX, Math.max(FILES_WIDTH_MIN, width))) });
@@ -3346,9 +3608,7 @@ export class AncillaController {
       tree: false,
       line: line ?? target.line,
     }));
-    if (!this.state.prefs.filesOpen) {
-      this.setPrefs({ filesOpen: true });
-    }
+    this.setSidePanel("files");
     return true;
   }
 
