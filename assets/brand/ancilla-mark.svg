@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">Ancilla</title>
+  <!--
+    The Ancilla mark on its 32-unit icon grid: an "A" drawn as two round strokes whose crossbar
+    is a single node. scripts/generate-icons.py reads this geometry to paint every icon, so keep
+    the stroke an absolute M/L polyline and the node one circle.
+  -->
+  <style>
+    .strokes { stroke: #13161B; }
+    .node { fill: #0A6DDD; }
+    @media (prefers-color-scheme: dark) {
+      .strokes { stroke: #EFF0F2; }
+      .node { fill: #5FA7FF; }
+    }
+  </style>
+  <path class="strokes" d="M8.25 22.5 L16 8.5 L23.75 22.5" fill="none" stroke="#13161B" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="node" cx="16" cy="18.75" r="2" fill="#0A6DDD"/>
+</svg>

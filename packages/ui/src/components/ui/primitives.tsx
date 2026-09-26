@@ -126,16 +126,26 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
   );
 });
 
-/** The Ancilla mark, drawn to match the app icon and favicon: the arch on a navy tile. */
+/**
+ * The Ancilla mark on its navy tile, matching the app icon and favicon: an "A" of two round strokes
+ * whose crossbar is a node. The geometry is copied from assets/brand/ancilla-mark.svg (logo.test.ts
+ * keeps the two in step). Decorative: every use sits beside the product name or a heading.
+ */
 export function Logo(props: { size?: number; className?: string }) {
   const size = props.size ?? 22;
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" className={props.className} aria-hidden="true">
       <rect width="32" height="32" rx="7.5" fill="oklch(0.25 0.045 280)" />
       <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="none" stroke="oklch(1 0 0 / 0.1)" />
-      <g transform="translate(6.83,6) scale(0.03558) translate(-368.6,-319)">
-        <path fill="oklch(0.96 0.01 280)" d="M 619.9 322 L 519.02 426.04 A 24.82 24.82 0 0 0 512.02 443.31 L 512.02 478 C 512.02 484 510.65 493.6 502.08 502 L 376.48 625 C 369.33 632 369.13 637 369.13 649 L 369.13 797.92 L 417.84 836.97 L 417.84 698.4 A 26.32 26.32 0 0 1 426.21 679.15 L 527.95 584.32 A 24.25 24.25 0 0 0 535.67 566.58 L 535.67 493.24 A 20.71 20.71 0 0 1 541.83 478.51 L 587.23 433.67 L 587.23 608.77 A 25.15 25.15 0 0 1 577.76 628.43 L 484.28 703 C 473.33 711.73 463.65 717 463.65 731 L 463.65 835.82 L 519.67 880.73 L 519.67 776 C 519.67 758 528 754.18 535.86 748 L 615.38 685.49 A 18 18 0 0 1 637.62 685.49 L 717.14 748 C 725 754.18 733.33 758 733.33 776 L 733.33 880.73 L 789.35 835.82 L 789.35 731 C 789.35 717 779.67 711.73 768.72 703 L 675.24 628.43 A 25.15 25.15 0 0 1 665.77 608.77 L 665.77 433.67 L 711.17 478.51 A 20.71 20.71 0 0 1 717.33 493.24 L 717.33 566.58 A 24.25 24.25 0 0 0 725.05 584.32 L 826.79 679.15 A 26.32 26.32 0 0 1 835.16 698.4 L 835.16 836.97 L 883.87 797.92 L 883.87 649 C 883.87 637 883.67 632 876.52 625 L 750.92 502 C 742.35 493.6 740.98 484 740.98 478 L 740.98 443.31 A 24.82 24.82 0 0 0 733.98 426.04 L 633.1 322 C 629.62 318.41 628.5 319.6 626.5 319.6 C 624.5 319.6 623.38 318.41 619.9 322 Z" />
-      </g>
+      <path
+        d="M8.25 22.5 L16 8.5 L23.75 22.5"
+        fill="none"
+        stroke="oklch(0.96 0.01 280)"
+        strokeWidth="3.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="16" cy="18.75" r="2" fill="oklch(0.72 0.15 255)" />
     </svg>
   );
 }
