@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **A research report downloads as PDF, Word or HTML.** The Download menu on a finished report writes the document beside report.md in the project's `.ancilla/research/` folder. The desktop app offers to open it from there; in a browser the file downloads. Headings, lists, tables and code come through, every citation is a superscript that jumps to its entry, and each source is a working link with its address printed after it.
+
+### Changed
+
+- **Citations are footnotes you can follow.** A report's citation markers are now superscript links: one click goes to the source's entry in the Sources list, where the page's title links to the page, its host stands beside it, and an arrow leads back to the claim. The report file uses standard GitHub-flavoured footnotes, so it reads the same way on GitHub or in an editor. Reports written before this release show the same way, and a code fence the writer left open can no longer swallow the Sources into a code block.
+
+### Fixed
+
+- **"Open report.md" finds the report on Windows.** For a project inside a WSL distro, the report was written under the Linux path taken literally on the Windows drive, so the file viewer, which reads the project through its `\\wsl.localhost` share, said the file was not there. The report is now written where the viewer reads.
+
 ## 0.19.1
 
 ### Changed
