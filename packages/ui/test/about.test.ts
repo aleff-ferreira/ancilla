@@ -9,10 +9,9 @@ function text(markup: string): string {
 }
 
 describe("About", () => {
-  it("credits Helicon and names the license next to the version", () => {
+  it("names the license next to the version", () => {
     const markup = renderToStaticMarkup(createElement(About, { version: "0.18.0" }));
-    assert.match(text(markup), /Ancilla 0\.18\.0 · based on Helicon by Harjot Singh Rana and contributors \(MIT\) · GNU AGPL v3/);
-    assert.match(markup, /href="https:\/\/github\.com\/HarjjotSinghh\/helicon"/);
+    assert.match(text(markup), /Ancilla 0\.18\.0 · GNU AGPL v3/);
   });
 
   it("links the license, Helicon's license text, the notice and the third-party notices out to the browser", () => {
@@ -33,6 +32,6 @@ describe("About", () => {
   });
 
   it("leaves the version out rather than showing a gap before it loads", () => {
-    assert.match(text(renderToStaticMarkup(createElement(About, { version: null }))), /^Ancilla · based on Helicon/);
+    assert.match(text(renderToStaticMarkup(createElement(About, { version: null }))), /^Ancilla · GNU AGPL v3/);
   });
 });

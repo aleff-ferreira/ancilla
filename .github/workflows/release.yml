@@ -24,7 +24,7 @@ env:
 
     **Unsigned installers.** The Windows installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app: choose More info, then Run anyway. The macOS app is not notarized by Apple yet, so its first launch needs a right-click on the app, then Open.
 
-    **Licenses.** Ancilla is free software under the [GNU AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE). It is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon) by Harjot Singh Rana and contributors, which is MIT: Helicon's copyright notice is kept in [LICENSE-HELICON](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE-HELICON), and [NOTICE.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/NOTICE.md) says what Ancilla changed. The third-party software each build bundles, Node.js among it, is listed with its licenses in [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md), which also ships inside the app.
+    **Licenses.** Ancilla is free software under the [GNU AGPL v3](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE). Portions derive from Helicon, Copyright (c) 2026 Harjot Singh Rana and contributors, under the MIT License; its notice is kept in [LICENSE-HELICON](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/LICENSE-HELICON). The third-party software each build bundles, Node.js among it, is listed with its licenses in [THIRD_PARTY_NOTICES.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/THIRD_PARTY_NOTICES.md), which also ships inside the app.
 
 jobs:
   desktop-windows:

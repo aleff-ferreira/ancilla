@@ -10,8 +10,6 @@ Security fixes land on `main` first and ship in the next release.
 | latest release | ✅ |
 | older releases | ❌ |
 
-Helicon releases are not covered here: Ancilla is a separate project (see [NOTICE.md](NOTICE.md)).
-
 ## Reporting a vulnerability
 
 Report it privately through GitHub's
@@ -29,5 +27,4 @@ Please include:
 
 Leave out tokens, `auth.json` contents and private logs; if a log is needed, redact it first.
 
-We aim to acknowledge a report within 72 hours and will coordinate disclosure with you. If the issue also affects
-[Helicon](https://github.com/HarjjotSinghh/helicon), we will help you report it upstream too.
+We aim to acknowledge a report within 72 hours and will coordinate disclosure with you.

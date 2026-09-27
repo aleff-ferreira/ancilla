@@ -17,20 +17,17 @@
 Ancilla puts every Muse Code thread you run into one window: projects grouped by the folder the agent worked in, each
 with its threads, which you can read, resume, steer and approve without opening the terminal UI, including threads
 started from the `muse` TUI. It talks to the `muse` CLI on your own machine over the Muse Session Protocol, with your
-own login, and keeps its own state in a local SQLite file. Ancilla is a fork of
-[Helicon](https://github.com/HarjjotSinghh/helicon) v0.17.1 that adds recovery for stalled Muse sessions, an Agents
-panel for native subagents and workflows, and fixes for Windows and WSL; see [NOTICE.md](NOTICE.md).
+own login, and keeps its own state in a local SQLite file.
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
-> are trademarks of Meta, used here only to describe what this client connects to. Ancilla is also not affiliated with
-> or endorsed by the Helicon project.
+> are trademarks of Meta, used here only to describe what this client connects to.
 
 ![A thread: the agent's steps, diffs and approvals inline, with the composer docked below](docs/assets/thread.png)
 
 ## Features
 
-### From Helicon
+### Core
 
 - **Projects** grouped by the directory the agent worked in, including isolated worktrees
 - **Threads** per project with full history, resume and diffs, including sessions started from the `muse` TUI
@@ -256,14 +253,6 @@ Other traffic happens because of Muse or because of what you open:
 
 This section is not legal advice.
 
-## Credits
-
-Ancilla is built on [Helicon](https://github.com/HarjjotSinghh/helicon) by Harjot Singh Rana and the
-[Helicon contributors](https://github.com/HarjjotSinghh/helicon/graphs/contributors). Nearly everything described above
-under "From Helicon" is their work, and its full history is kept in this repository. Ancilla is not affiliated with or
-endorsed by the Helicon project; [NOTICE.md](NOTICE.md) says what was forked and what changed. Bundled third-party
-software is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md); pull requests are welcome. Report vulnerabilities as described in
@@ -274,6 +263,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md); pull requests are welcome. Report vulner
 [GNU AGPL v3](LICENSE). Copyright (c) 2026 Aleff Ferreira Francisco. Anyone who changes Ancilla and runs it for others,
 or ships it, must offer their version's source under the same license.
 
-Ancilla is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon), Copyright (c) 2026 Harjot Singh Rana and
-contributors, released under the MIT License. Helicon's notice is kept in [LICENSE-HELICON](LICENSE-HELICON), as that
-license requires; everything Ancilla adds is under the AGPL.
+Portions of Ancilla derive from Helicon, Copyright (c) 2026 Harjot Singh Rana and contributors, under the MIT License; its notice is kept in [LICENSE-HELICON](LICENSE-HELICON).
+Bundled third-party software is listed with its licenses in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
