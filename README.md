@@ -11,13 +11,12 @@
   <img alt="Ancilla: open-source desktop and web client for the Muse Code CLI" src="docs/assets/readme-hero-light.png" />
 </picture>
 
-> **Ancilla** (Latin for "helper" or "handmaid") is an open-source desktop and web app for Meta's **Muse Code CLI**
-> (`muse`): it looks after your agent threads while Muse does the work.
+> **Ancilla** is a desktop and web app for Meta's **Muse Code CLI** (`muse`): a place to run, watch and steer your
+> agent threads, with the work Muse does on your machine and your own login.
 
-Ancilla puts every Muse Code thread you run into one window: projects grouped by the folder the agent worked in, each
-with its threads, which you can read, resume, steer and approve without opening the terminal UI, including threads
-started from the `muse` TUI. It talks to the `muse` CLI on your own machine over the Muse Session Protocol, with your
-own login, and keeps its own state in a local SQLite file.
+Ancilla keeps every Muse Code thread you run in one window, grouped by project, so you can read, resume and approve
+them without the terminal, follow what a run of agents is doing while it happens, and ask for research that comes back
+as a cited report. It works on Windows, macOS and Linux, and on Windows with Muse installed natively or inside WSL.
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
@@ -25,74 +24,29 @@ own login, and keeps its own state in a local SQLite file.
 
 ![A thread: the agent's steps, diffs and approvals inline, with the composer docked below](docs/assets/thread.png)
 
-## Features
+## What it does
 
-### Core
+- **Projects and threads.** Every thread, including ones started from the `muse` terminal, under the folder it
+  worked in; a project can group several folders.
+- **Approvals and control.** Approve, steer, stop, queue and resend prompts from the thread, with the approval modes
+  Muse offers shown as they are.
+- **Agents in view.** When a thread runs subagents, workflows or background tasks, one card says what is going on,
+  what needs you and how far along it is; a panel and an activity drawer go deeper.
+- **Deep research.** Turn on Research, ask a question, and get a Markdown report in the thread whose sources are
+  pages the workers actually read, all on your Muse plan.
+- **The rest of the day.** A file viewer beside the thread, a usage page, thread titles, more than one Muse login,
+  and a desktop app that updates itself.
 
-- **Projects** grouped by the directory the agent worked in, including isolated worktrees
-- **Threads** per project with full history, resume and diffs, including sessions started from the `muse` TUI
-- **Approvals** surfaced honestly (`onRequest / promptUnmatched / denyUnmatched`), never bypassed
-- **One codebase** for desktop (Tauri) and web (the same React UI against a local or remote server)
-- **Windows that works**: Muse Code for Windows natively (no WSL), or Muse inside WSL2 with path translation
-- **A file viewer beside the thread**: browse the project, read highlighted source, preview and edit Markdown, and view
-  images, video and PDFs; paths Muse Code mentions open there
-- **Your real plan meter**: the 5-hour window and weekly cap as Muse Code reports them, in the sidebar and on the usage
-  page
-- **Goals you can steer**: set, pause, resume, change and clear a `/goal` from the goal panel or the composer
-- **Background work under control**: send a running tool call to the background, stop one or all of them; cancel a
-  workflow run, or skip and retry its agents
-- **Reasoning effort that sticks**, applied as the session's own default, which is the level `muse serve` actually uses
-- **More than one Muse login**: named profiles, each project remembering which one its new threads start on
-
-### New in Ancilla
-
-- **Session recovery that never resends work.** When Muse's live feed stalls, Ancilla keeps the thread moving by reading
-  its saved progress, and says so in the thread. It never resends a prompt, never resumes a running turn and never
-  restarts delegation to catch up. [How it works](docs/muse-recovery.md)
-- **A Swarm card in every thread** that runs native Muse subagents, workflow children or background tasks. One line
-  answers whether everything is fine, what needs you and how far along the run is; the rows that need attention
-  (waiting on you, failed, no update) carry the reason and the action; each agent has its own mark. A docked
-  **Swarm panel** adds a timeline of the run, a filterable roster, an inspector per agent and keyboard navigation;
-  a cross-thread **Activity** drawer (Ctrl+Shift+A) lists everything running and everything waiting on you; a
-  finished run becomes a report with highlights and where the time went. Nothing is inferred: what Muse does not
-  report says so. [Details](docs/agent-activity.md)
-- **No duplicate prompt bubbles.** A prompt with attachments shows once, not once for Muse's saved copy and once for the
-  local preview. [Details](docs/prompt-echo-reconciliation.md)
-- **Thread titles stay local.** Titles live in Ancilla's database and are not sent to Muse, which works around a Muse
-  1.4.0 bug where a renamed session breaks a later workflow's event log; sharing them is a `runtime.json` opt-in.
-  [Configuration](docs/muse-recovery.md#local-thread-titles)
-- **Windows and WSL fixes:** projects opened from `\\wsl.localhost\<distro>\...`, an existing `muse login` recognised
-  on Windows and in WSL, and a per-machine `runtime.json` that pins the runtime, the distro and the `muse` path and
-  forwards environment variables into WSL (for example a file-based credential store).
-- **Projects with several folders.** A project can group more than one folder: "Add folder…" in a project's menu
-  puts another folder under it, and a folder that was a project of its own moves in with its threads. Each thread
-  still runs in exactly one folder, because Muse gives a session one workspace root; the project simply lists the
-  threads of all its folders together, and the new-thread page lets you pick which folder to start in.
-- **Deep research.** A Research button beside the model picker, or `/research <question>`, sends parallel Muse
-  workers out to search the web and read what they find, round after round under a supervisor, until a writer turns
-  their notes into a Markdown report in the thread. The row in the transcript shows the phase, each worker's searches
-  and reads, the sources found and verified, the tokens spent and the time left in the window, with Stop that either
-  writes a report from what it has or drops the run. Every model call and every search runs through Muse on your
-  plan, so there is no key to add and the cost lands on the Usage page; a citation only ever names a page a worker
-  actually opened. First release: the report reads inline and lands in `.ancilla/research/` in the workspace, and a
-  run cut off by a restart stays interrupted until a later release can resume it.
-
-![The Swarm card: a native Muse workflow with ten agents in four phases, the rows that need attention first, and the approval it is waiting on](docs/assets/agents.png)
-
-![The Swarm panel beside the thread: the run's timeline, filters, the phase-grouped roster and an agent's inspector](docs/assets/swarm-panel.png)
-
-![A finished run: the report with its highlights and where the time went](docs/assets/swarm-done.png)
-
-![Starting a thread: recent work per project above the composer](docs/assets/home.png)
-
-![The command palette: threads, projects, and actions on Cmd/Ctrl+K](docs/assets/palette.png)
+More is on the way; the [changelog](docs/CHANGELOG.md) says what each release added.
 
 <details>
-<summary>Usage and settings</summary>
+<summary>More screenshots</summary>
 
-![Usage: what these threads would have cost at API rates, by day, by model and by thread](docs/assets/usage.png)
+![Agents at work in a thread](docs/assets/agents.png)
 
-![Settings: theme and code colours, what a new thread starts on, approvals, updates](docs/assets/settings.png)
+![Starting a thread](docs/assets/home.png)
+
+![Usage](docs/assets/usage.png)
 
 </details>
 
@@ -200,21 +154,9 @@ the page, and no token is needed unless one was set.
 
 ## Architecture
 
-```
-packages/daemon  Node library: spawns `muse serve` per workspace, speaks MSP (JSON-RPC over stdio), local SQLite store
-packages/server  HTTP + server-sent events bridge between the UI and the daemon
-packages/ui      shared React UI (desktop + web, single source of truth)
-apps/desktop     Tauri 2 shell (Windows, macOS, Linux) that runs the bundled server and shows packages/ui
-apps/web         the same UI in a browser, against a local or remote server
-```
-
-- Protocol: the **Muse Session Protocol (MSP)** via the official
-  [`@muse-code/sdk`](https://github.com/meta-models/muse-code-sdk) (MIT) and `muse schema generate-ts` types. No TUI
-  scraping.
-- Auth: your own `muse login`. Ancilla never stores credentials.
-- State: local SQLite, `projects (cwd/worktree) > sessions > turns`.
-- Windows: Muse for Windows runs natively; Muse in WSL2 runs through `wsl.exe`, with project paths translated between
-  Windows and WSL.
+A local server talks to the `muse` CLI on your machine through its own session protocol, using your own `muse login`,
+and keeps Ancilla's state in a local SQLite file. The desktop app runs that server bundled with a Node.js runtime; the
+web app is the same interface in a browser against a local or remote server. Credentials never pass through Ancilla.
 
 ## What leaves your machine
 
