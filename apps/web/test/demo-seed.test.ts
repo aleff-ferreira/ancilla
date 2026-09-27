@@ -4,9 +4,9 @@ import {
   completionView,
   errorKind,
   foldFromLoad,
-  sidebarSwarmSummary,
+  sidebarCrewSummary,
   summaryLine,
-  swarmView,
+  crewView,
   usageTotal,
   type AgentVM,
   type MspItem,
@@ -17,8 +17,8 @@ import { DemoAncillaClient } from "../src/demo/client.js";
 import { REPLAY_FAILURE, RESEARCH_RUNS, SCENARIOS, THREADS, seed, type Scenario, type SeedThread } from "../src/demo/seed.js";
 
 /**
- * The demo seed builds every `?swarm=` scenario as the wire Muse would have sent, and the UI's own model
- * (`swarmView`, the same fold the app uses) reads the states the design's scenario calls for off it.
+ * The demo seed builds every `?crew=` scenario as the wire Muse would have sent, and the UI's own model
+ * (`crewView`, the same fold the app uses) reads the states the design's scenario calls for off it.
  */
 
 const NOW = Date.UTC(2026, 8, 26, 14, 43, 16);
@@ -45,7 +45,7 @@ function viewOf(scenario: Scenario, now = NOW) {
   const seeded = seed(now, scenario);
   const thread = seeded.threads[0] as SeedThread;
   const fold = foldFromLoad(loadOf(thread));
-  return { seeded, thread, fold, vm: swarmView(fold, thread.summary, now, { partialHistory: thread.truncated === true }) };
+  return { seeded, thread, fold, vm: crewView(fold, thread.summary, now, { partialHistory: thread.truncated === true }) };
 }
 
 function runOf(scenario: Scenario, now = NOW): RunVM {
@@ -97,11 +97,11 @@ describe("the demo seed", () => {
     assert.ok(Date.parse(running.createdAt) > Date.parse(done.endedAt as string), "the running one came after the finished one");
   });
 
-  it("folds the research thread's runs into the Swarm view, a phase per round and an agent per worker", () => {
+  it("folds the research thread's runs into the Crew view, a phase per round and an agent per worker", () => {
     const seeded = seed(NOW);
     const thread = seeded.threads.find((candidate) => candidate.summary.sessionId === THREADS.research) as SeedThread;
     const fold = foldFromLoad(loadOf(thread));
-    const vm = swarmView(fold, thread.summary, NOW, { researchRuns: seeded.research });
+    const vm = crewView(fold, thread.summary, NOW, { researchRuns: seeded.research });
     assert.deepEqual(vm.runs.map((run) => [run.kind, run.itemId, run.status]), [
       ["research", `research:${RESEARCH_RUNS.done}`, "finished"],
       ["research", `research:${RESEARCH_RUNS.running}`, "running"],
@@ -116,7 +116,7 @@ describe("the demo seed", () => {
     assert.equal(running.tokens?.total, 91_420);
     assert.equal(completionView(done)?.headline, "All five landed.");
     assert.equal(completionView(done)?.excerpt, "14 sources · 11 verified · 4 curated\nThe report is in the transcript.");
-    assert.equal(sidebarSwarmSummary(fold, thread.summary.live, NOW, { researchRuns: seeded.research })?.text, "2 done · 2 working");
+    assert.equal(sidebarCrewSummary(fold, thread.summary.live, NOW, { researchRuns: seeded.research })?.text, "2 done · 2 working");
   });
 
   it("sends labels only when an agent is scheduled and usage on exactly one revision, as Muse does", () => {
@@ -135,7 +135,7 @@ describe("the demo seed", () => {
   });
 });
 
-describe("swarmView over the scenarios", () => {
+describe("crewView over the scenarios", () => {
   it("running: the design's run 41m 16s in, with one failed, one quiet, one finishing and one planned agent", () => {
     const { vm, seeded } = viewOf("running");
     const run = vm.runs[0] as RunVM;
@@ -249,10 +249,10 @@ describe("swarmView over the scenarios", () => {
 
   it("reconnect: the run as in running; when the feed is stale every clock freezes and nothing is promoted", () => {
     const { fold, thread } = viewOf("reconnect");
-    const live = swarmView(fold, thread.summary, NOW).runs[0] as RunVM;
+    const live = crewView(fold, thread.summary, NOW).runs[0] as RunVM;
     assert.equal(live.status, "running");
     assert.deepEqual(live.counts, runOf("running").counts);
-    const stale = swarmView(fold, thread.summary, NOW + 10_000, { stale: true, staleAt: NOW + 4_000 }).runs[0] as RunVM;
+    const stale = crewView(fold, thread.summary, NOW + 10_000, { stale: true, staleAt: NOW + 4_000 }).runs[0] as RunVM;
     assert.equal(stale.stale, true);
     assert.equal(stale.elapsedMs, 41 * MIN + 20_000);
     assert.equal(stale.counts.noUpdate, 0);
@@ -333,14 +333,14 @@ describe("swarmView over the scenarios", () => {
     assert.equal(e2e.taskInfo?.initiator, "user");
     assert.equal(diff.failure?.text, "openapi-diff exited with status 2");
     assert.ok(diff.durationMs && diff.durationMs > 0);
-    assert.equal(sidebarSwarmSummary(fold, null, NOW)?.task, "npm run docs:build");
+    assert.equal(sidebarCrewSummary(fold, null, NOW)?.task, "npm run docs:build");
     assert.equal(seeded.streams.length, 1);
   });
 
   it("shows a native subagent surfaced as a spawn and wait pair, in the thread that used one", () => {
     const seeded = seed(NOW, "running");
     const thread = seeded.threads.find((candidate) => candidate.summary.sessionId === THREADS.lazyCharts) as SeedThread;
-    const view = swarmView(foldFromLoad(loadOf(thread)), thread.summary, NOW);
+    const view = crewView(foldFromLoad(loadOf(thread)), thread.summary, NOW);
     assert.deepEqual(view.runs, []);
     assert.equal(view.subagents.length, 1);
     const survey = view.subagents[0] as AgentVM;
@@ -375,7 +375,7 @@ describe("the demo client", () => {
   async function reload(client: DemoAncillaClient, now = Date.now()) {
     const load = await client.loadTranscript(THREADS.audit);
     const fold = foldFromLoad(load);
-    return { load, fold, vm: swarmView(fold, load.session, now, { partialHistory: load.truncated }) };
+    return { load, fold, vm: crewView(fold, load.session, now, { partialHistory: load.truncated }) };
   }
 
   it("retries an agent as a new attempt on the same row, which lands within the minute", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { panelKeyAction, usePanelKeys, type PanelKeyAction, type PanelKeyInput } from "../src/components/swarm/usePanelKeys.js";
+import { panelKeyAction, usePanelKeys, type PanelKeyAction, type PanelKeyInput } from "../src/components/crew/usePanelKeys.js";
 
 const ROSTER: [string, PanelKeyAction][] = [
   ["j", "next"], ["ArrowDown", "next"], ["k", "previous"], ["ArrowUp", "previous"],

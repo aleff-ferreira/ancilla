@@ -87,8 +87,8 @@ export function CommandPalette() {
             <Item value="Activity" keywords={["agents", "tasks", "running", "needs you", "drawer"]} icon={<PulseIcon size={15} />} onSelect={() => run(() => controller.setActivityOpen(true))} hint={<Shortcut keys={[MOD, "Shift", "A"]} />}>
               Activity
             </Item>
-            <Item value="Swarm panel" keywords={["agents", "workflow", "timeline", "roster"]} icon={<GitForkIcon size={15} />} onSelect={() => run(() => controller.toggleSwarmPanel())} hint={<Shortcut keys={[MOD, "Shift", "M"]} />}>
-              Swarm panel
+            <Item value="Crew panel" keywords={["agents", "workflow", "timeline", "roster"]} icon={<GitForkIcon size={15} />} onSelect={() => run(() => controller.toggleCrewPanel())} hint={<Shortcut keys={[MOD, "Shift", "M"]} />}>
+              Crew panel
             </Item>
             <Item value="Theme system" keywords={["appearance"]} icon={<MonitorIcon size={15} />} onSelect={() => run(() => controller.setTheme("system"))}>
               Use system theme

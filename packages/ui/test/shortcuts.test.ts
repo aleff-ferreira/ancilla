@@ -1,37 +1,37 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { swarmShortcut, windowTitle, type ShortcutKey } from "../src/app/swarm-shortcuts.js";
-import { windowTitleCount } from "../src/model/swarm.js";
-import { LIVE, appState, approvalEvents, fold, runEvents, session, thread } from "./swarm-fixtures.js";
+import { crewShortcut, windowTitle, type ShortcutKey } from "../src/app/crew-shortcuts.js";
+import { windowTitleCount } from "../src/model/crew.js";
+import { LIVE, appState, approvalEvents, fold, runEvents, session, thread } from "./crew-fixtures.js";
 
 function key(k: string, extra: Partial<ShortcutKey> = {}): ShortcutKey {
   return { key: k, ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, ...extra };
 }
 
-describe("swarm shortcuts", () => {
-  it("opens the Activity drawer on Ctrl+Shift+A and the Swarm panel on Ctrl+Shift+M, Cmd on a Mac", () => {
-    assert.equal(swarmShortcut(key("A", { ctrlKey: true, shiftKey: true }), false), "activity");
-    assert.equal(swarmShortcut(key("a", { ctrlKey: true, shiftKey: true }), false), "activity");
-    assert.equal(swarmShortcut(key("M", { ctrlKey: true, shiftKey: true }), false), "swarm");
-    assert.equal(swarmShortcut(key("A", { metaKey: true, shiftKey: true }), true), "activity");
-    assert.equal(swarmShortcut(key("M", { metaKey: true, shiftKey: true }), true), "swarm");
-    assert.equal(swarmShortcut(key("A", { ctrlKey: true, shiftKey: true }), true), null, "Ctrl is not the Mac's modifier");
-    assert.equal(swarmShortcut(key("A", { metaKey: true, shiftKey: true }), false), null);
+describe("crew shortcuts", () => {
+  it("opens the Activity drawer on Ctrl+Shift+A and the Crew panel on Ctrl+Shift+M, Cmd on a Mac", () => {
+    assert.equal(crewShortcut(key("A", { ctrlKey: true, shiftKey: true }), false), "activity");
+    assert.equal(crewShortcut(key("a", { ctrlKey: true, shiftKey: true }), false), "activity");
+    assert.equal(crewShortcut(key("M", { ctrlKey: true, shiftKey: true }), false), "crew");
+    assert.equal(crewShortcut(key("A", { metaKey: true, shiftKey: true }), true), "activity");
+    assert.equal(crewShortcut(key("M", { metaKey: true, shiftKey: true }), true), "crew");
+    assert.equal(crewShortcut(key("A", { ctrlKey: true, shiftKey: true }), true), null, "Ctrl is not the Mac's modifier");
+    assert.equal(crewShortcut(key("A", { metaKey: true, shiftKey: true }), false), null);
   });
 
   it("needs both the modifier and Shift, and never Alt", () => {
-    assert.equal(swarmShortcut(key("a", { ctrlKey: true }), false), null);
-    assert.equal(swarmShortcut(key("A", { shiftKey: true }), false), null);
-    assert.equal(swarmShortcut(key("A", { ctrlKey: true, shiftKey: true, altKey: true }), false), null);
-    assert.equal(swarmShortcut(key("B", { ctrlKey: true, shiftKey: true }), false), null);
+    assert.equal(crewShortcut(key("a", { ctrlKey: true }), false), null);
+    assert.equal(crewShortcut(key("A", { shiftKey: true }), false), null);
+    assert.equal(crewShortcut(key("A", { ctrlKey: true, shiftKey: true, altKey: true }), false), null);
+    assert.equal(crewShortcut(key("B", { ctrlKey: true, shiftKey: true }), false), null);
   });
 
   it("stays out of text fields", () => {
     for (const tagName of ["INPUT", "TEXTAREA"]) {
-      assert.equal(swarmShortcut(key("A", { ctrlKey: true, shiftKey: true, target: { tagName } as unknown as EventTarget }), false), null, tagName);
+      assert.equal(crewShortcut(key("A", { ctrlKey: true, shiftKey: true, target: { tagName } as unknown as EventTarget }), false), null, tagName);
     }
-    assert.equal(swarmShortcut(key("M", { ctrlKey: true, shiftKey: true, target: { tagName: "DIV", isContentEditable: true } as unknown as EventTarget }), false), null);
-    assert.equal(swarmShortcut(key("M", { ctrlKey: true, shiftKey: true, target: { tagName: "DIV", isContentEditable: false } as unknown as EventTarget }), false), "swarm");
+    assert.equal(crewShortcut(key("M", { ctrlKey: true, shiftKey: true, target: { tagName: "DIV", isContentEditable: true } as unknown as EventTarget }), false), null);
+    assert.equal(crewShortcut(key("M", { ctrlKey: true, shiftKey: true, target: { tagName: "DIV", isContentEditable: false } as unknown as EventTarget }), false), "crew");
   });
 });
 

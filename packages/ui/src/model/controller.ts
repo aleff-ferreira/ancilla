@@ -21,7 +21,7 @@ import type {
   WorkflowAction,
 } from "../types.js";
 import { describeTool, modelDisplayName } from "./format.js";
-import { pendingKey, researchRunIdOf, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
+import { pendingKey, researchRunIdOf, runLive, crewBusy, crewView, type AgentVM } from "./crew.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
 import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
@@ -51,14 +51,14 @@ import {
 import {
   FILES_WIDTH_MAX,
   FILES_WIDTH_MIN,
-  SWARM_WIDTH_MAX,
-  SWARM_WIDTH_MIN,
+  CREW_WIDTH_MAX,
+  CREW_WIDTH_MIN,
   Store,
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEPS,
   defaultPrefs,
-  emptySwarmPanel,
+  emptyCrewPanel,
   initialState,
   revivePrefs,
   type AppState,
@@ -70,8 +70,8 @@ import {
   type Route,
   type SidePanel,
   type SkillsState,
-  type SwarmFilter,
-  type SwarmPanelState,
+  type CrewFilter,
+  type CrewPanelState,
   type ThemePref,
   type ThreadState,
   type Toast,
@@ -1006,7 +1006,7 @@ export class AncillaController {
     if (fold.activeTurnId !== null || Object.keys(fold.approvals).length > 0 || Object.keys(fold.userInputs).length > 0) {
       return true;
     }
-    return swarmBusy(fold);
+    return crewBusy(fold);
   }
 
   private async reloadThread(sessionId: string, resume = false): Promise<void> {
@@ -1987,11 +1987,11 @@ export class AncillaController {
       const approvals = { ...f.approvals };
       delete approvals[request.approvalId];
       // The wait on the user ends with the click too, so a run's "waited on you" counts to here.
-      const traced = f.swarm.requests[request.approvalId];
-      const swarm = traced && traced.decidedAt === null
-        ? { ...f.swarm, requests: { ...f.swarm.requests, [request.approvalId]: { ...traced, decidedAt } } }
-        : f.swarm;
-      return { ...f, approvals, resolved: { ...f.resolved, [request.approvalId]: { decision, resolvedBy: by } }, swarm };
+      const traced = f.crew.requests[request.approvalId];
+      const crew = traced && traced.decidedAt === null
+        ? { ...f.crew, requests: { ...f.crew.requests, [request.approvalId]: { ...traced, decidedAt } } }
+        : f.crew;
+      return { ...f, approvals, resolved: { ...f.resolved, [request.approvalId]: { decision, resolvedBy: by } }, crew };
     });
     try {
       await this.client.decideApproval({
@@ -3704,7 +3704,7 @@ export class AncillaController {
     this.setPrefs({ sidebarCollapsed: !this.state.prefs.sidebarCollapsed });
   }
 
-  // ---------------------------------------------------------------- side panel and swarm
+  // ---------------------------------------------------------------- side panel and crew
 
   /** What the slot beside threads shows. `filesOpen` follows it for the views that still read the old switch. */
   setSidePanel(panel: SidePanel): void {
@@ -3720,52 +3720,52 @@ export class AncillaController {
     this.setSidePanel(show ? "files" : "none");
   }
 
-  /** Shows or hides the Swarm panel; it takes the file viewer's slot, so opening one closes the other. */
-  toggleSwarmPanel(open?: boolean): void {
-    const show = open ?? this.state.prefs.sidePanel !== "swarm";
-    this.setSidePanel(show ? "swarm" : "none");
+  /** Shows or hides the Crew panel; it takes the file viewer's slot, so opening one closes the other. */
+  toggleCrewPanel(open?: boolean): void {
+    const show = open ?? this.state.prefs.sidePanel !== "crew";
+    this.setSidePanel(show ? "crew" : "none");
   }
 
-  setSwarmWidth(width: number): void {
-    this.setPrefs({ swarmWidth: Math.round(Math.min(SWARM_WIDTH_MAX, Math.max(SWARM_WIDTH_MIN, width))) });
+  setCrewWidth(width: number): void {
+    this.setPrefs({ crewWidth: Math.round(Math.min(CREW_WIDTH_MAX, Math.max(CREW_WIDTH_MIN, width))) });
   }
 
-  private patchSwarmPanel(sessionId: string, fn: (panel: SwarmPanelState) => SwarmPanelState): void {
+  private patchCrewPanel(sessionId: string, fn: (panel: CrewPanelState) => CrewPanelState): void {
     this.update((s) => {
-      const current = s.swarm.panels[sessionId] ?? emptySwarmPanel();
+      const current = s.crew.panels[sessionId] ?? emptyCrewPanel();
       const next = fn(current);
-      return next === current ? s : { ...s, swarm: { ...s.swarm, panels: { ...s.swarm.panels, [sessionId]: next } } };
+      return next === current ? s : { ...s, crew: { ...s.crew, panels: { ...s.crew.panels, [sessionId]: next } } };
     });
   }
 
   /** Opens one agent in the panel's inspector, opening the panel itself when it is closed; null goes back to the roster. */
   inspectAgent(sessionId: string, agentId: string | null): void {
-    this.patchSwarmPanel(sessionId, (panel) => ({ ...panel, mode: agentId === null ? "roster" : "inspector", inspectId: agentId }));
+    this.patchCrewPanel(sessionId, (panel) => ({ ...panel, mode: agentId === null ? "roster" : "inspector", inspectId: agentId }));
     if (agentId !== null) {
-      this.toggleSwarmPanel(true);
+      this.toggleCrewPanel(true);
     }
   }
 
-  setSwarmFilter(sessionId: string, filter: SwarmFilter, query?: string): void {
-    this.patchSwarmPanel(sessionId, (panel) => {
+  setCrewFilter(sessionId: string, filter: CrewFilter, query?: string): void {
+    this.patchCrewPanel(sessionId, (panel) => {
       const next = { ...panel, filter, query: query ?? panel.query };
       return next.filter === panel.filter && next.query === panel.query ? panel : next;
     });
   }
 
   toggleTimeline(sessionId: string): void {
-    this.patchSwarmPanel(sessionId, (panel) => ({ ...panel, timelineOpen: !panel.timelineOpen }));
+    this.patchCrewPanel(sessionId, (panel) => ({ ...panel, timelineOpen: !panel.timelineOpen }));
   }
 
   togglePhase(sessionId: string, name: string): void {
-    this.patchSwarmPanel(sessionId, (panel) => ({
+    this.patchCrewPanel(sessionId, (panel) => ({
       ...panel,
       openPhases: panel.openPhases.includes(name) ? panel.openPhases.filter((phase) => phase !== name) : [...panel.openPhases, name],
     }));
   }
 
   setActivityOpen(open: boolean): void {
-    this.update((s) => (s.swarm.activityOpen === open ? s : { ...s, swarm: { ...s.swarm, activityOpen: open } }));
+    this.update((s) => (s.crew.activityOpen === open ? s : { ...s, crew: { ...s.crew, activityOpen: open } }));
   }
 
   /** The window's name, through the shell when it can name windows and the document otherwise. */
@@ -3779,16 +3779,16 @@ export class AncillaController {
 
   private setPending(key: string, action: "retry" | "stop" | null): void {
     this.update((s) => {
-      if ((s.swarm.pending[key] ?? null) === action) {
+      if ((s.crew.pending[key] ?? null) === action) {
         return s;
       }
-      const pending = { ...s.swarm.pending };
+      const pending = { ...s.crew.pending };
       if (action) {
         pending[key] = action;
       } else {
         delete pending[key];
       }
-      return { ...s, swarm: { ...s.swarm, pending } };
+      return { ...s, crew: { ...s.crew, pending } };
     });
   }
 
@@ -3797,7 +3797,7 @@ export class AncillaController {
    * or task has an outcome. An action the fold never confirms stays pending, and the row keeps saying so.
    */
   private settlePending(sessionId: string, fold: ThreadFold): void {
-    const keys = Object.keys(this.state.swarm.pending).filter((key) => key.startsWith(`${sessionId}:`));
+    const keys = Object.keys(this.state.crew.pending).filter((key) => key.startsWith(`${sessionId}:`));
     if (keys.length === 0) {
       return;
     }
@@ -3812,7 +3812,7 @@ export class AncillaController {
       }
     }
     for (const key of keys) {
-      const action = this.state.swarm.pending[key];
+      const action = this.state.crew.pending[key];
       const rest = key.slice(sessionId.length + 1);
       const colon = rest.lastIndexOf(":");
       const agentId = rest.slice(0, colon);
@@ -3832,7 +3832,7 @@ export class AncillaController {
    * Retry, skip or stop one agent, whatever kind it is. The row shows the action as pending until a revision
    * confirms it: a new attempt for a retry, an outcome for a skip or stop. A refusal clears it at once.
    */
-  async swarmAction(sessionId: string, agent: AgentVM, action: "retry" | "skip" | "stop"): Promise<boolean> {
+  async crewAction(sessionId: string, agent: AgentVM, action: "retry" | "skip" | "stop"): Promise<boolean> {
     const key = pendingKey(sessionId, agent.id, agent.attempt);
     if (agent.kind === "research") {
       // The daemon's supervisor runs research workers; only the run as a whole can be stopped.
@@ -3849,7 +3849,7 @@ export class AncillaController {
       const flag = action === "retry" ? "retry" : "stop";
       this.setPending(key, flag);
       if (action !== "retry") {
-        this.update((s) => (s.swarm.skipped.includes(key) ? s : { ...s, swarm: { ...s.swarm, skipped: [...s.swarm.skipped, key].slice(-300) } }));
+        this.update((s) => (s.crew.skipped.includes(key) ? s : { ...s, crew: { ...s.crew, skipped: [...s.crew.skipped, key].slice(-300) } }));
       }
       const ok = await this.workflowAction(sessionId, action === "retry" ? "retry" : "skip", agent.workflowRunId, { childId: agent.id, attempt: agent.attempt });
       if (!ok) {
@@ -3907,9 +3907,9 @@ export class AncillaController {
     if (!thread) {
       return { runs: [], tasks: [] };
     }
-    const view = swarmView(thread.fold, session, this.platform.now(), {
-      pending: this.state.swarm.pending,
-      skipped: this.state.swarm.skipped,
+    const view = crewView(thread.fold, session, this.platform.now(), {
+      pending: this.state.crew.pending,
+      skipped: this.state.crew.skipped,
       models: this.state.models,
       researchRuns: thread.researchRuns,
     });
@@ -3931,11 +3931,11 @@ export class AncillaController {
 
   dismissReport(sessionId: string, itemId: string): void {
     const key = `${sessionId}:${itemId}`;
-    this.update((s) => (s.swarm.dismissedReports.includes(key) ? s : { ...s, swarm: { ...s.swarm, dismissedReports: [...s.swarm.dismissedReports, key].slice(-300) } }));
+    this.update((s) => (s.crew.dismissedReports.includes(key) ? s : { ...s, crew: { ...s.crew, dismissedReports: [...s.crew.dismissedReports, key].slice(-300) } }));
   }
 
   dismissRecap(sessionId: string): void {
-    this.update((s) => (s.swarm.dismissedRecaps.includes(sessionId) ? s : { ...s, swarm: { ...s.swarm, dismissedRecaps: [...s.swarm.dismissedRecaps, sessionId].slice(-300) } }));
+    this.update((s) => (s.crew.dismissedRecaps.includes(sessionId) ? s : { ...s, crew: { ...s.crew, dismissedRecaps: [...s.crew.dismissedRecaps, sessionId].slice(-300) } }));
     this.markLeft(sessionId, null);
   }
 
@@ -3945,17 +3945,17 @@ export class AncillaController {
    */
   markLeft(sessionId: string, at: number | null = this.platform.now()): void {
     this.update((s) => {
-      if ((s.swarm.leftAt[sessionId] ?? null) === at) {
+      if ((s.crew.leftAt[sessionId] ?? null) === at) {
         return s;
       }
-      const leftAt = { ...s.swarm.leftAt };
+      const leftAt = { ...s.crew.leftAt };
       if (at === null) {
         delete leftAt[sessionId];
       } else {
         leftAt[sessionId] = at;
       }
-      const dismissedRecaps = at === null ? s.swarm.dismissedRecaps : s.swarm.dismissedRecaps.filter((id) => id !== sessionId);
-      return { ...s, swarm: { ...s.swarm, leftAt, dismissedRecaps } };
+      const dismissedRecaps = at === null ? s.crew.dismissedRecaps : s.crew.dismissedRecaps.filter((id) => id !== sessionId);
+      return { ...s, crew: { ...s.crew, leftAt, dismissedRecaps } };
     });
   }
 

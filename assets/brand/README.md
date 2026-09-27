@@ -1,7 +1,7 @@
 # Ancilla brand
 
 The Ancilla mark is an "A" drawn as two round strokes whose crossbar is a single node: the helper
-(*ancilla*, Latin for handmaid) holding the agent swarm it runs for you. It is original to this
+(*ancilla*, Latin for handmaid) holding the agent crew it runs for you. It is original to this
 project. Helicon's mark, name and artwork belong to Helicon and are not used here.
 
 | File | What it is |

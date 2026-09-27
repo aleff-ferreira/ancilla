@@ -702,7 +702,7 @@ describe("subagent children", () => {
   });
 });
 
-describe("swarm trace", () => {
+describe("crew trace", () => {
   const T = Date.UTC(2026, 8, 26, 14, 2, 0);
   const wf = (revision: number, children: unknown[], at?: number, status = "inProgress", extra: Record<string, unknown> = {}): ViewEvent => ({
     method: revision === 1 ? "item/started" : status === "inProgress" ? "item/updated" : "item/completed",
@@ -719,7 +719,7 @@ describe("swarm trace", () => {
       wf(5, [{ childId: "a", attempt: 1, status: "completed" }], T + 61_000),
       wf(6, [{ childId: "a", attempt: 1, status: "terminal", terminal: "completed", durationMs: 59_000 }], T + 62_000),
     ]);
-    const run = fold.swarm.runs["wf"];
+    const run = fold.crew.runs["wf"];
     assert.ok(run);
     assert.deepEqual(run.children["a:1"], {
       scheduledAt: T, startedAt: T + 2_000, usageAt: T + 60_000, completedAt: T + 61_000, terminalAt: T + 62_000,
@@ -738,18 +738,18 @@ describe("swarm trace", () => {
       wf(1, [{ childId: "a", attempt: 1, status: "scheduled" }, { childId: "b", attempt: 1, status: "scheduled" }], undefined, "inProgress", recorded(T)),
       wf(2, [{ childId: "a", attempt: 1, status: "started" }, { childId: "b", attempt: 1, status: "scheduled" }], undefined, "inProgress", recorded(T + 5_000)),
     ]);
-    const before = fold.swarm.runs["wf"]!;
+    const before = fold.crew.runs["wf"]!;
     assert.equal(before.children["a:1"]?.startedAt, T + 5_000);
     assert.equal(before.children["b:1"]?.lastEventAt, T);
     fold = applyEvent(fold, wf(3, [{ childId: "a", attempt: 1, status: "started" }, { childId: "b", attempt: 1, status: "started" }], undefined, "inProgress", recorded(T + 9_000)));
-    const after = fold.swarm.runs["wf"]!;
+    const after = fold.crew.runs["wf"]!;
     assert.notEqual(after, before, "the trace is copied for the revision");
     assert.equal(after.children["a:1"], before.children["a:1"], "an attempt the revision did not touch keeps its record");
     assert.equal(after.children["b:1"]?.startedAt, T + 9_000);
     assert.equal(before.children["b:1"]?.startedAt, undefined, "the fold on screen is never changed under it");
     const untimed = foldAll([wf(1, [{ childId: "a", attempt: 1, status: "scheduled" }])]);
-    assert.deepEqual(untimed.swarm.runs["wf"]?.children["a:1"], { lastEventAt: null, approx: false });
-    assert.equal(untimed.swarm.runs["wf"]?.startedAt, null);
+    assert.deepEqual(untimed.crew.runs["wf"]?.children["a:1"], { lastEventAt: null, approx: false });
+    assert.equal(untimed.crew.runs["wf"]?.startedAt, null);
   });
 
   it("latches the usage Muse sends once, and notes the run's start from revision 1 and its end", () => {
@@ -758,19 +758,19 @@ describe("swarm trace", () => {
       wf(2, [{ childId: "a", attempt: 1, status: "usage", usage: { inputTokens: 48_333, outputTokens: 4_004, reasoningTokens: 3_409 } }], T + 10_000),
       wf(3, [{ childId: "a", attempt: 1, status: "terminal", terminal: "completed" }], T + 11_000),
     ]);
-    assert.deepEqual(fold.swarm.runs["wf"]?.children["a:1"]?.usage, { inputTokens: 48_333, outputTokens: 4_004, reasoningTokens: 3_409 });
+    assert.deepEqual(fold.crew.runs["wf"]?.children["a:1"]?.usage, { inputTokens: 48_333, outputTokens: 4_004, reasoningTokens: 3_409 });
     assert.equal(fold.items["wf"]?.children?.[0]?.usage, undefined, "the item shows what Muse sent last");
     fold = applyEvent(fold, wf(4, [{ childId: "a", attempt: 1, status: "terminal", terminal: "completed" }], T + 12_000, "completed"));
-    assert.equal(fold.swarm.runs["wf"]?.startedAt, T);
-    assert.equal(fold.swarm.runs["wf"]?.endedAt, T + 12_000);
-    assert.equal(fold.swarm.runs["wf"]?.children["a:1"]?.lastEventAt, T + 11_000, "the run ending is not the agent moving");
+    assert.equal(fold.crew.runs["wf"]?.startedAt, T);
+    assert.equal(fold.crew.runs["wf"]?.endedAt, T + 12_000);
+    assert.equal(fold.crew.runs["wf"]?.children["a:1"]?.lastEventAt, T + 11_000, "the run ending is not the agent moving");
   });
 
   it("marks a run first seen past revision 1, and a child first seen under way, as approximate", () => {
     const id = "01a0dbae-727a-7543-b502-a584a609ad8b";
     const scheduled = parseInt(id.slice(0, 8) + id.slice(9, 13), 16);
     const fold = foldAll([wf(22, [{ childId: id, attempt: 1, status: "started" }, { childId: "plain", attempt: 1, status: "terminal", terminal: "completed" }], scheduled + 90_000)]);
-    const run = fold.swarm.runs["wf"]!;
+    const run = fold.crew.runs["wf"]!;
     assert.equal(run.approx, true);
     assert.equal(run.startedAt, scheduled + 90_000);
     assert.deepEqual(run.children[`${id}:1`], { scheduledAt: scheduled, startedAt: scheduled + 90_000, lastEventAt: scheduled + 90_000, approx: true });
@@ -780,7 +780,7 @@ describe("swarm trace", () => {
     assert.equal(uuidTime("plain"), null);
     // A retry shares the id, so its time says nothing about attempt 2.
     const retried = foldAll([wf(30, [{ childId: id, attempt: 2, status: "started" }], scheduled + 200_000)]);
-    assert.deepEqual(retried.swarm.runs["wf"]?.children[`${id}:2`], { startedAt: scheduled + 200_000, lastEventAt: scheduled + 200_000, approx: true });
+    assert.deepEqual(retried.crew.runs["wf"]?.children[`${id}:2`], { startedAt: scheduled + 200_000, lastEventAt: scheduled + 200_000, approx: true });
   });
 
   it("keeps an attempt's record after a retry drops it from the item", () => {
@@ -789,10 +789,10 @@ describe("swarm trace", () => {
       wf(2, [{ childId: "a", attempt: 1, status: "terminal", terminal: "failed", durationMs: 5_000 }], T + 5_000),
       wf(3, [{ childId: "a", attempt: 2, status: "scheduled" }], T + 6_000),
     ]);
-    assert.deepEqual(Object.keys(fold.swarm.runs["wf"]?.children ?? {}), ["a:1", "a:2"]);
-    assert.equal(fold.swarm.runs["wf"]?.children["a:1"]?.terminal, "failed");
-    assert.equal(fold.swarm.runs["wf"]?.children["a:1"]?.label, "design:x");
-    assert.equal(fold.swarm.runs["wf"]?.children["a:2"]?.scheduledAt, T + 6_000);
+    assert.deepEqual(Object.keys(fold.crew.runs["wf"]?.children ?? {}), ["a:1", "a:2"]);
+    assert.equal(fold.crew.runs["wf"]?.children["a:1"]?.terminal, "failed");
+    assert.equal(fold.crew.runs["wf"]?.children["a:1"]?.label, "design:x");
+    assert.equal(fold.crew.runs["wf"]?.children["a:2"]?.scheduledAt, T + 6_000);
   });
 
   it("carries the trace across a partial page and merges a full reload's record times with the live ones", () => {
@@ -808,17 +808,17 @@ describe("swarm trace", () => {
     const recorded = (ms: number) => ({ recordedAt: new Date(ms).toISOString() });
     // A partial page that only holds the newest revision keeps everything the live stream traced.
     const partial = foldFromLoad(page([wf(4, [{ childId: "a", attempt: 1, status: "terminal", terminal: "completed" }], undefined, "inProgress", recorded(T + 4_500))], true), live);
-    assert.deepEqual(partial.swarm.runs["wf"]?.children["a:1"], {
+    assert.deepEqual(partial.crew.runs["wf"]?.children["a:1"], {
       scheduledAt: T, startedAt: T + 2_000, usageAt: T + 3_000, terminalAt: T + 4_500, lastEventAt: T + 4_500, usage: { inputTokens: 5 }, terminal: "completed", approx: false,
     });
-    assert.equal(partial.swarm.runs["wf"]?.startedAt, T);
+    assert.equal(partial.crew.runs["wf"]?.startedAt, T);
     // A full reload replays the history's record times; where the live stream knew better, that stands.
     const full = foldFromLoad(page([
       wf(2, [{ childId: "a", attempt: 1, status: "started" }], undefined, "inProgress", recorded(T + 2_400)),
       wf(3, [{ childId: "a", attempt: 1, status: "usage" }], undefined, "inProgress", recorded(T + 3_400)),
       wf(4, [{ childId: "a", attempt: 1, status: "terminal", terminal: "completed" }], undefined, "inProgress", recorded(T + 4_400)),
     ], false), live);
-    const merged = full.swarm.runs["wf"]!;
+    const merged = full.crew.runs["wf"]!;
     assert.equal(merged.startedAt, T, "the live start from revision 1 beats a capped page's first revision");
     assert.equal(merged.approx, false);
     assert.equal(merged.children["a:1"]?.scheduledAt, T, "the page never saw the scheduling revision; the live trace did");
@@ -828,7 +828,7 @@ describe("swarm trace", () => {
     assert.equal(merged.children["a:1"]?.approx, false);
     // A run the reload no longer holds takes its trace with it.
     const gone = foldFromLoad(page([wf(1, [{ childId: "z", attempt: 1, status: "started" }], undefined, "inProgress", { itemId: "other" })], false), live);
-    assert.deepEqual(Object.keys(gone.swarm.runs), ["other"]);
+    assert.deepEqual(Object.keys(gone.crew.runs), ["other"]);
   });
 
   it("traces a tool call while it runs and keeps it only when it ran in the background", () => {
@@ -837,22 +837,22 @@ describe("swarm trace", () => {
       params: { item: { itemId, kind: "toolCall", status, revision, tool: "bash", args: JSON.stringify({ command: "npm test" }), ...extra } },
     });
     let fold = foldAll([tool("t1", 1, "inProgress", T), tool("t2", 1, "inProgress", T + 1_000)]);
-    assert.deepEqual(fold.swarm.tasks["t1"], { firstSeenAt: T, approx: false, lastOutputAt: null, endedAt: null });
+    assert.deepEqual(fold.crew.tasks["t1"], { firstSeenAt: T, approx: false, lastOutputAt: null, endedAt: null });
     fold = applyEvents(fold, [
       { method: "item/delta", at: T + 30_000, params: { itemId: "t1", field: "output", delta: "12 passed\n" } },
       { method: "item/delta", params: { itemId: "t2", field: "output", delta: "no time on this one\n" } },
       tool("t1", 2, "inProgress", T + 40_000, { background: true, backgroundInitiator: "user" }),
     ]);
-    assert.equal(fold.swarm.tasks["t1"]?.lastOutputAt, T + 30_000);
-    assert.equal(fold.swarm.tasks["t1"]?.firstSeenAt, T, "backgrounding it later does not move its start");
-    assert.equal(fold.swarm.tasks["t2"]?.lastOutputAt, null);
+    assert.equal(fold.crew.tasks["t1"]?.lastOutputAt, T + 30_000);
+    assert.equal(fold.crew.tasks["t1"]?.firstSeenAt, T, "backgrounding it later does not move its start");
+    assert.equal(fold.crew.tasks["t2"]?.lastOutputAt, null);
     fold = applyEvents(fold, [tool("t1", 3, "completed", T + 90_000, { background: true }), tool("t2", 2, "completed", T + 91_000)]);
-    assert.equal(fold.swarm.tasks["t1"]?.endedAt, T + 90_000);
-    assert.equal(fold.swarm.tasks["t2"], undefined, "an ordinary call that finished needs no trace");
+    assert.equal(fold.crew.tasks["t1"]?.endedAt, T + 90_000);
+    assert.equal(fold.crew.tasks["t2"], undefined, "an ordinary call that finished needs no trace");
     // A history page without event times reads the start off the UUIDv7 item id.
     const id = "01a0f3c4-6d2e-7b1a-8c3f-5e9d2a7b4c10";
     const paged = foldAll([{ method: "item/updated", params: { item: { itemId: id, kind: "toolCall", status: "inProgress", revision: 1, background: true } } }]);
-    assert.deepEqual(paged.swarm.tasks[id], { firstSeenAt: uuidTime(id), approx: true, lastOutputAt: null, endedAt: null });
+    assert.deepEqual(paged.crew.tasks[id], { firstSeenAt: uuidTime(id), approx: true, lastOutputAt: null, endedAt: null });
   });
 
   it("notes when a request was raised and when it was answered", () => {
@@ -862,7 +862,7 @@ describe("swarm trace", () => {
       { method: "userInput/requested", at: T + 1_000, params: { userInputId: "q1", questions: [] } },
       { method: "approval/requested", params: { approvalId: "ap2", sessionId: "s" } },
     ]);
-    assert.deepEqual(fold.swarm.requests, {
+    assert.deepEqual(fold.crew.requests, {
       ap1: { kind: "approval", itemId: "tool-1", askedAt: T, decidedAt: null },
       q1: { kind: "input", itemId: null, askedAt: T + 1_000, decidedAt: null },
       ap2: { kind: "approval", itemId: null, askedAt: null, decidedAt: null },
@@ -871,8 +871,8 @@ describe("swarm trace", () => {
       { method: "approval/resolved", at: T + 100_000, params: { approvalId: "ap1", decision: "approved", resolvedBy: "user" } },
       { method: "userInput/settled", at: T + 120_000, params: { userInputId: "q1", outcome: "answered", answers: [] } },
     ]);
-    assert.equal(fold.swarm.requests["ap1"]?.decidedAt, T + 100_000);
-    assert.equal(fold.swarm.requests["q1"]?.decidedAt, T + 120_000);
-    assert.equal(fold.swarm.requests["ap2"]?.decidedAt, null);
+    assert.equal(fold.crew.requests["ap1"]?.decidedAt, T + 100_000);
+    assert.equal(fold.crew.requests["q1"]?.decidedAt, T + 120_000);
+    assert.equal(fold.crew.requests["ap2"]?.decidedAt, null);
   });
 });

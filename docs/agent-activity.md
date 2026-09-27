@@ -3,13 +3,13 @@
 Muse Code can delegate work: a native workflow fans out to agents that run in parallel, a subagent takes a
 side task, a shell command keeps running in the background. The transcript shows the lead agent's steps, not
 what the delegated work is doing. Ancilla shows that in three places that grow out of one another: the
-**Swarm card** in the dock, the **Swarm panel** beside the thread, and the **Activity** drawer over the sidebar.
+**Crew card** in the dock, the **Crew panel** beside the thread, and the **Activity** drawer over the sidebar.
 Each is one keystroke deeper than the last, and `Esc` always goes back exactly one level.
 
 Everything on these surfaces is something Muse sent, or something Ancilla can derive from the order it
 arrived in. Nothing is inferred from the clock alone; see [what Muse reports](#what-muse-reports-and-what-the-surface-says-when-it-does-not).
 
-## The Swarm card
+## The Crew card
 
 A thread with a live run, subagent or background task gets one card in the dock, above the request panel and
 the composer. A thread with nothing running gets no card and no strip: the idle cost is zero.
@@ -59,10 +59,10 @@ The transcript keeps one work-log row at the launch point, `Started workflow …
 the dock`, which becomes `Workflow finished … · 10 agents · 45m 10s · report in the dock`; the button on it
 focuses the card.
 
-## The Swarm panel
+## The Crew panel
 
 The panel opens from the toggle in the thread header, from `Ctrl/Cmd+Shift+M`, from the command palette, or
-from the card's footer. It takes the files panel's slot: the slot shows Files or Swarm, never both, and opening
+from the card's footer. It takes the files panel's slot: the slot shows Files or Crew, never both, and opening
 one closes the other. It docks beside the thread while the thread keeps at least 560 px; otherwise it overlays
 the thread's right edge over a scrim, and `Esc` closes it. The transcript never loses its scroll position either
 way. The panel is 520 px by default and can be dragged between 400 and 800.
@@ -115,7 +115,7 @@ once Ancilla tracks them (coming in 1.1)`.
 Around all of this, the ambient signals: the sidebar row gets a second line with a micro strip, `Judge · 6/10`
 and the attention counts (`10 landed` once the run ends, `Last known 12m` when the feed is stale, the command
 when a thread only has a background task); the thread header shows `Needs you · N`, `Working 41m 16s`, `Waiting
-for you`, `Swarm landed 45m 10s` for a few seconds after the end, or `Last known`; and the window title starts
+for you`, `Crew landed 45m 10s` for a few seconds after the end, or `Last known`; and the window title starts
 with `(N)` while N requests wait across threads. None of these carry a live region: the card's announcer is the
 only one in the document, and it says only that a request needs you, that an agent failed, that a phase or the
 run finished, that the feed went stale, or that a background task failed, at most once every ten seconds.
@@ -184,23 +184,23 @@ These need a wire field or server work Ancilla does not have yet. Each shows its
 | Strips, badge counts and drawer items for threads this window has not opened | the sidebar's word for the thread; the drawer's note |
 | An Activity tab in the inspector with a subagent's tool calls | the Overview note: `Muse does not stream a workflow agent's tool calls to this thread.` |
 | An agent's own result | `Muse does not share a workflow agent's result. The run's report cites it.` |
-| The swarm's tokens in the composer's cost | the composer counts the lead only, with a tooltip `excludes agents` |
+| The crew's tokens in the composer's cost | the composer counts the lead only, with a tooltip `excludes agents` |
 | `Load earlier history` past the capped read | the partial-history notice without the button |
 | A sigil in the approval panel | the panel unchanged |
 
 ## Verifying it
 
-The model has unit tests in `packages/ui/test/swarm.test.ts` (phases, counts, the no-update threshold, retries
+The model has unit tests in `packages/ui/test/crew.test.ts` (phases, counts, the no-update threshold, retries
 and the optimistic pending flags, run-level requests, partial history, a stale feed, the completion report, the
 plan read from a script, sigils, announcements, the sidebar summary, the drawer) and `fold.test.ts` (the
-transition times and the latched usage), and `swarm.bench.test.ts` builds a 2000-agent run over a hundred
+transition times and the latched usage), and `crew.bench.test.ts` builds a 2000-agent run over a hundred
 revisions and holds each recompute under budget. The surfaces have SSR tests beside them, and
 `apps/web/test/demo-seed.test.ts` folds every demo scenario through the same model.
 
-To see it without Muse, run `npm run demo --workspace @ancilla/web` and open `/demo.html?swarm=running`. The
+To see it without Muse, run `npm run demo --workspace @ancilla/web` and open `/demo.html?crew=running`. The
 audit thread plays the reference scenario: ten agents in four phases, 41m 16s in, one failed after two attempts,
 one quiet past the threshold, one finishing, one planned, a request Muse raised during Judge and a background
-task. `swarm=stalled`, `failed`, `waiting`, `partial`, `reconnect`, `done`, `big` (two thousand agents) and
+task. `crew=stalled`, `failed`, `waiting`, `partial`, `reconnect`, `done`, `big` (two thousand agents) and
 `task` (three background tasks and no run) isolate the other states, and `workflow=done` lets whichever run is
 loaded finish as the page opens.
 

@@ -3,10 +3,10 @@ import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
-import { CompletionReport, emphasized, reportMeta, type CompletionReportProps } from "../src/components/swarm/CompletionReport.js";
-import { SinceYouLeft, recapText } from "../src/components/swarm/SinceYouLeft.js";
-import { SwarmCard } from "../src/components/swarm/SwarmCard.js";
-import { completionView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/swarm.js";
+import { CompletionReport, emphasized, reportMeta, type CompletionReportProps } from "../src/components/crew/CompletionReport.js";
+import { SinceYouLeft, recapText } from "../src/components/crew/SinceYouLeft.js";
+import { CrewCard } from "../src/components/crew/CrewCard.js";
+import { completionView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
 import { S, finishedFeed, finishedRun, flatten, mkRun, referenceAgents, textOf as text, view } from "./fixtures/lantern.js";
 
 const noop = () => {};
@@ -21,8 +21,8 @@ function render(run: RunVM, overrides: Partial<CompletionReportProps> = {}): { m
 describe("CompletionReport", () => {
   it("opens with the seal, the serif headline and the fact line", () => {
     const { markup } = render(finishedRun());
-    assert.match(markup, /class="swarm-tile ok"/);
-    assert.match(markup, /class="swarm-el ok"[^>]*>(?:<svg[\s\S]*?<\/svg>)?Done · 45m 06s</);
+    assert.match(markup, /class="crew-tile ok"/);
+    assert.match(markup, /class="crew-el ok"[^>]*>(?:<svg[\s\S]*?<\/svg>)?Done · 45m 06s</);
     assert.match(markup, /<h2>All ten landed\.<\/h2>/);
     assert.match(markup, /class="sub">Every phase reached its end · 1 agent needed 3 attempts</);
     assert.match(text(markup), /Workflow · started [^·]+ · finished /);
@@ -32,8 +32,8 @@ describe("CompletionReport", () => {
 
   it("draws the finale rail, the four stats and the highlights the model chose, with their asides", () => {
     const { markup, completion } = render(finishedRun());
-    assert.equal((markup.match(/class="swarm-strip rail finale"/g) ?? []).length, 4);
-    assert.doesNotMatch(markup, /swarm-sheen/, "no sheen unless asked for");
+    assert.equal((markup.match(/class="crew-strip rail finale"/g) ?? []).length, 4);
+    assert.doesNotMatch(markup, /crew-sheen/, "no sheen unless asked for");
     const stats = [...markup.matchAll(/class="v">([^<]*)<\/div><div class="k">([^<]*)</g)].map((m) => [m[1], m[2]]);
     assert.deepEqual(stats.map((s) => s[1]), ["agents", "wall clock", "tokens, reported by Muse", "estimate at list price"]);
     assert.deepEqual(stats.slice(0, 3).map((s) => s[0]), ["10", "45m 06s", "1.5M"]);
@@ -51,7 +51,7 @@ describe("CompletionReport", () => {
 
   it("shows where the time went: one lane per agent, a span per attempt, the phases' bands and the axis", () => {
     const { markup, completion } = render(finishedRun());
-    assert.match(markup, /class="swarm-fp" role="img" aria-label="Where the time went: 10 agents over 45m 06s"/);
+    assert.match(markup, /class="crew-fp" role="img" aria-label="Where the time went: 10 agents over 45m 06s"/);
     const bars = markup.match(/class="bar( f)?"/g) ?? [];
     assert.equal(bars.length, completion.fingerprint.lanes.reduce((n, lane) => n + lane.spans.length, 0));
     assert.equal(bars.filter((bar) => bar.includes(" f")).length, 2, "two failed attempts in the danger colour");
@@ -79,7 +79,7 @@ describe("CompletionReport", () => {
     const failed = mkRun(referenceAgents().map((agent) => ({ ...agent, quiet: null, state: agent.state === "failed" ? agent.state : "done" as const })), { status: "finished-with-failures", endedAt: S(43, 2), elapsedMs: S(43, 2) - S(0, 0), report: { summary: null, failure: null, handoffs: [] } });
     const { markup, completion } = render(failed);
     assert.equal(completion.sheen, false);
-    assert.match(markup, /class="swarm-tile mute"/);
+    assert.match(markup, /class="crew-tile mute"/);
     assert.match(markup, /Finished · 43m 02s/);
     assert.match(markup, /<h2>Nine of ten landed, one failed\.<\/h2>/);
     assert.match(markup, /Muse did not attach a report\./);
@@ -88,7 +88,7 @@ describe("CompletionReport", () => {
 
   it("plays the sheen only when asked, on a run where everyone landed", () => {
     const { markup } = render(finishedRun(), { sheen: true });
-    assert.equal((markup.match(/swarm-strip rail finale swarm-sheen/g) ?? []).length, 4);
+    assert.equal((markup.match(/crew-strip rail finale crew-sheen/g) ?? []).length, 4);
     const collapsed = render(finishedRun(), { expanded: false }).markup;
     assert.doesNotMatch(collapsed, /<h2>/);
     assert.match(collapsed, /aria-expanded="false"/);
@@ -96,7 +96,7 @@ describe("CompletionReport", () => {
 
   it("is what the card becomes once the run ended, with the tasks below it", () => {
     const run = finishedRun();
-    const markup = renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(SwarmCard, {
+    const markup = renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CrewCard, {
       sessionId: "s1", run, tasks: [], completion: completionView(run), sinceYouLeft: null, expanded: true, openPhase: null, selectedId: null, readOnly: false,
       onToggle: noop, onOpenPhase: noop, onInspect: noop, onOpenPanel: noop, onAction: noop, onStopRun: noop, onDismissReport: noop, onDismissRecap: noop, onReview: noop,
     }) }));

@@ -26,7 +26,7 @@ Why, in one paragraph. Deep Dog 2 is Python only, in-process only, with no serve
 
 ### 1.2 Ancilla and Muse (`/home/user/ancilla`)
 
-- MSP (`node_modules/@muse-code/sdk/dist/src/msp.d.ts`): methods `session/{start,resume,fork,list,read,compact,setModel,userShell,setApprovalMode}`, `turn/{start,steer,interrupt,cancel,unqueue}`, `model/list`, `view/{page,unsubscribe}`, `approval/*`, `userInput/*`, `subagent/*` (L1895). `turn/start` input parts are `text | image` only, no mode, skill, workflow or tool selector (L1466, L1538). `SessionConfig` has no members (L945). Nothing in the SDK or Ancilla registers tools or MCP servers. No client verb launches a workflow; workflows are launched by the model through a `toolCall` with `tool: "workflow"` (`packages/ui/src/model/swarm.ts` L602-660).
+- MSP (`node_modules/@muse-code/sdk/dist/src/msp.d.ts`): methods `session/{start,resume,fork,list,read,compact,setModel,userShell,setApprovalMode}`, `turn/{start,steer,interrupt,cancel,unqueue}`, `model/list`, `view/{page,unsubscribe}`, `approval/*`, `userInput/*`, `subagent/*` (L1895). `turn/start` input parts are `text | image` only, no mode, skill, workflow or tool selector (L1466, L1538). `SessionConfig` has no members (L945). Nothing in the SDK or Ancilla registers tools or MCP servers. No client verb launches a workflow; workflows are launched by the model through a `toolCall` with `tool: "workflow"` (`packages/ui/src/model/crew.ts` L602-660).
 - Additional verbs Ancilla uses beyond the union (`packages/daemon/src/sessions.ts` L427-541): `session/rename`, `usage/read`, `goal/*`, `task/{background,stop,stopAll}`, `skill/list`, `workflow/cancel`, `workflow/childControl`, `item/readOutput`.
 - One-shot model calls: `muse exec --json --no-session-log --disable-web-tools --reasoning-effort minimal --max-model-steps 1 [--model id] <prompt>` (`server.ts` L3196-3217), prompt passed as a CLI argument, run by `defaultExec` with a hard-coded 30 s timeout and only `env` as an option (`packages/daemon/src/wsl.ts` L47-71, L17). Output parsed from JSONL `run.output.delta` / `run.terminal.completed` (`threadTitles.ts` L83-118). Runs under the default login; `runPlanned` adds no account env (L2098-2101).
 - Sessions and hosts: one `muse serve` per (account, folder) (`hostKey`, L2147); `startSession(cwd, approvalMode, modelId, accountId)` (L2440-2472); notifications forwarded to clients over SSE as `{type:"msp", sessionId, method, params}` (L3582-3606); live per-session state in `liveFor`; usage rows recorded from `session/tokenUsage` for any session the host reports (`recordUsage`).
@@ -48,7 +48,7 @@ Why, in one paragraph. Deep Dog 2 is Python only, in-process only, with no serve
 |---|---|---|
 | Direct dependency (bundle CPython + `pip install deep-dog-2`) | Rejected | Needs DeepSeek/Meta and Exa/Tavily keys the app does not have and cannot store safely (no keychain); bypasses Muse for every model call; import-time Tavily client and env-read constants make per-run isolation incomplete; private LangChain monkeypatches make upgrades fragile; 100-200 MB more per platform (ASSUMPTION). |
 | Isolated Python service (subprocess with a JSON protocol Ancilla would have to write) | Rejected for the same key and runtime reasons | Also: unconditional `print()` calls pollute stdout, so the protocol channel would need its own fd. Would remain a reasonable path only if a future requirement is bit-for-bit parity with upstream. |
-| Muse-native workflow (write a `.muse/workflows/scripts/*.js` script implementing the supervisor loop, let Muse run it) | Deferred to stage 4, not the base | No client verb launches a workflow; launch is model-chosen (`triggerSource: guidanceAuto`). The workflow host API (`host.parallel`, `hostApiVersion`) is only seen in demo output (`seed.ts` L634-646), not documented in the SDK. Cannot be the foundation of a deterministic feature, but it is the cheapest way to get Swarm-card UI for free once verified. |
+| Muse-native workflow (write a `.muse/workflows/scripts/*.js` script implementing the supervisor loop, let Muse run it) | Deferred to stage 4, not the base | No client verb launches a workflow; launch is model-chosen (`triggerSource: guidanceAuto`). The workflow host API (`host.parallel`, `hostApiVersion`) is only seen in demo output (`seed.ts` L634-646), not documented in the SDK. Cannot be the foundation of a deterministic feature, but it is the cheapest way to get Crew-card UI for free once verified. |
 | **Selective port to TypeScript, Muse as model and tool runtime** | **Chosen** | Every needed capability exists on verified paths: one-shot tool-less model calls via `muse exec`; tool-using agent runs via Muse sessions with built-in web tools and `toolCall` items visible to Ancilla; cancellation via `turn/interrupt`; token usage via `session/tokenUsage`; persistence, SSE, transcript merging, and settings via existing patterns. No new runtime, no secrets, no new frameworks. |
 
 ### 2.2 Role mapping between Deep Dog 2 and Muse
@@ -76,7 +76,7 @@ Composer: DeepResearch toggle  ──►   POST /api/research
 /research slash command              ResearchJobManager                    
                                       ├─ ResearchJob (one per run)          
 ResearchRunRow in Transcript ◄──SSE── │   engine = @ancilla/research         
-SwarmDockCard (stage 2 mirror)        │     runResearch(question, cfg, deps) 
+CrewDockCard (stage 2 mirror)        │     runResearch(question, cfg, deps) 
                                       │       deps.model  ──► MuseExecModelClient ──► muse exec (CLI, one shot)
 Stop / Resume actions  ──►            │       deps.worker ──► MuseSessionWorkerRunner ──► session/start + turn/start
                                       │                          ▲ item/*, session/tokenUsage, approval/*
@@ -91,7 +91,7 @@ Package boundaries:
 - `packages/research` (`@ancilla/research`, new, pure TypeScript, no runtime dependencies): the ported engine. Depends on nothing in Ancilla. Exposes `runResearch(input, config, deps)` and the types below. Fully testable with fakes, mirroring upstream's `FakeModelFactory` approach.
 - `packages/server/src/research/`: the Muse adapters, the job manager, persistence glue, routes, file output.
 - `packages/daemon/src/store.ts`: three new tables and typed CRUD.
-- `packages/ui`: types, client methods, controller actions, composer trigger, slash command, transcript row, later Swarm mirroring.
+- `packages/ui`: types, client methods, controller actions, composer trigger, slash command, transcript row, later Crew mirroring.
 - `apps/web`: `webClient` and demo client implementations, demo scenario.
 
 ## 4. Contracts
@@ -315,9 +315,9 @@ Risks: worker prompt compliance on the findings block (fallback: treat the whole
 - Windows/WSL: worker sessions on WSL hosts use `hostPathFor`, already handled by `startSession`; verify path spelling in `sources.json`.
 - Tests: resume from a persisted mid-run state; cost arithmetic; inspector paging; failure injection (host exit mid-round → `interrupted`, worker turn error → retry once, quota error → breaker); a soak test running three concurrent runs against the fake host asserting the global cap.
 
-### Stage 4: Swarm-card integration (optional, after spike)
+### Stage 4: Crew-card integration (optional, after spike)
 
-Mirror each run into the fold as a synthetic `workflow` item (`itemId: research:<runId>`, `scriptId: ancilla:deep-research`, children per worker with `phase` from the round, terminal `message` carrying `<workflow-launch-reconciled>` JSON built from the run view) so the Swarm card, panel, Activity drawer and completion report render it with no UI change; the server intercepts `workflow/cancel` and `workflow/childControl` for research run ids before forwarding to Muse (`server.ts` L1409-1456). Requires verifying that `applyEvents` accepts events without a Muse `viewCursor` and that `loadTranscript` can splice the synthetic snapshot into `events` without confusing `foldFromLoad`. Alternatively, once the Muse workflow host API is documented, a native workflow script generated from the same engine could run inside Muse; the engine's `WorkerRunner`/`ModelClient` boundary is what keeps that door open.
+Mirror each run into the fold as a synthetic `workflow` item (`itemId: research:<runId>`, `scriptId: ancilla:deep-research`, children per worker with `phase` from the round, terminal `message` carrying `<workflow-launch-reconciled>` JSON built from the run view) so the Crew card, panel, Activity drawer and completion report render it with no UI change; the server intercepts `workflow/cancel` and `workflow/childControl` for research run ids before forwarding to Muse (`server.ts` L1409-1456). Requires verifying that `applyEvents` accepts events without a Muse `viewCursor` and that `loadTranscript` can splice the synthetic snapshot into `events` without confusing `foldFromLoad`. Alternatively, once the Muse workflow host API is documented, a native workflow script generated from the same engine could run inside Muse; the engine's `WorkerRunner`/`ModelClient` boundary is what keeps that door open.
 
 ## 8. Cross-cutting requirements
 
@@ -335,7 +335,7 @@ Mirror each run into the fold as a synthetic `workflow` item (`itemId: research:
 2. Two Muse paths by role: `muse exec` for tool-less steps (deterministic, no session pollution, verified today), worker sessions for tool-using steps (verified event contracts, cancellation, usage accounting).
 3. Provenance from observed tool calls, not model claims: a citation is valid only if the worker actually saw the URL. This is stricter than upstream and is what makes "citation validation" mean something.
 4. Structured decisions as fenced JSON instead of tool schemas: the only structured-output facility reachable through Muse. The prompts keep upstream's verdict wording so behaviour stays comparable.
-5. Transcript row first, Swarm card later: the shell-run precedent is verified end to end; synthetic workflow items are not.
+5. Transcript row first, Crew card later: the shell-run precedent is verified end to end; synthetic workflow items are not.
 6. Worker sessions are archived real sessions: reuses discovery, usage and host management with two flags rather than a parallel session concept.
 7. Budgets enforced by Ancilla, not by the model: upstream's prompt-only concurrency limit becomes a semaphore; tool budgets become counters with interrupts.
 

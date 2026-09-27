@@ -107,10 +107,10 @@ export interface Prefs {
    */
   filesOpen: boolean;
   filesWidth: number;
-  /** What the slot beside a thread shows: the file viewer, the Swarm panel, or nothing. */
+  /** What the slot beside a thread shows: the file viewer, the Crew panel, or nothing. */
   sidePanel: SidePanel;
-  /** The Swarm panel's width, resizable like the file viewer. */
-  swarmWidth: number;
+  /** The Crew panel's width, resizable like the file viewer. */
+  crewWidth: number;
   /** The version whose release notes were last shown, so an update shows what changed once. */
   lastSeenVersion: string | null;
   /** Session statistics pills above the composer: turns, speed and token usage for the open thread. */
@@ -126,26 +126,26 @@ export const DEFAULT_FILES_WIDTH = 480;
 export const FILES_WIDTH_MIN = 320;
 export const FILES_WIDTH_MAX = 1200;
 
-export type SidePanel = "none" | "files" | "swarm";
-export const DEFAULT_SWARM_WIDTH = 520;
-export const SWARM_WIDTH_MIN = 400;
-export const SWARM_WIDTH_MAX = 800;
+export type SidePanel = "none" | "files" | "crew";
+export const DEFAULT_CREW_WIDTH = 520;
+export const CREW_WIDTH_MIN = 400;
+export const CREW_WIDTH_MAX = 800;
 
-export type SwarmFilter = "all" | "needs" | "failed" | "no-update" | "working" | "done";
+export type CrewFilter = "all" | "needs" | "failed" | "no-update" | "working" | "done";
 
-/** One thread's Swarm panel: the roster or one agent's inspector, the filter, and what is folded. */
-export interface SwarmPanelState {
+/** One thread's Crew panel: the roster or one agent's inspector, the filter, and what is folded. */
+export interface CrewPanelState {
   mode: "roster" | "inspector";
   inspectId: string | null;
-  filter: SwarmFilter;
+  filter: CrewFilter;
   query: string;
   timelineOpen: boolean;
   /** Phases the user opened in the roster; the current phase and failed ones open by default. */
   openPhases: string[];
 }
 
-export interface SwarmState {
-  panels: Record<string, SwarmPanelState>;
+export interface CrewState {
+  panels: Record<string, CrewPanelState>;
   activityOpen: boolean;
   /** Actions sent and not yet confirmed by a revision, by `pendingKey(sessionId, agentId, attempt)`. */
   pending: Record<string, "retry" | "stop">;
@@ -159,11 +159,11 @@ export interface SwarmState {
   dismissedRecaps: string[];
 }
 
-export function emptySwarmPanel(): SwarmPanelState {
+export function emptyCrewPanel(): CrewPanelState {
   return { mode: "roster", inspectId: null, filter: "all", query: "", timelineOpen: true, openPhases: [] };
 }
 
-export function emptySwarmState(): SwarmState {
+export function emptyCrewState(): CrewState {
   return { panels: {}, activityOpen: false, pending: {}, skipped: [], leftAt: {}, dismissedReports: [], dismissedRecaps: [] };
 }
 
@@ -211,7 +211,7 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     filesOpen: false,
     filesWidth: DEFAULT_FILES_WIDTH,
     sidePanel: "none",
-    swarmWidth: DEFAULT_SWARM_WIDTH,
+    crewWidth: DEFAULT_CREW_WIDTH,
     lastSeenVersion: null,
     showTelemetry: false,
     preYolo: null,
@@ -341,8 +341,8 @@ export interface AppState {
   fileVersions: Record<string, number>;
   /** Folders open in each project's file tree. */
   fileTreeOpen: Record<string, string[]>;
-  /** The Swarm panels, the Activity drawer and the agent actions in flight. */
-  swarm: SwarmState;
+  /** The Crew panels, the Activity drawer and the agent actions in flight. */
+  crew: CrewState;
 }
 
 /** `confirmFullAccess` is the full-access confirmation, which `/permissions full` must still pass through. */
@@ -400,7 +400,7 @@ export function initialState(prefs: Prefs): AppState {
     fileDrafts: {},
     fileVersions: {},
     fileTreeOpen: {},
-    swarm: emptySwarmState(),
+    crew: emptyCrewState(),
     draftHandoff: null,
     updates: null,
     skills: {},
@@ -422,9 +422,16 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
   if (r["sidePanel"] === undefined && r["filesOpen"] === true) {
     r["sidePanel"] = "files";
   }
+  // The Swarm panel became the Crew panel; a saved open panel and its width carry over under the new name.
+  if (r["sidePanel"] === "swarm") {
+    r["sidePanel"] = "crew";
+  }
+  if (r["crewWidth"] === undefined && typeof r["swarmWidth"] === "number") {
+    r["crewWidth"] = r["swarmWidth"];
+  }
   const pick = <K extends keyof Prefs>(key: K, valid: (v: unknown) => boolean): Prefs[K] =>
     valid(r[key]) ? (r[key] as Prefs[K]) : fallback[key];
-  const sidePanel = pick("sidePanel", (v) => v === "none" || v === "files" || v === "swarm");
+  const sidePanel = pick("sidePanel", (v) => v === "none" || v === "files" || v === "crew");
   const isApprovalMode = (v: unknown): boolean =>
     v === "onRequest" || v === "promptUnmatched" || v === "denyUnmatched" || v === "allowAll";
   const isPreYolo = (v: unknown): boolean => {
@@ -468,7 +475,7 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     filesOpen: sidePanel === "files",
     filesWidth: pick("filesWidth", (v) => typeof v === "number" && v >= FILES_WIDTH_MIN && v <= FILES_WIDTH_MAX),
     sidePanel,
-    swarmWidth: pick("swarmWidth", (v) => typeof v === "number" && v >= SWARM_WIDTH_MIN && v <= SWARM_WIDTH_MAX),
+    crewWidth: pick("crewWidth", (v) => typeof v === "number" && v >= CREW_WIDTH_MIN && v <= CREW_WIDTH_MAX),
     lastSeenVersion: pick("lastSeenVersion", (v) => v === null || typeof v === "string"),
     showTelemetry: pick("showTelemetry", (v) => typeof v === "boolean"),
     preYolo: pick("preYolo", isPreYolo),

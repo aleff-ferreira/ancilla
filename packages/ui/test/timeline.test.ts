@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CANVAS_AT, Timeline, timelineLabel, timelineLayout, type Lane, type TimelineLayout } from "../src/components/swarm/Timeline.js";
-import { swarmView, type RunVM } from "../src/model/swarm.js";
-import { Feed, NOW, S, SESSION, approvalAt, atNow, fold, lantern, lanternDone, lanternRun, launch } from "./swarm-panel-fixture.js";
+import { CANVAS_AT, Timeline, timelineLabel, timelineLayout, type Lane, type TimelineLayout } from "../src/components/crew/Timeline.js";
+import { crewView, type RunVM } from "../src/model/crew.js";
+import { Feed, NOW, S, SESSION, approvalAt, atNow, fold, lantern, lanternDone, lanternRun, launch } from "./crew-panel-fixture.js";
 
 const WIDTH = 488;
 
@@ -31,7 +31,7 @@ function bigRun(n: number): RunVM {
   for (let i = 0; i < n; i += 1) feed.schedule(`b-${i}`, `audit:agent-${i}`, S(0, 1));
   for (let i = 0; i < n; i += 1) feed.set(`b-${i}`, { status: "started" }, S(0, 2));
   const f = fold([launch(null), ...feed.events], S(5, 0));
-  const run = swarmView(f, SESSION, S(5, 0)).runs[0];
+  const run = crewView(f, SESSION, S(5, 0)).runs[0];
   if (!run) throw new Error("no run");
   return run;
 }
@@ -133,7 +133,7 @@ describe("Timeline layout", () => {
 
   it("has no chart before the run's start is known", () => {
     const feed = new Feed();
-    const run = swarmView(fold([launch(null)]), SESSION, NOW).runs[0];
+    const run = crewView(fold([launch(null)]), SESSION, NOW).runs[0];
     assert.equal(run, undefined);
     void feed;
     const partial = { ...lanternRun(), startedAt: null } as RunVM;
@@ -144,7 +144,7 @@ describe("Timeline layout", () => {
   it("spreads the ticks out for a run that goes on for hours", () => {
     const feed = new Feed();
     feed.schedule("a", "audit:a", S(0, 0)).set("a", { status: "started" }, S(0, 1));
-    const run = swarmView(fold([launch(null), ...feed.events], S(200, 0)), SESSION, S(200, 0)).runs[0]!;
+    const run = crewView(fold([launch(null), ...feed.events], S(200, 0)), SESSION, S(200, 0)).runs[0]!;
     const layout = layoutOf(run);
     assert.deepEqual(layout.ticks.map((tick) => tick.label).slice(0, 4), ["0", "30m", "60m", "90m"]);
   });

@@ -9,7 +9,7 @@ import type { AncillaController } from "../src/model/controller.js";
 import { groupByProject, type SidebarEntry } from "../src/model/status.js";
 import { Store, type AppState } from "../src/model/store.js";
 import type { ProjectView } from "../src/types.js";
-import { NOW, appState, session } from "./swarm-fixtures.js";
+import { NOW, appState, session } from "./crew-fixtures.js";
 
 const PROJECT: ProjectView = {
   cwd: "/work/lantern",

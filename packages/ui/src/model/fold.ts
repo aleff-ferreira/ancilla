@@ -165,7 +165,7 @@ export interface TaskTrace {
 }
 
 /** Everything the agents view needs that only the order of revisions can tell. */
-export interface SwarmTrace {
+export interface CrewTrace {
   runs: Record<string, RunTrace>;
   requests: Record<string, RequestTrace>;
   tasks: Record<string, TaskTrace>;
@@ -189,7 +189,7 @@ export interface ThreadFold {
   /** The host unloaded the session; the next command must resume it first. */
   closed: boolean;
   /** Transition times, latched usage and request times for the agents view; never reset by a partial page. */
-  swarm: SwarmTrace;
+  crew: CrewTrace;
 }
 
 export const HIDDEN_KINDS: ReadonlySet<string> = new Set(["reminderChild"]);
@@ -199,7 +199,7 @@ const EVENT_MINUTES_CAP = 600;
 /** Request times outlive their runs' highlights by this many entries before the oldest are forgotten. */
 const REQUEST_TRACE_CAP = 500;
 
-export function emptySwarm(): SwarmTrace {
+export function emptyCrew(): CrewTrace {
   return { runs: {}, requests: {}, tasks: {} };
 }
 
@@ -229,7 +229,7 @@ export function emptyFold(): ThreadFold {
     resolved: {},
     settled: {},
     echoes: [],
-    swarm: emptySwarm(),
+    crew: emptyCrew(),
     meta: {
       todoList: null,
       branch: null,
@@ -335,7 +335,7 @@ class Draft {
   private echoesCopied = false;
   private callsCopied = false;
   private agentsCopied = false;
-  private swarmCopied = false;
+  private crewCopied = false;
   /** Runs whose child records this batch has already copied, so a revision with many changes copies once. */
   private readonly runsCopied = new Set<string>();
 
@@ -410,26 +410,26 @@ class Draft {
   }
 
   /** The trace, copied once per batch so the fold on screen keeps the one it had. */
-  swarm(): SwarmTrace {
-    if (!this.swarmCopied) {
-      const base = this.fold.swarm ?? emptySwarm();
-      this.fold.swarm = { runs: { ...base.runs }, requests: { ...base.requests }, tasks: { ...base.tasks } };
-      this.swarmCopied = true;
+  crew(): CrewTrace {
+    if (!this.crewCopied) {
+      const base = this.fold.crew ?? emptyCrew();
+      this.fold.crew = { runs: { ...base.runs }, requests: { ...base.requests }, tasks: { ...base.tasks } };
+      this.crewCopied = true;
     }
-    return this.fold.swarm;
+    return this.fold.crew;
   }
 
   /** A run's trace this batch may write to; its child records are copied the first time. */
   runTrace(itemId: string): RunTrace {
-    const swarm = this.swarm();
-    const current = swarm.runs[itemId];
+    const crew = this.crew();
+    const current = crew.runs[itemId];
     if (current && this.runsCopied.has(itemId)) {
       return current;
     }
     const run: RunTrace = current
       ? { ...current, children: { ...current.children }, eventMinutes: [...current.eventMinutes] }
       : { startedAt: null, approx: false, endedAt: null, children: {}, eventMinutes: [] };
-    swarm.runs[itemId] = run;
+    crew.runs[itemId] = run;
     this.runsCopied.add(itemId);
     return run;
   }
@@ -460,7 +460,7 @@ function traceWorkflow(draft: Draft, previous: MspItem | undefined, next: MspIte
   for (const child of previous?.children ?? []) {
     before.set(childKey(child), child);
   }
-  const current = draft.fold.swarm?.runs[next.itemId];
+  const current = draft.fold.crew?.runs[next.itemId];
   const ended = next.status !== "inProgress";
   const changed: WorkflowChild[] = [];
   for (const child of children) {
@@ -553,13 +553,13 @@ function traceTask(draft: Draft, next: MspItem, eventAt: number | undefined): vo
   const at = revisionTime(next, eventAt);
   const running = next.status === "inProgress";
   const background = next.background === true;
-  const current = draft.fold.swarm?.tasks[next.itemId];
+  const current = draft.fold.crew?.tasks[next.itemId];
   if (!current) {
     if (!running && !background) {
       return;
     }
     const guess = uuidTime(next.itemId);
-    draft.swarm().tasks[next.itemId] = {
+    draft.crew().tasks[next.itemId] = {
       firstSeenAt: at ?? guess,
       approx: at === undefined,
       lastOutputAt: null,
@@ -571,21 +571,21 @@ function traceTask(draft: Draft, next: MspItem, eventAt: number | undefined): vo
     return;
   }
   if (!background) {
-    delete draft.swarm().tasks[next.itemId];
+    delete draft.crew().tasks[next.itemId];
     return;
   }
   if (current.endedAt === null) {
-    draft.swarm().tasks[next.itemId] = { ...current, endedAt: at ?? null };
+    draft.crew().tasks[next.itemId] = { ...current, endedAt: at ?? null };
   }
 }
 
 /** Stamps when a request was raised, once; a redelivered or updated request keeps its first time. */
 function traceRequest(draft: Draft, id: string, kind: RequestTrace["kind"], itemId: string | null, at: number | undefined): void {
-  const requests = draft.fold.swarm?.requests;
+  const requests = draft.fold.crew?.requests;
   if (requests?.[id]) {
     return;
   }
-  const target = draft.swarm().requests;
+  const target = draft.crew().requests;
   target[id] = { kind, itemId, askedAt: at ?? null, decidedAt: null };
   const ids = Object.keys(target);
   for (let i = 0; i < ids.length - REQUEST_TRACE_CAP; i += 1) {
@@ -594,11 +594,11 @@ function traceRequest(draft: Draft, id: string, kind: RequestTrace["kind"], item
 }
 
 function traceDecision(draft: Draft, id: string, at: number | undefined): void {
-  const current = draft.fold.swarm?.requests[id];
+  const current = draft.fold.crew?.requests[id];
   if (!current || current.decidedAt !== null || at === undefined) {
     return;
   }
-  draft.swarm().requests[id] = { ...current, decidedAt: at };
+  draft.crew().requests[id] = { ...current, decidedAt: at };
 }
 
 function upsertItem(draft: Draft, incoming: MspItem, at?: number): void {
@@ -777,11 +777,11 @@ function appendDelta(draft: Draft, params: Record<string, unknown>, at: number |
     next.visibleOutput = (next.visibleOutput ?? "") + delta;
     // A background task's liveness is its output: the last line with a time is what "no output for" counts from.
     if (item.kind === "toolCall" && at !== undefined) {
-      const task = d.swarm?.tasks[id];
+      const task = d.crew?.tasks[id];
       if (task) {
-        draft.swarm().tasks[id] = { ...task, lastOutputAt: at };
+        draft.crew().tasks[id] = { ...task, lastOutputAt: at };
       } else if (item.background === true || item.revision === 0) {
-        draft.swarm().tasks[id] = { firstSeenAt: at, approx: true, lastOutputAt: at, endedAt: null };
+        draft.crew().tasks[id] = { firstSeenAt: at, approx: true, lastOutputAt: at, endedAt: null };
       }
     }
   } else if (field.startsWith("summary.")) {
@@ -1246,12 +1246,12 @@ function mergeRunTrace(fresh: RunTrace, old: RunTrace): RunTrace {
  * the thread already traced from the live stream, or from an earlier fuller page, is not thrown away for that. A
  * run whose item the fold no longer holds takes its trace with it.
  */
-function carriedSwarm(fold: ThreadFold, previous: ThreadFold | null | undefined): ThreadFold {
-  const old = previous?.swarm;
-  if (!old || old === fold.swarm) {
+function carriedCrew(fold: ThreadFold, previous: ThreadFold | null | undefined): ThreadFold {
+  const old = previous?.crew;
+  if (!old || old === fold.crew) {
     return fold;
   }
-  const runs: Record<string, RunTrace> = { ...fold.swarm.runs };
+  const runs: Record<string, RunTrace> = { ...fold.crew.runs };
   for (const [id, trace] of Object.entries(old.runs)) {
     if (!fold.items[id]) {
       continue;
@@ -1259,14 +1259,14 @@ function carriedSwarm(fold: ThreadFold, previous: ThreadFold | null | undefined)
     const fresh = runs[id];
     runs[id] = fresh ? mergeRunTrace(fresh, trace) : trace;
   }
-  const requests: Record<string, RequestTrace> = { ...fold.swarm.requests };
+  const requests: Record<string, RequestTrace> = { ...fold.crew.requests };
   for (const [id, trace] of Object.entries(old.requests)) {
     const fresh = requests[id];
     requests[id] = fresh
       ? { ...fresh, askedAt: fresh.askedAt ?? trace.askedAt, decidedAt: fresh.decidedAt ?? trace.decidedAt }
       : trace;
   }
-  const tasks: Record<string, TaskTrace> = { ...fold.swarm.tasks };
+  const tasks: Record<string, TaskTrace> = { ...fold.crew.tasks };
   for (const [id, trace] of Object.entries(old.tasks)) {
     if (!fold.items[id]) {
       continue;
@@ -1286,7 +1286,7 @@ function carriedSwarm(fold: ThreadFold, previous: ThreadFold | null | undefined)
       endedAt: fresh.endedAt ?? trace.endedAt,
     };
   }
-  return { ...fold, swarm: { runs, requests, tasks } };
+  return { ...fold, crew: { runs, requests, tasks } };
 }
 
 /**
@@ -1468,9 +1468,9 @@ export function foldFromLoad(load: TranscriptLoad, previous?: ThreadFold | null)
     // The page's own older revision can hold the labels a newer status-only one on screen lacks.
     fold = carriedWorkflowLabels(fold, snapshot);
     // The fold grew out of the one on screen, so it holds that trace already; the page's own adds what it saw.
-    fold = carriedSwarm(fold, snapshot);
+    fold = carriedCrew(fold, snapshot);
   } else {
-    fold = carriedSwarm(fold, previous);
+    fold = carriedCrew(fold, previous);
   }
   const activeTurnId = load.msp ? load.msp.activeTurnId : fold.activeTurnId;
   const { approvals, userInputs } = pendingRequests(load, fold, snapshot, previous, activeTurnId);

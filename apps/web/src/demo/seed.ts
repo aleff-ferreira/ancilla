@@ -3,9 +3,9 @@
  * Every name, path, file and number here is made up. Times are relative to when the page loads, so
  * the sidebar always reads "just now", "2 hours ago" and so on.
  *
- * The audit thread plays the agents scenario `?swarm=` names: a native workflow of ten agents in four
+ * The audit thread plays the agents scenario `?crew=` names: a native workflow of ten agents in four
  * phases (or two thousand in eight, or none and three background tasks), written out as the revisions
- * Muse sends, so the Swarm card, panel and drawer read the same wire here as against a real run.
+ * Muse sends, so the Crew card, panel and drawer read the same wire here as against a real run.
  */
 import type { ApprovalRequest, LiveView, MspItem, ResearchConfig, ResearchRunView, SessionSummary, TokenUsage, ViewEvent, WorkflowChild } from "@ancilla/ui";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
@@ -268,7 +268,7 @@ export function childrenAt(run: AuditRun, at: number, since: number, cache?: Chi
   return children;
 }
 
-/** The workflow item at one revision: what the fold folds and the Swarm surfaces read. */
+/** The workflow item at one revision: what the fold folds and the Crew surfaces read. */
 export function auditItem(run: AuditRun, at: number, since: number, revision: number, cache?: ChildCache): MspItem {
   const ended = run.endedAt !== null && at >= run.endedAt;
   const item: MspItem = {

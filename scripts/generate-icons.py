@@ -182,7 +182,7 @@ def hero(mark: Mark, dark: bool) -> Image.Image:
     d = ImageDraw.Draw(img)
     name, tagline = font(132, 700), font(38, 450)
     title = "Ancilla"
-    line = "A desktop companion for Muse Code agent swarms"
+    line = "A desktop companion for Muse Code agent crews"
 
     cap = -d.textbbox((0, 0), "H", font=name, anchor="ls")[1]
     ink = (mark.width + max(y for _, y in mark.points)

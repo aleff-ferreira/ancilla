@@ -5,7 +5,7 @@ import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
 import { basename } from "../../model/format.js";
 import { goalView } from "../../model/goal.js";
 import { agentFeedRecovered, agentNumbers, markAgentFeed, type AgentFeedMark } from "../../model/agents.js";
-import { runLive, swarmBusy, swarmView, type SwarmVM } from "../../model/swarm.js";
+import { runLive, crewBusy, crewView, type CrewVM } from "../../model/crew.js";
 import type { ThreadState } from "../../model/store.js";
 import type { SessionSummary } from "../../types.js";
 import { SidebarToggle, TrafficLightSpacer } from "../chrome.js";
@@ -14,15 +14,15 @@ import { TelemetryPills } from "../composer/TelemetryPills.js";
 import { ApprovalPanel, PlanPanel, QuestionPanel, QueuedList, ReadOnlyNotice, StalledNotice } from "../requests/Requests.js";
 import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
-import { NeedsYouChip, SwarmStatus, SwarmToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../swarm/HeaderChips.js";
-import { SwarmDockCard } from "../swarm/SwarmCard.js";
-import { SwarmPanel } from "../swarm/SwarmPanel.js";
+import { NeedsYouChip, CrewStatus, CrewToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../crew/HeaderChips.js";
+import { CrewDockCard } from "../crew/CrewCard.js";
+import { CrewPanel } from "../crew/CrewPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, MOD } from "../ui/primitives.js";
 import { FilesPanel } from "../files/FilesPanel.js";
 import { Transcript } from "./Transcript.js";
 
-/** Ages in the Swarm card tick this often; the elapsed clocks tick on their own 1 s timer (SPEC §13). */
+/** Ages in the Crew card tick this often; the elapsed clocks tick on their own 1 s timer (SPEC §13). */
 const AGE_TICK_MS = 15_000;
 
 export function ThreadView(props: { sessionId: string }) {
@@ -31,8 +31,8 @@ export function ThreadView(props: { sessionId: string }) {
   const sidePanel = useApp((s) => s.prefs.sidePanel);
   const connection = useApp((s) => s.connection);
   const models = useApp((s) => s.models);
-  const pending = useApp((s) => s.swarm.pending);
-  const skipped = useApp((s) => s.swarm.skipped);
+  const pending = useApp((s) => s.crew.pending);
+  const skipped = useApp((s) => s.crew.skipped);
   const fold = thread?.fold ?? null;
   const agentItems = fold ? fold.agentItems ?? fold.items : null;
   // Remember the agent items as the last history read left them while the live view is unavailable, to tell
@@ -44,16 +44,16 @@ export function ThreadView(props: { sessionId: string }) {
     setFeedMark(nextFeedMark);
   }
   const researchRuns = thread?.researchRuns;
-  const busy = fold ? swarmBusy(fold, researchRuns) : false;
+  const busy = fold ? crewBusy(fold, researchRuns) : false;
   const now = useNow(AGE_TICK_MS, busy);
-  const swarmStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
+  const crewStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
     || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
   // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
   const loaded = !thread || thread.fold.order.length > 0 || thread.load === "ready";
-  const swarm = useMemo<SwarmVM | null>(
-    () => (fold && loaded ? swarmView(fold, session, now, { stale: swarmStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId), researchRuns }) : null),
+  const crew = useMemo<CrewVM | null>(
+    () => (fold && loaded ? crewView(fold, session, now, { stale: crewStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId), researchRuns }) : null),
     // The view reads the agent items, the item order, the requests, the trace and the research runs; streamed reply text changes none of them.
-    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId, researchRuns],
+    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.crew, session, now, crewStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId, researchRuns],
   );
   if (!session) {
     return <MissingThread />;
@@ -61,20 +61,20 @@ export function ThreadView(props: { sessionId: string }) {
   const running = thread ? thread.fold.activeTurnId !== null : Boolean(session.live?.activeTurnId);
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-      <ThreadHeader session={session} thread={thread} running={running} swarm={swarm} />
+      <ThreadHeader session={session} thread={thread} running={running} crew={crew} />
       <div className="flex min-h-0 flex-1">
         <div className="@container flex min-w-0 flex-1 flex-col">
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
-          <Dock session={session} thread={thread} running={running} swarm={swarm} swarmStale={swarmStale} />
+          <Dock session={session} thread={thread} running={running} crew={crew} crewStale={crewStale} />
         </div>
-        {sidePanel === "swarm" ? <SwarmPanel sessionId={props.sessionId} />
+        {sidePanel === "crew" ? <CrewPanel sessionId={props.sessionId} />
           : sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
       </div>
     </div>
   );
 }
 
-function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; swarm: SwarmVM | null }) {
+function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; crew: CrewVM | null }) {
   const controller = useController();
   const { session, thread } = props;
   const [renaming, setRenaming] = useState(false);
@@ -85,10 +85,10 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
   const noDrag = useOverlayDragProps("off");
   const sidePanel = useApp((s) => s.prefs.sidePanel);
   const reportDismissed = useApp((s) => {
-    const run = headerRun(props.swarm);
-    return run ? s.swarm.dismissedReports.includes(`${session.sessionId}:${run.itemId}`) : true;
+    const run = headerRun(props.crew);
+    return run ? s.crew.dismissedReports.includes(`${session.sessionId}:${run.itemId}`) : true;
   });
-  const run = headerRun(props.swarm);
+  const run = headerRun(props.crew);
   const landed = useLanded(run);
   const liveRun = run !== null && runLive(run);
   const filesOpen = sidePanel === "files";
@@ -139,15 +139,15 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
       ) : null}
       <NeedsYouChip count={needs} onClick={() => focusRequestPanel()} />
       {needs > 0 ? (
-        <SwarmStatus kind="waiting" />
+        <CrewStatus kind="waiting" />
       ) : props.running ? (
-        <SwarmStatus kind="working" ms={startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null} at={Date.now()} live />
+        <CrewStatus kind="working" ms={startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null} at={Date.now()} live />
       ) : landed && run ? (
-        <SwarmStatus kind="landed" ms={run.elapsedMs} />
+        <CrewStatus kind="landed" ms={run.elapsedMs} />
       ) : run && run.stale && liveRun ? (
-        <SwarmStatus kind="stale" ms={staleAge(run, run.clockAt)} />
+        <CrewStatus kind="stale" ms={staleAge(run, run.clockAt)} />
       ) : run && !liveRun && !reportDismissed && run.status === "finished" ? (
-        <SwarmStatus kind="done" />
+        <CrewStatus kind="done" />
       ) : thread?.readOnly ? (
         <span className="flex shrink-0 items-center gap-1.5 px-1 text-xs text-subtle">
           <LockIcon size={12} />
@@ -162,7 +162,7 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
         </Tip>
       ) : null}
       <HiddenCardsButton sessionId={session.sessionId} running={props.running} />
-      <SwarmToggle active={sidePanel === "swarm"} count={liveRun ? run.counts.total : null} onClick={() => controller.toggleSwarmPanel()} />
+      <CrewToggle active={sidePanel === "crew"} count={liveRun ? run.counts.total : null} onClick={() => controller.toggleCrewPanel()} />
       <Tip label={filesOpen ? "Hide files" : "Show files"} shortcut={[MOD, "Shift", "E"]}>
         <IconButton label={filesOpen ? "Hide files" : "Show files"} active={filesOpen} onClick={() => controller.toggleFiles()}>
           <TreeStructureIcon size={15} />
@@ -298,7 +298,7 @@ function HiddenCardsButton(props: { sessionId: string; running: boolean }) {
   );
 }
 
-function Dock(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; swarm: SwarmVM | null; swarmStale: boolean }) {
+function Dock(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; crew: CrewVM | null; crewStale: boolean }) {
   const controller = useController();
   const { session, thread } = props;
   const fold = thread?.fold ?? null;
@@ -324,11 +324,11 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
             onRetry={() => void controller.retryStalledThread(session.sessionId)}
           />
         ) : null}
-        {props.swarm ? (
-          <SwarmDockCard
+        {props.crew ? (
+          <CrewDockCard
             sessionId={session.sessionId}
-            view={props.swarm}
-            stale={props.swarmStale}
+            view={props.crew}
+            stale={props.crewStale}
             readOnly={Boolean(thread?.readOnly)}
             compact={approvals.length + inputs.length > 0}
           />

@@ -4170,7 +4170,7 @@ export class AncillaServer {
       this.refuseRenames(hostKey, typeof error === "string" ? error : JSON.stringify(error));
     }
     const item = asRecord(params["item"]);
-    // Only a failed item is read through; a swarm's many healthy updates cost nothing here.
+    // Only a failed item is read through; a crew's many healthy updates cost nothing here.
     if (item && (/fail|error/i.test(str(item["status"]) ?? "") || (item["error"] !== undefined && item["error"] !== null))) {
       this.refuseRenames(hostKey, JSON.stringify(item));
     }

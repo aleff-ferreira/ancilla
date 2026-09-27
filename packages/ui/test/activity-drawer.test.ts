@@ -11,11 +11,11 @@ import {
   stopAllText,
   visibleSections,
   type ActivityDrawerProps,
-} from "../src/components/swarm/ActivityDrawer.js";
-import { activityKey, itemElapsed, splitProgress, stopQuestion, stoppable } from "../src/components/swarm/ActivityItem.js";
+} from "../src/components/crew/ActivityDrawer.js";
+import { activityKey, itemElapsed, splitProgress, stopQuestion, stoppable } from "../src/components/crew/ActivityItem.js";
 import { MOD } from "../src/components/ui/primitives.js";
-import type { ActivityItemVM, ActivityVM } from "../src/model/swarm.js";
-import { APPROVAL_COMMAND, NOW, RUN_NAME, TASK_COMMAND, appState, approvalEvents, fold, runEvents, session, taskEvents, thread } from "./swarm-fixtures.js";
+import type { ActivityItemVM, ActivityVM } from "../src/model/crew.js";
+import { APPROVAL_COMMAND, NOW, RUN_NAME, TASK_COMMAND, appState, approvalEvents, fold, runEvents, session, taskEvents, thread } from "./crew-fixtures.js";
 
 const base = { sessionId: "s1", project: "lantern", thread: "Design the offline sync engine", stale: false } as const;
 const approval: ActivityItemVM = { ...base, itemId: "call-1", agentId: null, kind: "request", text: "Run a shell command", sub: APPROVAL_COMMAND, state: "request", startedAt: NOW - 100_000, endedAt: null };
@@ -95,13 +95,13 @@ describe("ActivityDrawer", () => {
   it("gives a run its strip, its progress with the count in bold, its chips, and Open and Stop", () => {
     const key = activityKey(run);
     const markup = render({ runs: { [key]: { groups: [["done", "done"], ["working", "failed"]], chips: [{ kind: "failed", count: 1, text: "1 failed" }] } } });
-    assert.match(markup, /class="swarm-strip"/);
+    assert.match(markup, /class="crew-strip"/);
     assert.match(markup, /Judge · <b class="font-medium text-fg">6 of 10<\/b>/);
     assert.match(markup, /1 failed<\/span>/);
     assert.match(markup, /Open<\/button>/);
     assert.match(markup, new RegExp(`aria-label="Stop ${RUN_NAME}"`));
     // Without the extras the row still reads; nothing is invented.
-    assert.doesNotMatch(render(), /swarm-strip/);
+    assert.doesNotMatch(render(), /crew-strip/);
   });
 
   it("shows a running task's command in mono with its last line under it, and a finished one with its outcome", () => {
@@ -204,7 +204,7 @@ describe("ActivityDrawer", () => {
     assert.deepEqual(model.runs[key], { groups: [["done"], ["working"]], chips: [{ kind: "needs", count: 1, text: "1 needs you" }] });
     assert.deepEqual(model.stopNames, { runs: [RUN_NAME], tasks: [TASK_COMMAND] });
     const markup = renderToStaticMarkup(createElement(ActivityDrawer, { open: true, view: model.view, runs: model.runs, stopNames: model.stopNames, filter: "all", now: NOW, onFilter() {}, onOpen() {}, onStop() {}, onStopAll() {}, onClose() {} }));
-    assert.match(markup, /class="swarm-strip"/);
+    assert.match(markup, /class="crew-strip"/);
     assert.match(markup, /1 needs you/);
     assert.match(text(markup), /Stop everything stops 1 run and 1 task in this thread/);
   });

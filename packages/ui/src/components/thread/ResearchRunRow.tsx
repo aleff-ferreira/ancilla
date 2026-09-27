@@ -17,7 +17,7 @@ import {
   workerChip,
   type ResearchStopAction,
 } from "../../model/research.js";
-import { durationText } from "../../model/swarm.js";
+import { durationText } from "../../model/crew.js";
 import type { ResearchRunView, ResearchWorkerView } from "../../types.js";
 import { BinocularsIcon, CaretDownIcon, CheckCircleIcon, CircleDashedIcon, ClockIcon, StopCircleIcon, WarningCircleIcon } from "../ui/icons.js";
 import { CopyButton, Markdown } from "../ui/Markdown.js";

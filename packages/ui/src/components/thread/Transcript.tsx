@@ -40,7 +40,7 @@ import {
   ToolRow,
   type Gate,
 } from "./items.js";
-import { SwarmAnchorRow } from "../swarm/SwarmAnchorRow.js";
+import { CrewAnchorRow } from "../crew/CrewAnchorRow.js";
 import { ResearchRunRow } from "./ResearchRunRow.js";
 
 type GateMap = Record<string, Gate>;
@@ -384,7 +384,7 @@ function Entry(props: { item: MspItem; gate?: Gate; answers: UserInputAnswer[] |
       return <SubagentRow item={item} sessionId={props.sessionId} />;
     case "workflow":
       // The run lives in the dock; the transcript keeps one line at the launch point that points there.
-      return <SwarmAnchorRow item={item} sessionId={props.sessionId} />;
+      return <CrewAnchorRow item={item} sessionId={props.sessionId} />;
     case "compaction":
       return <CompactionRow item={item} />;
     case "userMessage":
@@ -499,7 +499,7 @@ function WorkLog(props: { turn: TurnView; gates: GateMap; answers: AnswerMap; se
         </div>
       </Collapse>
       {runs.map((item) => (
-        <SwarmAnchorRow key={item.itemId} item={item} sessionId={props.sessionId} />
+        <CrewAnchorRow key={item.itemId} item={item} sessionId={props.sessionId} />
       ))}
       <DiffChips entries={turn.entries} className="mt-2" sessionId={props.sessionId} />
     </div>

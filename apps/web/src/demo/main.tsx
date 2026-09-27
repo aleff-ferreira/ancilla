@@ -5,7 +5,7 @@
  *
  * Query options, all optional:
  *   view=home|agents|diff|approval|research|usage|settings|palette   the screen to start on
- *   swarm=running|stalled|failed|waiting|partial|reconnect|done|big|task
+ *   crew=running|stalled|failed|waiting|partial|reconnect|done|big|task
  *       what the audit thread's agents are doing; opens that thread unless view= says otherwise:
  *       running    the design's run 41m 16s in: ten agents in four phases, one failed after two attempts, one
  *                  quiet past the run's own threshold, one finishing, one planned; a request Muse raised during
@@ -44,23 +44,23 @@ const VIEWS: Record<string, string> = {
 const params = new URLSearchParams(window.location.search);
 const view = params.get("view");
 const openPalette = params.get("palette") === "1" || view === "palette";
-const scenario = params.get("swarm");
-const swarm = isScenario(scenario) ? scenario : "running";
+const scenario = params.get("crew");
+const crew = isScenario(scenario) ? scenario : "running";
 if (view !== null && view in VIEWS) {
   // Applied once and dropped, so moving around the app and reloading stays where you went.
   params.delete("view");
   const search = params.toString();
   window.history.replaceState(null, "", `${window.location.pathname}${search ? `?${search}` : ""}${VIEWS[view]}`);
 } else if (scenario !== null && !window.location.hash) {
-  // A scenario is about the audit thread, so start there; `swarm=` stays in the query, since it is the world.
+  // A scenario is about the audit thread, so start there; `crew=` stays in the query, since it is the world.
   window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${VIEWS["agents"]}`);
 }
 
 const theme = params.get("theme");
 const zoom = Number(params.get("zoom"));
-// `panel=swarm|files` opens that side panel from the start, for shots of it; `files=1` is the older spelling.
+// `panel=crew|files` opens that side panel from the start, for shots of it; `files=1` is the older spelling.
 const panel = params.get("panel");
-const sidePanel: "none" | "files" | "swarm" = panel === "swarm" ? "swarm" : panel === "files" || params.get("files") === "1" ? "files" : "none";
+const sidePanel: "none" | "files" | "crew" = panel === "crew" ? "crew" : panel === "files" || params.get("files") === "1" ? "files" : "none";
 const prefs = {
   theme: theme === "light" || theme === "dark" ? theme : "system",
   lastProject: PROJECTS.atlas,
@@ -81,7 +81,7 @@ const platform: Platform = {
   savePrefs: () => {},
 };
 
-const client = new DemoAncillaClient(swarm);
+const client = new DemoAncillaClient(crew);
 if (params.get("workflow") === "done") {
   client.finishAudit();
 }

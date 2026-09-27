@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
-import { Inspector, type InspectorProps } from "../src/components/swarm/Inspector.js";
-import { AT_RUN_END, NEAR_END, NOT_REPORTED, factsOf, lifecycleItems } from "../src/components/swarm/InspectorSections.js";
-import { withPending } from "../src/components/swarm/panel.js";
-import { pendingKey, type AgentVM, type RunVM } from "../src/model/swarm.js";
-import { S, lanternDone, lanternRun, panelStore, renderWith, textOf } from "./swarm-panel-fixture.js";
+import { Inspector, type InspectorProps } from "../src/components/crew/Inspector.js";
+import { AT_RUN_END, NEAR_END, NOT_REPORTED, factsOf, lifecycleItems } from "../src/components/crew/InspectorSections.js";
+import { withPending } from "../src/components/crew/panel.js";
+import { pendingKey, type AgentVM, type RunVM } from "../src/model/crew.js";
+import { S, lanternDone, lanternRun, panelStore, renderWith, textOf } from "./crew-panel-fixture.js";
 
 function agent(run: RunVM, name: string): AgentVM {
   const found = run.agents.find((candidate) => candidate.name === name);
@@ -39,8 +39,8 @@ describe("Inspector", () => {
       assert.ok(index > at, `${part} comes after the previous section`);
       at = index;
     }
-    assert.match(markup, /class="swarm-sigil s36 fail"/, "a 36 px sigil with the failure badge");
-    assert.match(markup, /class="swarm-badge fail"/);
+    assert.match(markup, /class="crew-sigil s36 fail"/, "a 36 px sigil with the failure badge");
+    assert.match(markup, /class="crew-badge fail"/);
     assert.match(markup, /data-inspector="full"/);
     assert.doesNotMatch(markup, /back to the run/, "the crumb is the panel head's when the inspector fills the panel");
   });

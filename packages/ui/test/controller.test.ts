@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
 import { buildTurns } from "../src/model/fold.js";
-import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
-import { swarmView } from "../src/model/swarm.js";
+import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
+import { crewView } from "../src/model/crew.js";
 import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
@@ -1029,7 +1029,7 @@ describe("AncillaController", () => {
       return load({ session: sessionId === "s1" ? SESSION : other, events: sessionId === "s1" ? events : [] });
     };
     const { controller, stop } = await started(client);
-    const working = () => swarmView(controller.store.get().threads.s1!.fold, SESSION, Date.now()).runs[0]?.counts.working;
+    const working = () => crewView(controller.store.get().threads.s1!.fold, SESSION, Date.now()).runs[0]?.counts.working;
     try {
       assert.equal(working(), 1);
       controller.openThread("s2");
@@ -3349,7 +3349,7 @@ describe("stale thread watchdog", () => {
   });
 });
 
-describe("swarm controls", () => {
+describe("crew controls", () => {
   const T = Date.UTC(2026, 8, 26, 14, 2, 0);
   const workflow = (revision: number, children: Record<string, unknown>[], status = "inProgress"): AncillaEvent => ({
     type: "msp", sessionId: "s1", method: revision === 1 ? "item/started" : "item/updated", at: T + revision * 1000,
@@ -3361,7 +3361,7 @@ describe("swarm controls", () => {
   });
   const agentOf = (controller: AncillaController, id: string) => {
     const thread = controller.store.get().threads["s1"]!;
-    const vm = swarmView(thread.fold, SESSION, Date.now(), { pending: controller.store.get().swarm.pending });
+    const vm = crewView(thread.fold, SESSION, Date.now(), { pending: controller.store.get().crew.pending });
     const run = vm.runs[0];
     const agent = run?.agents.find((a) => a.id === id) ?? vm.tasks.find((t) => t.id === id);
     assert.ok(agent, `no agent ${id}`);
@@ -3372,35 +3372,43 @@ describe("swarm controls", () => {
     const fallback = defaultPrefs();
     assert.equal(revivePrefs({ filesOpen: true }, fallback).sidePanel, "files");
     assert.equal(revivePrefs({ filesOpen: true }, fallback).filesOpen, true);
-    assert.equal(revivePrefs({ sidePanel: "swarm", filesOpen: true }, fallback).sidePanel, "swarm", "the new setting wins over the old switch");
-    assert.equal(revivePrefs({ sidePanel: "swarm", filesOpen: true }, fallback).filesOpen, false);
+    assert.equal(revivePrefs({ sidePanel: "crew", filesOpen: true }, fallback).sidePanel, "crew", "the new setting wins over the old switch");
+    assert.equal(revivePrefs({ sidePanel: "crew", filesOpen: true }, fallback).filesOpen, false);
     assert.equal(revivePrefs({ filesOpen: false }, fallback).sidePanel, "none");
-    assert.equal(revivePrefs({ swarmWidth: 9_999 }, fallback).swarmWidth, DEFAULT_SWARM_WIDTH);
-    assert.equal(revivePrefs({ swarmWidth: 640 }, fallback).swarmWidth, 640);
+    assert.equal(revivePrefs({ crewWidth: 9_999 }, fallback).crewWidth, DEFAULT_CREW_WIDTH);
+    assert.equal(revivePrefs({ crewWidth: 640 }, fallback).crewWidth, 640);
   });
 
-  it("swaps the slot between the file viewer and the Swarm panel, one at a time", async () => {
+  it("carries a saved Swarm panel and its width over to the Crew names", () => {
+    const fallback = defaultPrefs();
+    assert.equal(revivePrefs({ sidePanel: "swarm" }, fallback).sidePanel, "crew");
+    assert.equal(revivePrefs({ swarmWidth: 640 }, fallback).crewWidth, 640);
+    assert.equal(revivePrefs({ swarmWidth: 640, crewWidth: 700 }, fallback).crewWidth, 700, "the new key wins");
+    assert.equal(revivePrefs({ swarmWidth: 9_999 }, fallback).crewWidth, DEFAULT_CREW_WIDTH);
+  });
+
+  it("swaps the slot between the file viewer and the Crew panel, one at a time", async () => {
     const client = new FakeClient();
     const { controller, stop } = await started(client);
     try {
       const prefs = () => controller.store.get().prefs;
-      controller.toggleSwarmPanel();
-      assert.equal(prefs().sidePanel, "swarm");
+      controller.toggleCrewPanel();
+      assert.equal(prefs().sidePanel, "crew");
       assert.equal(prefs().filesOpen, false);
       controller.toggleFiles();
-      assert.equal(prefs().sidePanel, "files", "opening files closes the Swarm panel");
+      assert.equal(prefs().sidePanel, "files", "opening files closes the Crew panel");
       assert.equal(prefs().filesOpen, true);
-      controller.toggleSwarmPanel(true);
-      assert.equal(prefs().sidePanel, "swarm");
+      controller.toggleCrewPanel(true);
+      assert.equal(prefs().sidePanel, "crew");
       assert.equal(prefs().filesOpen, false);
-      controller.toggleSwarmPanel();
+      controller.toggleCrewPanel();
       assert.equal(prefs().sidePanel, "none");
       controller.openFile("s1", "README.md");
       assert.equal(prefs().sidePanel, "files", "opening a file shows the viewer");
-      controller.setSwarmWidth(10_000);
-      assert.equal(prefs().swarmWidth, 800);
-      controller.setSwarmWidth(10);
-      assert.equal(prefs().swarmWidth, 400);
+      controller.setCrewWidth(10_000);
+      assert.equal(prefs().crewWidth, 800);
+      controller.setCrewWidth(10);
+      assert.equal(prefs().crewWidth, 400);
     } finally {
       stop();
     }
@@ -3415,25 +3423,25 @@ describe("swarm controls", () => {
       await settle();
       const failed = agentOf(controller, "c1");
       assert.equal(failed.state, "failed");
-      assert.equal(await controller.swarmAction("s1", failed, "retry"), true);
+      assert.equal(await controller.crewAction("s1", failed, "retry"), true);
       assert.deepEqual(client.actions.at(-1), "workflow:s1:retry:run-1:c1@1");
-      assert.deepEqual(controller.store.get().swarm.pending, { "s1:c1:1": "retry" });
+      assert.deepEqual(controller.store.get().crew.pending, { "s1:c1:1": "retry" });
       assert.equal(agentOf(controller, "c2").pending, null);
       client.handler?.(workflow(3, [{ childId: "c1", attempt: 2, status: "scheduled", label: "audit:routes" }, { childId: "c2", attempt: 1, status: "started" }]));
       await settle();
-      assert.deepEqual(controller.store.get().swarm.pending, {}, "attempt 2 on the wire confirms the retry");
+      assert.deepEqual(controller.store.get().crew.pending, {}, "attempt 2 on the wire confirms the retry");
       assert.equal(agentOf(controller, "c1").attempt, 2);
 
       const working = agentOf(controller, "c2");
-      assert.equal(await controller.swarmAction("s1", working, "skip"), true);
+      assert.equal(await controller.crewAction("s1", working, "skip"), true);
       assert.deepEqual(client.actions.at(-1), "workflow:s1:skip:run-1:c2@1");
-      assert.deepEqual(controller.store.get().swarm.pending, { "s1:c2:1": "stop" });
-      assert.deepEqual(controller.store.get().swarm.skipped, ["s1:c2:1"]);
+      assert.deepEqual(controller.store.get().crew.pending, { "s1:c2:1": "stop" });
+      assert.deepEqual(controller.store.get().crew.skipped, ["s1:c2:1"]);
       assert.equal(agentOf(controller, "c2").pending, "stop");
       client.handler?.(workflow(4, [{ childId: "c1", attempt: 2, status: "started" }, { childId: "c2", attempt: 1, status: "terminal", terminal: "cancelled" }]));
       await settle();
-      assert.deepEqual(controller.store.get().swarm.pending, {});
-      const skipped = swarmView(controller.store.get().threads["s1"]!.fold, SESSION, Date.now(), { skipped: controller.store.get().swarm.skipped }).runs[0]!.agents.find((a) => a.id === "c2");
+      assert.deepEqual(controller.store.get().crew.pending, {});
+      const skipped = crewView(controller.store.get().threads["s1"]!.fold, SESSION, Date.now(), { skipped: controller.store.get().crew.skipped }).runs[0]!.agents.find((a) => a.id === "c2");
       assert.equal(skipped?.skippedBy, "you");
     } finally {
       stop();
@@ -3447,10 +3455,10 @@ describe("swarm controls", () => {
       client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
       await settle();
       client.workflowError = new AncillaError("stale", 409, "stale_attempt");
-      assert.equal(await controller.swarmAction("s1", agentOf(controller, "c1"), "stop"), false);
-      assert.deepEqual(controller.store.get().swarm.pending, {});
+      assert.equal(await controller.crewAction("s1", agentOf(controller, "c1"), "stop"), false);
+      assert.deepEqual(controller.store.get().crew.pending, {});
       assert.equal(controller.store.get().toasts.at(-1)?.title, "That agent already moved on");
-      assert.equal(await controller.swarmAction("s1", { ...agentOf(controller, "c1"), workflowRunId: null }, "retry"), false, "no run id, nothing to send");
+      assert.equal(await controller.crewAction("s1", { ...agentOf(controller, "c1"), workflowRunId: null }, "retry"), false, "no run id, nothing to send");
     } finally {
       stop();
     }
@@ -3464,13 +3472,13 @@ describe("swarm controls", () => {
       await settle();
       const running = agentOf(controller, "task-1");
       assert.equal(running.kind, "task");
-      assert.equal(await controller.swarmAction("s1", running, "retry"), false, "a task cannot be retried from here");
-      assert.equal(await controller.swarmAction("s1", running, "stop"), true);
+      assert.equal(await controller.crewAction("s1", running, "retry"), false, "a task cannot be retried from here");
+      assert.equal(await controller.crewAction("s1", running, "stop"), true);
       assert.equal(client.actions.at(-1), "task:s1:stop:task-1");
       assert.equal(agentOf(controller, "task-1").pending, "stop");
       client.handler?.(task(2, "completed"));
       await settle();
-      assert.deepEqual(controller.store.get().swarm.pending, {});
+      assert.deepEqual(controller.store.get().crew.pending, {});
       assert.equal(agentOf(controller, "task-1").state, "done");
     } finally {
       stop();
@@ -3486,7 +3494,7 @@ describe("swarm controls", () => {
       await settle();
       assert.deepEqual(await controller.stopEverything("s1"), { runs: ["audit"], tasks: ["npm run docs:build"] });
       assert.deepEqual(client.actions.slice(-2), ["workflow:s1:cancel:run-1", "task:s1:stopAll"]);
-      assert.deepEqual(controller.store.get().swarm.pending, { "s1:task-1:1": "stop" });
+      assert.deepEqual(controller.store.get().crew.pending, { "s1:task-1:1": "stop" });
       assert.deepEqual(await controller.stopEverything("s2"), { runs: [], tasks: [] }, "a thread this client does not hold has nothing to stop");
       assert.equal(await controller.stopRun("s1", "wf"), true);
       assert.equal(client.actions.at(-1), "workflow:s1:cancel:run-1");
@@ -3496,7 +3504,7 @@ describe("swarm controls", () => {
     }
   });
 
-  it("routes a Swarm stop on a research run to stopResearch, refuses worker controls, and stops research with everything else", async () => {
+  it("routes a Crew stop on a research run to stopResearch, refuses worker controls, and stops research with everything else", async () => {
     const client = new FakeClient();
     const research = runningResearch();
     client.researchRuns.push(research);
@@ -3506,12 +3514,12 @@ describe("swarm controls", () => {
       client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
       await settle();
       const threadOf = () => controller.store.get().threads["s1"]!;
-      const vm = swarmView(threadOf().fold, SESSION, Date.now(), { researchRuns: threadOf().researchRuns });
+      const vm = crewView(threadOf().fold, SESSION, Date.now(), { researchRuns: threadOf().researchRuns });
       const worker = vm.runs.flatMap((run) => run.agents).find((candidate) => candidate.id === "research:run-1:A3");
       assert.ok(worker);
-      assert.equal(await controller.swarmAction("s1", worker, "stop"), false, "a worker takes no stop of its own");
-      assert.equal(await controller.swarmAction("s1", worker, "retry"), false);
-      assert.deepEqual(controller.store.get().swarm.pending, {}, "nothing is marked pending for it");
+      assert.equal(await controller.crewAction("s1", worker, "stop"), false, "a worker takes no stop of its own");
+      assert.equal(await controller.crewAction("s1", worker, "retry"), false);
+      assert.deepEqual(controller.store.get().crew.pending, {}, "nothing is marked pending for it");
       assert.deepEqual(client.researchStops, []);
 
       const stopped = await controller.stopEverything("s1");
@@ -3543,21 +3551,21 @@ describe("swarm controls", () => {
     client.listSessions = async () => [SESSION, other];
     const { controller, stop } = await started(client);
     try {
-      assert.deepEqual(controller.store.get().swarm.leftAt, {});
+      assert.deepEqual(controller.store.get().crew.leftAt, {});
       controller.openThread("s2");
       await settle();
-      const left = controller.store.get().swarm.leftAt["s1"];
+      const left = controller.store.get().crew.leftAt["s1"];
       assert.ok(typeof left === "number" && left > 0, "leaving the thread notes when");
       controller.markLeft("s2", 123);
-      assert.equal(controller.store.get().swarm.leftAt["s2"], 123);
+      assert.equal(controller.store.get().crew.leftAt["s2"], 123);
       controller.dismissRecap("s1");
-      assert.equal(controller.store.get().swarm.leftAt["s1"], undefined);
-      assert.deepEqual(controller.store.get().swarm.dismissedRecaps, ["s1"]);
+      assert.equal(controller.store.get().crew.leftAt["s1"], undefined);
+      assert.deepEqual(controller.store.get().crew.dismissedRecaps, ["s1"]);
       controller.markLeft("s1", 456);
-      assert.deepEqual(controller.store.get().swarm.dismissedRecaps, [], "a new absence gets a new recap");
+      assert.deepEqual(controller.store.get().crew.dismissedRecaps, [], "a new absence gets a new recap");
       controller.dismissReport("s1", "wf");
       controller.dismissReport("s1", "wf");
-      assert.deepEqual(controller.store.get().swarm.dismissedReports, ["s1:wf"]);
+      assert.deepEqual(controller.store.get().crew.dismissedReports, ["s1:wf"]);
     } finally {
       stop();
     }
@@ -3572,17 +3580,17 @@ describe("swarm controls", () => {
     await settle();
     await settle();
     try {
-      const panel = () => controller.store.get().swarm.panels["s1"];
+      const panel = () => controller.store.get().crew.panels["s1"];
       assert.equal(panel(), undefined);
       controller.inspectAgent("s1", "c1");
       assert.deepEqual(panel(), { mode: "inspector", inspectId: "c1", filter: "all", query: "", timelineOpen: true, openPhases: [] });
-      assert.equal(controller.store.get().prefs.sidePanel, "swarm", "inspecting opens the panel");
+      assert.equal(controller.store.get().prefs.sidePanel, "crew", "inspecting opens the panel");
       controller.inspectAgent("s1", null);
       assert.equal(panel()?.mode, "roster");
-      controller.setSwarmFilter("s1", "failed", "judge:");
+      controller.setCrewFilter("s1", "failed", "judge:");
       assert.equal(panel()?.filter, "failed");
       assert.equal(panel()?.query, "judge:");
-      controller.setSwarmFilter("s1", "all");
+      controller.setCrewFilter("s1", "all");
       assert.equal(panel()?.query, "judge:", "the query stays unless given");
       controller.toggleTimeline("s1");
       assert.equal(panel()?.timelineOpen, false);
@@ -3591,7 +3599,7 @@ describe("swarm controls", () => {
       controller.togglePhase("s1", "Judge");
       assert.deepEqual(panel()?.openPhases, ["Design"]);
       controller.setActivityOpen(true);
-      assert.equal(controller.store.get().swarm.activityOpen, true);
+      assert.equal(controller.store.get().crew.activityOpen, true);
       controller.setWindowTitle("(1) Probe — Ancilla");
       assert.deepEqual(titles, ["(1) Probe — Ancilla"]);
     } finally {

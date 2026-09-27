@@ -1,7 +1,7 @@
 // The design's fictional run, "offline-sync-research-design" in project lantern, as the model test builds it:
 // a workflow item revised the way Muse sends it, so component tests render the view-models the app would.
 import { applyEvents, emptyFold, type ThreadFold } from "../../src/model/fold.js";
-import { attentionOrder, phasesOf, runCounts, swarmView, type AgentState, type AgentVM, type RunVM, type SwarmOptions, type SwarmVM } from "../../src/model/swarm.js";
+import { attentionOrder, phasesOf, runCounts, crewView, type AgentState, type AgentVM, type RunVM, type CrewOptions, type CrewVM } from "../../src/model/crew.js";
 import type { MspItem, SessionSummary, ViewEvent, WorkflowChild } from "../../src/types.js";
 
 /** The run started at 14:02:00; every time below is minutes and seconds into it. */
@@ -171,9 +171,9 @@ export const APPROVAL: ViewEvent = {
 export const APPROVED: ViewEvent = { method: "approval/resolved", at: S(41, 16), params: { approvalId: "ap1", decision: "approved", resolvedBy: "user" } };
 
 /** The thread as it stood at `now`: the launch and every event up to then, viewed then. */
-export function view(feed: Feed, now = NOW, extra: SwarmOptions = {}, events: ViewEvent[] = []): { fold: ThreadFold; vm: SwarmVM } {
+export function view(feed: Feed, now = NOW, extra: CrewOptions = {}, events: ViewEvent[] = []): { fold: ThreadFold; vm: CrewVM } {
   const f = fold([launch(), ...feed.events, ...events].filter((event) => event.at === undefined || event.at <= now));
-  return { fold: f, vm: swarmView(f, SESSION, now, extra) };
+  return { fold: f, vm: crewView(f, SESSION, now, extra) };
 }
 
 /** The run finished at 45m 10s: everyone landed, conflict-ledger on attempt 3 after the user's retry. */
@@ -193,7 +193,7 @@ export function finishedRun(now = S(50, 0)): RunVM {
   return view(finishedFeed(), now, {}, [APPROVAL, APPROVED]).vm.runs[0] as RunVM;
 }
 
-export function runningRun(extra: SwarmOptions = {}, events: ViewEvent[] = []): RunVM {
+export function runningRun(extra: CrewOptions = {}, events: ViewEvent[] = []): RunVM {
   return view(lantern(), NOW, extra, events).vm.runs[0] as RunVM;
 }
 

@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Strip, stripCounts, stripLabel, type StripCell, type StripProps } from "../src/components/swarm/Strip.js";
+import { Strip, stripCounts, stripLabel, type StripCell, type StripProps } from "../src/components/crew/Strip.js";
 
 const STATES: StripCell[] = ["planned", "scheduled", "working", "finishing", "no-update", "waiting-on-you", "failed", "skipped", "done", "unknown"];
 
@@ -23,9 +23,9 @@ function render(props: StripProps): string {
 
 /** The cell classes in drawing order, phase by phase. */
 function cells(markup: string): string[][] {
-  return markup.split('<span class="swarm-phase">').slice(1).map((phase) => {
-    const inner = /^((?:<span class="swarm-cell [^"]*"><\/span>)*)<\/span>/.exec(phase)?.[1] ?? "";
-    return [...inner.matchAll(/class="swarm-cell ([^"]*)"/g)].map((cell) => cell[1]);
+  return markup.split('<span class="crew-phase">').slice(1).map((phase) => {
+    const inner = /^((?:<span class="crew-cell [^"]*"><\/span>)*)<\/span>/.exec(phase)?.[1] ?? "";
+    return [...inner.matchAll(/class="crew-cell ([^"]*)"/g)].map((cell) => cell[1]);
   });
 }
 
@@ -49,7 +49,7 @@ describe("Strip", () => {
   it("draws one cell per agent, in schedule order, with the shape of its state", () => {
     const markup = render({ groups: [STATES] });
     assert.deepEqual(cells(markup), [["planned", "pending", "work", "finishing", "quiet", "need", "fail", "stop", "done", "unknown"]]);
-    assert.equal((markup.match(/swarm-cell/g) ?? []).length, STATES.length);
+    assert.equal((markup.match(/crew-cell/g) ?? []).length, STATES.length);
   });
 
   it("groups cells by phase, with a gap per phase and nothing for an empty one", () => {
@@ -60,7 +60,7 @@ describe("Strip", () => {
 
   it("carries the counts as text, attention before momentum, never a bare number", () => {
     const markup = render({ groups: RUN });
-    assert.match(markup, /^<span role="img" aria-label="10 agents in 4 phases: 6 done, 1 failed, 1 no update, 1 working, 1 planned" class="swarm-strip">/);
+    assert.match(markup, /^<span role="img" aria-label="10 agents in 4 phases: 6 done, 1 failed, 1 no update, 1 working, 1 planned" class="crew-strip">/);
     assert.equal(stripLabel([["waiting-on-you", "done"]]), "2 agents: 1 done, 1 needs you");
     assert.equal(stripLabel([["waiting-on-you", "waiting-on-you", "scheduled"]]), "3 agents: 2 need you, 1 queued");
     assert.equal(stripLabel([["working"]]), "1 agent: 1 working");
@@ -73,7 +73,7 @@ describe("Strip", () => {
   it("says when nothing is scheduled yet", () => {
     assert.match(render({ groups: [] }), /aria-label="No agents scheduled yet"/);
     assert.match(render({ groups: [[]], more: true }), /aria-label="No agents scheduled yet, more may start"/);
-    assert.doesNotMatch(render({ groups: [] }), /swarm-cell|swarm-phase/);
+    assert.doesNotMatch(render({ groups: [] }), /crew-cell|crew-phase/);
   });
 
   it("ends with a dashed cell while the plan is unknown", () => {
@@ -86,7 +86,7 @@ describe("Strip", () => {
   it("takes a label of its own, or stays decorative when the text is beside it", () => {
     assert.match(render({ groups: RUN, label: "Judge · 6 of 10" }), /role="img" aria-label="Judge · 6 of 10"/);
     const decorative = render({ groups: RUN, decorative: true });
-    assert.match(decorative, /^<span aria-hidden="true" class="swarm-strip">/);
+    assert.match(decorative, /^<span aria-hidden="true" class="crew-strip">/);
     assert.doesNotMatch(decorative, /role=|aria-label/);
   });
 
@@ -100,7 +100,7 @@ describe("Strip", () => {
     it("turns a phase past 48 agents into a proportional bar and keeps the others as cells", () => {
       const big: StripCell[] = [...fill("done", 30), ...fill("working", 10), ...fill("failed", 5), ...fill("scheduled", 3), "planned"];
       const markup = render({ groups: [big, ["done", "working"]] });
-      assert.equal((markup.match(/swarm-bin/g) ?? []).length, 1);
+      assert.equal((markup.match(/crew-bin/g) ?? []).length, 1);
       assert.deepEqual(segments(markup), [
         { kind: "done", width: 61.2 },
         { kind: "work", width: 20.4 },
@@ -113,7 +113,7 @@ describe("Strip", () => {
 
     it("keeps exactly 48 cells as cells", () => {
       const markup = render({ groups: [fill("done", 48)] });
-      assert.doesNotMatch(markup, /swarm-bin/);
+      assert.doesNotMatch(markup, /crew-bin/);
       assert.equal(cells(markup)[0].length, 48);
     });
 
@@ -128,9 +128,9 @@ describe("Strip", () => {
     it("bins the whole strip past the sidebar's 24, at the width it is given", () => {
       const phases = [fill("done", 7), fill("done", 7), fill("working", 7), fill("planned", 7)];
       const markup = render({ groups: phases, size: "xs", bin: "run", binAt: 24, binWidth: 72 });
-      assert.match(markup, /class="swarm-strip xs"/);
-      assert.doesNotMatch(markup, /swarm-phase/);
-      assert.match(markup, /<span class="swarm-bin" style="--bw:72px">/);
+      assert.match(markup, /class="crew-strip xs"/);
+      assert.doesNotMatch(markup, /crew-phase/);
+      assert.match(markup, /<span class="crew-bin" style="--bw:72px">/);
       assert.deepEqual(segments(markup), [{ kind: "done", width: 50 }, { kind: "work", width: 25 }, { kind: "pending", width: 25 }]);
       assert.match(markup, /aria-label="28 agents in 4 phases: 14 done, 7 working, 7 planned"/);
       // At the threshold the cells stay, and a run bar never sets a width it was not given.
@@ -145,27 +145,27 @@ describe("Strip", () => {
 
   describe("sizes and modifiers", () => {
     it("sets the size class for every size but the default", () => {
-      assert.match(render({ groups: RUN }), /class="swarm-strip"/);
-      assert.match(render({ groups: RUN, size: "sm" }), /class="swarm-strip"/);
-      for (const size of ["xs", "md", "rail"] as const) assert.match(render({ groups: RUN, size }), new RegExp(`class="swarm-strip ${size}"`));
+      assert.match(render({ groups: RUN }), /class="crew-strip"/);
+      assert.match(render({ groups: RUN, size: "sm" }), /class="crew-strip"/);
+      for (const size of ["xs", "md", "rail"] as const) assert.match(render({ groups: RUN, size }), new RegExp(`class="crew-strip ${size}"`));
     });
 
     it("marks the finale, and the sheen only with it", () => {
-      assert.match(render({ groups: RUN, finale: true }), /class="swarm-strip finale"/);
-      assert.match(render({ groups: RUN, finale: true, sheen: true }), /class="swarm-strip finale swarm-sheen"/);
+      assert.match(render({ groups: RUN, finale: true }), /class="crew-strip finale"/);
+      assert.match(render({ groups: RUN, finale: true, sheen: true }), /class="crew-strip finale crew-sheen"/);
       assert.doesNotMatch(render({ groups: RUN, sheen: true }), /sheen|finale/);
     });
 
     it("marks a stale strip and every cell in it as last known", () => {
       const markup = render({ groups: [["working", "done"]], stale: true, more: true });
-      assert.match(markup, /class="swarm-strip stale"/);
+      assert.match(markup, /class="crew-strip stale"/);
       assert.deepEqual(cells(markup), [["work stale", "done stale"], ["more stale"]]);
-      assert.match(render({ groups: [fill("working", 3)], stale: true, binAt: 2 }), /class="swarm-bin stale"/);
+      assert.match(render({ groups: [fill("working", 3)], stale: true, binAt: 2 }), /class="crew-bin stale"/);
       assert.doesNotMatch(render({ groups: RUN }), /stale/);
     });
 
     it("passes a class through", () => {
-      assert.match(render({ groups: RUN, className: "shrink-0" }), /class="swarm-strip shrink-0"/);
+      assert.match(render({ groups: RUN, className: "shrink-0" }), /class="crew-strip shrink-0"/);
     });
   });
 
@@ -174,12 +174,12 @@ describe("Strip", () => {
 
     it("draws every class the strip emits", () => {
       for (const kind of ["done", "work", "finishing", "quiet", "need", "fail", "stop", "planned", "pending", "unknown", "more"]) {
-        assert.match(css, new RegExp(`\\.swarm-cell\\.${kind}\\b`), kind);
+        assert.match(css, new RegExp(`\\.crew-cell\\.${kind}\\b`), kind);
       }
       for (const kind of ["done", "work", "quiet", "need", "fail", "stop", "unknown", "pending"]) {
-        assert.match(css, new RegExp(`\\.swarm-bin > \\.${kind}\\b`), kind);
+        assert.match(css, new RegExp(`\\.crew-bin > \\.${kind}\\b`), kind);
       }
-      for (const selector of [".swarm-strip", ".swarm-strip.xs", ".swarm-strip.md", ".swarm-strip.rail", ".swarm-strip.finale", ".swarm-cell.stale", ".swarm-bin.stale", ".swarm-strip > .swarm-phase", ".swarm-strip.finale.swarm-sheen"]) {
+      for (const selector of [".crew-strip", ".crew-strip.xs", ".crew-strip.md", ".crew-strip.rail", ".crew-strip.finale", ".crew-cell.stale", ".crew-bin.stale", ".crew-strip > .crew-phase", ".crew-strip.finale.crew-sheen"]) {
         assert.ok(css.includes(selector), selector);
       }
     });
@@ -188,9 +188,9 @@ describe("Strip", () => {
       for (const token of ["--ok-soft", "--cell-done", "--cell-done-ok", "--bar-fill", "--lane-done", "--hatch", "--hatch-fail", "--sigil-ink", "--dur-micro", "--dur-fill", "--dur-collapse", "--dur-digits", "--dur-breathe", "--dur-sheen"]) {
         assert.match(css, new RegExp(`^\\s*${token}:`, "m"), token);
       }
-      for (const name of ["swarm-breathe", "swarm-sheen", "swarm-settle"]) assert.ok(css.includes(`@keyframes ${name} {`), name);
+      for (const name of ["crew-breathe", "crew-sheen", "crew-settle"]) assert.ok(css.includes(`@keyframes ${name} {`), name);
       const reduced = css.slice(css.lastIndexOf("@media (prefers-reduced-motion: reduce)"));
-      for (const selector of [".swarm-sigil.work > svg", ".swarm-breathe", ".swarm-settle", ".swarm-strip.finale.swarm-sheen .swarm-cell.done", ".swarm-cell"]) {
+      for (const selector of [".crew-sigil.work > svg", ".crew-breathe", ".crew-settle", ".crew-strip.finale.crew-sheen .crew-cell.done", ".crew-cell"]) {
         assert.ok(reduced.includes(selector), selector);
       }
     });

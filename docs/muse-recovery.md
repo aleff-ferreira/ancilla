@@ -58,7 +58,7 @@ saved progress without resending the task. **Last checked** is the latest succes
 when a check last found something new, so a check that finds nothing new moves only **Last checked**. **Reload
 results** reads immediately.
 
-The [Swarm card](agent-activity.md) reads **Last known** while the feed is unavailable, freezes every clock at the
+The [Crew card](agent-activity.md) reads **Last known** while the feed is unavailable, freezes every clock at the
 last moment Ancilla heard from Muse, and stops animating agents that were working when the feed went quiet.
 
 ### When it ends
@@ -151,7 +151,7 @@ yourself:
 
 1. Start a long workflow from a thread and keep that thread selected.
 2. If the feed stalls, **Syncing saved progress** appears and **Last checked** advances about every 15 seconds, while
-   the transcript and the Swarm card keep filling in.
+   the transcript and the Crew card keep filling in.
 3. The server's `/api/health` shows how long each session's feed has been quiet (`diagnostics.sessions`). For the web
    server on its default port that is `http://127.0.0.1:3127/api/health`; if you started it with `--token`, the
    endpoint needs that token like the rest of the API (sign in on that address first, or send

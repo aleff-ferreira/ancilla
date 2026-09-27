@@ -15,7 +15,7 @@ export function fakeResearchWorker(over: Partial<ResearchWorkerView> & { agentId
   return { round: 1, topic: "a topic", discovery: false, state: "working", toolCalls: 0, searches: 0, reads: 0, saved: 0, startedAt: null, endedAt: null, ...over };
 }
 
-/** The Swarm surfaces' research scenario: three workers in two rounds, one done, one failed, one working. */
+/** The Crew surfaces' research scenario: three workers in two rounds, one done, one failed, one working. */
 export function runningResearch(over: Partial<ResearchRunView> = {}): ResearchRunView {
   const base = fakeResearchRun({});
   return fakeResearchRun({

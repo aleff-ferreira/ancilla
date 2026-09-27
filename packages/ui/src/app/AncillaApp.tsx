@@ -5,7 +5,7 @@ import { WhatsNew } from "../components/app/WhatsNew.js";
 import { BootError, BootScreen, NewThread, Onboarding, Welcome } from "../components/home/Home.js";
 import { CommandPalette } from "../components/palette/CommandPalette.js";
 import { isTyping } from "../components/requests/Requests.js";
-import { ActivityDrawerHost } from "../components/swarm/ActivityDrawer.js";
+import { ActivityDrawerHost } from "../components/crew/ActivityDrawer.js";
 import { SettingsPage } from "../components/settings/SettingsPage.js";
 import { Sidebar } from "../components/sidebar/Sidebar.js";
 import { ThreadView } from "../components/thread/ThreadView.js";
@@ -16,11 +16,11 @@ import { Toasts } from "../components/ui/Toasts.js";
 import { AncillaController, type Platform } from "../model/controller.js";
 import type { Notifier } from "../model/notify.js";
 import type { AppUpdater } from "../model/updates.js";
-import { windowTitleCount } from "../model/swarm.js";
+import { windowTitleCount } from "../model/crew.js";
 import { zoomStepFromKey, type ZoomStep } from "../model/zoom-shortcut.js";
 import { ControllerProvider, useApp, useController } from "./context.js";
 import { FrameProvider, FrameStrip, WindowControls, type WindowFrame } from "./frame.js";
-import { swarmShortcut, windowTitle } from "./swarm-shortcuts.js";
+import { crewShortcut, windowTitle } from "./crew-shortcuts.js";
 
 declare global {
   interface WindowEventMap {
@@ -147,15 +147,15 @@ function GlobalShortcuts() {
         applyZoomStep(controller, zoom);
         return;
       }
-      const swarm = swarmShortcut(event, isMac);
-      if (swarm === "activity") {
+      const crew = crewShortcut(event, isMac);
+      if (crew === "activity") {
         event.preventDefault();
-        controller.setActivityOpen(!controller.store.get().swarm.activityOpen);
+        controller.setActivityOpen(!controller.store.get().crew.activityOpen);
         return;
       }
-      if (swarm === "swarm") {
+      if (crew === "crew") {
         event.preventDefault();
-        controller.toggleSwarmPanel();
+        controller.toggleCrewPanel();
         return;
       }
       if (mod && !event.shiftKey && !event.altKey && key === "k") {
