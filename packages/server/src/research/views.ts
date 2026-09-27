@@ -1,5 +1,6 @@
 import {
   ZERO_USAGE,
+  modernizeCitations,
   type ResearchPhase,
   type ResearchRunRecord,
   type ResearchRunView,
@@ -97,7 +98,7 @@ export function runView(record: ResearchRunRecord, rows: ResearchWorkerRecord[],
     usage: state?.usage ?? { ...ZERO_USAGE },
     failure: record.failure,
     reportAvailable: record.report !== null && record.report.length > 0,
-    report: options.withReport ? record.report : null,
+    report: options.withReport && record.report ? modernizeCitations(record.report) : null,
     reportPath: record.reportPath,
     config: record.config,
   };

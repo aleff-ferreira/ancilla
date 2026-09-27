@@ -20,7 +20,7 @@ export interface FinalRegistryEntry extends SourceEntry {
 
 export interface FinalizedCitations {
   report: string;
-  /** The entries that were cited and present, in first-appearance order; position plus one is the `[n]` number. */
+  /** The entries that were cited and present, in first-appearance order; position plus one is the footnote number. */
   cited: SourceEntry[];
   /** Codes that looked like citations but were not in the registry; they stay in the body as plain text. */
   unknownCodes: string[];
@@ -173,15 +173,68 @@ function bodyWithoutSources(text: string): string {
   return cleaned.slice(0, header.index).trimEnd();
 }
 
+/** Link text keeps its brackets literal; a URL with spaces or parentheses goes in angle brackets so it parses whole. */
+export function markdownLink(title: string, url: string): string {
+  const text = title.replace(/([\[\]\\])/g, "\\$1");
+  const target = /[\s()<>]/.test(url) ? `<${url.replace(/[<>]/g, (c) => encodeURIComponent(c))}>` : url;
+  return `[${text}](${target})`;
+}
+
+/** One entry of the Sources section: a GFM footnote definition whose text is the title linked to the URL. */
 function sourceLine(number: number, entry: SourceEntry): string {
   const title = (entry.title ?? "").trim() || "Untitled";
-  return `[${number}] ${title} (${entry.url})`;
+  return `[^${number}]: ${markdownLink(title, entry.url)}`;
 }
 
 /**
- * Keeps only the codes that are cited and present in the registry, renumbers them to `[1..N]` in first-appearance
- * order, and appends a `## Sources` section built from the registry. Unknown codes lose their brackets and stay as
- * plain text. When nothing valid was cited the cleaned body comes back without a Sources section, which is never
+ * A body that opens a code fence and never closes it would swallow everything appended after it, Sources
+ * included, into that block. Balancing the fence first keeps the sources readable whatever the writer did.
+ */
+function closeOpenFence(body: string): string {
+  let open: string | null = null;
+  for (const line of body.split("\n")) {
+    const fence = /^\s{0,3}(`{3,}|~{3,})/.exec(line);
+    if (!fence) continue;
+    const marker = fence[1] as string;
+    if (open === null) open = marker;
+    else if (marker[0] === open[0] && marker.length >= open.length) open = null;
+  }
+  return open === null ? body : `${body}\n${open}`;
+}
+
+/** A legacy Sources line, `[3] Title (https://url)`, as written through Ancilla 0.19.1. */
+const LEGACY_SOURCE_RE = /^\[(\d+)\]\s+(.*?)\s*\((\S+?)\)\s*$/;
+
+/**
+ * Reports written before footnotes cited as `[3]` and listed `[3] Title (url)` under `## Sources`. This rewrites
+ * such a report into the footnote form so old runs read and export like new ones. A report already in the
+ * footnote form, or without a legacy Sources section, comes back unchanged.
+ */
+export function modernizeCitations(report: string): string {
+  const header = /^#{1,3}\s+Sources\s*$/im.exec(report);
+  if (!header) return report;
+  const body = report.slice(0, header.index);
+  const section = report.slice(header.index + header[0].length);
+  const numbers = new Set<string>();
+  const lines: string[] = [];
+  for (const raw of section.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const match = LEGACY_SOURCE_RE.exec(line);
+    if (!match) return report;
+    numbers.add(match[1] as string);
+    lines.push(`[^${match[1]}]: ${markdownLink((match[2] as string).trim() || "Untitled", match[3] as string)}`);
+  }
+  if (lines.length === 0) return report;
+  const rewritten = body.replace(/\[(\d+)\]/g, (whole, number: string) => (numbers.has(number) ? `[^${number}]` : whole));
+  return `${rewritten.trimEnd()}\n\n## Sources\n\n${lines.join("\n")}`;
+}
+
+/**
+ * Keeps only the codes that are cited and present in the registry, renumbers them to footnotes `[^1..N]` in
+ * first-appearance order, and appends a `## Sources` section of footnote definitions built from the registry, each
+ * the title linked to the URL, so any GFM renderer makes the citations clickable. Unknown codes lose their brackets
+ * and stay as plain text. When nothing valid was cited the cleaned body comes back without a Sources section, which is never
  * worse than what the writer produced (upstream `_finalize_code_citations` with `renumber=True`).
  */
 export function finalizeCitations(report: string, registry: SourceEntry[]): FinalizedCitations {
@@ -201,7 +254,7 @@ export function finalizeCitations(report: string, registry: SourceEntry[]): Fina
     const unknown: string[] = [];
     for (const code of splitGroup(group)) {
       const number = numberOf.get(code);
-      if (number !== undefined) known.push(`[${number}]`);
+      if (number !== undefined) known.push(`[^${number}]`);
       else unknown.push(code);
     }
     if (unknown.length === 0) return known.join("");
@@ -214,5 +267,5 @@ export function finalizeCitations(report: string, registry: SourceEntry[]): Fina
     return { report: rewritten, cited: [], unknownCodes };
   }
   const lines = citedEntries.map((entry, index) => sourceLine(index + 1, entry));
-  return { report: `${rewritten}\n\n## Sources\n\n${lines.join("\n")}`, cited: citedEntries, unknownCodes };
+  return { report: `${closeOpenFence(rewritten)}\n\n## Sources\n\n${lines.join("\n")}`, cited: citedEntries, unknownCodes };
 }

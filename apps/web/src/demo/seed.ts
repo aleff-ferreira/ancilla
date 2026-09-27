@@ -1326,30 +1326,30 @@ export const RESEARCH_CONFIG: ResearchConfig = {
 /** The finished run's report: what it says is true of WCAG, and every citation is a page the workers read. */
 export const RESEARCH_REPORT = `# What muted text has to meet in dark mode
 
-**Short answer.** WCAG 2.1 asks the same of secondary text as of any other body text: a contrast ratio of at least 4.5:1 against its background, or 3:1 when the text is large, which the guideline defines as 18 point, or 14 point bold [1]. There is no lower bar for text that is meant to look secondary; the technique notes are explicit that de-emphasised text is still text [2]. The AAA level raises the body-text bar to 7:1 [3].
+**Short answer.** WCAG 2.1 asks the same of secondary text as of any other body text: a contrast ratio of at least 4.5:1 against its background, or 3:1 when the text is large, which the guideline defines as 18 point, or 14 point bold [^1]. There is no lower bar for text that is meant to look secondary; the technique notes are explicit that de-emphasised text is still text [^2]. The AAA level raises the body-text bar to 7:1 [^3].
 
 ## What the guideline says
 
-The minimum-contrast criterion (1.4.3) is a Level AA requirement and applies to the visual presentation of text and images of text. It exempts three things only: text that is part of an inactive user interface component, purely decorative text, and text inside a picture where the picture carries the meaning [1]. Placeholder and hint text are not on that list, and the Understanding document treats them as ordinary text [2].
+The minimum-contrast criterion (1.4.3) is a Level AA requirement and applies to the visual presentation of text and images of text. It exempts three things only: text that is part of an inactive user interface component, purely decorative text, and text inside a picture where the picture carries the meaning [^1]. Placeholder and hint text are not on that list, and the Understanding document treats them as ordinary text [^2].
 
-The ratio is computed from relative luminance, so it does not care which of the two colours is lighter. That is why a muted grey that passes on white can fail on a dark surface: the same grey sits closer in luminance to a dark canvas than to a light one [2].
+The ratio is computed from relative luminance, so it does not care which of the two colours is lighter. That is why a muted grey that passes on white can fail on a dark surface: the same grey sits closer in luminance to a dark canvas than to a light one [^2].
 
 ## What that means for a dark theme
 
-- Pick the muted colour per theme rather than sharing one hex value across both. A single value tuned for the light theme is the usual cause of a dark-mode failure [2].
-- Check the muted colour against every surface it sits on, not only the page background. Cards and sidebars in a dark theme are often a few steps lighter than the canvas, which lowers the ratio further [1].
-- Large text and non-text elements have their own, lower bar of 3:1 (1.4.11 for user interface components and graphical objects), which is the number to use for borders and icons, not for captions [4].
+- Pick the muted colour per theme rather than sharing one hex value across both. A single value tuned for the light theme is the usual cause of a dark-mode failure [^2].
+- Check the muted colour against every surface it sits on, not only the page background. Cards and sidebars in a dark theme are often a few steps lighter than the canvas, which lowers the ratio further [^1].
+- Large text and non-text elements have their own, lower bar of 3:1 (1.4.11 for user interface components and graphical objects), which is the number to use for borders and icons, not for captions [^4].
 
 ## Open questions
 
-The guideline measures contrast with the WCAG 2 formula. The draft APCA model used in some design tools weights dark-on-light and light-on-dark text differently, and a colour that passes one can fail the other; nothing here settles which a product should follow, only that the shipping standard is the WCAG 2 ratio [1].
+The guideline measures contrast with the WCAG 2 formula. The draft APCA model used in some design tools weights dark-on-light and light-on-dark text differently, and a colour that passes one can fail the other; nothing here settles which a product should follow, only that the shipping standard is the WCAG 2 ratio [^1].
 
 ## Sources
 
-[1] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.3 Contrast (Minimum) (https://www.w3.org/TR/WCAG21/#contrast-minimum)
-[2] Understanding Success Criterion 1.4.3: Contrast (Minimum) (https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html)
-[3] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.6 Contrast (Enhanced) (https://www.w3.org/TR/WCAG21/#contrast-enhanced)
-[4] Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.11 Non-text Contrast (https://www.w3.org/TR/WCAG21/#non-text-contrast)
+[^1]: [Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.3 Contrast (Minimum)](https://www.w3.org/TR/WCAG21/#contrast-minimum)
+[^2]: [Understanding Success Criterion 1.4.3: Contrast (Minimum)](https://www.w3.org/WAI/WCAG21/Understanding/contrast-minimum.html)
+[^3]: [Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.6 Contrast (Enhanced)](https://www.w3.org/TR/WCAG21/#contrast-enhanced)
+[^4]: [Web Content Accessibility Guidelines (WCAG) 2.1, Success Criterion 1.4.11 Non-text Contrast](https://www.w3.org/TR/WCAG21/#non-text-contrast)
 `;
 
 /** A worker row as the server reports one; the counts are what it has done so far. */

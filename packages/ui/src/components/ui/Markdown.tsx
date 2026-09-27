@@ -1,9 +1,9 @@
 import { CheckIcon, CopyIcon } from "./icons.js";
-import { Children, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Children, createContext, isValidElement, memo, useContext, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from "react";
 import { looksLikeFilePath, type FileTarget } from "../../model/files.js";
 import { STREAM_SAMPLE_MS, streamRenderMode } from "../../model/streaming.js";
 import { useSampledText } from "../../app/sampled.js";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { highlight } from "sugar-high";
 import { cn } from "./primitives.js";
@@ -161,26 +161,65 @@ export interface FileLinks {
 
 export const FileLinksContext = createContext<FileLinks | null>(null);
 
-function MarkdownLink(props: { href?: string; children?: ReactNode }) {
+/**
+ * A link into the same document, such as a footnote reference or its way back: scrolled to rather than navigated
+ * to, since the app's route lives in the hash. The scroll waits a frame so a container that opens on the click
+ * (a folded report, say) has laid out first.
+ */
+function jumpTo(href: string): void {
+  let id = href.slice(1);
+  try {
+    id = decodeURIComponent(id);
+  } catch {
+    /* an odd id is looked up as written */
+  }
+  requestAnimationFrame(() => {
+    const element = document.getElementById(id);
+    if (!element) return;
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+    element.classList.add("jumped");
+    setTimeout(() => element.classList.remove("jumped"), 1600);
+  });
+}
+
+type LinkProps = Omit<ComponentPropsWithoutRef<"a">, "ref">;
+
+/** Rendered links keep the attributes markdown gave them (a footnote's id and back-reference marks among them). */
+function MarkdownLink({ href, children, node: _node, ...rest }: LinkProps & { node?: unknown }) {
   const links = useContext(FileLinksContext);
-  const target = links && props.href ? links.resolve(props.href) : null;
+  const target = links && href ? links.resolve(href) : null;
+  if (href?.startsWith("#")) {
+    return (
+      <a
+        {...rest}
+        href={href}
+        onClick={(event) => {
+          event.preventDefault();
+          jumpTo(href);
+        }}
+      >
+        {children}
+      </a>
+    );
+  }
   if (links && target) {
     return (
       <a
-        href={props.href}
+        {...rest}
+        href={href}
         title={`Open ${target.path}`}
         onClick={(event) => {
           event.preventDefault();
           links.open(target);
         }}
       >
-        {props.children}
+        {children}
       </a>
     );
   }
   return (
-    <a href={props.href} target="_blank" rel="noreferrer noopener">
-      {props.children}
+    <a {...rest} href={href} target="_blank" rel="noreferrer noopener">
+      {children}
     </a>
   );
 }
@@ -220,7 +259,7 @@ function MarkdownImage(props: { src?: string | Blob; alt?: string }) {
 }
 
 const COMPONENTS: Components = {
-  a: ({ href, children }) => <MarkdownLink href={href}>{children}</MarkdownLink>,
+  a: (props) => <MarkdownLink {...props} />,
   code: ({ className, children }) => <InlineCode className={className}>{children}</InlineCode>,
   img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
   pre: ({ children }) => {
@@ -284,16 +323,77 @@ function rehypeWords() {
 const STREAM_PLUGINS = [rehypeWords];
 
 /**
+ * Each Sources entry gets the page's host after its title, so the reader can weigh a source without following
+ * it: `Understanding Success Criterion 1.4.3 · w3.org`. The link is the first outside link in the entry.
+ */
+function rehypeSourceHosts() {
+  const hostOf = (href: unknown): string | null => {
+    if (typeof href !== "string" || !/^https?:\/\//i.test(href)) return null;
+    try {
+      return new URL(href).hostname.replace(/^www\./, "");
+    } catch {
+      return null;
+    }
+  };
+  const decorate = (item: HastNode): void => {
+    for (const block of item.children ?? []) {
+      const children = block.children ?? [];
+      const index = children.findIndex((child) => child.tagName === "a" && hostOf(child.properties?.["href"]) !== null);
+      if (index < 0) continue;
+      const host = hostOf(children[index]?.properties?.["href"]) as string;
+      children.splice(index + 1, 0, { type: "element", tagName: "span", properties: { className: ["src-host"] }, children: [{ type: "text", value: host }] });
+      block.children = children;
+      return;
+    }
+  };
+  const walk = (node: HastNode): void => {
+    if (node.tagName === "section" && node.properties?.["dataFootnotes"] !== undefined) {
+      for (const list of node.children ?? []) {
+        if (list.tagName !== "ol") continue;
+        for (const item of list.children ?? []) if (item.tagName === "li") decorate(item);
+      }
+      return;
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  return (tree: HastNode) => walk(tree);
+}
+
+const FOOTNOTE_PLUGINS = [rehypeSourceHosts];
+const STREAM_FOOTNOTE_PLUGINS = [rehypeWords, rehypeSourceHosts];
+
+/**
  * Agent prose: GitHub-flavored markdown with highlighted code blocks. `stream` fades in each new
  * word while the text is short; a huge stream renders plain, then from a throttled snapshot, so
  * it cannot cost a full re-parse on every flush.
  */
-export const Markdown = memo(function Markdown(props: { text: string; className?: string; stream?: boolean }) {
+/**
+ * Footnotes render as superscript links to a list at the end. Their element ids are prefixed per document, so two
+ * documents on one page (two reports in a thread) never share an id. The list's own heading stays out of sight:
+ * a document that wants one writes it, as research reports do with `## Sources`.
+ */
+function footnoteOptions(prefix: string): Options["remarkRehypeOptions"] {
+  return {
+    clobberPrefix: prefix,
+    footnoteLabel: "Sources",
+    footnoteLabelProperties: { className: ["sr-only"] },
+    footnoteBackLabel: (referenceIndex: number) => `Back to citation ${referenceIndex + 1}`,
+  };
+}
+
+export const Markdown = memo(function Markdown(props: { text: string; className?: string; stream?: boolean; footnotePrefix?: string }) {
   const mode = streamRenderMode(props.text.length, props.stream ?? false);
   const shown = useSampledText(props.text, mode === "sampled", STREAM_SAMPLE_MS);
+  const remarkRehypeOptions = useMemo(() => (props.footnotePrefix ? footnoteOptions(props.footnotePrefix) : undefined), [props.footnotePrefix]);
+  const rehypePlugins = props.footnotePrefix ? (mode === "words" ? STREAM_FOOTNOTE_PLUGINS : FOOTNOTE_PLUGINS) : mode === "words" ? STREAM_PLUGINS : undefined;
   return (
     <div className={cn("prose-ancilla", props.className)}>
-      <ReactMarkdown remarkPlugins={PLUGINS} rehypePlugins={mode === "words" ? STREAM_PLUGINS : undefined} components={COMPONENTS}>
+      <ReactMarkdown
+        remarkPlugins={PLUGINS}
+        rehypePlugins={rehypePlugins}
+        remarkRehypeOptions={remarkRehypeOptions}
+        components={COMPONENTS}
+      >
         {shown}
       </ReactMarkdown>
     </div>

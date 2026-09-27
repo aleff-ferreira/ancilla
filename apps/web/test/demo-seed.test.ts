@@ -85,8 +85,8 @@ describe("the demo seed", () => {
     assert.equal(done.status, "completed");
     assert.ok(done.reportAvailable && done.report && done.reportPath);
     // Every citation in the report names a source the report lists, and nothing is cited that is not listed.
-    const cited = new Set([...done.report.replace(/## Sources[\s\S]*$/, "").matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
-    const listed = new Set([...(/## Sources([\s\S]*)$/.exec(done.report)?.[1] ?? "").matchAll(/^\[(\d+)\] .+ \(https?:\/\/\S+\)$/gm)].map((m) => Number(m[1])));
+    const cited = new Set([...done.report.replace(/## Sources[\s\S]*$/, "").matchAll(/\[\^(\d+)\]/g)].map((m) => Number(m[1])));
+    const listed = new Set([...(/## Sources([\s\S]*)$/.exec(done.report)?.[1] ?? "").matchAll(/^\[\^(\d+)\]: \[.+\]\(https?:\/\/\S+\)$/gm)].map((m) => Number(m[1])));
     assert.ok(cited.size > 0 && listed.size > 0);
     assert.deepEqual([...cited].sort(), [...listed].sort());
     assert.ok(done.workers.every((worker) => worker.state === "completed"));

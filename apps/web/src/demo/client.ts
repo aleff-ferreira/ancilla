@@ -1406,14 +1406,14 @@ export class DemoAncillaClient implements AncillaClient {
       "",
       "## What a real report looks like",
       "",
-      `Each claim carries a marker like this one [1], and the marker points at a page one of the workers actually opened, never at something the model remembered. The supervisor sent ${run.workers.length} workers over ${run.round} ${run.round === 1 ? "round" : "rounds"}; ${run.sources.verified} of the ${run.sources.registry} pages they turned up were read and verified, and the writer cites only those [2].`,
+      `Each claim carries a marker like this one [^1], and the marker points at a page one of the workers actually opened, never at something the model remembered. The supervisor sent ${run.workers.length} workers over ${run.round} ${run.round === 1 ? "round" : "rounds"}; ${run.sources.verified} of the ${run.sources.registry} pages they turned up were read and verified, and the writer cites only those [^2].`,
       "",
       "Muse ran every search and every read here on your plan, so the tokens above are the run's real cost and appear on the Usage page under this thread.",
       "",
       "## Sources",
       "",
-      "[1] Ancilla demo mode (https://example.com/ancilla-demo)",
-      "[2] How deep research cites its sources (https://example.com/ancilla-demo/citations)",
+      "[^1]: [Ancilla demo mode](https://example.com/ancilla-demo)",
+      "[^2]: [How deep research cites its sources](https://example.com/ancilla-demo/citations)",
       "",
     ].join("\n");
   }

@@ -38,7 +38,7 @@ describe("runResearch", () => {
     const outcome = await runResearch(INPUT, testConfig(), harness.deps, new AbortController().signal);
     assert.equal(outcome.status, "completed");
     assert.equal(outcome.failure, null);
-    assert.equal(outcome.report, "# Report\n\nA claim [1]. Another [2].\n\n## Sources\n\n[1] Source A1 (https://example.org/a1)\n[2] Source A2 (https://example.org/a2)");
+    assert.equal(outcome.report, "# Report\n\nA claim [^1]. Another [^2].\n\n## Sources\n\n[^1]: [Source A1](https://example.org/a1)\n[^2]: [Source A2](https://example.org/a2)");
     assert.equal(outcome.state.phase, "done");
     assert.equal(outcome.state.brief, "Research brief for the question.");
     assert.equal(outcome.state.draft, null);
@@ -57,7 +57,7 @@ describe("runResearch", () => {
     const harness = makeHarness(model, worker, clock);
     const outcome = await runResearch(INPUT, testConfig(), harness.deps, new AbortController().signal);
     assert.equal(outcome.status, "completed");
-    assert.equal(outcome.report, "# R\n\nSeen [1]. Claimed A1-S2.\n\n## Sources\n\n[1] Seen (https://seen.org/p)");
+    assert.equal(outcome.report, "# R\n\nSeen [^1]. Claimed A1-S2.\n\n## Sources\n\n[^1]: [Seen](https://seen.org/p)");
     assert.deepEqual(
       outcome.state.registry.map((e) => [e.code, e.verified]),
       [
@@ -92,7 +92,7 @@ describe("runResearch", () => {
     const harness = makeHarness(model, worker, clock);
     const outcome = await runResearch({ ...INPUT, stopWritesReport: true }, testConfig({ windowMaxMinutes: 10, salvageFraction: 0.6 }), harness.deps, controller.signal);
     assert.equal(outcome.status, "partial");
-    assert.equal(outcome.report, "# Early stop\n\nClaim [1].\n\n## Sources\n\n[1] Source A1 (https://example.org/a1)");
+    assert.equal(outcome.report, "# Early stop\n\nClaim [^1].\n\n## Sources\n\n[^1]: [Source A1](https://example.org/a1)");
     // Without findings there is nothing to write from, whatever the user asked.
     const bare = new FakeModel({ brief: [briefText()], supervisor: [decision("CONTINUE_RESEARCH", ["Only"])], writer: ["unused"] });
     const bareController = new AbortController();
@@ -123,7 +123,7 @@ describe("runResearch", () => {
     const outcome = await runResearch(input, testConfig({ maxParallel: 2, windowMaxMinutes: 10, salvageFraction: 0.6 }), harness.deps, controller.signal);
     assert.equal(outcome.status, "partial");
     assert.match(outcome.failure ?? "", /cancelled/);
-    assert.equal(outcome.report, "# Salvage\n\nClaim [1].\n\n## Sources\n\n[1] Source A1 (https://example.org/a1)");
+    assert.equal(outcome.report, "# Salvage\n\nClaim [^1].\n\n## Sources\n\n[^1]: [Source A1](https://example.org/a1)");
     // Agents 1 and 2 held the two lanes when agent 2's start aborted the run; agents 3 to 5 were queued and never started.
     assert.deepEqual(
       worker.tasks.map((t) => t.agentId),
@@ -282,7 +282,7 @@ describe("runResearch", () => {
     );
     assert.equal(outcome.state.rounds[1]?.delegations[0]?.topic, "Resumed topic");
     assert.equal(outcome.state.rounds[1]?.delegations[0]?.agentId, 3);
-    assert.equal(outcome.report, "# R\n\n[1] and [2].\n\n## Sources\n\n[1] Source A1 (https://example.org/a1)\n[2] Source A3 (https://example.org/a3)");
+    assert.equal(outcome.report, "# R\n\n[^1] and [^2].\n\n## Sources\n\n[^1]: [Source A1](https://example.org/a1)\n[^2]: [Source A3](https://example.org/a3)");
     assert.equal(outcome.state.config.maxRounds, testConfig().maxRounds);
   });
 
@@ -406,7 +406,7 @@ describe("runResearch", () => {
     const resumed = await runResearch(INPUT, testConfig(), harness2.deps, new AbortController().signal, checkpoint);
     assert.equal(resumed.status, "partial");
     assert.equal(resumed.failure, first.failure);
-    assert.equal(resumed.report, "# Salvaged again\n\nClaim [1].\n\n## Sources\n\n[1] A (https://a.org)");
+    assert.equal(resumed.report, "# Salvaged again\n\nClaim [^1].\n\n## Sources\n\n[^1]: [A](https://a.org)");
     assert.match(model2.calls[0]?.prompt ?? "", /Research was stopped before the supervisor concluded/);
     assert.equal(model2.counts.supervisor, 0);
   });

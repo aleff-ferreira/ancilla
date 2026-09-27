@@ -140,8 +140,8 @@ describe("ResearchRunRow", () => {
   });
 
   it("renders the report through Markdown once complete, folded past a screen's worth, with Copy and Open", () => {
-    const lines = Array.from({ length: 20 }, (_, i) => `Paragraph ${i + 1} cites a source [${(i % 3) + 1}].`);
-    const report = `# Geothermal in Europe\n\n${lines.join("\n\n")}\n\n## Sources\n\n[1] A page (https://example.com/a)\n`;
+    const lines = Array.from({ length: 20 }, (_, i) => `Paragraph ${i + 1} cites a source [^${(i % 3) + 1}].`);
+    const report = `# Geothermal in Europe\n\n${lines.join("\n\n")}\n\n## Sources\n\n[^1]: [A page](https://example.com/a)\n[^2]: [B page](https://example.com/b)\n[^3]: [C page](https://example.com/c)\n`;
     const markup = render(fakeResearchRun({ status: "completed", phase: "done", endedAt: "2026-09-26T00:08:01.000Z", reportAvailable: true, report, reportPath: "/work/app/.ancilla/research/run-1/report.md" }));
     assert.match(markup, /<h1>Geothermal in Europe<\/h1>/);
     assert.match(text(markup), /Report/);
@@ -153,8 +153,20 @@ describe("ResearchRunRow", () => {
     assert.doesNotMatch(markup, /data-research-phase/);
   });
 
+  it("renders citations as superscript links into a Sources list whose entries link to the pages", () => {
+    const report = "# Short\n\nOne line [^1][^2].\n\n## Sources\n\n[^1]: [A page](https://example.com/a)\n[^2]: [B page](https://example.com/b)";
+    const markup = render(fakeResearchRun({ runId: "run-9", status: "completed", phase: "done", reportAvailable: true, report }));
+    assert.match(markup, /<sup><a id="research-run-9-fnref-1"[^>]*href="#research-run-9-fn-1"[^>]*>1<\/a><\/sup>/, "a reference is a superscript link with the run's own id prefix");
+    assert.match(markup, /<li id="research-run-9-fn-2">/, "the entry carries the id the reference points at");
+    assert.match(markup, /<a href="https:\/\/example.com\/a" target="_blank" rel="noreferrer noopener">A page<\/a>/, "the title links to the page");
+    assert.match(markup, /data-footnote-backref/, "each entry links back to its citation");
+    assert.match(markup, /A page<\/a><span class="src-host">example.com<\/span>/, "the page's host follows the title");
+    assert.match(markup, /<h2>Sources<\/h2>/, "the report's own Sources heading stays; the generated label is hidden");
+    assert.match(markup, /class="sr-only"[^>]*>Sources</);
+  });
+
   it("shows a short report in full and says it is reading one it does not have yet", () => {
-    const short = render(fakeResearchRun({ status: "completed", phase: "done", reportAvailable: true, report: "# Short\n\nOne line [1].\n\n## Sources\n\n[1] A (https://example.com)" }));
+    const short = render(fakeResearchRun({ status: "completed", phase: "done", reportAvailable: true, report: "# Short\n\nOne line [^1].\n\n## Sources\n\n[^1]: [A](https://example.com)" }));
     assert.doesNotMatch(text(short), /Show all/);
     assert.doesNotMatch(short, /max-h-\[300px\]/);
     const pending = render(fakeResearchRun({ status: "completed", phase: "done", reportAvailable: true, report: null }));

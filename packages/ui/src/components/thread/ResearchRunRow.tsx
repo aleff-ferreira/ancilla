@@ -242,8 +242,15 @@ function Report(props: { run: ResearchRunView; sessionId: string; latest: boolea
         </p>
       ) : null}
       {view === "report" && run.report ? (
-        <div className={cn("relative", long && !expanded && "max-h-[300px] overflow-hidden")}>
-          <Markdown text={run.report} />
+        <div
+          className={cn("relative", long && !expanded && "max-h-[300px] overflow-hidden")}
+          onClickCapture={(event) => {
+            // Following a citation into the folded part of the report unfolds it first.
+            const anchor = (event.target as HTMLElement).closest("a");
+            if (anchor?.getAttribute("href")?.startsWith("#")) setExpanded(true);
+          }}
+        >
+          <Markdown text={run.report} footnotePrefix={`research-${run.runId}-`} />
           {long && !expanded ? <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-raised to-transparent" /> : null}
         </div>
       ) : view === "reading" ? (
