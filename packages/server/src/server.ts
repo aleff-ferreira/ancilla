@@ -1902,7 +1902,15 @@ export class AncillaServer {
         throw new HttpError(404, "Unknown project folder.");
       }
       const target: OpenTarget = body["target"] === "editor" ? "editor" : "files";
-      await this.opener(this.localPathFor(cwd), target);
+      const root = await this.localRootFor(cwd);
+      const relative = str(body["path"]);
+      if (relative) {
+        // One file inside the project, opened by whatever the OS associates with it (a report's PDF, say).
+        const { abs } = await resolveInRoot(root, relative, cwd);
+        await this.opener(abs, "files");
+      } else {
+        await this.opener(root, target);
+      }
       this.json(res, 200, { ok: true });
       return true;
     }
@@ -2254,6 +2262,20 @@ export class AncillaServer {
       return toWindowsPath(remoteRoot);
     } catch {
       return remoteRoot;
+    }
+  }
+
+  /**
+   * Where a project folder is on this machine's file system: what the file viewer reads from, where research
+   * reports are written, and what the OS opener is handed. A Linux path on Windows resolves through WSL to its
+   * `\\wsl.localhost\` share; `localPathFor` alone only knows the `/mnt/x` drives, which is not enough for a
+   * project inside a distro.
+   */
+  private async localRootFor(cwd: string): Promise<string> {
+    try {
+      return resolveUserPath(cwd, await this.pathContext(cwd)).local;
+    } catch {
+      return this.localPathFor(cwd);
     }
   }
 
@@ -3396,7 +3418,7 @@ export class AncillaServer {
     if (!thread.cwd) {
       return null;
     }
-    const directory = join(this.localPathFor(thread.cwd), ...RESEARCH_DIR, run.id);
+    const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, "report.md"), report, "utf8");
     await writeFile(
@@ -4198,12 +4220,7 @@ export class AncillaServer {
     if (!cwd || !this.store.getProject(cwd)) {
       throw new HttpError(404, "Unknown project folder.");
     }
-    let root: string;
-    try {
-      root = resolveUserPath(cwd, await this.pathContext(cwd)).local;
-    } catch {
-      root = this.localPathFor(cwd);
-    }
+    const root = await this.localRootFor(cwd);
     const target = str(body["path"]) ?? url.searchParams.get("path") ?? "";
     if (method === "GET" && path === "/api/files/list") {
       this.json(res, 200, await listFolder(root, cwd, target));
