@@ -6,7 +6,7 @@ import type { Element, ElementContent, Text } from "hast";
 import { toHtml } from "hast-util-to-html";
 import type { FootnoteReference, Image, ImageReference, Root } from "mdast";
 import { type Handlers, type State, toHast } from "mdast-util-to-hast";
-import { type ReportMeta, type ReportSource, splitReport, subtitleOf } from "./markdown.js";
+import { type ReportMeta, type ReportSource, headingOf, splitReport } from "./markdown.js";
 
 const CSS = `
 :root { color-scheme: light dark; --fg: #1f2328; --muted: #59636e; --bg: #ffffff; --rule: #d1d9e0; --code-bg: #f6f8fa; --link: #0969da; --quote: #d1d9e0; }
@@ -86,10 +86,12 @@ function sourcesHtml(sources: ReportSource[]): string {
 
 /** The report as a complete HTML document. */
 export function renderHtml(root: Root, meta: ReportMeta): string {
-  const { body, sources, numberOf } = splitReport(root);
+  const split = splitReport(root);
+  const { body, sources, numberOf } = split;
   const tree = toHast({ type: "root", children: body }, { handlers: handlers(numberOf) as Handlers });
   const article = toHtml(tree);
-  const title = escapeHtml(meta.question.trim() || "Research report");
+  const heading = headingOf(split, meta);
+  const title = escapeHtml(heading.title);
   return [
     "<!doctype html>",
     `<html lang="en">`,
@@ -103,7 +105,7 @@ export function renderHtml(root: Root, meta: ReportMeta): string {
     "<body>",
     "<header>",
     `<h1>${title}</h1>`,
-    `<p class="subtitle">${escapeHtml(subtitleOf(meta))}</p>`,
+    ...heading.lines.map((line) => `<p class="subtitle">${escapeHtml(line)}</p>`),
     "</header>",
     "<main>",
     article,

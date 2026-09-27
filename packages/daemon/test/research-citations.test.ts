@@ -154,6 +154,14 @@ describe("modernizeCitations", () => {
     );
   });
 
+  it("reads the other shapes an old list came in, and keeps a link's text or a definition as it was", () => {
+    const legacy = "See [1] and [2], not [1](https://x.example/) nor the definition below.\n\n[1]: https://def.example/\n\n## Sources\n\n[1] https://a.org/1\n2. Two: (https://en.wikipedia.org/wiki/Foo_(bar))";
+    assert.equal(
+      modernizeCitations(legacy),
+      "See [^1] and [^2], not [1](https://x.example/) nor the definition below.\n\n[1]: https://def.example/\n\n## Sources\n\n[^1]: [https://a.org/1](https://a.org/1)\n[^2]: [Two](<https://en.wikipedia.org/wiki/Foo_(bar)>)",
+    );
+  });
+
   it("leaves a footnote report, a report without Sources, and an unrecognised Sources section alone", () => {
     const modern = "Claim [^1].\n\n## Sources\n\n[^1]: [One](https://a.org/1)";
     assert.equal(modernizeCitations(modern), modern);

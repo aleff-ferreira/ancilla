@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { ResearchEvent, ResearchInput, ResearchRunState } from "@ancilla/daemon";
 import type { ResearchEngine } from "../src/research/index.js";
+import { modernizeCitations } from "@ancilla/daemon";
 import {
-  modernizeCitations,
   parseReport,
   questionSlug,
   renderDocx,
@@ -112,6 +112,15 @@ describe("research export: markdown", () => {
     assert.equal(modernizeCitations("# Q\n\nNo sources [1] here.\n"), "# Q\n\nNo sources [1] here.\n");
   });
 
+  it("takes a report's opening heading as the document title and keeps the question under it", () => {
+    const own = renderHtml(parseReport("# The river, chaptered\n\nBody.\n"), { question: "How to build it?", endedAt: null });
+    assert.match(own, /<h1>The river, chaptered<\/h1>\s*<p class="subtitle">How to build it\?<\/p>\s*<p class="subtitle">Deep research report · Ancilla<\/p>/);
+    assert.doesNotMatch(own, /<main>\s*<h1>/, "the heading does not repeat in the body");
+    const bare = renderHtml(parseReport("Body first.\n\n# Later heading\n"), { question: "How to build it?", endedAt: null });
+    assert.match(bare, /<h1>How to build it\?<\/h1>\s*<p class="subtitle">Deep research report · Ancilla<\/p>/);
+    assert.match(bare, /<main>[\s\S]*<h1>Later heading<\/h1>/, "a heading further down stays where it is");
+  });
+
   it("splits the body from the sources, numbering them in order of first citation", () => {
     const root = parseReport(`Second[^b] then first[^a] and second again[^b].\n\n## Sources\n\n[^a]: [A](https://a.example/)\n[^b]: [B](https://b.example/)\n[^c]: Only a title\n`);
     const split = splitReport(root);
@@ -139,8 +148,8 @@ describe("research export: html", () => {
   it("renders a standalone page with linked citations and a numbered sources list", () => {
     const html = renderHtml(parseReport(REPORT), META);
     assert.match(html, /^<!doctype html>/);
-    assert.match(html, /<title>Why does the Amazon rainforest matter\?<\/title>/);
-    assert.match(html, /<h1>Why does the Amazon rainforest matter\?<\/h1>/);
+    assert.match(html, /<title>Why the Amazon matters<\/title>/, "the report's own heading is the document title");
+    assert.match(html, /<h1>Why the Amazon matters<\/h1>\s*<p class="subtitle">Why does the Amazon rainforest matter\?<\/p>/);
     assert.match(html, /Deep research report · Ancilla · 2026-09-26/);
     assert.match(html, /prefers-color-scheme: dark/);
     assert.match(html, /<sup class="cite"><a href="#src-1">1<\/a><\/sup>/);

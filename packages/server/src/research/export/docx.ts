@@ -27,7 +27,7 @@ import {
   type IRunOptions,
   type ParagraphChild,
 } from "docx";
-import { type ReportMeta, type ReportSource, plainText, splitReport, subtitleOf } from "./markdown.js";
+import { type ReportMeta, type ReportSource, headingOf, plainText, splitReport, subtitleOf } from "./markdown.js";
 
 const BODY_FONT = "Calibri";
 const MONO_FONT = "Consolas";
@@ -286,12 +286,13 @@ function heading(id: string, name: string, size: number, before: number): { id: 
 
 /** The report as a .docx file. */
 export async function renderDocx(root: Root, meta: ReportMeta): Promise<Buffer> {
-  const { body, sources, numberOf } = splitReport(root);
+  const split = splitReport(root);
+  const { body, sources, numberOf } = split;
   const builder = new DocxBuilder(numberOf);
-  const question = meta.question.trim() || "Research report";
+  const head = headingOf(split, meta);
   const document = new Document({
     creator: "Ancilla",
-    title: question,
+    title: head.title,
     description: subtitleOf(meta),
     styles: {
       default: { document: { run: { font: BODY_FONT, size: 22 } } },
@@ -326,12 +327,16 @@ export async function renderDocx(root: Root, meta: ReportMeta): Promise<Buffer> 
           }),
         },
         children: [
-          new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(question)] }),
-          new Paragraph({
-            children: [new TextRun({ text: subtitleOf(meta), color: MUTED, size: 20 })],
-            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 } },
-            spacing: { after: 360 },
-          }),
+          new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun(head.title)] }),
+          ...head.lines.map(
+            (line, index) =>
+              new Paragraph({
+                children: [new TextRun({ text: line, color: MUTED, size: 20 })],
+                ...(index === head.lines.length - 1
+                  ? { border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 } }, spacing: { after: 360 } }
+                  : { spacing: { after: 60 } }),
+              }),
+          ),
           ...builder.blocks(body, { level: 0, quote: false }),
           ...builder.sources(sources),
         ],

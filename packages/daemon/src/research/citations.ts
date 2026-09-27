@@ -202,32 +202,44 @@ function closeOpenFence(body: string): string {
   return open === null ? body : `${body}\n${open}`;
 }
 
-/** A legacy Sources line, `[3] Title (https://url)`, as written through Ancilla 0.19.1. */
-const LEGACY_SOURCE_RE = /^\[(\d+)\]\s+(.*?)\s*\((\S+?)\)\s*$/;
+/** `[3] Title (https://url)`, `[3] https://url` or `3. Title (https://url)`: the shapes older reports listed sources in. */
+const LEGACY_SOURCE_LINE = /^(?:\[(\d+)\]|(\d+)\.)\s+(.*?)\s*$/;
+const TRAILING_URL = /^(.*?)\s*\(?\s*(https?:\/\/\S+?)\)?\s*$/;
 
 /**
  * Reports written before footnotes cited as `[3]` and listed `[3] Title (url)` under `## Sources`. This rewrites
  * such a report into the footnote form so old runs read and export like new ones. A report already in the
- * footnote form, or without a legacy Sources section, comes back unchanged.
+ * footnote form, or without a legacy Sources section, comes back unchanged; a `[3]` that is a link's text or a
+ * reference definition is not a citation and keeps its brackets.
  */
 export function modernizeCitations(report: string): string {
-  const header = /^#{1,3}\s+Sources\s*$/im.exec(report);
-  if (!header) return report;
-  const body = report.slice(0, header.index);
-  const section = report.slice(header.index + header[0].length);
-  const numbers = new Set<string>();
-  const lines: string[] = [];
-  for (const raw of section.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    const match = LEGACY_SOURCE_RE.exec(line);
-    if (!match) return report;
-    numbers.add(match[1] as string);
-    lines.push(`[^${match[1]}]: ${markdownLink((match[2] as string).trim() || "Untitled", match[3] as string)}`);
+  const lines = report.replace(/\r\n?/g, "\n").split("\n");
+  let headingAt = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (/^#{1,3}\s+(?:Sources|References)\s*$/i.test(lines[i] as string)) {
+      headingAt = i;
+      break;
+    }
   }
-  if (lines.length === 0) return report;
-  const rewritten = body.replace(/\[(\d+)\]/g, (whole, number: string) => (numbers.has(number) ? `[^${number}]` : whole));
-  return `${rewritten.trimEnd()}\n\n## Sources\n\n${lines.join("\n")}`;
+  if (headingAt < 0) return report;
+  const numbers = new Set<string>();
+  const sources = lines.slice(headingAt + 1).map((line) => {
+    const match = LEGACY_SOURCE_LINE.exec(line.trim());
+    if (!match) return line;
+    const located = TRAILING_URL.exec((match[3] ?? "").trim());
+    if (!located) return line;
+    const number = (match[1] ?? match[2]) as string;
+    const url = located[2] as string;
+    const title = (located[1] as string).trim().replace(/[\s:–-]+$/, "") || url;
+    numbers.add(number);
+    return `[^${number}]: ${markdownLink(title, url)}`;
+  });
+  if (numbers.size === 0) return report;
+  const body = lines
+    .slice(0, headingAt)
+    .join("\n")
+    .replace(/\[(\d+)\](?![(:])/g, (whole, number: string) => (numbers.has(number) ? `[^${number}]` : whole));
+  return [body, lines[headingAt], ...sources].join("\n");
 }
 
 /**

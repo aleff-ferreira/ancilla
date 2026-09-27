@@ -98,7 +98,7 @@ const completingEngine: ResearchEngine = async (input, config, deps) => {
   });
   await deps.checkpoint(state);
   deps.events.emit(eventOf(input, 4, "run_completed", { phase: "done" }));
-  return { status: "completed", report: `# ${input.question}\n\nAn answer [1].\n\n## Sources\n1. https://example.com/a\n`, state: { ...state, phase: "done" }, failure: null };
+  return { status: "completed", report: `# ${input.question}\n\nAn answer [^1].\n\n## Sources\n\n[^1]: [A page](https://example.com/a)\n`, state: { ...state, phase: "done" }, failure: null };
 };
 
 /** An engine that runs until the signal fires, then comes back cancelled. */

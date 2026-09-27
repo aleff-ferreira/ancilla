@@ -13,7 +13,7 @@ import { renderPdf } from "./pdf.js";
 
 export { docxAnchor, renderDocx } from "./docx.js";
 export { renderHtml } from "./html.js";
-export { collect, modernizeCitations, parseReport, plainText, splitReport, subtitleOf } from "./markdown.js";
+export { collect, parseReport, plainText, splitReport, subtitleOf } from "./markdown.js";
 export type { ReportMeta, ReportSource, SplitReport } from "./markdown.js";
 export { renderPdf, toWinAnsi } from "./pdf.js";
 

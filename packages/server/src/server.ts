@@ -3607,7 +3607,7 @@ export class AncillaServer {
         throw new HttpError(409, "This thread has no project folder to save into.");
       }
       const fileName = exportFileName(format);
-      const directory = join(this.localPathFor(thread.cwd), ...RESEARCH_DIR, run.id);
+      const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
       await mkdir(directory, { recursive: true });
       await writeFile(join(directory, fileName), file);
       const relative = [...RESEARCH_DIR, run.id, fileName].join("/");
@@ -3623,7 +3623,7 @@ export class AncillaServer {
         throw new HttpError(404, "That export has not been generated yet.");
       }
       // resolveInRoot answers 404 for a file not generated yet, and refuses anything that leaves the folder.
-      const { abs } = await resolveInRoot(this.localPathFor(thread.cwd), [...RESEARCH_DIR, run.id, name].join("/"), thread.cwd);
+      const { abs } = await resolveInRoot(await this.localRootFor(thread.cwd), [...RESEARCH_DIR, run.id, name].join("/"), thread.cwd);
       await serveExportFile(req, res, abs, format, `${questionSlug(run.question)}.${format}`);
       return true;
     }

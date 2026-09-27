@@ -8,6 +8,7 @@
  * form before parsing.
  */
 import type { FootnoteDefinition, Nodes, Root, RootContent } from "mdast";
+import { modernizeCitations } from "@ancilla/daemon";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { gfmFromMarkdown } from "mdast-util-gfm";
 import { gfm } from "micromark-extension-gfm";
@@ -30,6 +31,8 @@ export interface ReportSource {
 }
 
 export interface SplitReport {
+  /** The title the writer gave the report, when it opened with a top-level heading; that heading leaves the body. */
+  title: string | null;
   /** The report's blocks without footnote definitions and without a Sources heading left with nothing under it. */
   body: RootContent[];
   /** Every source, in the order their numbers run. */
@@ -38,57 +41,8 @@ export interface SplitReport {
   numberOf: Map<string, number>;
 }
 
-const SOURCES_HEADING = /^#{1,3}\s+(?:Sources|References)\s*$/i;
-/** `[3] Title (https://url)`, `[3] https://url` or `3. Title (https://url)`: the shapes older reports listed sources in. */
-const OLD_SOURCE_LINE = /^(?:\[(\d+)\]|(\d+)\.)\s+(.*?)\s*$/;
-const TRAILING_URL = /^(.*?)\s*\(?\s*(https?:\/\/[^\s()<>]+)\s*\)?$/;
-
-/**
- * Rewrites a report that cites with bare `[3]` and lists `[3] Title (https://url)` under its Sources heading to the
- * footnote form (`[^3]` and `[^3]: [Title](https://url)`), so it exports with linked citations like a newer one.
- * A report already in the footnote form, or without a Sources section, comes back as it was.
- *
- * TODO(merge): the daemon on main exports `modernizeCitations` from `@ancilla/daemon` (research/citations.ts); this
- * copy exists only because the worktree this was built in predates it. Import the daemon's and drop this one.
- */
-export function modernizeCitations(report: string): string {
-  const lines = report.replace(/\r\n?/g, "\n").split("\n");
-  let headingAt = -1;
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    if (SOURCES_HEADING.test(lines[i] as string)) {
-      headingAt = i;
-      break;
-    }
-  }
-  if (headingAt < 0) {
-    return report;
-  }
-  const numbers = new Set<string>();
-  const rewrittenSources = lines.slice(headingAt + 1).map((line) => {
-    const match = OLD_SOURCE_LINE.exec(line.trim());
-    if (!match) {
-      return line;
-    }
-    const number = (match[1] ?? match[2]) as string;
-    const located = TRAILING_URL.exec((match[3] ?? "").trim());
-    if (!located) {
-      return line;
-    }
-    const url = located[2] as string;
-    const title = (located[1] as string).trim().replace(/[\s:–-]+$/, "").replace(/[[\]]/g, "") || url;
-    numbers.add(number);
-    return `[^${number}]: [${title}](${url})`;
-  });
-  if (numbers.size === 0) {
-    return report;
-  }
-  const body = lines
-    .slice(0, headingAt)
-    .join("\n")
-    // `[3]` that is a citation: not already a footnote, not the text of a link `[3](url)` nor a reference `[3]: url`.
-    .replace(/\[(\d+)\](?![(:])/g, (whole, number: string) => (numbers.has(number) ? `[^${number}]` : whole));
-  return [body, lines[headingAt], ...rewrittenSources].join("\n");
-}
+/** `Title (https://url)`, `Title https://url` or a bare URL: a footnote definition written without a link. */
+const TRAILING_URL = /^(.*?)\s*\(?\s*(https?:\/\/\S+?)\)?\s*$/;
 
 /** The report's Markdown as mdast, with GFM tables, footnotes, strikethrough and task lists. */
 export function parseReport(markdown: string): Root {
@@ -187,7 +141,14 @@ export function splitReport(root: Root): SplitReport {
   if (last && last.type === "heading" && /^(?:Sources|References)$/i.test(plainText(last.children).trim())) {
     body.pop();
   }
-  return { body, sources, numberOf };
+  // A report that opens with its own title keeps it as the document's, rather than repeating it under the question.
+  let title: string | null = null;
+  const first = body[0];
+  if (first && first.type === "heading" && first.depth === 1) {
+    title = plainText(first.children).trim() || null;
+    if (title) body.shift();
+  }
+  return { title, body, sources, numberOf };
 }
 
 function stripDefinitions(nodes: RootContent[]): RootContent[] {
@@ -203,6 +164,13 @@ function stripDefinitions(nodes: RootContent[]): RootContent[] {
     }
   }
   return kept;
+}
+
+/** The document's title and the lines under it: the writer's title over the question, or the question alone. */
+export function headingOf(split: Pick<SplitReport, "title">, meta: ReportMeta): { title: string; lines: string[] } {
+  const question = meta.question.trim() || "Research report";
+  const title = split.title ?? question;
+  return { title, lines: [...(title === question ? [] : [question]), subtitleOf(meta)] };
 }
 
 /** The line every rendering carries under its title. */

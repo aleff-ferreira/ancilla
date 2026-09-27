@@ -12,7 +12,7 @@
  */
 import PDFDocument from "pdfkit";
 import type { Blockquote, Code, Heading, List, PhrasingContent, Root, RootContent, Table } from "mdast";
-import { type ReportMeta, type ReportSource, plainText, splitReport, subtitleOf } from "./markdown.js";
+import { type ReportMeta, type ReportSource, type SplitReport, headingOf, plainText, splitReport, subtitleOf } from "./markdown.js";
 
 const FONT = { regular: "Helvetica", bold: "Helvetica-Bold", italic: "Helvetica-Oblique", boldItalic: "Helvetica-BoldOblique", mono: "Courier" } as const;
 const COLOR = { text: "#1f2328", muted: "#59636e", link: "#0969da", rule: "#d1d9e0", codeBg: "#f3f4f6" } as const;
@@ -115,13 +115,13 @@ class PdfBuilder {
   private readonly left: number;
   private readonly contentWidth: number;
 
-  constructor(private readonly numberOf: Map<string, number>, meta: ReportMeta) {
+  constructor(private readonly numberOf: Map<string, number>, title: string, meta: ReportMeta) {
     this.doc = new PDFDocument({
       size: "A4",
       margins: { top: PAGE_MARGIN, bottom: PAGE_MARGIN + 12, left: PAGE_MARGIN, right: PAGE_MARGIN },
       bufferPages: true,
       autoFirstPage: true,
-      info: { Title: meta.question, Author: "Ancilla", Subject: subtitleOf(meta), Creator: "Ancilla" },
+      info: { Title: title, Author: "Ancilla", Subject: subtitleOf(meta), Creator: "Ancilla" },
       pdfVersion: "1.5",
     });
     this.left = this.doc.page.margins.left;
@@ -377,12 +377,13 @@ class PdfBuilder {
 
   // ------------------------------------------------------------------ title and sources
 
-  title(meta: ReportMeta): void {
+  title(split: Pick<SplitReport, "title">, meta: ReportMeta): void {
+    const heading = headingOf(split, meta);
     this.doc.font(FONT.bold).fontSize(22).fillColor(COLOR.text);
-    this.doc.text(toWinAnsi(meta.question.trim() || "Research report"), this.left, this.doc.y, { width: this.contentWidth, lineGap: 3 });
+    this.doc.text(toWinAnsi(heading.title), this.left, this.doc.y, { width: this.contentWidth, lineGap: 3 });
     this.doc.moveDown(0.3);
     this.doc.font(FONT.regular).fontSize(9.5).fillColor(COLOR.muted);
-    this.doc.text(toWinAnsi(subtitleOf(meta)), { width: this.contentWidth });
+    for (const line of heading.lines) this.doc.text(toWinAnsi(line), { width: this.contentWidth });
     this.doc.moveDown(0.5);
     this.doc.save().moveTo(this.left, this.doc.y).lineTo(this.left + this.contentWidth, this.doc.y).lineWidth(0.75).strokeColor(COLOR.rule).stroke().restore();
     this.doc.moveDown(0.8);
@@ -434,15 +435,16 @@ function destinationOf(number: number): string {
 
 /** The report as a PDF. */
 export function renderPdf(root: Root, meta: ReportMeta): Promise<Buffer> {
-  const { body, sources, numberOf } = splitReport(root);
-  const builder = new PdfBuilder(numberOf, meta);
+  const split = splitReport(root);
+  const { body, sources, numberOf } = split;
+  const builder = new PdfBuilder(numberOf, headingOf(split, meta).title, meta);
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     builder.doc.on("data", (chunk: Buffer) => chunks.push(chunk));
     builder.doc.on("end", () => resolve(Buffer.concat(chunks)));
     builder.doc.on("error", reject);
     try {
-      builder.title(meta);
+      builder.title(split, meta);
       builder.blocks(body);
       builder.sources(sources);
       builder.footers();
