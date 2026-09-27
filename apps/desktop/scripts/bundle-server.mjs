@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
-import { cp, mkdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, stat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -57,6 +58,25 @@ if (hasCargo()) {
 } else {
   console.warn(`cargo not found: leaving ${RUST_LICENSES} out, as there is no desktop executable to build either`);
 }
+// pdfkit (the PDF export of research reports) needs two adjustments to work from inside one CommonJS file:
+// - esbuild would take the package's ESM build, whose `import.meta.url` is undefined once bundled as CommonJS, and
+//   pdfkit reads it while loading; the CommonJS build the server itself runs on is used instead.
+// - pdfkit loads its fourteen standard fonts' metrics lazily, through a `createRequire(__filename)` of the package's
+//   own `#standard-fonts/*` import map. Bundled, `__filename` is server.cjs in a folder with no package.json, so that
+//   require would fail at the first PDF export. Turning those calls into plain `require`s lets esbuild resolve them
+//   through pdfkit's package.json and put the font modules into the bundle, which then needs no font files beside it.
+const pdfkitStandardFonts = {
+  name: "pdfkit-standard-fonts",
+  setup(build) {
+    build.onResolve({ filter: /^pdfkit$/ }, () => ({ path: createRequire(join(rootDir, "packages", "server", "package.json")).resolve("pdfkit") }));
+    build.onLoad({ filter: /[\\/]pdfkit[\\/]js[\\/]pdfkit\.js$/ }, async (args) => {
+      const source = await readFile(args.path, "utf8");
+      const contents = source.replaceAll("require$1('#standard-fonts/", "require('#standard-fonts/");
+      if (contents === source) throw new Error(`pdfkit's standard-font loaders were not found in ${args.path}; the bundle plugin needs updating`);
+      return { contents, loader: "js" };
+    });
+  },
+};
 // scripts/third-party-notices.mjs repeats this build to list the packages it bundles; keep the two in step.
 await esbuild.build({
   entryPoints: [join(rootDir, "packages", "server", "src", "cli.ts")],
@@ -65,5 +85,6 @@ await esbuild.build({
   format: "cjs",
   outfile: join(resourcesDir, "server.cjs"),
   logLevel: "info",
+  plugins: [pdfkitStandardFonts],
 });
 console.log("bundled desktop resources into src-tauri/resources");

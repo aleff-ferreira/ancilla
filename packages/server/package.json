@@ -14,11 +14,21 @@
     "clean": "rimraf dist"
   },
   "dependencies": {
+    "@ancilla/daemon": "*",
     "@harjjotsinghh/aonia": "^0.1.0",
-    "@ancilla/daemon": "*"
+    "docx": "^9.7.2",
+    "hast-util-to-html": "^9.0.5",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-to-hast": "^13.2.1",
+    "micromark-extension-gfm": "^3.0.0",
+    "pdfkit": "^0.20.2"
   },
   "devDependencies": {
+    "@types/hast": "^3.0.5",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^22.0.0",
+    "@types/pdfkit": "^0.17.6",
     "rimraf": "^6.0.1",
     "typescript": "^5.6.0"
   },
