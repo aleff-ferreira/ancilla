@@ -1,0 +1,11 @@
+#!/bin/sh
+# Commits in this repository are authored by Aleff Ferreira Francisco (CLAUDE.md). An AI tool's identity, whether from
+# `--author`, an environment variable or a stray git config, is refused before the commit is made.
+ident="$(git var GIT_AUTHOR_IDENT) $(git var GIT_COMMITTER_IDENT)"
+case "$ident" in
+  *[Cc]laude*|*[Aa]nthropic*|*[Cc]opilot*|*[Cc]odex*|*[Oo]pen[Aa][Ii]*|*noreply@anthropic.com*)
+    echo "pre-commit: the author or committer identity is an AI tool's:" >&2
+    echo "  $ident" >&2
+    echo "Set it to Aleff Ferreira Francisco <146892275+aleff-ferreira@users.noreply.github.com> and commit again (CLAUDE.md)." >&2
+    exit 1;;
+esac

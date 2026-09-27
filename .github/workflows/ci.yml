@@ -23,6 +23,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # The whole history: the attribution check below reads every commit since the fork from Helicon.
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -30,6 +33,9 @@ jobs:
       # Every file that carries the version agrees, and the changelog has an entry for it
       # (scripts/bump-version.mjs), so a half-done bump never reaches a tag.
       - run: node scripts/bump-version.mjs --check
+      # No commit credits an AI tool as author, committer or co-author (CLAUDE.md, scripts/check-attribution.mjs).
+      - if: runner.os == 'Linux'
+        run: node scripts/check-attribution.mjs
       - run: npm ci
       # THIRD_PARTY_NOTICES.md follows the lockfiles; a dependency change has to regenerate it
       # (npm run notices). Linux only: Windows runners check the file out with CRLF endings.

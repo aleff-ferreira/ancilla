@@ -9,12 +9,14 @@
     "apps/*"
   ],
   "scripts": {
+    "prepare": "node scripts/install-hooks.mjs",
     "version:bump": "node scripts/bump-version.mjs",
     "version:check": "node scripts/bump-version.mjs --check",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "notices": "node scripts/third-party-notices.mjs",
-    "notices:check": "node scripts/third-party-notices.mjs --check"
+    "notices:check": "node scripts/third-party-notices.mjs --check",
+    "attribution:check": "node scripts/check-attribution.mjs"
   },
   "engines": {
     "node": ">=22"
