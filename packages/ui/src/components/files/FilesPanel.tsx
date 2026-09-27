@@ -161,7 +161,7 @@ function ResizeHandle() {
           controller.setFilesWidth(width - 16);
         }
       }}
-      className="absolute top-0 left-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-accent/35 focus-visible:bg-accent/35 focus-visible:outline-none"
+      className="absolute top-0 left-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-brand/35 focus-visible:bg-focus focus-visible:outline-none"
     />
   );
 }
@@ -200,7 +200,7 @@ function FileTree(props: { sessionId: string; cwd: string }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-line px-2 py-1.5">
-        <label className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md bg-sunken px-2 text-sm shadow-[0_0_0_1px_var(--border)] focus-within:shadow-[0_0_0_1px_var(--accent)]">
+        <label className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md bg-sunken px-2 text-sm shadow-[0_0_0_1px_var(--border)] focus-within:shadow-[0_0_0_1px_var(--focus-ring)]">
           {searching ? <Spinner size={12} className="shrink-0" /> : <MagnifyingGlassIcon size={13} className="shrink-0 text-subtle" />}
           <input
             value={query}

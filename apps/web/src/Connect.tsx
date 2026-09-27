@@ -80,7 +80,7 @@ export function Connect(props: { onDone: () => void }) {
             value={base}
             onChange={(event) => setBase(event.target.value)}
             placeholder="https://box.example:3127"
-            className="h-9 rounded-lg bg-sunken px-3 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--accent)]"
+            className="h-9 rounded-lg bg-sunken px-3 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-ring)]"
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -90,14 +90,14 @@ export function Connect(props: { onDone: () => void }) {
             value={token}
             onChange={(event) => setToken(event.target.value)}
             placeholder="Only if the daemon was started with --token"
-            className="h-9 rounded-lg bg-sunken px-3 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--accent)]"
+            className="h-9 rounded-lg bg-sunken px-3 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-ring)]"
           />
         </label>
         {error ? <p className="rounded-lg bg-danger-soft px-3 py-2 text-xs text-pretty text-danger-text">{error}</p> : null}
         <button
           type="submit"
           disabled={busy}
-          className="mt-1 h-9 rounded-lg bg-accent text-sm font-medium text-white transition-opacity duration-100 disabled:opacity-60"
+          className="mt-1 h-9 rounded-lg bg-brand text-sm font-medium text-brand-fg transition-colors duration-100 hover:bg-brand-hover disabled:opacity-60"
         >
           {busy ? "Checking" : "Connect"}
         </button>

@@ -348,7 +348,7 @@ export function Composer(props: ComposerProps) {
   return (
     <div
       className={cn(
-        "relative min-w-0 max-w-full rounded-[18px] bg-raised shadow-[0_0_0_1px_var(--border-strong),0_1px_2px_oklch(0_0_0/0.05)] transition-shadow duration-150 ease-out focus-within:shadow-[0_0_0_1px_color-mix(in_oklch,var(--fg)_30%,transparent),0_2px_8px_-2px_oklch(0_0_0/0.12)]",
+        "composer-surface relative min-w-0 max-w-full bg-raised transition-shadow duration-150 ease-out",
         props.readOnly && "opacity-75",
       )}
       onMouseDown={(event) => {
@@ -455,7 +455,7 @@ export function Composer(props: ComposerProps) {
             onClick={() => (showStop ? void controller.stop(props.sessionId as string) : void submit(false))}
             className={cn(
               "ml-1 inline-flex size-8 shrink-0 items-center justify-center rounded-full transition-[transform,background-color,color] duration-150 active:scale-95",
-              showStop ? "bg-inverse text-inverse-fg" : "bg-accent text-accent-fg hover:bg-accent-hover disabled:bg-active disabled:text-subtle",
+              showStop ? "bg-inverse text-inverse-fg" : "bg-brand text-brand-fg hover:bg-brand-hover disabled:bg-active disabled:text-subtle",
             )}
           >
             <SwapIcon value={starting || stopping ? "busy" : showStop ? "stop" : researching ? "research" : "send"}>
@@ -602,7 +602,7 @@ function AccountPicker(props: { sessionId: string | null; cwd: string | null; va
 }
 
 /** The popover's number fields: the same small box as the Settings rows, right-aligned so the digits line up. */
-const RESEARCH_FIELD = "h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-accent";
+const RESEARCH_FIELD = "h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus";
 
 /**
  * Starts a DeepResearch run on the composer's draft, or on a question typed in the popover when the draft is
@@ -881,7 +881,7 @@ function EffortPicker(props: { side: PickerSide }) {
             <Slider.Thumb
               ref={thumb}
               aria-valuetext={LEVELS[position]?.label}
-              className="block h-6 w-[18px] rounded-md bg-white shadow-[0_0_0_1px_oklch(0_0_0/0.08),0_1px_3px_oklch(0_0_0/0.3)] outline-none transition-transform duration-100 ease-out focus-visible:ring-2 focus-visible:ring-accent active:scale-95"
+              className="block h-6 w-[18px] rounded-md bg-white shadow-[0_0_0_1px_oklch(0_0_0/0.08),0_1px_3px_oklch(0_0_0/0.3)] outline-none transition-transform duration-100 ease-out focus-visible:ring-2 focus-visible:ring-focus active:scale-95"
             />
           </Slider.Root>
           <p className={cn("mt-2 text-xs", auto ? "text-subtle" : "text-muted")}>
@@ -895,7 +895,7 @@ function EffortPicker(props: { side: PickerSide }) {
               id={switchId}
               checked={auto}
               onCheckedChange={(on) => controller.setEffort(on ? null : (LEVELS[position]?.value ?? "medium"))}
-              className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent data-[state=checked]:bg-accent"
+              className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus data-[state=checked]:bg-accent"
             >
               <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
             </Switch.Root>
@@ -972,7 +972,7 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
               checked={yolo}
               disabled={!yoloLoaded}
               onCheckedChange={(on) => (on ? controller.setPicker("confirmYolo") : void controller.setYoloEnabled(false))}
-              className="relative mt-0.5 inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50 data-[state=checked]:bg-accent"
+              className="relative mt-0.5 inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50 data-[state=checked]:bg-accent"
             >
               <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
             </Switch.Root>
@@ -1002,7 +1002,7 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
               id={bypassId}
               checked={bypass}
               onCheckedChange={(on) => (on ? controller.setPicker("confirmBypass") : controller.setBypassAll(false))}
-              className="relative mt-0.5 inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent data-[state=checked]:bg-accent"
+              className="relative mt-0.5 inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus data-[state=checked]:bg-accent"
             >
               <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />
             </Switch.Root>

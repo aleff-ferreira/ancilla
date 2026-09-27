@@ -151,7 +151,7 @@ function RowActions(props: { agent: AgentVM; readOnly: boolean; confirm: RowConf
 
 /**
  * One agent in the roster: glyph · sigil · name · tokens · time · share, 32 px, or 44 with the state's second line.
- * The focused row carries the accent bar and its actions; Enter opens the inspector.
+ * The focused row carries the focus bar and its actions; Enter opens the inspector.
  */
 export const RosterRow = forwardRef<HTMLDivElement, RosterRowProps>(function RosterRow(props, ref) {
   const { agent } = props;
@@ -183,7 +183,7 @@ export const RosterRow = forwardRef<HTMLDivElement, RosterRowProps>(function Ros
         "relative grid items-center px-4 outline-none",
         ROSTER_COLUMNS,
         tall ? "min-h-11 pt-[3px] pb-1" : "min-h-8",
-        props.focused && "bg-active before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-accent before:content-['']",
+        props.focused && "bg-active before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-focus before:content-['']",
         !props.focused && "hover:bg-hover",
         tall && props.focused && "[&>.rowacts]:top-[3px]",
       )}
@@ -242,7 +242,7 @@ export const NeedRow = forwardRef<HTMLDivElement, NeedRowProps>(function NeedRow
       className={cn(
         "relative grid min-h-11 items-center px-4 pt-[3px] pb-1 outline-none",
         ROSTER_COLUMNS,
-        props.focused ? "bg-active before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-accent before:content-['']" : "hover:bg-hover",
+        props.focused ? "bg-active before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-focus before:content-['']" : "hover:bg-hover",
       )}
     >
       <span className={cn("col-start-1 row-start-1 flex size-4 items-center justify-center", input ? "text-status-input" : "text-warn")}>

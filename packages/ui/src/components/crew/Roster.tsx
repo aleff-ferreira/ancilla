@@ -62,7 +62,7 @@ function PhaseHead(props: { phase: PhaseVM; run: RunVM | null; open: boolean; cu
       className={cn(
         "relative flex h-[34px] cursor-default items-center gap-2 border-b border-line bg-[var(--pane-bg)] pr-4 pl-3 whitespace-nowrap outline-none select-none",
         props.sticky && "sticky top-0 z-[2]",
-        props.focused && "before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-accent before:content-['']",
+        props.focused && "before:absolute before:top-1 before:bottom-1 before:left-0 before:w-0.5 before:rounded-sm before:bg-focus before:content-['']",
         !props.focused && "hover:bg-hover",
       )}
     >

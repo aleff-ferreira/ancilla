@@ -42,7 +42,7 @@ export function PanelResize() {
           controller.setCrewWidth(width - 16);
         }
       }}
-      className="absolute top-0 left-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-accent/35 focus-visible:bg-accent/35 focus-visible:outline-none"
+      className="absolute top-0 left-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-brand/35 focus-visible:bg-focus focus-visible:outline-none"
     />
   );
 }

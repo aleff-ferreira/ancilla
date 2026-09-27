@@ -3,6 +3,7 @@
 // holds the resting pose, and the click hands off to the caller instead of toggling locally.
 import { motion, useReducedMotion } from "motion/react";
 import { useState } from "react";
+import { Logo } from "../ui/primitives.js";
 
 const WIDTH = 321;
 const HEIGHT = 270;
@@ -88,6 +89,7 @@ export function FolderArt(props: { onActivate?: () => void; label: string }) {
               stroke="var(--folder-edge)"
             />
           </svg>
+          <Logo size={44} className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2" />
         </motion.span>
       </span>
     </button>

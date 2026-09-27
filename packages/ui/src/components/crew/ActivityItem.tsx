@@ -225,7 +225,7 @@ export function ActivityItem(props: ActivityItemProps) {
       data-key={activityKey(item)}
       onClick={props.onSelect}
       className={cn(
-        "rounded-xl p-2 outline-none focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent",
+        "rounded-xl p-2 outline-none focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-focus",
         props.selected ? "bg-active" : "hover:bg-hover",
       )}
     >

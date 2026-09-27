@@ -38,7 +38,7 @@ export function PlanMeter() {
   }, [controller]);
   if (!view) {
     return (
-      <section aria-label="Plan usage" className="rounded-2xl bg-raised px-4 py-3.5 shadow-card">
+      <section aria-label="Plan usage" className="rounded-xl bg-raised px-4 py-3.5 shadow-panel">
         <div className="flex items-center gap-2 text-sm font-medium text-fg">
           <GaugeIcon size={15} className="text-subtle" /> Plan usage
         </div>
@@ -55,7 +55,7 @@ export function PlanMeter() {
 function MeterCard(props: { view: PlanView; title: string; now: number }) {
   const { view, title, now } = props;
   return (
-    <section aria-label={title} className="rounded-2xl bg-raised px-4 py-3.5 shadow-card">
+    <section aria-label={title} className="rounded-xl bg-raised px-4 py-3.5 shadow-panel">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <GaugeIcon size={15} className="shrink-0 text-subtle" />
         <h2 className="text-sm font-medium text-fg">{title}</h2>

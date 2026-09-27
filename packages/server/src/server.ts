@@ -76,7 +76,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
-export const ANCILLA_VERSION = "0.19.2";
+export const ANCILLA_VERSION = "0.20.0";
 
 export interface HostExit {
   code: number | null;

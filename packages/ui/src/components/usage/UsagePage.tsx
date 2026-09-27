@@ -80,9 +80,10 @@ export function UsagePage() {
               key={range.days}
               type="button"
               onClick={() => setDays(range.days)}
+              aria-pressed={days === range.days}
               className={cn(
                 "h-7 rounded-md px-2.5 text-xs font-medium transition-colors duration-100",
-                days === range.days ? "bg-raised text-fg shadow-btn" : "text-muted hover:text-fg",
+                days === range.days ? "selected-control bg-raised text-fg" : "text-muted hover:text-fg",
               )}
             >
               {range.label}
@@ -262,10 +263,10 @@ function summarize(report: UsageReport, models: readonly ModelOption[]): UsageVi
 
 function Card(props: { label: string; value: string; detail?: string }) {
   return (
-    <div className="flex flex-col gap-1 rounded-xl bg-raised px-4 py-3 shadow-[0_0_0_1px_var(--border)]">
-      <p className="text-xs text-muted">{props.label}</p>
+    <div className="flex flex-col gap-1 rounded-xl bg-raised px-4 py-3 shadow-panel">
+      <p className="text-xs font-medium text-muted">{props.label}</p>
       <p className="text-xl font-semibold text-fg tabular-nums">{props.value}</p>
-      {props.detail ? <p className="text-2xs text-subtle">{props.detail}</p> : null}
+      {props.detail ? <p className="text-2xs text-subtle tabular-nums">{props.detail}</p> : null}
     </div>
   );
 }
@@ -299,9 +300,9 @@ function DailyChart(props: { view: UsageView }) {
   const max = Math.max(...view.days.map((d) => d.cost), 0.000001);
   const order = view.models.map((m) => m.modelId);
   return (
-    <section className="min-w-0 overflow-hidden rounded-xl bg-raised px-4 py-4 shadow-[0_0_0_1px_var(--border)]">
+    <section className="min-w-0 overflow-hidden rounded-xl bg-raised px-4 py-4 shadow-panel">
       <div className="mb-3 flex items-baseline justify-between">
-        <h2 className="text-sm font-semibold text-fg">Cost by day</h2>
+        <h2 className="text-sm font-medium text-fg">Cost by day</h2>
         <span className="text-2xs text-subtle tabular-nums">peak {formatCost(max, view.currency)}</span>
       </div>
       <div className="flex h-40 min-w-0 items-end gap-px overflow-hidden">
@@ -339,8 +340,8 @@ function Models(props: { view: UsageView }) {
   const { view } = props;
   const max = Math.max(...view.models.map((m) => m.cost), 0.000001);
   return (
-    <section className="rounded-xl bg-raised px-4 py-4 shadow-[0_0_0_1px_var(--border)]">
-      <h2 className="mb-3 text-sm font-semibold text-fg">By model</h2>
+    <section className="rounded-xl bg-raised px-4 py-4 shadow-panel">
+      <h2 className="mb-3 text-sm font-medium text-fg">By model</h2>
       <div className="flex flex-col gap-3">
         {view.models.map((model, index) => (
           <div key={model.modelId} className="flex flex-col gap-1.5">
@@ -381,15 +382,15 @@ function Threads(props: { view: UsageView }) {
     return null;
   }
   return (
-    <section className="rounded-xl bg-raised px-4 py-4 shadow-[0_0_0_1px_var(--border)]">
-      <h2 className="mb-3 text-sm font-semibold text-fg">Costliest threads</h2>
+    <section className="rounded-xl bg-raised px-4 py-4 shadow-panel">
+      <h2 className="mb-3 text-sm font-medium text-fg">Costliest threads</h2>
       <ul className="flex flex-col">
         {view.threads.map((thread) => (
           <li key={thread.sessionId}>
             <button
               type="button"
               onClick={() => controller.openThread(thread.sessionId)}
-              className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors duration-100 hover:bg-hover"
+              className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left transition-colors duration-100 hover:bg-hover"
             >
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm text-fg">{thread.title ?? "New thread"}</p>
@@ -409,7 +410,7 @@ function Threads(props: { view: UsageView }) {
 
 function EmptyUsage(props: { days: number }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-xl bg-raised px-6 py-16 text-center shadow-[0_0_0_1px_var(--border)]">
+    <div className="flex flex-col items-center gap-2 rounded-xl bg-raised px-6 py-16 text-center shadow-panel">
       <p className="text-sm font-medium text-fg">No model calls in the last {rangeLabel(props.days)}</p>
       <p className="max-w-[42ch] text-xs text-muted">
         This fills in as threads run. Opening an older thread also backfills what it spent, so its calls show up here too.

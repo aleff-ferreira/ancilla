@@ -123,7 +123,7 @@ export function ApprovalPanel(props: { request: ApprovalRequest; primary: boolea
             rows={2}
             value={feedback}
             onChange={(event) => setFeedback(event.currentTarget.value)}
-            className="w-full resize-none rounded-lg bg-sunken px-3 py-2 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--accent)] focus-visible:outline-none"
+            className="w-full resize-none rounded-lg bg-sunken px-3 py-2 text-sm text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-ring)] focus-visible:outline-none"
           />
           <div className="flex justify-end gap-2">
             <Button size="sm" variant="ghost" onClick={() => setFeedbackChoice(null)}>

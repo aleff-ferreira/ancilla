@@ -1,32 +1,42 @@
 @import "tailwindcss";
 @import "@fontsource-variable/inter/wght.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
-@import "@fontsource-variable/newsreader/opsz.css";
+@import "@fontsource-variable/fraunces/opsz.css";
 
 @source "../../../packages/ui/src";
 
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /*
- * Ancilla tokens. Restrained palette: cool-tinted neutrals (hue 255) plus one blue accent,
- * the blue of the app icon, reserved for action, live state and focus. Every text token
- * clears 4.5:1 on every surface in both themes (checked with a WCAG script).
+ * Ancilla in the AMAZONIA WORKS family: forest neutrals and an emerald brand accent.
+ * Brand, selection and keyboard focus are separate from the existing blue runtime accent.
+ * Keep execution, warning, completion, chart and code colors independent of brand styling.
  */
 :root {
   color-scheme: light;
-  --bg: oklch(0.992 0.002 255);
-  --bg-sidebar: oklch(0.967 0.004 255);
+  --bg: oklch(0.992 0.002 170);
+  --bg-sidebar: oklch(0.967 0.004 170);
   --bg-raised: oklch(1 0 0);
-  --bg-sunken: oklch(0.962 0.004 255);
-  --bg-hover: oklch(0.25 0.02 255 / 0.05);
-  --bg-active: oklch(0.25 0.02 255 / 0.085);
-  --bg-inverse: oklch(0.22 0.01 255);
-  --fg-inverse: oklch(0.985 0.002 255);
-  --border: oklch(0.25 0.02 255 / 0.1);
-  --border-strong: oklch(0.25 0.02 255 / 0.2);
-  --fg: oklch(0.2 0.01 255);
-  --fg-muted: oklch(0.43 0.012 255);
-  --fg-subtle: oklch(0.5 0.012 255);
+  --bg-sunken: oklch(0.962 0.004 170);
+  --bg-hover: oklch(0.25 0.02 170 / 0.05);
+  --bg-active: oklch(0.25 0.02 170 / 0.085);
+  --bg-inverse: oklch(0.22 0.01 170);
+  --fg-inverse: oklch(0.985 0.002 170);
+  --border: oklch(0.25 0.02 170 / 0.1);
+  --border-strong: oklch(0.25 0.02 170 / 0.2);
+  --fg: oklch(0.2 0.01 170);
+  --fg-muted: oklch(0.43 0.012 170);
+  --fg-subtle: oklch(0.49 0.012 170);
+  --brand: oklch(0.51201 0.09518 173.605);
+  --brand-hover: oklch(0.45576 0.08594 171.69);
+  --brand-fg: oklch(1 0 0);
+  --brand-text: var(--brand-hover);
+  --brand-soft: color-mix(in oklch, var(--brand) 9%, transparent);
+  --brand-line: color-mix(in oklch, var(--brand) 30%, transparent);
+  --selection-bg: var(--brand-soft);
+  --selection-line: var(--brand);
+  --focus-ring: var(--brand-text);
+  /* Compatibility accent: live execution, operational controls and existing data series. */
   --accent: oklch(0.55 0.19 257);
   --accent-hover: oklch(0.5 0.19 257);
   --accent-fg: oklch(0.99 0 0);
@@ -43,7 +53,7 @@
   --ok-text: oklch(0.47 0.12 150);
   --diff-add: oklch(0.7 0.15 150 / 0.16);
   --diff-del: oklch(0.65 0.2 27 / 0.12);
-  --scrollbar: oklch(0.25 0.02 255 / 0.18);
+  --scrollbar: oklch(0.25 0.02 170 / 0.18);
   --sh-class: oklch(0.5 0.14 300);
   --sh-identifier: oklch(0.3 0.02 255);
   --sh-sign: oklch(0.5 0.012 255);
@@ -56,13 +66,13 @@
   /* Elevation: a hairline ring plus a short layered shadow, never a wide blur. */
   --elev-btn: 0 0 0 1px var(--border-strong), 0 1px 2px oklch(0.2 0.02 255 / 0.06);
   --elev-card: 0 0 0 1px var(--border), 0 1px 2px oklch(0.2 0.02 255 / 0.04), 0 2px 6px oklch(0.2 0.02 255 / 0.04);
-  /* First-run folder art (Rare UI FolderComponent), in the accent family. */
-  --folder-back: oklch(0.7 0.13 250);
-  --folder-flap: oklch(0.6 0.15 254 / 0.55);
-  --folder-edge: oklch(0.84 0.08 245);
-  --folder-page: oklch(0.992 0 0);
-  --folder-page-edge: oklch(0.9 0.005 255);
-  --folder-line: oklch(0.87 0.006 255);
+  /* First-run folder art (Rare UI FolderComponent), in the brand family. */
+  --folder-back: oklch(0.62 0.09 170);
+  --folder-flap: oklch(0.5 0.09 170 / 0.75);
+  --folder-edge: oklch(0.77 0.075 165);
+  --folder-page: oklch(0.985 0.006 100);
+  --folder-page-edge: oklch(0.9 0.008 160);
+  --folder-line: oklch(0.85 0.012 165);
   /* The Windows 11 caption close red, the same in both themes like the native button. */
   --caption-close: oklch(0.536 0.191 30.1);
   /* A thread waiting on the user's answer, T3 Code's indigo. */
@@ -88,19 +98,23 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: oklch(0.178 0.004 255);
-  --bg-sidebar: oklch(0.152 0.004 255);
-  --bg-raised: oklch(0.215 0.005 255);
-  --bg-sunken: oklch(0.148 0.004 255);
-  --bg-hover: oklch(0.98 0.005 255 / 0.05);
-  --bg-active: oklch(0.98 0.005 255 / 0.085);
-  --bg-inverse: oklch(0.95 0.003 255);
-  --fg-inverse: oklch(0.17 0.004 255);
-  --border: oklch(0.98 0.005 255 / 0.08);
-  --border-strong: oklch(0.98 0.005 255 / 0.15);
-  --fg: oklch(0.955 0.003 255);
-  --fg-muted: oklch(0.76 0.008 255);
-  --fg-subtle: oklch(0.66 0.009 255);
+  --bg: oklch(0.178 0.009 175);
+  --bg-sidebar: oklch(0.152 0.008 175);
+  --bg-raised: oklch(0.22 0.012 175);
+  --bg-sunken: oklch(0.148 0.008 175);
+  --bg-hover: oklch(0.98 0.008 165 / 0.05);
+  --bg-active: oklch(0.98 0.008 165 / 0.085);
+  --bg-inverse: oklch(0.95 0.008 160);
+  --fg-inverse: oklch(0.17 0.008 175);
+  --border: oklch(0.98 0.008 165 / 0.08);
+  --border-strong: oklch(0.98 0.008 165 / 0.15);
+  --fg: oklch(0.955 0.008 160);
+  --fg-muted: oklch(0.76 0.01 165);
+  --fg-subtle: oklch(0.67 0.012 165);
+  --brand: oklch(0.77294 0.15349 163.223);
+  --brand-hover: oklch(0.84519 0.12995 164.978);
+  --brand-fg: oklch(0.21981 0.02976 168.555);
+  --brand-text: oklch(0.84519 0.12995 164.978);
   --accent: oklch(0.58 0.18 257);
   --accent-hover: oklch(0.63 0.17 257);
   --accent-fg: oklch(0.99 0 0);
@@ -117,7 +131,7 @@
   --ok-text: oklch(0.8 0.13 155);
   --diff-add: oklch(0.7 0.14 150 / 0.14);
   --diff-del: oklch(0.65 0.18 25 / 0.14);
-  --scrollbar: oklch(0.98 0.005 255 / 0.16);
+  --scrollbar: oklch(0.98 0.008 165 / 0.16);
   --sh-class: oklch(0.78 0.11 300);
   --sh-identifier: oklch(0.9 0.01 255);
   --sh-sign: oklch(0.68 0.01 255);
@@ -130,12 +144,12 @@
   /* In dark mode the ring turns into a faint light edge that melts into the shadow. */
   --elev-btn: 0 0 0 1px oklch(1 0 0 / 0.1), 0 1px 2px oklch(0 0 0 / 0.3);
   --elev-card: 0 0 0 1px oklch(1 0 0 / 0.09), 0 1px 2px oklch(0 0 0 / 0.2), 0 2px 6px oklch(0 0 0 / 0.2);
-  --folder-back: oklch(0.52 0.14 256);
-  --folder-flap: oklch(0.42 0.13 256 / 0.6);
-  --folder-edge: oklch(0.68 0.11 250);
-  --folder-page: oklch(0.29 0.006 255);
-  --folder-page-edge: oklch(0.37 0.008 255);
-  --folder-line: oklch(0.44 0.01 255);
+  --folder-back: oklch(0.4 0.055 170);
+  --folder-flap: oklch(0.32 0.055 170 / 0.8);
+  --folder-edge: oklch(0.6 0.085 165);
+  --folder-page: oklch(0.29 0.01 165);
+  --folder-page-edge: oklch(0.37 0.012 165);
+  --folder-line: oklch(0.44 0.014 165);
   --status-input: oklch(0.76 0.12 285);
   --chart-1: oklch(0.68 0.15 257);
   --chart-2: oklch(0.72 0.12 170);
@@ -161,6 +175,15 @@
   --color-fg: var(--fg);
   --color-muted: var(--fg-muted);
   --color-subtle: var(--fg-subtle);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-text: var(--brand-text);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-line: var(--brand-line);
+  --color-selection: var(--selection-bg);
+  --color-selection-line: var(--selection-line);
+  --color-focus: var(--focus-ring);
   --color-accent: var(--accent);
   --color-accent-hover: var(--accent-hover);
   --color-accent-fg: var(--accent-fg);
@@ -189,7 +212,7 @@
 
   --font-sans: "Inter Variable", "Inter", ui-sans-serif, system-ui, "Segoe UI Variable Text", "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
-  --font-display: "Newsreader Variable", "Newsreader", "Iowan Old Style", Georgia, serif;
+  --font-display: "Fraunces Variable", "Fraunces", "Iowan Old Style", Georgia, serif;
   /* Window caption glyphs, only drawn in the Windows desktop shell. */
   --font-caption: "Segoe Fluent Icons", "Segoe MDL2 Assets", sans-serif;
 
@@ -220,6 +243,7 @@
   --shadow-soft: 0 1px 2px oklch(0 0 0 / 0.06), 0 0 0 1px var(--border);
   --shadow-btn: var(--elev-btn);
   --shadow-card: var(--elev-card);
+  --shadow-panel: 0 0 0 1px var(--border);
 }
 
 /* Semantic stacking order; never ad hoc 999s. */
@@ -277,11 +301,13 @@
   }
 
   ::selection {
-    background: color-mix(in oklch, var(--accent) 28%, transparent);
+    /* An opaque pair stays readable even when a code theme uses a different surface. */
+    background: color-mix(in oklch, var(--brand) 22%, var(--bg-raised));
+    color: var(--fg);
   }
 
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
   }
 
@@ -318,6 +344,38 @@
 }
 
 @layer components {
+  /* Selection is a static brand cue. Runtime glyphs keep their own status colors. */
+  .selection-row:is([aria-current="page"], [data-selected="true"]) {
+    background-color: var(--selection-bg);
+    color: var(--fg);
+  }
+  .selection-row:is([aria-current="page"], [data-selected="true"])::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    width: 2px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--selection-line);
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  .selected-control {
+    box-shadow: 0 0 0 1px var(--brand-line), inset 0 -1px 0 var(--selection-line);
+  }
+  .command-palette [cmdk-group] + [cmdk-group] {
+    /* An inset rule preserves the list's existing height and scroll behavior. */
+    box-shadow: inset 0 1px var(--border);
+  }
+  .composer-surface {
+    border-radius: 14px;
+    box-shadow: 0 0 0 1px var(--border-strong), 0 1px 2px oklch(0 0 0 / 0.05);
+  }
+  .composer-surface:focus-within {
+    box-shadow: 0 0 0 1px var(--focus-ring);
+  }
+
   /* Running indicator: a quarter ring that turns. Reduced motion keeps the ring, drops the turn. */
   .spin-ring {
     display: inline-block;

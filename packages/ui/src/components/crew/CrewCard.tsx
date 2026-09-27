@@ -529,7 +529,7 @@ export function CrewCard(props: CrewCardProps) {
         ref={rootRef}
         aria-label="Agents and tasks"
         data-crew-card={props.sessionId}
-        className={cn("crew-card @container enter-up overflow-hidden rounded-2xl bg-raised shadow-card", stale && "crew-stale")}
+        className={cn("crew-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel", stale && "crew-stale")}
         onKeyDown={onKeyDown}
       >
         {body}

@@ -65,7 +65,7 @@ export function NewThread(props: { cwd: string | null }) {
                     <button
                       type="button"
                       onClick={() => controller.openThread(session.sessionId)}
-                      className="flex h-9 w-full items-center gap-3 rounded-lg px-2 text-left transition-colors hover:bg-hover"
+                      className="flex h-9 w-full items-center gap-3 rounded-md px-2 text-left transition-colors hover:bg-hover"
                     >
                       <span className="min-w-0 flex-1 truncate text-sm text-muted">{session.title}</span>
                       <span className="shrink-0 text-xs text-subtle tabular-nums">{relativeTime(session.activityAt, now)}</span>
@@ -176,7 +176,7 @@ function ProjectSwitcher(props: { project: ProjectView; projects: ProjectView[] 
       <MenuTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-baseline gap-1 rounded-md text-accent-text underline decoration-dotted decoration-[1.5px] underline-offset-[7px] outline-offset-4 transition-colors hover:decoration-solid data-[state=open]:decoration-solid"
+          className="inline-flex items-baseline gap-1 rounded-md text-brand-text underline decoration-dotted decoration-[1.5px] underline-offset-[7px] outline-offset-4 transition-colors hover:decoration-solid data-[state=open]:decoration-solid"
         >
           {props.project.displayName}
           <CaretDownIcon weight="regular" size={22} className="translate-y-[3px] self-center" aria-hidden="true" />
@@ -238,7 +238,7 @@ export function Welcome() {
               autoFocus
               placeholder={windows ? "D:\\Projects\\my-app" : "/home/you/code/my-app"}
               onChange={(event) => setPath(event.currentTarget.value)}
-              className="h-10 min-w-0 flex-1 rounded-lg bg-raised px-3 font-mono text-base text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--accent)] focus-visible:outline-none sm:text-sm"
+              className="h-10 min-w-0 flex-1 rounded-lg bg-raised px-3 font-mono text-base text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-ring)] focus-visible:outline-none sm:text-sm"
             />
             <Button variant="primary" type="submit" className="h-10 px-4" loading={busy} disabled={!path.trim()}>
               Add project

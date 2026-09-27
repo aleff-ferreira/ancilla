@@ -6,13 +6,13 @@
     the stroke an absolute M/L polyline and the node one circle.
   -->
   <style>
-    .strokes { stroke: #13161B; }
-    .node { fill: #0A6DDD; }
+    .strokes { stroke: #121815; }
+    .node { fill: #0B7862; }
     @media (prefers-color-scheme: dark) {
-      .strokes { stroke: #EFF0F2; }
-      .node { fill: #5FA7FF; }
+      .strokes { stroke: #EEF5EE; }
+      .node { fill: #34D399; }
     }
   </style>
-  <path class="strokes" d="M8.25 22.5 L16 8.5 L23.75 22.5" fill="none" stroke="#13161B" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle class="node" cx="16" cy="18.75" r="2" fill="#0A6DDD"/>
+  <path class="strokes" d="M8.25 22.5 L16 8.5 L23.75 22.5" fill="none" stroke="#121815" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="node" cx="16" cy="18.75" r="2" fill="#0B7862"/>
 </svg>

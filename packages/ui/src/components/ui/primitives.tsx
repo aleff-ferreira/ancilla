@@ -64,7 +64,7 @@ export function Toggle(props: { checked: boolean; onChange: (on: boolean) => voi
       disabled={props.disabled}
       aria-label={props.label}
       className={cn(
-        "relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent",
+        "relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-accent",
         props.className,
       )}
     >
@@ -152,7 +152,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
 });
 
 /**
- * The Ancilla mark on its navy tile, matching the app icon and favicon: an "A" of two round strokes
+ * The Ancilla mark on its forest tile, matching the app icon and favicon: an "A" of two round strokes
  * whose crossbar is a node. The geometry is copied from assets/brand/ancilla-mark.svg (logo.test.ts
  * keeps the two in step). Decorative: every use sits beside the product name or a heading.
  */
@@ -160,17 +160,17 @@ export function Logo(props: { size?: number; className?: string }) {
   const size = props.size ?? 22;
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" className={props.className} aria-hidden="true">
-      <rect width="32" height="32" rx="7.5" fill="oklch(0.25 0.045 280)" />
+      <rect width="32" height="32" rx="7.5" fill="#0B1F18" />
       <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="none" stroke="oklch(1 0 0 / 0.1)" />
       <path
         d="M8.25 22.5 L16 8.5 L23.75 22.5"
         fill="none"
-        stroke="oklch(0.96 0.01 280)"
+        stroke="#EEF5EE"
         strokeWidth="3.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx="16" cy="18.75" r="2" fill="oklch(0.72 0.15 255)" />
+      <circle cx="16" cy="18.75" r="2" fill="#34D399" />
     </svg>
   );
 }

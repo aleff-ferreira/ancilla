@@ -739,7 +739,7 @@ function SubagentControls(props: { item: MspItem; sessionId: string; subagentId:
           disabled={busy}
           aria-label={running ? "Message this subagent" : "Give this subagent a follow-up task"}
           placeholder={running ? "Tell this subagent something" : "Give it a follow-up task"}
-          className="h-7 min-w-0 flex-1 rounded-md bg-sunken px-2 text-sm text-fg shadow-[0_0_0_1px_var(--border)] outline-none placeholder:text-subtle focus-visible:shadow-[0_0_0_1px_var(--accent)]"
+          className="h-7 min-w-0 flex-1 rounded-md bg-sunken px-2 text-sm text-fg shadow-[0_0_0_1px_var(--border)] outline-none placeholder:text-subtle focus-visible:shadow-[0_0_0_1px_var(--focus-ring)]"
         />
         <Button type="submit" size="sm" variant="secondary" disabled={!note.trim()} loading={busy}>
           <PaperPlaneRightIcon size={12} /> Send

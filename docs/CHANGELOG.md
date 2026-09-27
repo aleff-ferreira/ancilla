@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.20.0
+
+### Changed
+
+- **Ancilla joins the AMAZONIA WORKS visual family.** Dark surfaces carry a subtle forest tint, the light theme uses softer mineral neutrals, and emerald marks the logo, send action and navigation selection. The app icon and installer artwork follow the same palette. Live activity keeps its blue, with separate colors and labels for completion, requests and failures.
+- **Display headings use Fraunces.** Home, first-run screens, empty states and the Crew completion headline share the parent brand's editorial typeface. Functional text stays in Inter and code in JetBrains Mono; all three fonts ship with the app. About now identifies Ancilla as an AMAZONIA WORKS product.
+- **Everyday surfaces have finer edges and clearer selections.** The composer has tighter corners and a restrained focus edge. Sidebar and command-palette selections use an inset emerald marker, while Settings, Usage and Crew cards share fine borders and a more consistent hierarchy. The sidebar, transcript width, composer position, navigation and keyboard controls retain their existing layout and behavior.
+
 ## 0.19.2
 
 ### New

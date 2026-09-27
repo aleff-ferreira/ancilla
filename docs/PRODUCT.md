@@ -14,7 +14,7 @@ Ancilla is a desktop and web client for `muse serve`, forked from Helicon. It gr
 
 ## Brand Personality
 
-Quiet, exact, trustworthy. The interface should feel like a well-made tool that stays out of the way: calm neutral surfaces, one blue accent reserved for action and live state, confident typography, and honest status. Emotional goal: the user feels in control of several agents at once, never surprised by what an agent did or is about to do.
+Quiet, exact, trustworthy. The interface should feel like a well-made tool that stays out of the way: calm forest-tinted surfaces, an emerald brand accent connecting Ancilla to AMAZONIA WORKS, blue for live execution, confident typography, and honest status. Emotional goal: the user feels in control of several agents at once, never surprised by what an agent did or is about to do.
 
 ## Anti-references
 

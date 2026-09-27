@@ -33,7 +33,7 @@ function Pick<T extends string | number | null>(props: {
           onClick={() => props.onChange(option.value)}
           className={cn(
             "h-7 shrink-0 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-40",
-            props.value === option.value ? "bg-raised text-fg shadow-btn" : "text-muted hover:text-fg",
+            props.value === option.value ? "selected-control bg-raised text-fg" : "text-muted hover:text-fg",
           )}
         >
           {option.label}
@@ -46,8 +46,8 @@ function Pick<T extends string | number | null>(props: {
 function Section(props: { title: string; children: ReactNode }) {
   return (
     <section className="mt-6">
-      <h2 className="mb-2 text-2xs font-semibold tracking-wide text-subtle uppercase">{props.title}</h2>
-      <div className="overflow-hidden rounded-2xl bg-raised shadow-card">{props.children}</div>
+      <h2 className="mb-2 text-xs leading-4 font-medium tracking-[0.04em] text-muted uppercase">{props.title}</h2>
+      <div className="overflow-hidden rounded-xl bg-raised shadow-panel">{props.children}</div>
     </section>
   );
 }
@@ -100,7 +100,7 @@ function Num(props: { value: number; min: number; max: number; step?: number; un
             commit();
           }
         }}
-        className="h-7 w-16 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40"
+        className="h-7 w-16 rounded-md bg-sunken px-2 text-right text-xs text-fg tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:cursor-not-allowed disabled:opacity-40"
       />
       {props.unit ? <span>{props.unit}</span> : null}
     </span>
@@ -202,7 +202,7 @@ const GROUPS: readonly { value: GroupBy; label: string }[] = [
 ];
 
 const INPUT_CLASS =
-  "h-9 w-full rounded-lg border border-line bg-sunken px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-accent";
+  "h-9 w-full rounded-lg border border-line bg-sunken px-3 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus";
 
 function AddAccountModal(props: { open: boolean; onOpenChange: (open: boolean) => void; controller: AncillaController }) {
   const [id, setId] = useState("");

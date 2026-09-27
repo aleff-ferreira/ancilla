@@ -59,7 +59,7 @@ export function FilterChips(props: FilterChipsProps) {
       })}
       <label
         className={cn(
-          "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md pr-1.5 pl-2 text-xs text-subtle shadow-[inset_0_0_0_1px_var(--border)] focus-within:shadow-[inset_0_0_0_1px_var(--accent)]",
+          "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md pr-1.5 pl-2 text-xs text-subtle shadow-[inset_0_0_0_1px_var(--border)] focus-within:shadow-[inset_0_0_0_1px_var(--focus-ring)]",
           props.narrow ? "" : "ml-auto",
         )}
       >

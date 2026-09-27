@@ -81,7 +81,7 @@ function SidebarTop() {
   return (
     <div data-drag-region {...drag} className="flex flex-col gap-px px-2 pt-2 pb-1.5">
       <div className="mb-2 flex h-8 items-center gap-2 pr-0.5 pl-1.5">
-        <Logo size={20} />
+        <Logo size={22} />
         <span className="text-[14px] font-semibold tracking-[-0.01em] text-fg">Ancilla</span>
         <span className="flex-1" />
         <Tip label="Hide sidebar" shortcut={[MOD, "B"]}>
@@ -109,8 +109,8 @@ function NavRow(props: { icon: ReactNode; label: string; keys: string[]; active?
       onClick={props.onClick}
       aria-current={props.active ? "page" : undefined}
       className={cn(
-        "group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-sm text-muted transition-colors duration-100 hover:bg-hover hover:text-fg",
-        props.active && "bg-active text-fg",
+        "selection-row group/nav relative flex h-8 w-full items-center gap-2.5 rounded-md px-2 text-sm transition-colors duration-100",
+        props.active ? "text-fg" : "text-muted hover:bg-hover hover:text-fg",
       )}
     >
       <span className="flex size-4 shrink-0 items-center justify-center">{props.icon}</span>
@@ -326,7 +326,7 @@ export const ProjectSection = memo(function ProjectSection(props: {
           event.preventDefault();
           event.stopPropagation();
         }}
-        className="group/project flex h-8 cursor-grab items-center gap-0.5 rounded-lg pr-1 transition-colors duration-100 hover:bg-hover active:cursor-grabbing"
+        className="group/project flex h-8 cursor-grab items-center gap-0.5 rounded-md pr-1 transition-colors duration-100 hover:bg-hover active:cursor-grabbing"
       >
         <button
           type="button"
@@ -606,9 +606,10 @@ export const ThreadRow = memo(
     return (
       <li>
         <div
+          data-selected={props.active || undefined}
           className={cn(
-            "group/row relative flex min-h-8 items-center gap-2 rounded-lg py-1 pr-1 pl-[30px] transition-colors duration-100",
-            props.active ? "bg-active" : "hover:bg-hover",
+            "selection-row group/row relative flex min-h-8 items-center gap-2 rounded-md py-1 pr-1 pl-[30px] transition-colors duration-100",
+            !props.active && "hover:bg-hover",
           )}
         >
           {props.settled ? null : (
@@ -633,7 +634,7 @@ export const ThreadRow = memo(
               onDoubleClick={() => setRenaming(true)}
               aria-current={props.active ? "page" : undefined}
               title={session.title}
-              className="min-w-0 flex-1 text-left outline-none after:absolute after:inset-0 after:rounded-lg focus-visible:after:outline-2 focus-visible:after:outline-offset-[-2px] focus-visible:after:outline-accent focus-visible:after:outline"
+              className="min-w-0 flex-1 text-left outline-none after:absolute after:inset-0 after:rounded-md focus-visible:after:outline-2 focus-visible:after:outline-offset-[-2px] focus-visible:after:outline-focus focus-visible:after:outline"
             >
               <span
                 className={cn(
@@ -716,7 +717,7 @@ function RenameField(props: { initial: string; onDone: (title: string | null) =>
           finish(null);
         }
       }}
-      className="relative z-10 h-6 min-w-0 flex-1 rounded-md bg-raised px-1.5 text-sm text-fg outline-none shadow-[0_0_0_1.5px_var(--accent)]"
+      className="relative z-10 h-6 min-w-0 flex-1 rounded-md bg-raised px-1.5 text-sm text-fg outline-none shadow-[0_0_0_1.5px_var(--focus-ring)]"
     />
   );
 }
@@ -1086,7 +1087,7 @@ function ResizeHandle() {
           controller.setSidebarWidth(width + 16);
         }
       }}
-      className="absolute top-0 right-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-accent/35 focus-visible:bg-accent/35 focus-visible:outline-none"
+      className="absolute top-0 right-[-3px] z-[var(--z-resize)] h-full w-1.5 cursor-col-resize transition-colors duration-150 hover:bg-brand/35 focus-visible:bg-focus focus-visible:outline-none"
     />
   );
 }
@@ -1113,7 +1114,7 @@ function SidebarEmpty() {
       <button
         type="button"
         onClick={() => controller.setAddProjectOpen(true)}
-        className="mt-3 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-accent-text hover:bg-hover"
+        className="mt-3 inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-brand-text hover:bg-hover"
       >
         <FolderPlusIcon size={14} /> Add project
       </button>

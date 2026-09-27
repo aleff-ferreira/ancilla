@@ -9,16 +9,16 @@ import { MOD, Shortcut } from "../ui/primitives.js";
 import { StatusGlyph } from "../ui/StatusGlyph.js";
 
 const GROUP =
-  "[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-subtle";
+  "[&_[cmdk-group-heading]]:px-2.5 [&_[cmdk-group-heading]]:pt-2.5 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:tracking-[0.025em] [&_[cmdk-group-heading]]:text-muted";
 const ITEM =
-  "flex h-9 cursor-default items-center gap-3 rounded-lg px-2.5 text-sm text-fg outline-none select-none data-[selected=true]:bg-hover";
+  "selection-row relative flex h-9 cursor-default items-center gap-3 rounded-md px-2.5 text-sm text-fg outline-none select-none";
 
 function Item(props: { value: string; keywords?: string[]; onSelect: () => void; icon: ReactNode; children: ReactNode; hint?: ReactNode }) {
   return (
     <Command.Item value={props.value} keywords={props.keywords} onSelect={props.onSelect} className={ITEM}>
       <span className="flex size-4 shrink-0 items-center justify-center text-muted">{props.icon}</span>
       <span className="flex min-w-0 flex-1 items-center gap-2">{props.children}</span>
-      {props.hint ? <span className="shrink-0 text-xs text-subtle">{props.hint}</span> : null}
+      {props.hint ? <span className="shrink-0 text-right text-xs text-subtle tabular-nums">{props.hint}</span> : null}
     </Command.Item>
   );
 }
@@ -52,7 +52,7 @@ export function CommandPalette() {
       title="Search threads, projects and actions"
       hideTitle
       bare
-      className="top-[12%] w-[min(620px,calc(100%-16px))] overflow-hidden"
+      className="command-palette top-[12%] w-[min(620px,calc(100%-16px))] overflow-hidden rounded-xl"
     >
       <Command loop label="Search threads, projects and actions">
         <div className="flex items-center gap-2.5 border-b border-line px-4">

@@ -8,9 +8,9 @@ paints it with Pillow alone, no SVG renderer: each mask is drawn at a large
 multiple of the output size and box-filtered down (exact area coverage), and
 every size is painted on its own instead of being shrunk from one master.
 
-Treatment: navy rounded tile (#1A1A2E, corner 16.8% on the desktop PNGs, 7.5/32
-on the SVGs), light strokes (#EFF0F2) and a blue node (#5FA7FF). On plain
-backgrounds the strokes take the UI's ink and the node its accent (ON_LIGHT,
+Treatment: forest rounded tile (#0B1F18, corner 16.8% on the desktop PNGs, 7.5/32
+on the SVGs), light strokes (#EEF5EE) and an emerald node (#34D399). On plain
+backgrounds the strokes take the UI's ink and the node its brand accent (ON_LIGHT,
 ON_DARK). The grid always maps onto the whole canvas, so the tiles and the
 transparent master share one layout.
 
@@ -43,12 +43,11 @@ MARK_SVG = os.path.join(ROOT, "assets", "brand", "ancilla-mark.svg")
 INTER = os.path.join(ROOT, "node_modules", "@fontsource-variable", "inter",
                      "files", "inter-latin-wght-normal.woff2")
 
-TILE = "#1A1A2E"
-# (strokes, node) per surface. The blues are the UI accent, oklch(0.55 0.19 257),
-# and a lighter step of it, oklch(0.72 0.15 255), that holds up on navy and black.
-ON_TILE = ("#EFF0F2", "#5FA7FF")
-ON_LIGHT = ("#13161B", "#0A6DDD")
-ON_DARK = ("#EFF0F2", "#5FA7FF")
+TILE = "#0B1F18"
+# (strokes, node) per surface. Brand greens are independent of the blue runtime accent.
+ON_TILE = ("#EEF5EE", "#34D399")
+ON_LIGHT = ("#121815", "#0B7862")
+ON_DARK = ("#EEF5EE", "#34D399")
 RADIUS_FRAC = 86 / 512  # desktop tile corner, kept from the previous icon set
 SVG_RADIUS = 7.5  # corner of the SVG tiles and the UI Logo, in grid units
 
@@ -176,7 +175,7 @@ def font(size: int, weight: int) -> ImageFont.FreeTypeFont:
 
 def hero(mark: Mark, dark: bool) -> Image.Image:
     """README banner: the mark beside the name, the tagline centered under both."""
-    bg, muted = ("#101113", "#AEB1B6") if dark else ("#FBFCFE", "#4B5056")
+    bg, muted = ("#0D1211", "#ACB3AF") if dark else ("#FBFDFC", "#4A524F")
     colors = ON_DARK if dark else ON_LIGHT
     img = Image.new("RGBA", (1600, 480), bg)
     d = ImageDraw.Draw(img)

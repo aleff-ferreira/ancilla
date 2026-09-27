@@ -258,7 +258,7 @@ function TitleField(props: { initial: string; onDone: (title: string | null) => 
           finish(null);
         }
       }}
-      className="h-7 w-[min(420px,50%)] rounded-md bg-raised px-2 text-sm font-semibold text-fg outline-none shadow-[0_0_0_1.5px_var(--accent)]"
+      className="h-7 w-[min(420px,50%)] rounded-md bg-raised px-2 text-sm font-semibold text-fg outline-none shadow-[0_0_0_1.5px_var(--focus-ring)]"
     />
   );
 }
@@ -370,7 +370,7 @@ function MissingThread() {
       <div className="flex flex-1 flex-col items-center justify-center gap-3 pb-[12vh] text-center">
         <p className="font-display text-2xl text-fg">This thread is not here anymore</p>
         <p className="max-w-[40ch] text-sm text-muted">It may have been archived or removed with its project.</p>
-        <button type="button" className="mt-2 text-sm font-medium text-accent-text hover:underline" onClick={() => controller.newThread()}>
+        <button type="button" className="mt-2 text-sm font-medium text-brand-text hover:underline" onClick={() => controller.newThread()}>
           Start a new thread
         </button>
       </div>

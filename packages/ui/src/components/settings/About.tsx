@@ -10,7 +10,7 @@ export const LEGAL_LINKS: readonly { label: string; href: string }[] = [
   { label: "Third-party notices", href: `${REPO}/blob/main/THIRD_PARTY_NOTICES.md` },
 ];
 
-const LINK_CLASS = "font-medium text-accent-text underline-offset-2 hover:underline";
+const LINK_CLASS = "font-medium text-brand-text underline-offset-2 hover:underline";
 
 /**
  * The version and the license, with the legal texts a click away. Plain `target="_blank"` links, which
@@ -22,6 +22,7 @@ export function About(props: { version: string | null }) {
       <p className="text-sm text-pretty text-fg">
         Ancilla{props.version ? ` ${props.version}` : ""} · GNU AGPL v3
       </p>
+      <p className="mt-1 text-xs text-muted">An AMAZONIA WORKS product</p>
       <p className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs">
         {LEGAL_LINKS.map((link) => (
           <a key={link.href} href={link.href} target="_blank" rel="noreferrer" className={`inline-flex items-center gap-1 ${LINK_CLASS}`}>
