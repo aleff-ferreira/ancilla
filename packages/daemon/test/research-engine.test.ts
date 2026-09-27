@@ -453,7 +453,7 @@ describe("runResearch", () => {
     assert.equal(outcome.status, "failed");
     assert.equal(outcome.report, null);
     assert.equal(model.counts.writer, 0, "nothing worth writing from, so the writer is never called");
-    assert.match(outcome.failure ?? "", /supervisor decision failed with no findings to write from/);
+    assert.match(outcome.failure ?? "", /supervisor decision failed \(no JSON object found\) with no findings to write from/);
     assert.equal(harness.events[harness.events.length - 1]?.type, "run_failed");
   });
 
@@ -467,5 +467,47 @@ describe("runResearch", () => {
     assert.match(outcome.failure ?? "", /rate-limit/);
     assert.equal(model.counts.writer, 0);
     assert.equal(harness.events[harness.events.length - 1]?.type, "run_failed");
+  });
+});
+
+describe("supervisor decisions that do not parse", () => {
+  it("researches the brief along default lines when the first decision is prose, and tells the supervisor next round", async () => {
+    const clock = new FakeClock();
+    const model = new FakeModel({
+      brief: [briefText("Protein hydration thermodynamics")],
+      supervisor: ["I would start by looking into hydration sites.", "Still just prose, sorry.", decision("RESEARCH_COMPLETE", [])],
+      writer: ["# Report\n\nClaim [A1-S1]."],
+    });
+    model.onCall = () => clock.advanceMinutes(0.2);
+    const worker = new FakeWorker(verifiedWorkerScript());
+    const harness = makeHarness(model, worker, clock);
+    const outcome = await runResearch(INPUT, testConfig({ maxParallel: 3, windowMinMinutes: 0.5 }), harness.deps, new AbortController().signal);
+    assert.equal(outcome.status, "completed");
+    assert.equal(worker.tasks.length, 3, "three default tasks ran in round 1");
+    assert.match(worker.tasks[0]?.topic ?? "", /Map the landscape of: Protein hydration/);
+    assert.equal(worker.tasks[0]?.discovery, true);
+    assert.match(outcome.state.rounds[0]?.reflection ?? "", /no usable decision/);
+    const third = model.calls.filter((c) => c.role === "supervisor")[2];
+    assert.match(third?.prompt ?? "", /NOTE: your previous answer was not a valid decision/);
+  });
+
+  it("says why when a later decision fails with nothing found, and retries a transport failure once", async () => {
+    const clock = new FakeClock();
+    const failing = new ResearchFailure("invalid_output", "the control turn answered nothing");
+    const model = new FakeModel({
+      brief: [briefText()],
+      supervisor: [failing, decision("CONTINUE_RESEARCH", ["T1"]), "prose", "prose again"],
+      writer: ["unused"],
+    });
+    model.onCall = () => clock.advanceMinutes(0.2);
+    // Round 1's worker fails outright; the retry round completes with nothing to show; then the decision fails.
+    let calls = 0;
+    const worker = new FakeWorker(() => (calls++ === 0 ? failedResult("other: boom") : completedResult("", [])));
+    const outcome = await runResearch(INPUT, testConfig({ maxParallel: 1 }), makeHarness(model, worker, clock).deps, new AbortController().signal);
+    assert.equal(outcome.status, "failed");
+    assert.equal(model.counts.writer, 0);
+    assert.match(outcome.failure ?? "", /supervisor decision failed \(no JSON object found\) with no findings to write from/);
+    // The first supervisor call threw once and was tried again, which is where round 1's real decision came from.
+    assert.equal(model.counts.supervisor, 4);
   });
 });

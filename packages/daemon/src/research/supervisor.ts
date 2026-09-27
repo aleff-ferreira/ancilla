@@ -69,13 +69,15 @@ function preDecisionExit(ctx: RunContext): string | null {
 }
 
 /**
- * One supervisor decision, two attempts as upstream. A fatal failure propagates and ends the run; a transport
- * failure that is worth retrying (timeout, rate limit, unavailable) gets the second attempt, an answer without a
- * usable decision gets it with a nudge, and any other failure (an `invalid_output`, say) ends the attempts at once
- * because the same call would fail the same way. A null result means the caller decides what a silent supervisor
- * means.
+ * One supervisor decision, two attempts as upstream. A fatal failure (auth, quota, cancellation) propagates and
+ * ends the run. Anything else gets the second attempt: a transport failure because a control turn that answered
+ * nothing once may answer next time, and an answer without a usable decision with a nudge that names what was
+ * wrong. When both attempts fail, the outcome carries the last reason so the run's failure text says what the
+ * supervisor actually did instead of a bare "decision failed"; the loop decides what to do about it.
  */
-async function decide(ctx: RunContext, round: number, notice: string | null): Promise<ParsedDecision | null> {
+type DecisionOutcome = { ok: true; decision: ParsedDecision } | { ok: false; reason: string };
+
+async function decide(ctx: RunContext, round: number, notice: string | null): Promise<DecisionOutcome> {
   const { state, config } = ctx;
   const prompt = buildSupervisorPrompt({
     question: state.question,
@@ -99,21 +101,35 @@ async function decide(ctx: RunContext, round: number, notice: string | null): Pr
     try {
       text = await ctx.complete("supervisor", attempt === 1 ? prompt : `${prompt}\n\n${SUPERVISOR_RETRY_NUDGE}\n(${lastReason})`);
     } catch (error) {
+      // One more try for anything short of fatal: a transport that answered nothing once may answer next time.
       if (error instanceof ResearchFailure && !error.fatal) {
         lastReason = `${error.kind}: ${error.message}`;
         ctx.log(`supervisor decision attempt ${attempt} failed (${lastReason})`);
-        if (error.retryable) continue;
-        ctx.log(`supervisor decision not retried: ${error.kind} failures do not change on a second call`);
-        return null;
+        continue;
       }
       throw error;
     }
     const parsed = parseDecision(text, config.maxParallel * 2);
-    if (parsed.ok) return parsed.value;
+    if (parsed.ok) return { ok: true, decision: parsed.value };
     lastReason = parsed.reason;
-    ctx.log(`supervisor decision attempt ${attempt} rejected (${lastReason})`);
+    ctx.log(`supervisor decision attempt ${attempt} rejected (${lastReason}); answer began: ${JSON.stringify(text.slice(0, 160))}`);
   }
-  return null;
+  return { ok: false, reason: lastReason || "no answer" };
+}
+
+/**
+ * What to research when the supervisor cannot say: three tasks cut from the brief, one broad and two focused, so a
+ * run whose first decision came back as prose still gathers something for the supervisor to reason about next
+ * round. Only used before any findings exist; later a failed decision ends research the way upstream's does.
+ */
+export function fallbackDelegations(brief: string, maxParallel: number): ParsedDelegation[] {
+  const topic = brief.replace(/\s+/g, " ").trim().slice(0, 400);
+  const tasks: ParsedDelegation[] = [
+    { topic: `Map the landscape of: ${topic}`, discovery: true, maxReads: null },
+    { topic: `Primary sources, key facts and figures on: ${topic}`, discovery: false, maxReads: null },
+    { topic: `The most recent developments, debates and open questions on: ${topic}`, discovery: false, maxReads: null },
+  ];
+  return tasks.slice(0, Math.max(1, Math.min(tasks.length, maxParallel)));
 }
 
 function budgetsFor(ctx: RunContext, delegation: Delegation): WorkerBudgets {
@@ -301,28 +317,41 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
     let reflection: string;
     let verdict: SupervisorVerdict;
     let delegations: Delegation[];
+    // A note for the next decision that must outlive this round's own reset of `notice`.
+    let carriedNotice: string | null = null;
     if (retrying && previous) {
       // Upstream re-does the iteration after its first all-failed round; the same topics run under new agent ids.
       reflection = `Retrying round ${previous.round}'s delegations after every worker failed.`;
       verdict = "CONTINUE_RESEARCH";
       delegations = toDelegations(ctx, previous.delegations.map((d) => ({ topic: d.topic, discovery: d.discovery, maxReads: d.maxReads })));
     } else {
-      const decision = await decide(ctx, roundNumber, notice);
-      if (!decision) {
+      const decided = await decide(ctx, roundNumber, notice);
+      if (!decided.ok) {
         // Upstream ends research gracefully when the supervisor fails twice; writing from nothing is not graceful.
         // Only real findings count: failure notes and unverified sources are notes too, but not evidence.
-        const reason = "supervisor decision failed";
+        const reason = `supervisor decision failed (${decided.reason})`;
         if (hasFindings(state)) {
           if (previous && previous.exit === null) previous.exit = reason;
           return { kind: "write", reason, salvage: true };
         }
-        state.aborted = true;
-        state.abortReason = `${reason} with no findings to write from`;
-        return { kind: "aborted", reason: state.abortReason };
+        if (state.rounds.length === 0) {
+          // Nothing gathered yet and no decision to gather with: research the brief along three default lines rather
+          // than end with nothing, and tell the supervisor next round what happened.
+          ctx.log(`${reason}; delegating along default lines instead`);
+          reflection = `The supervisor gave no usable decision (${decided.reason}); researching the brief along default lines.`;
+          verdict = "CONTINUE_RESEARCH";
+          delegations = toDelegations(ctx, fallbackDelegations(state.brief ?? state.question, config.maxParallel));
+          carriedNotice = "NOTE: your previous answer was not a valid decision, so the first round researched the brief along default lines. Answer with the fenced JSON decision this time.";
+        } else {
+          state.aborted = true;
+          state.abortReason = `${reason} with no findings to write from`;
+          return { kind: "aborted", reason: state.abortReason };
+        }
+      } else {
+        reflection = decided.decision.reflection;
+        verdict = decided.decision.verdict;
+        delegations = toDelegations(ctx, decided.decision.delegations);
       }
-      reflection = decision.reflection;
-      verdict = decision.verdict;
-      delegations = toDelegations(ctx, decision.delegations);
     }
 
     const round: SupervisorRound = {
@@ -351,7 +380,7 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
       },
       { round: roundNumber },
     );
-    notice = null;
+    notice = carriedNotice;
 
     if (delegations.length === 0) {
       const previousEmpty = previous !== null && previous.delegations.length === 0;

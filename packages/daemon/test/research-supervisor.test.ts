@@ -251,15 +251,15 @@ describe("supervisor loop workers", () => {
     assert.ok(run2.state.notes.every((n) => n.length <= NOTE_CHAR_CAP && /…\[truncated\]$/.test(n)));
   });
 
-  it("retries a decision only on a retryable failure, never on invalid_output", async () => {
+  it("retries any non-fatal failure once, including an invalid_output, and gives a rate limit the second attempt", async () => {
     const clock = new FakeClock();
-    const invalid = new FakeModel({ supervisor: [new ResearchFailure("invalid_output", "muse exec printed no answer."), decision("CONTINUE_RESEARCH", ["A"])] });
+    const invalid = new FakeModel({ supervisor: [new ResearchFailure("invalid_output", "muse exec printed no answer."), decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])] });
+    invalid.onCall = () => clock.advanceMinutes(4);
     const run = loop(testConfig(), invalid, new FakeWorker(verifiedWorkerScript()), clock);
     const exit = await runSupervisorLoop(run.ctx);
-    assert.equal(invalid.counts.supervisor, 1, "an invalid_output is not retried");
-    assert.equal(exit.kind, "aborted");
-    assert.match(exit.reason, /supervisor decision failed/);
-    assert.ok(run.harness.logs.some((line) => /not retried/.test(line)));
+    assert.equal(invalid.counts.supervisor, 3, "an invalid_output gets the second attempt too");
+    assert.equal(exit.kind === "write" && exit.reason, "research complete");
+    assert.ok(run.harness.logs.some((line) => /attempt 1 failed \(invalid_output/.test(line)));
 
     const clock2 = new FakeClock();
     const flaky = new FakeModel({ supervisor: [new ResearchFailure("rate_limited", "429"), decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])] });
@@ -268,6 +268,11 @@ describe("supervisor loop workers", () => {
     const exit2 = await runSupervisorLoop(run2.ctx);
     assert.equal(flaky.counts.supervisor, 3, "a rate limit gets the second attempt");
     assert.equal(exit2.kind === "write" && exit2.reason, "research complete");
+
+    const fatal = new FakeModel({ supervisor: [new ResearchFailure("cancelled", "stopped")] });
+    const run3 = loop(testConfig(), fatal, new FakeWorker(verifiedWorkerScript()));
+    await assert.rejects(runSupervisorLoop(run3.ctx), /stopped/);
+    assert.equal(fatal.counts.supervisor, 1, "a fatal failure is never retried");
   });
 
   it("does not salvage from failure notes alone: failed or empty workers, then a silent supervisor, abort", async () => {
@@ -279,19 +284,27 @@ describe("supervisor loop workers", () => {
     const exit = await runSupervisorLoop(run.ctx);
     assert.equal(run.state.notes.length, 2, "an empty completion and a failure both leave a note");
     assert.equal(exit.kind, "aborted");
-    assert.match(exit.reason, /supervisor decision failed with no findings to write from/);
+    assert.match(exit.reason, /supervisor decision failed \(no JSON object found\) with no findings to write from/);
     assert.equal(model.counts.supervisor, 3);
   });
 
-  it("aborts when the supervisor fails twice before anything was found", async () => {
+  it("researches the brief along default lines when the supervisor fails twice before anything was found", async () => {
     const clock = new FakeClock();
-    const model = new FakeModel({ supervisor: ["no json here", "still nothing"] });
-    const run = loop(testConfig(), model, new FakeWorker(), clock);
+    const model = new FakeModel({ supervisor: ["no json here", "still nothing", decision("RESEARCH_COMPLETE", [])] });
+    model.onCall = () => clock.advanceMinutes(2);
+    const worker = new FakeWorker(verifiedWorkerScript());
+    const run = loop(testConfig({ maxParallel: 2 }), model, worker, clock);
     const exit = await runSupervisorLoop(run.ctx);
-    assert.equal(exit.kind, "aborted");
-    assert.match(exit.reason, /supervisor decision failed/);
-    assert.equal(model.counts.supervisor, 2);
+    assert.equal(exit.kind === "write" && exit.reason, "research complete");
+    assert.equal(model.counts.supervisor, 3, "two failed attempts, then the round-2 decision");
     assert.match(model.calls[1]?.prompt ?? "", /did not contain a valid fenced JSON decision/);
+    assert.equal(worker.tasks.length, 2, "the default tasks are capped at maxParallel");
+    assert.match(worker.tasks[0]?.topic ?? "", /^Map the landscape of: /);
+    assert.equal(worker.tasks[0]?.discovery, true);
+    assert.match(worker.tasks[1]?.topic ?? "", /^Primary sources, key facts and figures on: /);
+    assert.match(run.state.rounds[0]?.reflection ?? "", /no usable decision/);
+    assert.match(model.calls[2]?.prompt ?? "", /NOTE: your previous answer was not a valid decision/);
+    assert.doesNotMatch(model.calls[2]?.prompt ?? "", /did not contain a valid fenced JSON decision/, "the retry nudge is not carried into round 2");
   });
 });
 
