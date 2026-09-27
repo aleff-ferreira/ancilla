@@ -1,4 +1,4 @@
-import { durationText, type AgentState, type AgentVM, type RunNeedVM } from "../../model/swarm.js";
+import { durationText, researchCounters, type AgentState, type AgentVM, type RunNeedVM, type RunVM } from "../../model/swarm.js";
 
 /**
  * The words the Swarm card says for an agent's state (SPEC §14). Facts say when Muse reports them; an absence is a
@@ -19,12 +19,25 @@ export const STATE_WORD: Record<AgentState, string> = {
 };
 
 export const NO_REASON = "Muse has not reported a reason yet. The run's report may explain it when it finishes.";
+export const RESEARCH_NO_REASON = "The run does not report why a worker failed. Its report may say.";
+/** Why a research worker's row offers no Retry, Skip or Stop. */
+export const RESEARCH_OWN = "Research workers run on their own";
 export const NOT_ATTRIBUTED = "Muse does not say which agent asked.";
 export const NOTHING_TO_COMPARE = "No agent has finished yet, so there is nothing to compare with.";
 export const NOT_CONFIRMED = "Muse has not confirmed yet.";
 
 export function plural(n: number, word: string, words = `${word}s`): string {
   return `${n} ${n === 1 ? word : words}`;
+}
+
+/** What the run is, for the head's sub line: `Workflow` or `Deep research`. */
+export function runKindWord(run: Pick<RunVM, "kind">): string {
+  return run.kind === "research" ? "Deep research" : "Workflow";
+}
+
+/** What a failed agent's row says when no reason came: the words differ by who runs the agent. */
+export function noReason(agent: Pick<AgentVM, "kind">): string {
+  return agent.kind === "research" ? RESEARCH_NO_REASON : NO_REASON;
 }
 
 /** `1m 40s ago`, `53s ago`: an age with the seconds, for when something was asked or reported. */
@@ -64,6 +77,16 @@ export function compactState(agent: AgentVM, stale = false): StateCopy {
   }
   if (agent.pending === "retry") return { text: "Retrying", dim: `· attempt ${agent.attempt + 1} starting`, tone: "work" };
   if (agent.pending === "stop") return { text: "Stopping…", dim: null, tone: null };
+  if (agent.research) {
+    // A research worker's row carries its counters in place of attempts, which it never has more than one of.
+    const counters = `· ${researchCounters(agent.research)}`;
+    switch (agent.state) {
+      case "done": return { text: "Done", dim: counters, tone: null };
+      case "failed": return { text: agent.research.wireState === "timed_out" ? "Timed out" : "Failed", dim: counters, tone: "fail" };
+      case "working": return { text: "Working", dim: counters, tone: "work" };
+      default: break;
+    }
+  }
   switch (agent.state) {
     case "done":
       return { text: "Done", dim: agent.attempt > 1 ? `· attempt ${agent.attempt}` : null, tone: null };

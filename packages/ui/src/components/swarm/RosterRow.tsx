@@ -7,6 +7,7 @@ import { durationText, type AgentState, type AgentVM, type RunNeedVM, type RunVM
 import { Button, Spinner, cn } from "../ui/primitives.js";
 import { Peek } from "./Peek.js";
 import { Sigil } from "./Sigil.js";
+import { RESEARCH_OWN } from "./cardCopy.js";
 import { isTall, rowLabel, subline, timeText, tokensText, type Subline } from "./panel.js";
 
 /** The roster's columns: glyph · sigil · name · tokens · time · share, with hairline gaps between (final.css `.cols`). */
@@ -129,7 +130,8 @@ function RowActions(props: { agent: AgentVM; readOnly: boolean; confirm: RowConf
   }
   const buttons: ReactNode[] = [];
   const small = "h-6 gap-1 px-2 text-xs";
-  if (!props.readOnly && agent.pending === null) {
+  // A research worker takes no control of its own, so its plate says why and offers Inspect alone.
+  if (!props.readOnly && agent.pending === null && agent.kind !== "research") {
     if (agent.state === "failed" && agent.kind === "workflow") {
       buttons.push(
         <Button key="retry" size="sm" variant="ghost" className={small} onClick={() => props.onAction(agent, "retry")}><ArrowCounterClockwiseIcon size={12} />Retry</Button>,
@@ -144,7 +146,7 @@ function RowActions(props: { agent: AgentVM; readOnly: boolean; confirm: RowConf
   if (buttons.length === 0 || agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled") {
     buttons.push(<Button key="inspect" size="sm" variant="ghost" className={small} onClick={props.onInspect}><EyeIcon size={12} />Inspect</Button>);
   }
-  return <span className={plate}>{buttons}</span>;
+  return <span className={plate} title={agent.kind === "research" ? RESEARCH_OWN : undefined}>{buttons}</span>;
 }
 
 /**

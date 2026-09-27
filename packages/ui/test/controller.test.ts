@@ -7,7 +7,7 @@ import { DEFAULT_SWARM_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } fr
 import { swarmView } from "../src/model/swarm.js";
 import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
-import { fakeResearchRun } from "./fixtures/research.js";
+import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
 
 const SESSION: SessionSummary = {
   sessionId: "s1",
@@ -3491,6 +3491,47 @@ describe("swarm controls", () => {
       assert.equal(await controller.stopRun("s1", "wf"), true);
       assert.equal(client.actions.at(-1), "workflow:s1:cancel:run-1");
       assert.equal(await controller.stopRun("s1", "nope"), false);
+    } finally {
+      stop();
+    }
+  });
+
+  it("routes a Swarm stop on a research run to stopResearch, refuses worker controls, and stops research with everything else", async () => {
+    const client = new FakeClient();
+    const research = runningResearch();
+    client.researchRuns.push(research);
+    client.transcript = async () => load({ researchRuns: [research] });
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
+      await settle();
+      const threadOf = () => controller.store.get().threads["s1"]!;
+      const vm = swarmView(threadOf().fold, SESSION, Date.now(), { researchRuns: threadOf().researchRuns });
+      const worker = vm.runs.flatMap((run) => run.agents).find((candidate) => candidate.id === "research:run-1:A3");
+      assert.ok(worker);
+      assert.equal(await controller.swarmAction("s1", worker, "stop"), false, "a worker takes no stop of its own");
+      assert.equal(await controller.swarmAction("s1", worker, "retry"), false);
+      assert.deepEqual(controller.store.get().swarm.pending, {}, "nothing is marked pending for it");
+      assert.deepEqual(client.researchStops, []);
+
+      const stopped = await controller.stopEverything("s1");
+      assert.deepEqual([...stopped.runs].sort(), ["audit", vm.runs.find((run) => run.kind === "research")?.name].sort());
+      assert.deepEqual(stopped.tasks, []);
+      assert.equal(client.actions.at(-1), "workflow:s1:cancel:run-1");
+      assert.deepEqual(client.researchStops, [{ runId: "run-1", writeReport: true }], "the composer's switch says a stop writes a report");
+      assert.equal(threadOf().researchRuns[0]?.status, "partial", "the answer to the stop lands on the run");
+      assert.equal(controller.store.get().researchStopping["run-1"], undefined);
+
+      const again = runningResearch({ runId: "run-2" });
+      client.researchRuns.push(again);
+      client.handler?.({ type: "research-run", sessionId: "s1", run: again });
+      await settle();
+      controller.setResearchStopWrites(false);
+      assert.equal(await controller.stopRun("s1", "research:run-2"), true);
+      assert.deepEqual(client.researchStops.at(-1), { runId: "run-2", writeReport: false });
+      assert.equal(threadOf().researchRuns.find((run) => run.runId === "run-2")?.status, "cancelled");
+      assert.equal(await controller.stopRun("s1", "research:missing"), false, "an unknown run is refused with a toast");
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not stop the research run");
     } finally {
       stop();
     }

@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import { formatClock } from "../../model/format.js";
 import { durationText, type CompletionVM, type FingerprintVM, type RunVM } from "../../model/swarm.js";
+import { runKindWord } from "./cardCopy.js";
 import {
   ArrowCounterClockwiseIcon,
   ArrowSquareOutIcon,
@@ -145,7 +146,7 @@ export function CompletionReport(props: CompletionReportProps) {
   const word = run.status === "stopped" ? "Stopped" : run.status === "failed" ? "Failed" : landed ? "Done" : "Finished";
   const started = run.startedAt !== null ? formatClock(run.startedAt, run.clockAt) : null;
   const finished = run.endedAt !== null ? formatClock(run.endedAt, run.clockAt) : null;
-  const subLong = ["Workflow", started ? `started ${started}` : null, finished ? `finished ${finished}` : null].filter(Boolean).join(" · ");
+  const subLong = [runKindWord(run), started ? `started ${started}` : null, finished ? `finished ${finished}` : null].filter(Boolean).join(" · ");
   const scheduled = run.counts.total - run.counts.planned;
   return (
     <div className="swarm-run report" data-run={run.itemId}>
@@ -157,7 +158,7 @@ export function CompletionReport(props: CompletionReportProps) {
           <span className="tt">
             <span className="nm">{run.name}</span>
             <span className="sub long">{subLong}</span>
-            <span className="sub short">Workflow · {elapsed}</span>
+            <span className="sub short">{runKindWord(run)} · {elapsed}</span>
           </span>
         </button>
         <span className={cn("swarm-el", landed && "ok")}>

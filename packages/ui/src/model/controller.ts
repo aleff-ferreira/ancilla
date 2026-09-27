@@ -21,7 +21,7 @@ import type {
   WorkflowAction,
 } from "../types.js";
 import { describeTool, modelDisplayName } from "./format.js";
-import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
+import { pendingKey, researchRunIdOf, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
 import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
@@ -3834,6 +3834,10 @@ export class AncillaController {
    */
   async swarmAction(sessionId: string, agent: AgentVM, action: "retry" | "skip" | "stop"): Promise<boolean> {
     const key = pendingKey(sessionId, agent.id, agent.attempt);
+    if (agent.kind === "research") {
+      // The daemon's supervisor runs research workers; only the run as a whole can be stopped.
+      return false;
+    }
     if (agent.kind === "workflow") {
       if (!agent.workflowRunId) {
         this.toast("error", "The workflow did not take that", "This run's id is not known here.");
@@ -3875,8 +3879,15 @@ export class AncillaController {
     return ok;
   }
 
-  /** Stops one run by its item; the confirm copy comes from the run's own view-model. */
+  /**
+   * Stops one run by its item; the confirm copy comes from the run's own view-model. A research run's item id
+   * carries its prefix, and stops the way the composer's switch says: with a report from what it has, or without.
+   */
   async stopRun(sessionId: string, itemId: string): Promise<boolean> {
+    const researchId = researchRunIdOf(itemId);
+    if (researchId !== null) {
+      return this.stopResearch(researchId, this.state.researchStopWrites);
+    }
     const item = this.state.threads[sessionId]?.fold.items[itemId];
     const runId = typeof item?.workflowRunId === "string" ? item.workflowRunId : null;
     if (!runId) {
@@ -3887,8 +3898,8 @@ export class AncillaController {
   }
 
   /**
-   * Stops every live run and background task in one thread. Approvals stay open. Returns what was asked to stop,
-   * by name, since `task/stopAll` does not say what it stopped.
+   * Stops every live run and background task in one thread, research runs included. Approvals stay open. Returns
+   * what was asked to stop, by name, since `task/stopAll` does not say what it stopped.
    */
   async stopEverything(sessionId: string): Promise<{ runs: string[]; tasks: string[] }> {
     const thread = this.state.threads[sessionId];
@@ -3896,10 +3907,15 @@ export class AncillaController {
     if (!thread) {
       return { runs: [], tasks: [] };
     }
-    const view = swarmView(thread.fold, session, this.platform.now(), { pending: this.state.swarm.pending, skipped: this.state.swarm.skipped, models: this.state.models });
+    const view = swarmView(thread.fold, session, this.platform.now(), {
+      pending: this.state.swarm.pending,
+      skipped: this.state.swarm.skipped,
+      models: this.state.models,
+      researchRuns: thread.researchRuns,
+    });
     const runs = view.runs.filter((run) => runLive(run) && run.runId !== null);
     const tasks = view.tasks.filter((task) => task.state === "working" || task.state === "no-update" || task.state === "waiting-on-you");
-    await Promise.all(runs.map((run) => this.workflowAction(sessionId, "cancel", run.runId as string)));
+    await Promise.all(runs.map((run) => (run.kind === "research" ? this.stopRun(sessionId, run.itemId) : this.workflowAction(sessionId, "cancel", run.runId as string))));
     if (tasks.length > 0) {
       for (const task of tasks) {
         this.setPending(pendingKey(sessionId, task.id, 1), "stop");

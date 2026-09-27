@@ -85,6 +85,7 @@ interface SwarmParts {
   swarm: ThreadFold["swarm"];
   approvals: ThreadFold["approvals"];
   userInputs: ThreadFold["userInputs"];
+  researchRuns: ThreadState["researchRuns"];
   busy: boolean;
   stale: boolean;
 }
@@ -107,6 +108,7 @@ function sameParts(a: SwarmParts | null, b: SwarmParts | null): boolean {
     a.swarm === b.swarm &&
     a.approvals === b.approvals &&
     a.userInputs === b.userInputs &&
+    a.researchRuns === b.researchRuns &&
     a.busy === b.busy &&
     a.stale === b.stale
   );
@@ -124,13 +126,14 @@ export function useSidebarSwarm(session: SessionSummary, status: ThreadStatus, n
       return null;
     }
     const fold = thread.fold;
-    const busy = swarmBusy(fold);
+    const busy = swarmBusy(fold, thread.researchRuns);
     return {
       fold,
       agentItems: fold.agentItems,
       swarm: fold.swarm,
       approvals: fold.approvals,
       userInputs: fold.userInputs,
+      researchRuns: thread.researchRuns,
       busy,
       stale: busy && !foldLive(s, thread),
     };
@@ -141,7 +144,7 @@ export function useSidebarSwarm(session: SessionSummary, status: ThreadStatus, n
     if (!parts) {
       return null;
     }
-    const summary = sidebarSwarmSummary(parts.fold, live, now, { sessionId, stale: parts.stale });
+    const summary = sidebarSwarmSummary(parts.fold, live, now, { sessionId, stale: parts.stale, researchRuns: parts.researchRuns });
     return summary && sidebarLineShown(summary, status, parts.busy) ? summary : null;
   }, [parts, live, sessionId, status, now]);
 }

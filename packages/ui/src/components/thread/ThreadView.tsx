@@ -43,16 +43,17 @@ export function ThreadView(props: { sessionId: string }) {
   if (nextFeedMark !== feedMark) {
     setFeedMark(nextFeedMark);
   }
-  const busy = fold ? swarmBusy(fold) : false;
+  const researchRuns = thread?.researchRuns;
+  const busy = fold ? swarmBusy(fold, researchRuns) : false;
   const now = useNow(AGE_TICK_MS, busy);
   const swarmStale = connection !== "open" || Boolean(thread?.fold.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale)
     || (viewUnavailable && !agentFeedRecovered(nextFeedMark, props.sessionId, agentItems, thread?.fold.activeTurnId === null));
   // Until the first read lands the fold is a blank placeholder, which says nothing about the thread's agents.
   const loaded = !thread || thread.fold.order.length > 0 || thread.load === "ready";
   const swarm = useMemo<SwarmVM | null>(
-    () => (fold && loaded ? swarmView(fold, session, now, { stale: swarmStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId) }) : null),
-    // The view reads the agent items, the item order, the requests and the trace; streamed reply text changes none of them.
-    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId],
+    () => (fold && loaded ? swarmView(fold, session, now, { stale: swarmStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId), researchRuns }) : null),
+    // The view reads the agent items, the item order, the requests, the trace and the research runs; streamed reply text changes none of them.
+    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.swarm, session, now, swarmStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId, researchRuns],
   );
   if (!session) {
     return <MissingThread />;

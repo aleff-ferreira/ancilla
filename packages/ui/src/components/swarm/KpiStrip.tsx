@@ -65,6 +65,8 @@ export function KpiStrip(props: KpiStripProps) {
 function tokensCell(run: RunVM, live: boolean): Cell {
   const label = live ? "Tokens so far" : "Tokens";
   if (!run.tokens) return { key: "tokens", label, value: "—", sub: "not reported yet" };
+  // A research run counts its own tokens; its workers report none, so there is no "of N" to say.
+  if (run.research) return { key: "tokens", label, value: formatTokens(run.tokens.total), sub: "the run's own count" };
   const all = run.tokens.reported >= run.tokens.of;
   return { key: "tokens", label, value: formatTokens(run.tokens.total), sub: all ? `all ${run.tokens.of} reported` : `${run.tokens.reported} of ${run.tokens.of} reported` };
 }
@@ -90,7 +92,7 @@ function runningCells(run: RunVM): Cell[] {
     costCell(run),
   ];
   if (run.slots) {
-    cells.push({ key: "slots", label: "Slots", value: String(run.slots.used), unit: `of ${run.slots.max}`, sub: "launch policy" });
+    cells.push({ key: "slots", label: "Slots", value: String(run.slots.used), unit: `of ${run.slots.max}`, sub: run.research ? "run config" : "launch policy" });
   }
   const perMinute = run.pulse[run.pulse.length - 1] ?? 0;
   const any = run.pulse.some((bin) => bin > 0);

@@ -5,9 +5,11 @@ import { chipCounts, rosterEntries, sortAgents, summaryText } from "../src/compo
 import { Roster } from "../src/components/swarm/Roster.js";
 import { panelRun } from "../src/components/swarm/SwarmPanel.js";
 import { applyEvents, emptyFold } from "../src/model/fold.js";
+import { researchThreadTitle } from "../src/model/research.js";
 import { pendingKey, type RunVM } from "../src/model/swarm.js";
 import type { ViewEvent } from "../src/types.js";
-import { Feed, MIN, NOW, S, approvalAt, atNow, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, panelStore, renderPanel, renderWith, rowTag, textOf } from "./swarm-panel-fixture.js";
+import { RESEARCH_NOW, runningResearch } from "./fixtures/research.js";
+import { Feed, MIN, NOW, S, approvalAt, atNow, attrs, digits, kpi, lantern, lanternDone, lanternFold, lanternRun, launch, panelStore, renderPanel, renderWith, rowTag, textOf, type PanelSetup } from "./swarm-panel-fixture.js";
 
 /** The rows of the roster grid in order: phase heads by name, agents by id. */
 function rows(markup: string): string[] {
@@ -287,5 +289,42 @@ describe("SwarmPanel", () => {
     assert.equal(panelRun([live, old]), live);
     assert.equal(panelRun([old]), old);
     assert.equal(panelRun([]), null);
+  });
+});
+
+describe("a research run in the panel", () => {
+  const RESEARCH = runningResearch();
+  const setup = (panel?: PanelSetup["panel"]): PanelSetup => ({ fold: emptyFold(), thread: { researchRuns: [RESEARCH] }, ...(panel ? { panel } : {}) });
+
+  it("lists the workers by round with the run's Stop, its own summary and figures, and no worker controls", () => {
+    const markup = renderPanel(setup(), RESEARCH_NOW);
+    const text = textOf(markup);
+    assert.ok(text.startsWith(`${researchThreadTitle(RESEARCH.question)} Running Stop run`), text.slice(0, 120));
+    assert.match(text, /Researching, round 2 of 12 · 1 done · 1 working · 1 failed/);
+    assert.deepEqual(rows(markup), ["phase:Round 1 of 12", "research:run-1:A1", "research:run-1:A2", "phase:Round 2 of 12", "research:run-1:A3"]);
+    assert.equal(subline(markup, "research:run-1:A1"), "Done · 2 searches · 3 reads · 1 saved");
+    assert.equal(subline(markup, "research:run-1:A2"), "Failed · 1 search · the run does not say why");
+    assert.equal(subline(markup, "research:run-1:A3"), "Working · 2 searches · 1 read");
+    assert.match(textOf(kpi(markup, "tokens")), /^Tokens so far 91k the run's own count$/);
+    assert.match(textOf(kpi(markup, "cost")), /^Est\. cost ~\$[\d.]+ at list price$/);
+    assert.match(textOf(kpi(markup, "slots")), /^Slots 1 of 3 run config$/);
+    assert.deepEqual(chips(markup), [["All", "3"], ["Failed", "1"], ["Working", "1"], ["Done", "1"]]);
+    assert.doesNotMatch(text, /Retry|Skip/, "no worker offers a retry or a skip");
+    assert.doesNotMatch(text, /No agents in this thread/);
+  });
+
+  it("inspects a worker as a research worker with its counters, and says why it has no controls", () => {
+    const markup = renderPanel(setup({ mode: "inspector", inspectId: "research:run-1:A2" }), RESEARCH_NOW);
+    const text = textOf(markup);
+    assert.match(text, /A2 · Primer's functional colour roles Round 1 of 12 · Research worker/);
+    assert.match(markup, /data-callout="failed"/);
+    assert.match(text, /Failed after 40s The run does not report why a worker failed\. Its report may say\. Research workers run on their own: the supervisor decides/);
+    assert.doesNotMatch(text, /Retry agent|Skip and continue|Stop agent/);
+    assert.match(text, /Task the topic the supervisor gave it Primer's functional colour roles/);
+    assert.deepEqual(attrs(markup, "data-fact").slice(0, 3), ["status", "started", "ended"]);
+    assert.match(text, /Searches 1 Reads 0 Saved 0 Tool calls 1 Model muse-spark-1\.3 Result Its findings go into the run's report Round 1/);
+    assert.match(text, /What the run reports for a worker: its state and its counters\./);
+    const working = textOf(renderPanel(setup({ mode: "inspector", inspectId: "research:run-1:A3" }), RESEARCH_NOW));
+    assert.match(working, /Started Round 2 of 12 .*Working · 2 searches · 1 read The counters move as the worker calls its tools now/);
   });
 });
