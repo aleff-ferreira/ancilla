@@ -1,5 +1,6 @@
 {
   "name": "@ancilla/daemon",
+  "license": "AGPL-3.0-only",
   "version": "0.19.0",
   "description": "Ancilla daemon: MSP host management, session orchestration, local state, WSL routing",
   "main": "dist/src/index.js",

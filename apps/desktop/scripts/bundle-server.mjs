@@ -12,7 +12,7 @@ const resourcesDir = join(appDir, "src-tauri", "resources");
 // notices for what it redistributes. fetch-node.mjs puts Node's own license here as well, and may run first, so
 // this script replaces only what it makes rather than clearing the folder.
 const legalDir = join(resourcesDir, "legal");
-const LEGAL_FILES = ["LICENSE", "NOTICE.md", "THIRD_PARTY_NOTICES.md"];
+const LEGAL_FILES = ["LICENSE", "LICENSE-HELICON", "NOTICE.md", "THIRD_PARTY_NOTICES.md"];
 const OPTIONAL = new Set(["NOTICE.md"]);
 // The Rust crates' license texts, which scripts/third-party-notices.mjs collects from Cargo's sources.
 const RUST_LICENSES = "RUST_CRATE_LICENSES.md";

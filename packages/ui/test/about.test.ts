@@ -11,16 +11,17 @@ function text(markup: string): string {
 describe("About", () => {
   it("credits Helicon and names the license next to the version", () => {
     const markup = renderToStaticMarkup(createElement(About, { version: "0.18.0" }));
-    assert.match(text(markup), /Ancilla 0\.18\.0 · based on Helicon by Harjot Singh Rana and contributors · MIT License/);
+    assert.match(text(markup), /Ancilla 0\.18\.0 · based on Helicon by Harjot Singh Rana and contributors \(MIT\) · GNU AGPL v3/);
     assert.match(markup, /href="https:\/\/github\.com\/HarjjotSinghh\/helicon"/);
   });
 
-  it("links the license, the notice and the third-party notices out to the browser", () => {
+  it("links the license, Helicon's license, the notice and the third-party notices out to the browser", () => {
     const markup = renderToStaticMarkup(createElement(About, { version: "0.18.0" }));
     assert.deepEqual(
       LEGAL_LINKS.map((link) => link.href),
       [
         "https://github.com/aleff-ferreira/ancilla/blob/main/LICENSE",
+        "https://github.com/aleff-ferreira/ancilla/blob/main/LICENSE-HELICON",
         "https://github.com/aleff-ferreira/ancilla/blob/main/NOTICE.md",
         "https://github.com/aleff-ferreira/ancilla/blob/main/THIRD_PARTY_NOTICES.md",
       ],

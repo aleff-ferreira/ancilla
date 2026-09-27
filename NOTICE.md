@@ -2,7 +2,9 @@
 
 Ancilla is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon), the open-source desktop and web client for
 Meta's Muse Code CLI created by Harjot Singh Rana and the Helicon contributors. Helicon is released under the MIT
-License, and so is Ancilla.
+License. Ancilla is released under the GNU Affero General Public License, version 3 ([LICENSE](LICENSE)); the parts
+of it that come from Helicon remain available under Helicon's MIT terms, and Ancilla's own code through version 0.18.0
+was published under MIT as well. Copyright (c) 2026 Aleff Ferreira Francisco.
 
 ## Origin
 
@@ -10,8 +12,8 @@ License, and so is Ancilla.
   [`8e5b141`](https://github.com/HarjjotSinghh/helicon/commit/8e5b141), which is Helicon v0.17.1.
 - The full upstream git history is preserved in this repository. Every Helicon commit keeps its original author and
   date; Ancilla's own work is the commits after `8e5b141`.
-- Helicon's copyright notice and the MIT permission notice are kept in [LICENSE](LICENSE), next to Ancilla's own
-  copyright line, as the license requires.
+- Helicon's copyright notice and the MIT permission notice are kept in [LICENSE-HELICON](LICENSE-HELICON), as the
+  license requires.
 
 ## What Ancilla changed
 

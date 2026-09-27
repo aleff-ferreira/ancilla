@@ -1,6 +1,6 @@
 # Ancilla
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/aleff-ferreira/ancilla.svg?label=latest)](https://github.com/aleff-ferreira/ancilla/releases/latest)
 [![Platform](https://img.shields.io/badge/installer-Windows%20%7C%20macOS%20%7C%20Linux-blue.svg)](https://github.com/aleff-ferreira/ancilla/releases/latest)
 [![Tauri](https://img.shields.io/badge/desktop-Tauri%202-FFC131.svg)](https://tauri.app)
@@ -271,5 +271,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md); pull requests are welcome. Report vulner
 
 ## License
 
-[MIT](LICENSE). Copyright (c) 2026 Aleff Ferreira Francisco, and Copyright (c) 2026 Harjot Singh Rana and contributors.
-Both notices, and the MIT permission notice, must stay with every copy or substantial portion of the software.
+[GNU AGPL v3](LICENSE). Copyright (c) 2026 Aleff Ferreira Francisco. Anyone who changes Ancilla and runs it for others,
+or ships it, must offer their version's source under the same license.
+
+Ancilla is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon), Copyright (c) 2026 Harjot Singh Rana and
+contributors, released under the MIT License. The parts that come from Helicon stay available under those terms, whose
+notice is kept in [LICENSE-HELICON](LICENSE-HELICON); Ancilla's own code through version 0.18.0 was published under MIT
+as well. [NOTICE.md](NOTICE.md) says what Ancilla changed.

@@ -57,5 +57,5 @@ Rust crate on Windows, macOS and Linux.
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the [MIT License](LICENSE) that covers the
+By contributing, you agree that your contributions are licensed under the [GNU AGPL v3](LICENSE) that covers the
 project.

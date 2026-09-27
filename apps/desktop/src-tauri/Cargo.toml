@@ -3,7 +3,7 @@ name = "ancilla"
 version = "0.19.0"
 description = "Ancilla: desktop ADE for the Muse Code CLI"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/aleff-ferreira/ancilla"
 
 [build-dependencies]
