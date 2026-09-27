@@ -10,9 +10,9 @@ import { addEcho, applyEvents, emptyFold, type ThreadFold } from "../src/model/f
 import { defaultPrefs, initialState, Store, type ThreadState } from "../src/model/store.js";
 import type { ViewEvent } from "../src/types.js";
 
-function render(fold: ThreadFold): string {
+function render(fold: ThreadFold, readOnly = false): string {
   const thread: ThreadState = {
-    load: "ready", error: null, readOnly: false, readOnlyReason: null, truncated: false,
+    load: "ready", error: null, readOnly, readOnlyReason: readOnly ? "Another Muse session has it open." : null, truncated: false,
     fold, attachments: [], shellRuns: [], researchRuns: [], stalled: false,
   };
   const state = initialState(defaultPrefs());
@@ -75,6 +75,27 @@ describe("Transcript failure notices", () => {
     assert.ok(markup.indexOf("older") < markup.indexOf("newer"), "the older turn is shown first");
     assert.match(markup, /Failed/);
     assert.doesNotMatch(markup, /This turn failed|Retry/);
+  });
+});
+
+describe("Transcript prompt actions", () => {
+  it("offers Edit and Resend on a stopped turn's line and on every prompt, but not in a read-only thread", () => {
+    const fold = applyEvents(emptyFold(), [
+      said("uA", "A", "refactor the parser", "2026-09-26T10:00:00.000Z"),
+      { method: "turn/completed", params: { turnId: "A", terminal: "cancelled", durationMs: 12_000 } },
+    ]);
+    const markup = render(fold);
+    assert.match(markup, /Stopped/);
+    // Once beside the prompt (hover actions) and once inline on the Stopped line.
+    assert.equal((markup.match(/>Edit</g) ?? []).length, 2);
+    assert.equal((markup.match(/>Resend</g) ?? []).length, 2);
+    assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>Resend</, "a stopped turn's Resend is live");
+    assert.doesNotMatch(render(fold, true), /Edit|Resend/);
+    // A finished turn keeps the hover actions only; a running one cannot resend yet.
+    const done = applyEvents(emptyFold(), [said("uB", "B", "add tests"), { method: "turn/completed", params: { turnId: "B", terminal: "completed" } }]);
+    assert.equal((render(done).match(/>Edit</g) ?? []).length, 1);
+    const running = applyEvents(emptyFold(), [{ method: "turn/started", params: { turnId: "C" } }, said("uC", "C", "still going")]);
+    assert.match(render(running), /<button[^>]*disabled=""[^>]*>Resend</);
   });
 });
 

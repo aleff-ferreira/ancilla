@@ -53,6 +53,7 @@ export function ResearchRunRow(props: { run: ResearchRunView; sessionId: string;
       {live ? <Progress run={run} /> : null}
       {reported ? <Report run={run} sessionId={props.sessionId} latest={props.latest} /> : null}
       {!live && !reported ? <Ended run={run} /> : null}
+      {!live ? <RunAgain run={run} sessionId={props.sessionId} /> : null}
     </section>
   );
 }
@@ -304,6 +305,40 @@ function Ended(props: { run: ResearchRunView }) {
           </span>
         </Tip>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Edit and run again for a run that has ended, whatever way it ended: Edit puts the question back in the
+ * composer with research mode armed, Run again starts it as it was, with the same window and workers.
+ */
+function RunAgain(props: { run: ResearchRunView; sessionId: string }) {
+  const controller = useController();
+  const readOnly = useApp((s) => s.threads[props.sessionId]?.readOnly ?? false);
+  const live = useApp((s) => s.threads[props.sessionId]?.researchRuns.some(researchLive) ?? false);
+  if (readOnly) return null;
+  const { run } = props;
+  const again = () =>
+    void controller.startResearch(props.sessionId, run.question, {
+      windowMinMinutes: run.config.windowMinMinutes,
+      windowMaxMinutes: run.config.windowMaxMinutes,
+      maxParallel: run.config.maxParallel,
+    });
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <Tip label="Put the question back in the composer, with research on, to change it">
+        <Button size="sm" variant="ghost" onClick={() => controller.editResearchQuestion(props.sessionId, run.question)}>
+          Edit question
+        </Button>
+      </Tip>
+      <Tip label={live ? "A research run is already going in this thread" : "Research the same question again, with the same window and workers"}>
+        <span tabIndex={live ? 0 : -1} className="inline-flex rounded-lg">
+          <Button size="sm" variant="ghost" disabled={live} onClick={again}>
+            Run again
+          </Button>
+        </span>
+      </Tip>
     </div>
   );
 }

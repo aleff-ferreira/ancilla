@@ -3,6 +3,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useStickToBottom } from "use-stick-to-bottom";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useSampled } from "../../app/sampled.js";
+import type { AncillaController } from "../../model/controller.js";
 import { buildTurns, type EchoAttachment, type LocalEcho, type ThreadFold, type TurnView } from "../../model/fold.js";
 import {
   describeTool,
@@ -254,7 +255,14 @@ const TurnBlock = memo(
     return (
       <article className="flex flex-col gap-3" aria-label="Turn">
         {turn.prompt ? (
-          <PromptBubble item={turn.prompt} sentAt={sentTime(turn)} files={props.attachments[turn.turnId ?? ""] ?? []} />
+          <PromptBubble
+            item={turn.prompt}
+            sentAt={sentTime(turn)}
+            files={props.attachments[turn.turnId ?? ""] ?? []}
+            sessionId={props.sessionId}
+            running={turn.running}
+            readOnly={props.readOnly}
+          />
         ) : null}
         {turn.running || standalone ? (
           <div className="flex flex-col gap-1.5">
@@ -303,9 +311,20 @@ const TurnBlock = memo(
         ) : null}
         {unconfirmed ? <UnconfirmedOutcome sessionId={props.sessionId} latest={props.isLast} /> : null}
         {cancelled ? (
-          <p className="flex items-center gap-1.5 text-xs text-subtle">
+          <p className="flex flex-wrap items-center gap-1.5 text-xs text-subtle">
             <SquareIcon weight="fill" size={11} /> Stopped
             {info?.durationMs ? <span className="tabular-nums">after {formatDuration(info.durationMs)}</span> : null}
+            {!props.readOnly && turn.prompt ? (
+              <span className="ml-1 inline-flex items-center gap-0.5">
+                <PromptAgain
+                  sessionId={props.sessionId}
+                  text={turn.prompt.displayText ?? turn.prompt.text ?? ""}
+                  files={props.attachments[turn.turnId ?? ""] ?? []}
+                  running={false}
+                  inline
+                />
+              </span>
+            ) : null}
           </p>
         ) : null}
       </article>
@@ -591,7 +610,7 @@ function TurnFooter(props: { turn: TurnView; speed: TurnSpeed | null; cost: Turn
   );
 }
 
-function PromptBubble(props: { item: MspItem; sentAt: number | null; files?: AttachmentView[] }) {
+function PromptBubble(props: { item: MspItem; sentAt: number | null; files?: AttachmentView[]; sessionId: string; running: boolean; readOnly: boolean }) {
   const text = props.item.displayText ?? props.item.text ?? "";
   const long = text.split("\n").length > 12 || text.length > 900;
   const [expanded, setExpanded] = useState(false);
@@ -616,6 +635,7 @@ function PromptBubble(props: { item: MspItem; sentAt: number | null; files?: Att
               </button>
             ) : null}
             <CopyButton text={text} label="Copy prompt" />
+            {!props.readOnly && text ? <PromptAgain sessionId={props.sessionId} text={text} files={files} running={props.running} /> : null}
           </div>
           {props.sentAt !== null ? (
             <Tip label={`Sent ${formatFullDate(props.sentAt)}`}>
@@ -722,6 +742,64 @@ function UnconfirmedOutcome(props: { sessionId: string; latest: boolean }) {
   );
 }
 
+type CarriedFiles = { attachments: OutgoingAttachment[]; previews: EchoAttachment[] };
+
+/**
+ * Runs `send` with a turn's own files read back: their bytes live on the server, so they are fetched again
+ * rather than left out, which would quietly ask the model a different question. Nothing runs at all when
+ * they cannot be read, so the choice stays the user's.
+ */
+async function withFilesAgain(controller: AncillaController, files: AttachmentView[], send: (carried: CarriedFiles) => Promise<unknown> | void): Promise<void> {
+  let carried: CarriedFiles = { attachments: [], previews: [] };
+  if (files.length > 0) {
+    try {
+      const read = await refetchAttachments(files);
+      carried = { attachments: read.map(toOutgoing), previews: read.map(toPreview) };
+    } catch (error) {
+      controller.toast("error", "Could not read the attached files again", error instanceof Error ? error.message : String(error));
+      return;
+    }
+  }
+  await send(carried);
+}
+
+/**
+ * Edit and Resend for a prompt that has already gone: Edit puts it back in the composer, files included, and
+ * Resend sends it again as it was. On every prompt, not only a stopped one, since a turn that went wrong is
+ * not the only reason to send a prompt twice.
+ */
+function PromptAgain(props: { sessionId: string; text: string; files: AttachmentView[]; running: boolean; inline?: boolean }) {
+  const controller = useController();
+  const cls = props.inline
+    ? "rounded-md px-1.5 py-0.5 text-xs font-medium text-muted hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+    : "rounded-md px-1.5 py-0.5 text-xs text-subtle hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:opacity-50";
+  return (
+    <>
+      <Tip label="Put this prompt back in the composer to change it">
+        <button
+          type="button"
+          className={cls}
+          onClick={() => void withFilesAgain(controller, props.files, (carried) => controller.prefillComposer(props.sessionId, props.text, carried))}
+        >
+          Edit
+        </button>
+      </Tip>
+      <Tip label={props.running ? "Wait for this turn to end, or stop it, to send the prompt again" : "Send this prompt again as it is"}>
+        <span tabIndex={props.running ? 0 : -1} className="inline-flex rounded-md">
+          <button
+            type="button"
+            className={cls}
+            disabled={props.running}
+            onClick={() => void withFilesAgain(controller, props.files, (carried) => controller.retryTurn(props.sessionId, props.text, carried))}
+          >
+            Resend
+          </button>
+        </span>
+      </Tip>
+    </>
+  );
+}
+
 function TurnError(props: {
   message: string;
   retryable: boolean;
@@ -743,25 +821,11 @@ function TurnError(props: {
    * rather than left out, which would quietly ask the model a different question. Nothing goes at all
    * when they cannot be read, so the notice stays up and the choice is still the user's.
    */
-  const again = (send: (files: { attachments: OutgoingAttachment[]; previews: EchoAttachment[] }) => Promise<unknown>) => {
-    void (async () => {
-      let carried: { attachments: OutgoingAttachment[]; previews: EchoAttachment[] } = { attachments: [], previews: [] };
-      if (props.files.length > 0) {
-        try {
-          const read = await refetchAttachments(props.files);
-          carried = { attachments: read.map(toOutgoing), previews: read.map(toPreview) };
-        } catch (error) {
-          controller.toast(
-            "error",
-            "Could not read the attached files again",
-            error instanceof Error ? error.message : String(error),
-          );
-          return;
-        }
-      }
+  const again = (send: (files: CarriedFiles) => Promise<unknown>) => {
+    void withFilesAgain(controller, props.files, async (carried) => {
       controller.dismissTurnError(props.sessionId, props.turnId);
       await send(carried);
-    })();
+    });
   };
   return (
     <div className="flex items-start gap-3 rounded-xl bg-danger-soft px-3.5 py-3" role="alert">

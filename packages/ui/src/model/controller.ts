@@ -1598,9 +1598,15 @@ export class AncillaController {
     return draft;
   }
 
-  /** Puts text in a thread's composer as if the user typed it, like `/goal ` for a new objective. */
-  prefillComposer(sessionId: string, text: string): void {
-    this.update((s) => ({ ...s, draftHandoff: { key: sessionId, text } }));
+  /** Puts text in a thread's composer as if the user typed it, like `/goal ` for a new objective, files and all. */
+  prefillComposer(sessionId: string, text: string, files: { attachments?: OutgoingAttachment[]; previews?: EchoAttachment[] } = {}): void {
+    this.update((s) => ({ ...s, draftHandoff: { key: sessionId, text, ...files } }));
+  }
+
+  /** Puts a research question back in the composer with research mode armed, so Send runs it again as edited. */
+  editResearchQuestion(sessionId: string, question: string): void {
+    this.prefillComposer(sessionId, question);
+    this.setResearchMode(true);
   }
 
   /** Starts a thread in `cwd` and runs its first action there; what the user typed goes to its composer if that fails. */

@@ -56,6 +56,15 @@ function renderThread(runs: ResearchRunView[]): string {
 const text = (markup: string) => markup.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
 describe("ResearchRunRow", () => {
+  it("offers Edit question and Run again once a run has ended, however it ended, and not while it runs", () => {
+    for (const status of ["completed", "partial", "failed", "cancelled", "interrupted"] as const) {
+      const markup = render(fakeResearchRun({ status, phase: "done", endedAt: "2026-09-26T00:05:00.000Z" }));
+      assert.match(text(markup), /Edit question/, status);
+      assert.match(text(markup), /Run again/, status);
+    }
+    assert.doesNotMatch(text(render(fakeResearchRun({ status: "running" }))), /Run again|Edit question/);
+  });
+
   it("says the run is waiting while it is queued, with no Stop yet for an optimistic row", () => {
     const markup = render(fakeResearchRun({ runId: "pending:abc", status: "queued", phase: "scoping", startedAt: null, researchDeadlineAt: null }));
     assert.match(text(markup), /Deep research/);
