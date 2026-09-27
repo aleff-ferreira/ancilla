@@ -2,7 +2,7 @@
   "name": "@ancilla/web",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "description": "Ancilla web app: shared UI wired to the local server over REST and SSE",
   "type": "module",
   "scripts": {
