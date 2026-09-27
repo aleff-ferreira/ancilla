@@ -275,6 +275,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md); pull requests are welcome. Report vulner
 or ships it, must offer their version's source under the same license.
 
 Ancilla is a fork of [Helicon](https://github.com/HarjjotSinghh/helicon), Copyright (c) 2026 Harjot Singh Rana and
-contributors, released under the MIT License. The parts that come from Helicon stay available under those terms, whose
-notice is kept in [LICENSE-HELICON](LICENSE-HELICON); Ancilla's own code through version 0.18.0 was published under MIT
-as well. [NOTICE.md](NOTICE.md) says what Ancilla changed.
+contributors, released under the MIT License. Helicon's notice is kept in [LICENSE-HELICON](LICENSE-HELICON), as that
+license requires; everything Ancilla adds is under the AGPL.
