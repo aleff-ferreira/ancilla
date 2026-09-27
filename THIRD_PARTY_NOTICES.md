@@ -10,7 +10,7 @@ Desktop builds of Ancilla also redistribute the third-party components below, ea
 An installed copy carries this file, [LICENSE](LICENSE), [LICENSE-HELICON](LICENSE-HELICON), [NOTICE.md](NOTICE.md), the Node.js license and the Rust crates' license texts in its
 `resources/legal` folder.
 
-- [JavaScript packages](#javascript-packages): 2 bundled into the local server, 133 into the interface
+- [JavaScript packages](#javascript-packages): 83 bundled into the local server, 133 into the interface
 - [Node.js runtime](#nodejs-runtime): Node.js v22.23.2
 - [Rust crates](#rust-crates): 531 crates from Cargo.lock
 
@@ -30,6 +30,8 @@ module-preload polyfill) is not listed.
 | @fontsource-variable/newsreader | 5.3.0 | OFL-1.1 | interface |
 | @harjjotsinghh/aonia | 0.1.0 | MIT | server |
 | @muse-code/sdk | 0.1.1 | MIT | server |
+| @noble/ciphers | 1.3.0 | MIT | server |
+| @noble/hashes | 1.8.0 | MIT | server |
 | @phosphor-icons/react | 2.1.10 | MIT | interface |
 | @radix-ui/number | 1.1.3 | MIT | interface |
 | @radix-ui/primitive | 1.1.7 | MIT | interface |
@@ -62,71 +64,90 @@ module-preload polyfill) is not listed.
 | @radix-ui/react-use-previous | 1.1.4 | MIT | interface |
 | @radix-ui/react-use-size | 1.1.4 | MIT | interface |
 | @radix-ui/react-visually-hidden | 1.2.11 | MIT | interface |
+| @swc/helpers | 0.5.23 | Apache-2.0 | server |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | interface |
 | @tauri-apps/plugin-notification | 2.4.0 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-process | 2.3.1 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-updater | 2.11.0 | MIT OR Apache-2.0 | interface |
-| @ungap/structured-clone | 1.4.0 | ISC | interface |
+| @ungap/structured-clone | 1.4.0 | ISC | interface, server |
 | aria-hidden | 1.2.6 | MIT | interface |
 | bail | 2.0.2 | MIT | interface |
-| ccount | 2.0.1 | MIT | interface |
+| base64-js | 0.0.8 | MIT | server |
+| base64-js | 1.5.1 | MIT | server |
+| brotli | 1.3.3 | MIT | server |
+| ccount | 2.0.1 | MIT | interface, server |
+| character-entities | 2.0.2 | MIT | server |
+| character-entities-html4 | 2.1.0 | MIT | server |
+| character-entities-legacy | 3.0.0 | MIT | server |
+| clone | 2.1.2 | MIT | server |
 | clsx | 2.1.1 | MIT | interface |
 | cmdk | 1.1.1 | MIT | interface |
-| comma-separated-tokens | 2.0.3 | MIT | interface |
-| decode-named-character-reference | 1.3.0 | MIT | interface |
-| devlop | 1.1.0 | MIT | interface |
-| escape-string-regexp | 5.0.0 | MIT | interface |
+| comma-separated-tokens | 2.0.3 | MIT | interface, server |
+| decode-named-character-reference | 1.3.0 | MIT | interface, server |
+| devlop | 1.1.0 | MIT | interface, server |
+| dfa | 1.2.0 | MIT | server |
+| docx | 9.7.2 | MIT | server |
+| escape-string-regexp | 5.0.0 | MIT | interface, server |
 | estree-util-is-identifier-name | 3.0.0 | MIT | interface |
 | extend | 3.0.2 | MIT | interface |
+| fast-deep-equal | 3.1.3 | MIT | server |
+| fontkit | 2.0.4 | MIT | server |
 | framer-motion | 13.2.0 | MIT | interface |
 | get-nonce | 1.0.1 | MIT | interface |
+| hast-util-to-html | 9.0.5 | MIT | server |
 | hast-util-to-jsx-runtime | 2.3.6 | MIT | interface |
-| hast-util-whitespace | 3.0.0 | MIT | interface |
+| hast-util-whitespace | 3.0.0 | MIT | interface, server |
 | html-url-attributes | 3.0.1 | MIT | interface |
+| html-void-elements | 3.0.0 | MIT | server |
 | inline-style-parser | 0.2.7 | MIT | interface |
 | is-plain-obj | 4.1.0 | MIT | interface |
-| longest-streak | 3.1.0 | MIT | interface |
-| markdown-table | 3.0.4 | MIT | interface |
-| mdast-util-find-and-replace | 3.0.2 | MIT | interface |
-| mdast-util-from-markdown | 2.0.3 | MIT | interface |
-| mdast-util-gfm | 3.1.0 | MIT | interface |
-| mdast-util-gfm-autolink-literal | 2.0.1 | MIT | interface |
-| mdast-util-gfm-footnote | 2.1.0 | MIT | interface |
-| mdast-util-gfm-strikethrough | 2.0.0 | MIT | interface |
-| mdast-util-gfm-table | 2.0.0 | MIT | interface |
-| mdast-util-gfm-task-list-item | 2.0.0 | MIT | interface |
-| mdast-util-phrasing | 4.1.0 | MIT | interface |
-| mdast-util-to-hast | 13.2.1 | MIT | interface |
-| mdast-util-to-markdown | 2.1.2 | MIT | interface |
-| mdast-util-to-string | 4.0.0 | MIT | interface |
-| micromark | 4.0.2 | MIT | interface |
-| micromark-core-commonmark | 2.0.3 | MIT | interface |
-| micromark-extension-gfm | 3.0.0 | MIT | interface |
-| micromark-extension-gfm-autolink-literal | 2.1.0 | MIT | interface |
-| micromark-extension-gfm-footnote | 2.1.0 | MIT | interface |
-| micromark-extension-gfm-strikethrough | 2.1.0 | MIT | interface |
-| micromark-extension-gfm-table | 2.1.1 | MIT | interface |
-| micromark-extension-gfm-task-list-item | 2.1.0 | MIT | interface |
-| micromark-factory-destination | 2.0.1 | MIT | interface |
-| micromark-factory-label | 2.0.1 | MIT | interface |
-| micromark-factory-space | 2.0.1 | MIT | interface |
-| micromark-factory-title | 2.0.1 | MIT | interface |
-| micromark-factory-whitespace | 2.0.1 | MIT | interface |
-| micromark-util-character | 2.1.1 | MIT | interface |
-| micromark-util-chunked | 2.0.1 | MIT | interface |
-| micromark-util-classify-character | 2.0.1 | MIT | interface |
-| micromark-util-combine-extensions | 2.0.1 | MIT | interface |
-| micromark-util-decode-numeric-character-reference | 2.0.2 | MIT | interface |
-| micromark-util-decode-string | 2.0.1 | MIT | interface |
-| micromark-util-html-tag-name | 2.0.1 | MIT | interface |
-| micromark-util-normalize-identifier | 2.0.1 | MIT | interface |
-| micromark-util-resolve-all | 2.0.1 | MIT | interface |
-| micromark-util-sanitize-uri | 2.0.1 | MIT | interface |
-| micromark-util-subtokenize | 2.1.0 | MIT | interface |
+| linebreak | 1.1.0 | MIT | server |
+| longest-streak | 3.1.0 | MIT | interface, server |
+| markdown-table | 3.0.4 | MIT | interface, server |
+| mdast-util-find-and-replace | 3.0.2 | MIT | interface, server |
+| mdast-util-from-markdown | 2.0.3 | MIT | interface, server |
+| mdast-util-gfm | 3.1.0 | MIT | interface, server |
+| mdast-util-gfm-autolink-literal | 2.0.1 | MIT | interface, server |
+| mdast-util-gfm-footnote | 2.1.0 | MIT | interface, server |
+| mdast-util-gfm-strikethrough | 2.0.0 | MIT | interface, server |
+| mdast-util-gfm-table | 2.0.0 | MIT | interface, server |
+| mdast-util-gfm-task-list-item | 2.0.0 | MIT | interface, server |
+| mdast-util-phrasing | 4.1.0 | MIT | interface, server |
+| mdast-util-to-hast | 13.2.1 | MIT | interface, server |
+| mdast-util-to-markdown | 2.1.2 | MIT | interface, server |
+| mdast-util-to-string | 4.0.0 | MIT | interface, server |
+| micromark | 4.0.2 | MIT | interface, server |
+| micromark-core-commonmark | 2.0.3 | MIT | interface, server |
+| micromark-extension-gfm | 3.0.0 | MIT | interface, server |
+| micromark-extension-gfm-autolink-literal | 2.1.0 | MIT | interface, server |
+| micromark-extension-gfm-footnote | 2.1.0 | MIT | interface, server |
+| micromark-extension-gfm-strikethrough | 2.1.0 | MIT | interface, server |
+| micromark-extension-gfm-table | 2.1.1 | MIT | interface, server |
+| micromark-extension-gfm-tagfilter | 2.0.0 | MIT | server |
+| micromark-extension-gfm-task-list-item | 2.1.0 | MIT | interface, server |
+| micromark-factory-destination | 2.0.1 | MIT | interface, server |
+| micromark-factory-label | 2.0.1 | MIT | interface, server |
+| micromark-factory-space | 2.0.1 | MIT | interface, server |
+| micromark-factory-title | 2.0.1 | MIT | interface, server |
+| micromark-factory-whitespace | 2.0.1 | MIT | interface, server |
+| micromark-util-character | 2.1.1 | MIT | interface, server |
+| micromark-util-chunked | 2.0.1 | MIT | interface, server |
+| micromark-util-classify-character | 2.0.1 | MIT | interface, server |
+| micromark-util-combine-extensions | 2.0.1 | MIT | interface, server |
+| micromark-util-decode-numeric-character-reference | 2.0.2 | MIT | interface, server |
+| micromark-util-decode-string | 2.0.1 | MIT | interface, server |
+| micromark-util-encode | 2.0.1 | MIT | server |
+| micromark-util-html-tag-name | 2.0.1 | MIT | interface, server |
+| micromark-util-normalize-identifier | 2.0.1 | MIT | interface, server |
+| micromark-util-resolve-all | 2.0.1 | MIT | interface, server |
+| micromark-util-sanitize-uri | 2.0.1 | MIT | interface, server |
+| micromark-util-subtokenize | 2.1.0 | MIT | interface, server |
 | motion | 13.2.0 | MIT | interface |
 | motion-dom | 13.2.0 | MIT | interface |
 | motion-utils | 13.0.0 | MIT | interface |
-| property-information | 7.2.0 | MIT | interface |
+| pdfkit | 0.20.2 | MIT | server |
+| png-js | 2.0.0 | UNKNOWN | server |
+| property-information | 7.2.0 | MIT | interface, server |
 | react | 18.3.1 | MIT | interface |
 | react-dom | 18.3.1 | MIT | interface |
 | react-markdown | 10.1.0 | MIT | interface |
@@ -136,26 +157,32 @@ module-preload polyfill) is not listed.
 | remark-gfm | 4.0.1 | MIT | interface |
 | remark-parse | 11.0.0 | MIT | interface |
 | remark-rehype | 11.1.2 | MIT | interface |
+| restructure | 3.0.2 | MIT | server |
 | scheduler | 0.23.2 | MIT | interface |
-| space-separated-tokens | 2.0.2 | MIT | interface |
+| space-separated-tokens | 2.0.2 | MIT | interface, server |
+| stringify-entities | 4.0.4 | MIT | server |
 | style-to-js | 1.1.21 | MIT | interface |
 | style-to-object | 1.0.14 | MIT | interface |
 | sugar-high | 2.4.0 | MIT | interface |
 | tailwindcss | 4.3.3 | MIT | interface |
-| trim-lines | 3.0.1 | MIT | interface |
+| tiny-inflate | 1.0.3 | MIT | server |
+| trim-lines | 3.0.1 | MIT | interface, server |
 | trough | 2.2.0 | MIT | interface |
-| tslib | 2.8.1 | 0BSD | interface |
+| tslib | 2.8.1 | 0BSD | interface, server |
+| unicode-properties | 1.4.1 | MIT | server |
+| unicode-trie | 2.0.0 | MIT | server |
 | unified | 11.0.5 | MIT | interface |
-| unist-util-is | 6.0.1 | MIT | interface |
-| unist-util-position | 5.0.0 | MIT | interface |
-| unist-util-stringify-position | 4.0.0 | MIT | interface |
-| unist-util-visit | 5.1.0 | MIT | interface |
-| unist-util-visit-parents | 6.0.2 | MIT | interface |
+| unist-util-is | 6.0.1 | MIT | interface, server |
+| unist-util-position | 5.0.0 | MIT | interface, server |
+| unist-util-stringify-position | 4.0.0 | MIT | interface, server |
+| unist-util-visit | 5.1.0 | MIT | interface, server |
+| unist-util-visit-parents | 6.0.2 | MIT | interface, server |
 | use-callback-ref | 1.3.3 | MIT | interface |
 | use-sidecar | 1.1.3 | MIT | interface |
 | use-stick-to-bottom | 1.1.6 | MIT | interface |
 | vfile | 6.0.3 | MIT | interface |
 | vfile-message | 4.0.3 | MIT | interface |
+| zwitch | 2.0.4 | MIT | server |
 | Node.js | 22.23.2 | MIT, with bundled components under their own licenses | sidecar |
 
 ## JavaScript packages
@@ -661,6 +688,71 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### @noble/ciphers 1.3.0
+
+- License: MIT
+- Source: <https://github.com/paulmillr/noble-ciphers>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### @noble/hashes 1.8.0
+
+- License: MIT
+- Source: <https://github.com/paulmillr/noble-hashes>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2022 Paul Miller (https://paulmillr.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the “Software”), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### @phosphor-icons/react 2.1.10
@@ -1687,6 +1779,218 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### @swc/helpers 0.5.23
+
+- License: Apache-2.0
+- Source: <https://github.com/swc-project/swc>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+                              Apache License
+                        Version 2.0, January 2004
+                     http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+   "License" shall mean the terms and conditions for use, reproduction,
+   and distribution as defined by Sections 1 through 9 of this document.
+
+   "Licensor" shall mean the copyright owner or entity authorized by
+   the copyright owner that is granting the License.
+
+   "Legal Entity" shall mean the union of the acting entity and all
+   other entities that control, are controlled by, or are under common
+   control with that entity. For the purposes of this definition,
+   "control" means (i) the power, direct or indirect, to cause the
+   direction or management of such entity, whether by contract or
+   otherwise, or (ii) ownership of fifty percent (50%) or more of the
+   outstanding shares, or (iii) beneficial ownership of such entity.
+
+   "You" (or "Your") shall mean an individual or Legal Entity
+   exercising permissions granted by this License.
+
+   "Source" form shall mean the preferred form for making modifications,
+   including but not limited to software source code, documentation
+   source, and configuration files.
+
+   "Object" form shall mean any form resulting from mechanical
+   transformation or translation of a Source form, including but
+   not limited to compiled object code, generated documentation,
+   and conversions to other media types.
+
+   "Work" shall mean the work of authorship, whether in Source or
+   Object form, made available under the License, as indicated by a
+   copyright notice that is included in or attached to the work
+   (an example is provided in the Appendix below).
+
+   "Derivative Works" shall mean any work, whether in Source or Object
+   form, that is based on (or derived from) the Work and for which the
+   editorial revisions, annotations, elaborations, or other modifications
+   represent, as a whole, an original work of authorship. For the purposes
+   of this License, Derivative Works shall not include works that remain
+   separable from, or merely link (or bind by name) to the interfaces of,
+   the Work and Derivative Works thereof.
+
+   "Contribution" shall mean any work of authorship, including
+   the original version of the Work and any modifications or additions
+   to that Work or Derivative Works thereof, that is intentionally
+   submitted to Licensor for inclusion in the Work by the copyright owner
+   or by an individual or Legal Entity authorized to submit on behalf of
+   the copyright owner. For the purposes of this definition, "submitted"
+   means any form of electronic, verbal, or written communication sent
+   to the Licensor or its representatives, including but not limited to
+   communication on electronic mailing lists, source code control systems,
+   and issue tracking systems that are managed by, or on behalf of, the
+   Licensor for the purpose of discussing and improving the Work, but
+   excluding communication that is conspicuously marked or otherwise
+   designated in writing by the copyright owner as "Not a Contribution."
+
+   "Contributor" shall mean Licensor and any individual or Legal Entity
+   on behalf of whom a Contribution has been received by Licensor and
+   subsequently incorporated within the Work.
+
+2. Grant of Copyright License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   copyright license to reproduce, prepare Derivative Works of,
+   publicly display, publicly perform, sublicense, and distribute the
+   Work and such Derivative Works in Source or Object form.
+
+3. Grant of Patent License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   (except as stated in this section) patent license to make, have made,
+   use, offer to sell, sell, import, and otherwise transfer the Work,
+   where such license applies only to those patent claims licensable
+   by such Contributor that are necessarily infringed by their
+   Contribution(s) alone or by combination of their Contribution(s)
+   with the Work to which such Contribution(s) was submitted. If You
+   institute patent litigation against any entity (including a
+   cross-claim or counterclaim in a lawsuit) alleging that the Work
+   or a Contribution incorporated within the Work constitutes direct
+   or contributory patent infringement, then any patent licenses
+   granted to You under this License for that Work shall terminate
+   as of the date such litigation is filed.
+
+4. Redistribution. You may reproduce and distribute copies of the
+   Work or Derivative Works thereof in any medium, with or without
+   modifications, and in Source or Object form, provided that You
+   meet the following conditions:
+
+   (a) You must give any other recipients of the Work or
+       Derivative Works a copy of this License; and
+
+   (b) You must cause any modified files to carry prominent notices
+       stating that You changed the files; and
+
+   (c) You must retain, in the Source form of any Derivative Works
+       that You distribute, all copyright, patent, trademark, and
+       attribution notices from the Source form of the Work,
+       excluding those notices that do not pertain to any part of
+       the Derivative Works; and
+
+   (d) If the Work includes a "NOTICE" text file as part of its
+       distribution, then any Derivative Works that You distribute must
+       include a readable copy of the attribution notices contained
+       within such NOTICE file, excluding those notices that do not
+       pertain to any part of the Derivative Works, in at least one
+       of the following places: within a NOTICE text file distributed
+       as part of the Derivative Works; within the Source form or
+       documentation, if provided along with the Derivative Works; or,
+       within a display generated by the Derivative Works, if and
+       wherever such third-party notices normally appear. The contents
+       of the NOTICE file are for informational purposes only and
+       do not modify the License. You may add Your own attribution
+       notices within Derivative Works that You distribute, alongside
+       or as an addendum to the NOTICE text from the Work, provided
+       that such additional attribution notices cannot be construed
+       as modifying the License.
+
+   You may add Your own copyright statement to Your modifications and
+   may provide additional or different license terms and conditions
+   for use, reproduction, or distribution of Your modifications, or
+   for any such Derivative Works as a whole, provided Your use,
+   reproduction, and distribution of the Work otherwise complies with
+   the conditions stated in this License.
+
+5. Submission of Contributions. Unless You explicitly state otherwise,
+   any Contribution intentionally submitted for inclusion in the Work
+   by You to the Licensor shall be under the terms and conditions of
+   this License, without any additional terms or conditions.
+   Notwithstanding the above, nothing herein shall supersede or modify
+   the terms of any separate license agreement you may have executed
+   with Licensor regarding such Contributions.
+
+6. Trademarks. This License does not grant permission to use the trade
+   names, trademarks, service marks, or product names of the Licensor,
+   except as required for reasonable and customary use in describing the
+   origin of the Work and reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty. Unless required by applicable law or
+   agreed to in writing, Licensor provides the Work (and each
+   Contributor provides its Contributions) on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+   implied, including, without limitation, any warranties or conditions
+   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+   PARTICULAR PURPOSE. You are solely responsible for determining the
+   appropriateness of using or redistributing the Work and assume any
+   risks associated with Your exercise of permissions under this License.
+
+8. Limitation of Liability. In no event and under no legal theory,
+   whether in tort (including negligence), contract, or otherwise,
+   unless required by applicable law (such as deliberate and grossly
+   negligent acts) or agreed to in writing, shall any Contributor be
+   liable to You for damages, including any direct, indirect, special,
+   incidental, or consequential damages of any character arising as a
+   result of this License or out of the use or inability to use the
+   Work (including but not limited to damages for loss of goodwill,
+   work stoppage, computer failure or malfunction, or any and all
+   other commercial damages or losses), even if such Contributor
+   has been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability. While redistributing
+   the Work or Derivative Works thereof, You may choose to offer,
+   and charge a fee for, acceptance of support, warranty, indemnity,
+   or other liability obligations and/or rights consistent with this
+   License. However, in accepting such obligations, You may act only
+   on Your own behalf and on Your sole responsibility, not on behalf
+   of any other Contributor, and only if You agree to indemnify,
+   defend, and hold each Contributor harmless for any liability
+   incurred by, or claims asserted against, such Contributor by reason
+   of your accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work.
+
+   To apply the Apache License to your work, attach the following
+   boilerplate notice, with the fields enclosed by brackets "[]"
+   replaced with your own identifying information. (Don't include
+   the brackets!)  The text should be enclosed in the appropriate
+   comment syntax for the file format. We also recommend that a
+   file or class name and description of purpose be included on the
+   same "printed page" as the copyright notice for easier
+   identification within third-party archives.
+
+Copyright 2024 SWC contributors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
 ### @tauri-apps/api 2.11.1
 
 - License: Apache-2.0 OR MIT
@@ -2081,7 +2385,7 @@ SOFTWARE.
 
 - License: ISC
 - Source: <https://github.com/ungap/structured-clone>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `LICENSE`:
 
@@ -2168,11 +2472,109 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### base64-js 0.0.8
+
+- License: MIT
+- Source: <https://github.com/beatgammit/base64-js>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE.MIT`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2014
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### base64-js 1.5.1
+
+- License: MIT
+- Source: <https://github.com/beatgammit/base64-js>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2014 Jameson Little
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### brotli 1.3.3
+
+- License: MIT
+- Source: <https://github.com/devongovett/brotli.js>
+- Shipped in: the local server (`resources/server.cjs`)
+
+The published package includes no license file. Its package.json declares MIT, by Devon Govett. The MIT License's standard text is added below.
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### ccount 2.0.1
 
 - License: MIT
 - Source: <https://github.com/wooorm/ccount>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2198,6 +2600,134 @@ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
 CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### character-entities 2.0.2
+
+- License: MIT
+- Source: <https://github.com/wooorm/character-entities>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2015 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### character-entities-html4 2.1.0
+
+- License: MIT
+- Source: <https://github.com/wooorm/character-entities-html4>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2015 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### character-entities-legacy 3.0.0
+
+- License: MIT
+- Source: <https://github.com/wooorm/character-entities-legacy>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2015 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### clone 2.1.2
+
+- License: MIT
+- Source: <https://github.com/pvorb/node-clone>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+Copyright © 2011-2015 Paul Vorbach <paul@vorba.ch>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
@@ -2257,7 +2787,7 @@ SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/wooorm/comma-separated-tokens>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2290,7 +2820,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/wooorm/decode-named-character-reference>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2323,7 +2853,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/wooorm/devlop>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2352,11 +2882,77 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### dfa 1.2.0
+
+- License: MIT
+- Source: <https://github.com/devongovett/dfa>
+- Shipped in: the local server (`resources/server.cjs`)
+
+The published package includes no license file. Its package.json declares MIT, by Devon Govett. The MIT License's standard text is added below.
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### docx 9.7.2
+
+- License: MIT
+- Source: <https://github.com/dolanmiu/docx>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2016 Dolan
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### escape-string-regexp 5.0.0
 
 - License: MIT
 - Source: <https://github.com/sindresorhus/escape-string-regexp>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2438,6 +3034,72 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### fast-deep-equal 3.1.3
+
+- License: MIT
+- Source: <https://github.com/epoberezkin/fast-deep-equal>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2017 Evgeny Poberezkin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### fontkit 2.0.4
+
+- License: MIT
+- Source: <https://github.com/foliojs/fontkit>
+- Shipped in: the local server (`resources/server.cjs`)
+
+The published package includes no license file. Its package.json declares MIT, by Devon Govett. The MIT License's standard text is added below.
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### framer-motion 13.2.0
 
 - License: MIT
@@ -2502,6 +3164,39 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### hast-util-to-html 9.0.5
+
+- License: MIT
+- Source: <https://github.com/syntax-tree/hast-util-to-html>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### hast-util-to-jsx-runtime 2.3.6
 
 - License: MIT
@@ -2539,7 +3234,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/hast-util-whitespace>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2600,6 +3295,39 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
+### html-void-elements 3.0.0
+
+- License: MIT
+- Source: <https://github.com/wooorm/html-void-elements>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### inline-style-parser 0.2.7
 
 - License: MIT
@@ -2640,11 +3368,43 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### linebreak 1.1.0
+
+- License: MIT
+- Source: <https://github.com/devongovett/linebreaker>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2014-present Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### longest-streak 3.1.0
 
 - License: MIT
 - Source: <https://github.com/wooorm/longest-streak>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2677,7 +3437,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/wooorm/markdown-table>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2710,7 +3470,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-find-and-replace>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2743,7 +3503,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-from-markdown>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2776,7 +3536,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2809,7 +3569,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm-autolink-literal>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2842,7 +3602,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm-footnote>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2875,7 +3635,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm-strikethrough>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2908,7 +3668,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm-table>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2941,7 +3701,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-gfm-task-list-item>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -2974,7 +3734,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-phrasing>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3008,7 +3768,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-to-hast>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3041,7 +3801,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-to-markdown>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3074,7 +3834,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/mdast-util-to-string>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3107,7 +3867,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3140,7 +3900,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-core-commonmark>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3173,7 +3933,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3206,7 +3966,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm-autolink-literal>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3239,7 +3999,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm-footnote>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3272,7 +4032,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm-strikethrough>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3305,7 +4065,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm-table>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3334,11 +4094,44 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### micromark-extension-gfm-tagfilter 2.0.0
+
+- License: MIT
+- Source: <https://github.com/micromark/micromark-extension-gfm-tagfilter>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2020 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### micromark-extension-gfm-task-list-item 2.1.0
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark-extension-gfm-task-list-item>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3371,7 +4164,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-destination>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3404,7 +4197,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-label>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3437,7 +4230,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-space>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3470,7 +4263,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-title>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3503,7 +4296,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-factory-whitespace>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3536,7 +4329,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-character>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3569,7 +4362,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-chunked>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3602,7 +4395,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-classify-character>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3635,7 +4428,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-combine-extensions>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3668,7 +4461,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-numeric-character-reference>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3701,7 +4494,40 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-string>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### micromark-util-encode 2.0.1
+
+- License: MIT
+- Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-encode>
+- Shipped in: the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3734,7 +4560,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-html-tag-name>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3767,7 +4593,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-normalize-identifier>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3800,7 +4626,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-resolve-all>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3833,7 +4659,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-sanitize-uri>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3866,7 +4692,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/micromark/micromark/tree/main/packages/micromark-util-subtokenize>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -3991,11 +4817,62 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### pdfkit 0.20.2
+
+- License: MIT
+- Source: <https://github.com/foliojs/pdfkit>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT LICENSE
+Copyright (c) 2014 Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### png-js 2.0.0
+
+- License: UNKNOWN
+- Source: <https://github.com/devongovett/png.js>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2017 Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### property-information 7.2.0
 
 - License: MIT
 - Source: <https://github.com/wooorm/property-information>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4316,6 +5193,38 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### restructure 3.0.2
+
+- License: MIT
+- Source: <https://github.com/devongovett/restructure>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2015-present Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### scheduler 0.23.2
 
 - License: MIT
@@ -4352,7 +5261,7 @@ SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/wooorm/space-separated-tokens>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4360,6 +5269,39 @@ SOFTWARE.
 (The MIT License)
 
 Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### stringify-entities 4.0.4
+
+- License: MIT
+- Source: <https://github.com/wooorm/stringify-entities>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2015 Titus Wormer <mailto:tituswormer@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -4513,11 +5455,43 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### tiny-inflate 1.0.3
+
+- License: MIT
+- Source: <https://github.com/devongovett/tiny-inflate>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2015-present Devon Govett
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### trim-lines 3.0.1
 
 - License: MIT
 - Source: <https://github.com/wooorm/trim-lines>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4582,7 +5556,7 @@ THE SOFTWARE.
 
 - License: 0BSD
 - Source: <https://github.com/Microsoft/tslib>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `LICENSE.txt`:
 
@@ -4599,6 +5573,42 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+```
+
+### unicode-properties 1.4.1
+
+- License: MIT
+- Source: <https://github.com/devongovett/unicode-properties>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+Copyright 2018
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### unicode-trie 2.0.0
+
+- License: MIT
+- Source: <https://github.com/devongovett/unicode-trie>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+Copyright 2018
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### unified 11.0.5
@@ -4637,7 +5647,7 @@ THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/unist-util-is>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4670,7 +5680,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/unist-util-position>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4703,7 +5713,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/unist-util-stringify-position>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4736,7 +5746,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/unist-util-visit>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4769,7 +5779,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 - License: MIT
 - Source: <https://github.com/syntax-tree/unist-util-visit-parents>
-- Shipped in: the interface (`resources/frontend`)
+- Shipped in: the interface (`resources/frontend`) and the local server (`resources/server.cjs`)
 
 `license`:
 
@@ -4938,6 +5948,39 @@ THE SOFTWARE.
 (The MIT License)
 
 Copyright (c) Titus Wormer <tituswormer@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### zwitch 2.0.4
+
+- License: MIT
+- Source: <https://github.com/wooorm/zwitch>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the

@@ -73,6 +73,7 @@ import {
   type WorkerSessionHandle,
   type WorkerUpdate,
 } from "./research/index.js";
+import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
 export const ANCILLA_VERSION = "0.19.1";
@@ -3543,6 +3544,10 @@ export class AncillaServer {
       this.json(res, 200, { runs: this.researchViews(sessionId) });
       return true;
     }
+    const exportMatch = path.match(/^\/api\/research\/([^/]+)\/export(?:\/([^/]+))?$/);
+    if (exportMatch) {
+      return this.routeResearchExport(method, decodeURIComponent(exportMatch[1] as string), exportMatch[2] ?? null, req, res);
+    }
     const runMatch = path.match(/^\/api\/research\/([^/]+)(?:\/(events|stop|resume))?$/);
     if (!runMatch) {
       return false;
@@ -3573,6 +3578,54 @@ export class AncillaServer {
     }
     if (method === "POST" && action === "resume") {
       throw new HttpError(501, "Resuming an interrupted research run is not available yet; start a new one.");
+    }
+    return false;
+  }
+
+  /**
+   * A report's downloads. POST `/api/research/:runId/export` with `{ format }` renders report.pdf, report.docx or
+   * report.html beside report.md and answers with where it went; GET `/api/research/:runId/export/report.<ext>` serves
+   * that file as an attachment named after the question.
+   */
+  private async routeResearchExport(method: string, runId: string, name: string | null, req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+    const run = this.store.getResearchRun(runId);
+    if (!run) {
+      throw new HttpError(404, "Unknown research run.");
+    }
+    const thread = this.researchThreadFor(run.sessionId);
+    if (method === "POST" && name === null) {
+      const body = await this.readBody(req);
+      const format = body["format"];
+      if (!isExportFormat(format)) {
+        throw new HttpError(400, "format must be pdf, docx or html.");
+      }
+      if (!run.report || !run.report.trim()) {
+        throw new HttpError(409, "The run has no report to export.");
+      }
+      const file = await renderReport(format, run.report, { question: run.question, endedAt: run.endedAt });
+      if (!thread?.cwd) {
+        throw new HttpError(409, "This thread has no project folder to save into.");
+      }
+      const fileName = exportFileName(format);
+      const directory = join(this.localPathFor(thread.cwd), ...RESEARCH_DIR, run.id);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, fileName), file);
+      const relative = [...RESEARCH_DIR, run.id, fileName].join("/");
+      this.json(res, 200, { path: relative, name: fileName, size: file.length, url: `/api/research/${encodeURIComponent(run.id)}/export/${fileName}` });
+      return true;
+    }
+    if ((method === "GET" || method === "HEAD") && name !== null) {
+      const format = exportFormatOfName(name);
+      if (!format) {
+        throw new HttpError(404, "Unknown export file.");
+      }
+      if (!thread?.cwd) {
+        throw new HttpError(404, "That export has not been generated yet.");
+      }
+      // resolveInRoot answers 404 for a file not generated yet, and refuses anything that leaves the folder.
+      const { abs } = await resolveInRoot(this.localPathFor(thread.cwd), [...RESEARCH_DIR, run.id, name].join("/"), thread.cwd);
+      await serveExportFile(req, res, abs, format, `${questionSlug(run.question)}.${format}`);
+      return true;
     }
     return false;
   }
