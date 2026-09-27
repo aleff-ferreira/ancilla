@@ -11,6 +11,8 @@ import {
   type AttachmentView,
   type ResearchConfig,
   type ResearchRunView,
+  type ResearchExport,
+  type ResearchExportFormat,
   type ResearchSettings,
   type DirectoryListing,
   type EnvironmentStatus,
@@ -236,6 +238,10 @@ export class WebAncillaClient implements AncillaClient {
   async getResearch(runId: string): Promise<ResearchRunView> {
     return (await call<{ run: ResearchRunView }>("GET", `/api/research/${enc(runId)}`)).run;
   }
+  async exportResearch(runId: string, format: ResearchExportFormat): Promise<ResearchExport> {
+    return call<ResearchExport>("POST", `/api/research/${enc(runId)}/export`, { format });
+  }
+
   async getResearchSettings(): Promise<ResearchSettings> {
     return call<ResearchSettings>("GET", "/api/research-settings");
   }
@@ -419,6 +425,10 @@ export class WebAncillaClient implements AncillaClient {
 
   async openFolder(cwd: string, target: "files" | "editor"): Promise<void> {
     await call("POST", "/api/open", { cwd, target });
+  }
+
+  async openProjectFile(cwd: string, path: string): Promise<void> {
+    await call("POST", "/api/open", { cwd, path });
   }
 
   async setReasoningEffort(sessionId: string, effort: ReasoningEffort): Promise<void> {

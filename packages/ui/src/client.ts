@@ -151,6 +151,8 @@ export interface AncillaClient {
   listResearch(sessionId: string): Promise<import("./types.js").ResearchRunView[]>;
   // GET /api/research/:runId -> {run} with the report filled in.
   getResearch(runId: string): Promise<import("./types.js").ResearchRunView>;
+  // POST /api/research/:runId/export {format} -> the document written beside report.md; 409 when there is no report.
+  exportResearch(runId: string, format: import("./types.js").ResearchExportFormat): Promise<import("./types.js").ResearchExport>;
   // GET /api/research-settings -> settings; PATCH with a partial (config partial is merged and clamped).
   getResearchSettings(): Promise<import("./types.js").ResearchSettings>;
   setResearchSettings(patch: { enabled?: boolean; config?: Partial<import("./types.js").ResearchConfig> }): Promise<import("./types.js").ResearchSettings>;
@@ -163,6 +165,8 @@ export interface AncillaClient {
   /** The full instructions of a skill, without its frontmatter. */
   skillBody(cwd: string, skillId: string): Promise<string>;
   openFolder(cwd: string, target: "files" | "editor"): Promise<void>;
+  // POST /api/open {cwd, path}: one file inside the project, in whatever the OS opens that kind of file with.
+  openProjectFile(cwd: string, path: string): Promise<void>;
   /** The session's standing reasoning effort, which is what Muse applies to its turns. */
   setReasoningEffort(sessionId: string, effort: ReasoningEffort): Promise<void>;
   /** `set` and `edit` need the objective. A verb that wakes a turn returns its id. */

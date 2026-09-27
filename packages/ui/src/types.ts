@@ -382,6 +382,18 @@ export interface ResearchSettings {
 }
 
 export type ResearchStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled" | "interrupted";
+
+/** The documents a report can be turned into. */
+export type ResearchExportFormat = "pdf" | "docx" | "html";
+
+/** A report turned into a document: written next to report.md, and served at `url` for a browser to download. */
+export interface ResearchExport {
+  /** Relative to the project folder, like `.ancilla/research/<runId>/report.pdf`. */
+  path: string;
+  name: string;
+  size: number;
+  url: string;
+}
 export type ResearchPhase = "scoping" | "drafting" | "researching" | "writing" | "done";
 export type ResearchWorkerState = "queued" | "working" | "completed" | "failed" | "timed_out" | "cancelled";
 

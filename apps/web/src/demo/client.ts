@@ -548,6 +548,8 @@ export class DemoAncillaClient implements AncillaClient {
 
   async openFolder(): Promise<void> {}
 
+  async openProjectFile(): Promise<void> {}
+
   // ------------------------------------------------------------------------------------ threads
 
   async listSessions(options?: { archived?: boolean }): Promise<SessionSummary[]> {
@@ -1183,6 +1185,10 @@ export class DemoAncillaClient implements AncillaClient {
     this.research.set(runId, run);
     this.scheduleResearch(runId, RESEARCH_STEP_MS.queue);
     return this.researchSummary(run);
+  }
+
+  async exportResearch(): Promise<never> {
+    throw new Error("The demo has no files to write; a real project gets the document beside report.md.");
   }
 
   async stopResearch(runId: string, writeReport: boolean): Promise<ResearchRunView> {

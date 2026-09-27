@@ -18,8 +18,8 @@ import {
   type ResearchStopAction,
 } from "../../model/research.js";
 import { durationText } from "../../model/crew.js";
-import type { ResearchRunView, ResearchWorkerView } from "../../types.js";
-import { BinocularsIcon, CaretDownIcon, CheckCircleIcon, CircleDashedIcon, ClockIcon, StopCircleIcon, WarningCircleIcon } from "../ui/icons.js";
+import type { ResearchExportFormat, ResearchRunView, ResearchWorkerView } from "../../types.js";
+import { BinocularsIcon, CaretDownIcon, CheckCircleIcon, CircleDashedIcon, ClockIcon, DownloadSimpleIcon, StopCircleIcon, WarningCircleIcon } from "../ui/icons.js";
 import { CopyButton, Markdown } from "../ui/Markdown.js";
 import { Menu, MenuContent, MenuItem, MenuTrigger, Tip } from "../ui/overlays.js";
 import { Button, Spinner, cn } from "../ui/primitives.js";
@@ -281,8 +281,39 @@ function Report(props: { run: ResearchRunView; sessionId: string; latest: boolea
             </Button>
           </Tip>
         ) : null}
+        {run.report ? <DownloadMenu run={run} sessionId={props.sessionId} /> : null}
       </div>
     </div>
+  );
+}
+
+const EXPORTS: { format: ResearchExportFormat; label: string; hint: string }[] = [
+  { format: "pdf", label: "PDF", hint: ".pdf" },
+  { format: "docx", label: "Word document", hint: ".docx" },
+  { format: "html", label: "Web page", hint: ".html" },
+];
+
+/** The report as a document: the server writes it beside report.md, and the shell saves or opens it from there. */
+function DownloadMenu(props: { run: ResearchRunView; sessionId: string }) {
+  const controller = useController();
+  const busy = useApp((s) => Boolean(s.busy[`research-export:${props.run.runId}`]));
+  return (
+    <Menu>
+      <MenuTrigger asChild>
+        <Button size="sm" variant="ghost" disabled={busy} aria-label="Download the report">
+          {busy ? <Spinner size={10} /> : <DownloadSimpleIcon size={13} />}
+          Download
+          <CaretDownIcon size={10} className="text-subtle" />
+        </Button>
+      </MenuTrigger>
+      <MenuContent align="start" className="w-[220px]">
+        {EXPORTS.map((entry) => (
+          <MenuItem key={entry.format} hint={entry.hint} onSelect={() => void controller.exportResearchReport(props.sessionId, props.run.runId, entry.format)}>
+            {entry.label}
+          </MenuItem>
+        ))}
+      </MenuContent>
+    </Menu>
   );
 }
 

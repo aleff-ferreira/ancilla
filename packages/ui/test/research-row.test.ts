@@ -149,6 +149,7 @@ describe("ResearchRunRow", () => {
     assert.match(markup, /max-h-\[300px\]/, "a long report starts folded");
     assert.match(markup, /aria-label="Copy the report"/);
     assert.match(text(markup), /Open report\.md/);
+    assert.match(markup, /aria-label="Download the report"/, "the report can be downloaded as a document");
     assert.doesNotMatch(markup, /aria-label="Stop the research run"/);
     assert.doesNotMatch(markup, /data-research-phase/);
   });

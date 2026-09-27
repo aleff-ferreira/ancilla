@@ -10,6 +10,7 @@ import type {
   OutputRange,
   ReasoningEffort,
   ResearchConfig,
+  ResearchExportFormat,
   ResearchRunView,
   SessionSummary,
   SkillEntry,
@@ -93,7 +94,12 @@ export interface Platform {
   focused(): boolean;
   /** Names the window, as `(2) Design the sync engine — Ancilla`; a shell without a title bar leaves it out. */
   setWindowTitle?(title: string): void;
+  /** Saves a file the server serves at `url` the way this shell saves files: a browser downloads it. */
+  download?(url: string, name: string): void;
 }
+
+/** How the export formats are named in copy. */
+export const RESEARCH_EXPORT_WORD: Record<ResearchExportFormat, string> = { pdf: "PDF", docx: "Word", html: "HTML" };
 
 const PREFS_KEY = "ancilla.prefs.v1";
 const DRAFT_PREFIX = "ancilla.draft.";
@@ -170,6 +176,15 @@ export function browserPlatform(): Platform {
     cancel: (handle) => window.clearTimeout(handle as number),
     // A window with no document at all is not one anybody is looking at.
     focused: () => typeof document !== "undefined" && document.hasFocus(),
+    download: (url, name) => {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = name;
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    },
     setWindowTitle: (title) => {
       if (typeof document !== "undefined" && document.title !== title) {
         document.title = title;
@@ -3127,6 +3142,42 @@ export class AncillaController {
       return false;
     } finally {
       this.setBusy(key, false);
+    }
+  }
+
+  /**
+   * Turns a run's report into a PDF, Word or HTML document. The server writes it beside report.md, so in the
+   * desktop app (the shell with an updater) the toast offers to open it from there, while a browser, which has
+   * no such folder to hand, downloads the copy the server serves.
+   */
+  async exportResearchReport(sessionId: string, runId: string, format: ResearchExportFormat): Promise<void> {
+    const key = `research-export:${runId}`;
+    if (this.state.busy[key]) {
+      return;
+    }
+    this.setBusy(key, true);
+    try {
+      const out = await this.client.exportResearch(runId, format);
+      const cwd = this.state.sessions[sessionId]?.cwd ?? null;
+      if (this.updates && cwd) {
+        this.toast("success", `Saved ${out.name} in the project`, out.path, { label: "Open", run: () => void this.openProjectFile(cwd, out.path) });
+      } else {
+        this.platform.download?.(out.url, out.name);
+        this.toast("success", `Downloading ${out.name}`, out.path);
+      }
+    } catch (error) {
+      this.toast("error", `Could not export the report as ${RESEARCH_EXPORT_WORD[format]}`, errorMessage(error));
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  /** Opens one file of the project with whatever the OS opens that kind of file with. */
+  async openProjectFile(cwd: string, path: string): Promise<void> {
+    try {
+      await this.client.openProjectFile(cwd, path);
+    } catch (error) {
+      this.toast("error", "Could not open the file", errorMessage(error));
     }
   }
 

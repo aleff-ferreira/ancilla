@@ -5,7 +5,7 @@ import { AncillaController, staleThreadReason, type Platform } from "../src/mode
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
 import { crewView } from "../src/model/crew.js";
-import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchRunView, ResearchSettings } from "../src/types.js";
+import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
 
@@ -295,6 +295,17 @@ class FakeClient implements AncillaClient {
     return `Instructions for ${skillId}.`;
   }
   async openFolder() {}
+  openedFiles: { cwd: string; path: string }[] = [];
+  async openProjectFile(cwd: string, path: string) {
+    this.openedFiles.push({ cwd, path });
+  }
+  exports: { runId: string; format: ResearchExportFormat }[] = [];
+  exportFails: string | null = null;
+  async exportResearch(runId: string, format: ResearchExportFormat): Promise<ResearchExport> {
+    this.exports.push({ runId, format });
+    if (this.exportFails) throw new Error(this.exportFails);
+    return { path: `.ancilla/research/${runId}/report.${format}`, name: `report.${format}`, size: 1234, url: `/api/research/${runId}/export/report.${format}` };
+  }
   skillSessions: (string | undefined)[] = [];
   efforts: string[] = [];
   goalError: Error | null = null;
@@ -2105,6 +2116,47 @@ describe("AncillaController", () => {
       assert.match(controller.store.get().threads["s1"]?.researchRuns[0]?.report ?? "", /^# Report/);
       client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", status: "completed", phase: "done", reportAvailable: true, report: null }) });
       assert.match(controller.store.get().threads["s1"]?.researchRuns[0]?.report ?? "", /^# Report/);
+      stop();
+    });
+
+    it("exports a report: a browser downloads it, the desktop app keeps it in the project and offers to open it", async () => {
+      const client = new FakeClient();
+      const downloads: { url: string; name: string }[] = [];
+      const shell = platform("#/t/s1");
+      shell.download = (url, name) => downloads.push({ url, name });
+      const controller = new AncillaController(client, shell);
+      const stop = controller.start();
+      await settle();
+      await settle();
+      await controller.exportResearchReport("s1", "r1", "pdf");
+      assert.deepEqual(client.exports, [{ runId: "r1", format: "pdf" }]);
+      assert.deepEqual(downloads, [{ url: "/api/research/r1/export/report.pdf", name: "report.pdf" }]);
+      assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /Downloading report\.pdf/);
+      assert.equal(controller.store.get().toasts.at(-1)?.action, undefined);
+      assert.equal(controller.store.get().busy["research-export:r1"], undefined, "the export is no longer busy");
+
+      // The desktop app, the shell with an updater, has the project folder on hand.
+      controller.attachUpdater({
+        currentVersion: async () => "0.19.1",
+        check: async () => null,
+        download: async () => {},
+        install: async () => {},
+        relaunch: async () => {},
+        onClose: () => () => {},
+      });
+      await controller.exportResearchReport("s1", "r1", "docx");
+      assert.equal(downloads.length, 1, "nothing is downloaded on the desktop");
+      const toast = controller.store.get().toasts.at(-1);
+      assert.match(toast?.title ?? "", /Saved report\.docx in the project/);
+      assert.equal(toast?.detail, ".ancilla/research/r1/report.docx");
+      toast?.action?.run();
+      await settle();
+      assert.deepEqual(client.openedFiles, [{ cwd: "/work/app", path: ".ancilla/research/r1/report.docx" }]);
+
+      client.exportFails = "The run has no report to export.";
+      await controller.exportResearchReport("s1", "r1", "html");
+      assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /Could not export the report as HTML/);
+      assert.equal(controller.store.get().toasts.at(-1)?.detail, "The run has no report to export.");
       stop();
     });
 
