@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **Research workers show up in the Swarm card, panel and Activity drawer.** A research run used to leave the Swarm panel saying "No agents in this thread" while its workers were out. Now the run is a run there like a workflow: each round is a phase ("Round 2 of 12"), each worker a row with its searches, reads and saves, the inspector explains why a worker has no Retry or Skip of its own, and Stop, whether on the run or through Stop everything, ends the research run the way the composer's switch says.
 - **A research run no longer dies on its first supervisor decision.** When the supervisor's answer is prose instead of the fenced JSON decision, as happens when the question itself reads like a set of instructions, the run used to end with "supervisor decision failed with no findings to write from" before a single worker had run. Now the first round researches the brief along three default lines (the landscape, the primary sources and figures, the latest developments), the supervisor is told what happened before its next decision, and a transport failure on a decision is retried once. When a later decision still fails with nothing found, the failure text says what was wrong with the answer.
 
 ## 0.19.0
