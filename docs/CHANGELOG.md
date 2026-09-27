@@ -4,7 +4,7 @@
 
 ### Changed
 
-- **Ancilla is now under the GNU AGPL v3.** Everything from this release on is licensed so that whoever changes Ancilla and ships it, or runs it for others, has to offer their version's source under the same terms. Helicon's own notice stays in `LICENSE-HELICON`, as its MIT license requires; everything Ancilla adds is under the AGPL.
+- **Ancilla is under the GNU AGPL v3.** Ancilla is licensed so that whoever changes Ancilla and ships it, or runs it for others, has to offer their version's source under the same terms. Helicon's own notice stays in `LICENSE-HELICON`, as its MIT license requires; everything Ancilla adds is under the AGPL.
 
 ### New
 
