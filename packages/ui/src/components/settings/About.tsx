@@ -5,7 +5,7 @@ const REPO = "https://github.com/aleff-ferreira/ancilla";
 /** The license and notices every copy of Ancilla carries, as published with its source. */
 export const LEGAL_LINKS: readonly { label: string; href: string }[] = [
   { label: "License", href: `${REPO}/blob/main/LICENSE` },
-  { label: "Helicon's license", href: `${REPO}/blob/main/LICENSE-HELICON` },
+  { label: "Helicon license", href: `${REPO}/blob/main/LICENSE-HELICON` },
   { label: "Notice", href: `${REPO}/blob/main/NOTICE.md` },
   { label: "Third-party notices", href: `${REPO}/blob/main/THIRD_PARTY_NOTICES.md` },
 ];

@@ -15,7 +15,7 @@ describe("About", () => {
     assert.match(markup, /href="https:\/\/github\.com\/HarjjotSinghh\/helicon"/);
   });
 
-  it("links the license, Helicon's license, the notice and the third-party notices out to the browser", () => {
+  it("links the license, Helicon's license text, the notice and the third-party notices out to the browser", () => {
     const markup = renderToStaticMarkup(createElement(About, { version: "0.18.0" }));
     assert.deepEqual(
       LEGAL_LINKS.map((link) => link.href),
