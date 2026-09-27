@@ -24,7 +24,7 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { pendingKey, runLive, swarmBusy, swarmView, type AgentVM } from "./swarm.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
-import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction } from "./research.js";
+import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
 import { projectForCwd } from "./status.js";
 import {
   INIT_PROMPT,
@@ -912,7 +912,13 @@ export class AncillaController {
     }
     // The research picker belongs to the composer that was on screen; another route mounts another composer, or none.
     const moved = routeToHash(route) !== routeToHash(previous);
-    this.update((s) => ({ ...s, route, picker: moved && s.picker === "research" ? null : s.picker }));
+    this.update((s) => ({
+      ...s,
+      route,
+      picker: moved && s.picker === "research" ? null : s.picker,
+      // Research mode belongs to that composer as well: a question armed here must not fire elsewhere.
+      researchMode: moved ? false : s.researchMode,
+    }));
     if (push) {
       const hash = routeToHash(route);
       if (this.platform.readHash() !== hash) {
@@ -2976,8 +2982,14 @@ export class AncillaController {
     if (!target) {
       return Promise.resolve(false);
     }
-    // The thread has no prompt of its own yet, so it keeps the folder's name until a prompt follows the report.
-    return this.startThread(target, `/research ${question}`, (fresh) => this.startResearch(fresh, question, config));
+    // The thread has no prompt of its own, so the question names it until the user renames it.
+    return this.startThread(target, `/research ${question}`, async (fresh) => {
+      const started = await this.startResearch(fresh, question, config);
+      if (started) {
+        void this.rename(fresh, researchThreadTitle(question));
+      }
+      return started;
+    });
   }
 
   /**
@@ -3038,6 +3050,10 @@ export class AncillaController {
       const run = await this.client.startResearch(sessionId, trimmed, config, commandId);
       this.dropResearchRun(sessionId, placeholder);
       this.mergeResearchRun(sessionId, run);
+      // The question went out; the next thing typed is a message again.
+      if (this.state.researchMode) {
+        this.update((s) => ({ ...s, researchMode: false }));
+      }
       return true;
     } catch (error) {
       this.dropResearchRun(sessionId, placeholder);
@@ -3120,12 +3136,22 @@ export class AncillaController {
    * a flag the composer reads, and one raised while the trigger is off would pop the popover open the moment the
    * trigger came back.
    */
-  toggleResearchPicker(): void {
-    if (this.state.picker === "research") {
-      this.setPicker(null);
-    } else if (this.researchTriggerEnabled()) {
-      this.setPicker("research");
+  toggleResearchMode(): void {
+    this.setResearchMode(!this.state.researchMode);
+  }
+
+  /** Arms or disarms research mode; arming needs a composer whose Research button is on, exactly like a click. */
+  setResearchMode(on: boolean): void {
+    if (on && !this.researchTriggerEnabled()) {
+      return;
     }
+    if (this.state.researchMode !== on) {
+      this.update((s) => ({ ...s, researchMode: on, picker: on ? s.picker : s.picker === "research" ? null : s.picker }));
+    }
+  }
+
+  setResearchTyped(patch: Partial<ResearchTyped>): void {
+    this.update((s) => ({ ...s, researchTyped: { ...s.researchTyped, ...patch } }));
   }
 
   /** Whether the composer on screen has a research trigger, and it would open: the composer's own conditions, read off the state. */

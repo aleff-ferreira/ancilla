@@ -17,7 +17,7 @@ import type {
   YoloSettings,
 } from "../types.js";
 import type { EchoAttachment, ThreadFold } from "./fold.js";
-import type { ResearchStopAction } from "./research.js";
+import type { ResearchStopAction, ResearchTyped } from "./research.js";
 import type { UpdateState } from "./updates.js";
 
 /** A tiny external store: immutable snapshots plus change listeners, read through useSyncExternalStore-style hooks. */
@@ -290,6 +290,13 @@ export interface AppState {
    * on it, so it cannot clear this on its own.
    */
   researchStopping: Record<string, ResearchStopAction>;
+  /**
+   * Research mode: the composer's field is the question and Send starts a run instead of a turn. Switched on from
+   * the Research button or its chord, off again once a run starts or the composer on screen changes.
+   */
+  researchMode: boolean;
+  /** The run options typed into the Research popover; null fields fall back to the server's defaults. */
+  researchTyped: ResearchTyped;
   prefs: Prefs;
   toasts: Toast[];
   paletteOpen: boolean;
@@ -373,6 +380,8 @@ export function initialState(prefs: Prefs): AppState {
     researchSettings: null,
     researchStopWrites: true,
     researchStopping: {},
+    researchMode: false,
+    researchTyped: { windowMin: null, windowMax: null, parallel: null },
     prefs,
     toasts: [],
     paletteOpen: false,

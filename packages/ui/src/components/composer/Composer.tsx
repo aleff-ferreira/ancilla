@@ -20,7 +20,7 @@ import { useSampled } from "../../app/sampled.js";
 import { loadDraft, saveDraft } from "../../model/controller.js";
 import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
-import { NOTHING_TYPED, RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, researchLive, type ResearchRange, type ResearchTyped } from "../../model/research.js";
+import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, researchLive, type ResearchRange, type ResearchTyped } from "../../model/research.js";
 import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
@@ -138,6 +138,9 @@ export function Composer(props: ComposerProps) {
   const hasText = text.trim().length > 0;
   const showStop = props.running && Boolean(props.sessionId) && !hasText;
   const shell = !props.readOnly && /^!\s*\S/.test(text);
+  const researchMode = useApp((s) => s.researchMode);
+  // Research mode takes plain text only; a command or a shell line keeps its own meaning.
+  const researching = researchMode && !props.readOnly && !shell && !text.startsWith("/");
 
   // Files ride along with the next message: Muse sees images itself, anything else lands in the workspace.
   const [files, setFiles] = useState<PendingFile[]>([]);
@@ -213,6 +216,17 @@ export function Composer(props: ComposerProps) {
     const value = text;
     const outgoing = files;
     if (!tryConsume(value, outgoing)) {
+      return;
+    }
+    if (researching) {
+      // The field is the question: the run takes it and nothing goes to Muse as a turn. Files stay put for a message.
+      setText("");
+      const state = controller.store.get();
+      const started = await controller.research(value, popoverOverrides(state.researchTyped, state.researchSettings?.config ?? null), props.sessionId);
+      if (!started) {
+        consumedRef.current = null;
+        setText(value);
+      }
       return;
     }
     setText("");
@@ -321,13 +335,15 @@ export function Composer(props: ComposerProps) {
 
   const placeholder = props.readOnly
     ? "Read-only while another Muse session has this thread open"
-    : props.running
+    : researchMode
+      ? "What should the workers find out? Enter starts the research"
+      : props.running
       ? `Queue a follow-up, or press ${MOD}+Enter to add it to this turn`
       : props.variant === "home"
         ? "Describe a change, a fix, or a question about the code. Use @path to point at files."
         : "Reply, or ask for the next change";
 
-  const sendLabel = showStop ? "Stop the turn" : shell ? "Run command" : props.running ? "Queue message" : "Send";
+  const sendLabel = showStop ? "Stop the turn" : researching ? "Start the research" : shell ? "Run command" : props.running ? "Queue message" : "Send";
 
   return (
     <div
@@ -416,16 +432,7 @@ export function Composer(props: ComposerProps) {
         {/* The new-thread composer sits high, so its menus open downward; they still flip when there is no room. */}
         <AttachButton onFiles={(picked) => addFiles(Array.from(picked))} disabled={props.readOnly || files.length >= MAX_FILES} />
         <ModelPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
-        <ResearchTrigger
-          sessionId={props.sessionId}
-          side={props.variant === "home" ? "bottom" : "top"}
-          text={shell || slashing ? "" : text}
-          disabled={props.readOnly || starting}
-          onStarted={() => {
-            setText("");
-            consumedRef.current = null;
-          }}
-        />
+        <ResearchTrigger sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} disabled={props.readOnly || starting} />
         <EffortPicker side={props.variant === "home" ? "bottom" : "top"} />
         <AccessPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
         <AccountPicker sessionId={props.sessionId} cwd={props.cwd} variant={props.variant} />
@@ -443,7 +450,7 @@ export function Composer(props: ComposerProps) {
         <Tip label={sendLabel} shortcut={[showStop ? "Esc" : "Enter"]}>
           <button
             type="button"
-            aria-label={showStop ? "Stop the turn" : shell ? "Run command" : props.running ? "Queue message" : "Send message"}
+            aria-label={showStop ? "Stop the turn" : researching ? "Start the research" : shell ? "Run command" : props.running ? "Queue message" : "Send message"}
             disabled={showStop ? stopping : (!hasText && files.length === 0) || props.readOnly || starting}
             onClick={() => (showStop ? void controller.stop(props.sessionId as string) : void submit(false))}
             className={cn(
@@ -451,11 +458,13 @@ export function Composer(props: ComposerProps) {
               showStop ? "bg-inverse text-inverse-fg" : "bg-accent text-accent-fg hover:bg-accent-hover disabled:bg-active disabled:text-subtle",
             )}
           >
-            <SwapIcon value={starting || stopping ? "busy" : showStop ? "stop" : "send"}>
+            <SwapIcon value={starting || stopping ? "busy" : showStop ? "stop" : researching ? "research" : "send"}>
               {starting || stopping ? (
                 <Spinner size={13} />
               ) : showStop ? (
                 <SquareIcon weight="fill" size={11} />
+              ) : researching ? (
+                <BinocularsIcon size={15} />
               ) : (
                 <ArrowUpIcon size={16} />
               )}
@@ -601,71 +610,85 @@ const RESEARCH_FIELD = "h-7 w-14 rounded-md bg-sunken px-2 text-right text-xs te
  * knobs offered per run show the Settings defaults and post only what was typed over them, inside the daemon's
  * limits; everything else is the server's to fill in.
  */
-function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; text: string; disabled: boolean; onStarted: () => void }) {
+/**
+ * The Research control: a toggle that arms research mode, so the composer's field becomes the question and Send
+ * starts a run, and a chevron that opens the run's options. Other harnesses toggle a mode and take the question from
+ * the usual field; this does the same rather than asking twice.
+ */
+function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; disabled: boolean }) {
   const controller = useController();
   const open = useApp((s) => s.picker === "research");
+  const armed = useApp((s) => s.researchMode);
   const settings = useApp((s) => s.researchSettings);
   const stopWrites = useApp((s) => s.researchStopWrites);
-  const busy = useApp((s) => (props.sessionId ? Boolean(s.busy[`research:${props.sessionId}`]) : Boolean(s.busy["start"])));
+  const typed = useApp((s) => s.researchTyped);
   const live = useApp((s) => (props.sessionId ? (s.threads[props.sessionId]?.researchRuns.some(researchLive) ?? false) : false));
-  const [question, setQuestion] = useState("");
-  const [typed, setTyped] = useState<ResearchTyped>(NOTHING_TYPED);
-  const questionId = useId();
   const minId = useId();
   const maxId = useId();
   const parallelId = useId();
   const switchId = useId();
-  const questionRef = useRef<HTMLTextAreaElement>(null);
-  const startRef = useRef<HTMLButtonElement>(null);
+  const firstFieldRef = useRef<HTMLInputElement>(null);
   const defaults = settings?.config ?? null;
-  const drafted = props.text.trim();
-  const asked = (drafted || question).trim();
   const off = settings?.enabled === false;
   const reason = off ? "Deep research is off in Settings" : live ? "A research run is already going in this thread" : null;
   const disabled = props.disabled || reason !== null;
   // An untouched field shows the loaded default, and nothing until the settings have loaded: a number made up here
   // would go out as an override.
   const shown = (field: keyof ResearchTyped, fallback: number | undefined) => typed[field] ?? (fallback === undefined ? "" : String(fallback));
-  const type = (field: keyof ResearchTyped, value: string) => setTyped((current) => ({ ...current, [field]: value }));
+  const type = (field: keyof ResearchTyped, value: string) => controller.setResearchTyped({ [field]: value });
   // Leaving a field settles it inside the daemon's limits, where the server would put it anyway; emptied, it shows
   // the default again and sends nothing.
-  const settle = (field: keyof ResearchTyped, range: ResearchRange, step = 1) =>
-    setTyped((current) => {
-      if (current[field] === null) return current;
-      const value = clampResearchNumber(current[field], range, step);
-      return { ...current, [field]: value === null ? null : String(value) };
-    });
-  const start = async () => {
-    if (!asked || busy) {
-      return;
-    }
-    controller.closePicker("research");
-    const started = await controller.research(asked, popoverOverrides(typed, defaults), props.sessionId);
-    if (started) {
-      setQuestion("");
-      if (drafted) props.onStarted();
-    }
+  const settle = (field: keyof ResearchTyped, range: ResearchRange, step = 1) => {
+    if (typed[field] === null) return;
+    const value = clampResearchNumber(typed[field], range, step);
+    controller.setResearchTyped({ [field]: value === null ? null : String(value) });
   };
-  const trigger = (
-    <ToolbarTrigger
-      aria-label={reason ? `Deep research: ${reason}` : "Deep research"}
-      icon={<BinocularsIcon size={13} />}
-      label="Research"
+  const toggle = (
+    <button
+      type="button"
+      aria-pressed={armed}
+      aria-label={reason ? `Deep research: ${reason}` : armed ? "Research mode on: Send starts a run" : "Research mode"}
       disabled={disabled}
-      className="disabled:cursor-not-allowed disabled:opacity-50"
-    />
+      onClick={() => controller.setResearchMode(!armed)}
+      className={cn(
+        "inline-flex h-7 min-w-0 items-center gap-1.5 rounded-l-lg px-2 text-xs font-medium transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50",
+        armed ? "bg-accent-soft text-accent-text hover:bg-accent-soft" : "text-muted hover:bg-hover hover:text-fg",
+      )}
+    >
+      <BinocularsIcon size={13} className="shrink-0" />
+      <span className="truncate">Research</span>
+    </button>
+  );
+  const chevron = (
+    <button
+      type="button"
+      aria-label="Research options"
+      disabled={disabled}
+      className={cn(
+        "inline-flex h-7 items-center rounded-r-lg pr-1.5 pl-0.5 transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-hover data-[state=open]:text-fg",
+        armed ? "bg-accent-soft text-accent-text" : "text-muted hover:bg-hover hover:text-fg",
+      )}
+    >
+      <CaretDownIcon size={12} className="shrink-0 opacity-60" />
+    </button>
+  );
+  const group = (
+    <span className="inline-flex items-stretch rounded-lg">
+      {toggle}
+      <Popover.Trigger asChild>{chevron}</Popover.Trigger>
+    </span>
   );
   return (
     <Popover.Root open={open && !disabled} onOpenChange={(next) => (next ? controller.setPicker("research") : controller.closePicker("research"))}>
       {reason ? (
         <Tip label={reason}>
           <span tabIndex={0} className="inline-flex rounded-lg">
-            {trigger}
+            {group}
           </span>
         </Tip>
       ) : (
-        <Tip label="Research a question on the web and get a cited report" shortcut={[MOD, "Shift", "R"]}>
-          <Popover.Trigger asChild>{trigger}</Popover.Trigger>
+        <Tip label={armed ? "Research mode is on: type the question and press Enter" : "Research mode: type a question, and Send has Muse workers research it into a cited report"} shortcut={[MOD, "Shift", "R"]}>
+          {group}
         </Tip>
       )}
       <Popover.Portal>
@@ -675,11 +698,11 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; te
           sideOffset={6}
           {...FLOATING}
           onOpenAutoFocus={(event) => {
-            // Straight to the question, or to Start when the draft is the question; the help button would show its tip.
+            // Straight to the first option; the help button would otherwise take focus and show its tip.
             event.preventDefault();
-            (questionRef.current ?? startRef.current)?.focus();
+            firstFieldRef.current?.focus();
           }}
-          className="pop z-[var(--z-dropdown)] w-[360px] max-w-[calc(100dvw-24px)] rounded-xl bg-raised p-3.5 text-fg shadow-pop outline-none"
+          className="pop z-[var(--z-dropdown)] w-[340px] max-w-[calc(100dvw-24px)] rounded-xl bg-raised p-3.5 text-fg shadow-pop outline-none"
         >
           <div className="flex items-center gap-2">
             <BinocularsIcon size={14} className="text-muted" />
@@ -691,36 +714,16 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; te
               </button>
             </Tip>
           </div>
-          {drafted ? (
-            <p className="mt-3 max-h-24 overflow-y-auto rounded-lg bg-sunken px-2.5 py-2 text-xs leading-relaxed text-fg whitespace-pre-wrap [overflow-wrap:anywhere]">{drafted}</p>
-          ) : (
-            <>
-              <label htmlFor={questionId} className="sr-only">
-                Question to research
-              </label>
-              <textarea
-                id={questionId}
-                ref={questionRef}
-                value={question}
-                rows={3}
-                placeholder="What should the workers find out?"
-                onChange={(event) => setQuestion(event.currentTarget.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    void start();
-                  }
-                }}
-                className="mt-3 block w-full resize-none rounded-lg bg-sunken px-2.5 py-2 text-sm leading-relaxed text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-accent"
-              />
-            </>
-          )}
+          <p className="mt-2 text-xs leading-relaxed text-muted">
+            Switch Research on, type the question in the message field, and Send starts the run. These are the run's options.
+          </p>
           <div className="mt-3 grid grid-cols-[1fr_auto_auto] items-center gap-x-3 gap-y-2 text-sm">
             <label htmlFor={minId} className="text-muted">
               Research window, minutes
             </label>
             <input
               id={minId}
+              ref={firstFieldRef}
               type="number"
               min={RESEARCH_LIMITS.windowMinutes.min}
               max={RESEARCH_LIMITS.windowMinutes.max}
@@ -768,12 +771,7 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; te
             </label>
             <Toggle id={switchId} checked={stopWrites} label="Stop writes a report from what it has" onChange={(on) => controller.setResearchStopWrites(on)} />
           </div>
-          <div className="mt-3 flex items-center justify-between gap-2">
-            <p className="text-xs text-subtle">Runs on your Muse plan; {props.sessionId ? "the report lands in this thread" : "starts a thread for the report"}.</p>
-            <Button ref={startRef} variant="primary" size="sm" disabled={!asked || busy} loading={busy} onClick={() => void start()}>
-              Start
-            </Button>
-          </div>
+          <p className="mt-3 text-xs text-subtle">Runs on your Muse plan; {props.sessionId ? "the report lands in this thread" : "the run starts a thread for its report"}.</p>
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

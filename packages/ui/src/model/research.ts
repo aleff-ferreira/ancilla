@@ -309,3 +309,9 @@ export function researchClock(
   const remainingMs = researchLive(run) && Number.isFinite(deadline) ? Math.max(0, deadline - now) : null;
   return { elapsedMs, remainingMs };
 }
+
+/** A thread started for a research run is named after its question, cut to one sidebar line. */
+export function researchThreadTitle(question: string): string {
+  const flat = question.replace(/\s+/g, " ").trim();
+  return flat.length <= 72 ? flat : `${flat.slice(0, 71).trimEnd()}…`;
+}

@@ -2190,38 +2190,61 @@ describe("AncillaController", () => {
       stop();
     });
 
-    it("opens the research picker from the shortcut only where a composer would show it, and drops it on leaving", async () => {
+    it("arms research mode from the chord only where a composer would show it, and drops it on leaving", async () => {
       const client = new FakeClient();
       const { controller, stop } = await started(client);
-      const picker = () => controller.store.get().picker;
-      controller.toggleResearchPicker();
-      assert.equal(picker(), "research");
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "the chord closes what it opened");
+      const armed = () => controller.store.get().researchMode;
+      controller.toggleResearchMode();
+      assert.equal(armed(), true);
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "the chord disarms what it armed");
       client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1" }) });
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "not while a run is going in the thread");
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "not while a run is going in the thread");
       client.handler?.({ type: "research-run", sessionId: "s1", run: fakeResearchRun({ runId: "r1", status: "completed", phase: "done" }) });
       controller.store.set((s) => ({ ...s, researchSettings: { enabled: false, config: fakeResearchRun({}).config } }));
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "not with the feature off");
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "not with the feature off");
       controller.store.set((s) => ({ ...s, researchSettings: { enabled: true, config: fakeResearchRun({}).config } }));
       controller.store.set((s) => ({ ...s, threads: { ...s.threads, s1: { ...s.threads["s1"]!, readOnly: true, readOnlyReason: "Another Muse session has it open." } } }));
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "not in a read-only thread");
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "not in a read-only thread");
       controller.store.set((s) => ({ ...s, threads: { ...s.threads, s1: { ...s.threads["s1"]!, readOnly: false, readOnlyReason: null } } }));
-      controller.toggleResearchPicker();
-      assert.equal(picker(), "research");
+      controller.toggleResearchMode();
+      assert.equal(armed(), true);
       controller.navigate({ kind: "settings" });
-      assert.equal(picker(), null, "leaving the composer drops its picker");
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "the settings page has no composer");
+      assert.equal(armed(), false, "leaving the composer disarms it");
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "the settings page has no composer");
       controller.newThread("/work/app");
-      controller.toggleResearchPicker();
-      assert.equal(picker(), "research", "the new-thread composer has the trigger too");
-      controller.store.set((s) => ({ ...s, picker: null, projects: [] }));
-      controller.toggleResearchPicker();
-      assert.equal(picker(), null, "without a project there is no composer yet");
+      controller.toggleResearchMode();
+      assert.equal(armed(), true, "the new-thread composer has the button too");
+      controller.setResearchMode(false);
+      controller.store.set((s) => ({ ...s, projects: [] }));
+      controller.toggleResearchMode();
+      assert.equal(armed(), false, "without a project there is no composer yet");
+      stop();
+    });
+
+    it("disarms research mode once the question has gone out, and keeps the typed options", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      controller.setResearchMode(true);
+      controller.setResearchTyped({ parallel: "4" });
+      assert.equal(await controller.research("what changed in WCAG 2.2?", { maxParallel: 4 }, "s1"), true);
+      assert.equal(controller.store.get().researchMode, false, "the next thing typed is a message again");
+      assert.equal(controller.store.get().researchTyped.parallel, "4", "options outlive the run they were set for");
+      assert.equal(client.researchStarts.at(-1)?.config?.maxParallel, 4);
+      // From the new-thread screen the question names the thread it starts, cut to one line.
+      let renamed: string | null = null;
+      (client as unknown as { updateSession: (id: string, patch: { title?: string }) => Promise<typeof SESSION> }).updateSession = async (_id, patch) => {
+        renamed = patch.title ?? null;
+        return { ...SESSION, ...patch };
+      };
+      controller.newThread("/work/app");
+      assert.equal(await controller.research("what changed in WCAG 2.2 and why does it matter for muted text in dark themes now", null, null), true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(renamed, "what changed in WCAG 2.2 and why does it matter for muted text in dark…");
       stop();
     });
 
