@@ -11,6 +11,7 @@ import { applyEvents, emptyFold, type ThreadFold } from "../src/model/fold.js";
 import { defaultPrefs, initialState, Store, type AppState, type ThreadState } from "../src/model/store.js";
 import type { LiveView, SessionSummary, ViewEvent } from "../src/types.js";
 import { APPROVAL, S, SESSION as LANTERN, lantern, launch, textOf as text } from "./fixtures/lantern.js";
+import { runningResearch } from "./fixtures/research.js";
 
 const LIVE: LiveView = { activeTurnId: "t1", turnStartedAt: null, pendingApprovals: 0, pendingInputs: 0, lastTerminal: null, lastError: null };
 const SESSION: SessionSummary = { ...LANTERN, live: LIVE };
@@ -74,6 +75,20 @@ describe("ThreadView with the Swarm card", () => {
     assert.match(section, /class="swarm-head"/);
     assert.match(section, /role="tablist"/);
     assert.match(text(section), /All 10 agents/);
+  });
+
+  it("mounts the card for a live research run, labelled Deep research, with a rail segment per round", () => {
+    const markup = render({ threads: { s1: thread({ researchRuns: [runningResearch()] }) }, sessions: { s1: { ...SESSION, live: null } } });
+    const section = card(markup);
+    assert.ok(section, "the card is there without any Muse item");
+    assert.match(text(section), /Deep research/);
+    assert.equal((section.match(/class="swarm-strip rail"/g) ?? []).length, 2, "one segment per round");
+    assert.match(section, /data-agent-kind="research"/);
+    assert.match(text(section), /Round 1 of 12/);
+    assert.match(text(section), /All 3 agents/);
+    assert.match(text(section), /Stop run/);
+    assert.match(markup, /class="n @max-\[700px\]:hidden" aria-hidden="true">3</, "the Swarm toggle counts the workers");
+    assert.doesNotMatch(markup, /No agents in this thread/);
   });
 
   it("collapses to lines when the card is collapsed in the prefs", () => {

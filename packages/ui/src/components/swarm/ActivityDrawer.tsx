@@ -362,6 +362,7 @@ function swarmOf(state: AppState, sessionId: string, now: number) {
     pending: state.swarm.pending,
     skipped: state.swarm.skipped,
     models: state.models,
+    researchRuns: thread.researchRuns,
   });
 }
 

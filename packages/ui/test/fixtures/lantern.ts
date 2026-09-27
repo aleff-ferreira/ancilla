@@ -311,6 +311,8 @@ export function mkRun(agents: AgentVM[], extra: Partial<RunVM> = {}): RunVM {
     itemId: "wf",
     runId: RUN_ID,
     name: "offline-sync-research-design",
+    kind: "workflow",
+    research: null,
     status: "running",
     revision: 40,
     startedAt: S(0, 0),

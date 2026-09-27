@@ -4,7 +4,7 @@ import { durationText, usageTotal, type AgentVM } from "../../model/swarm.js";
 import { ArrowCounterClockwiseIcon, CaretRightIcon, ChatCircleDotsIcon, EyeIcon, SkipForwardIcon, StopCircleIcon } from "../ui/icons.js";
 import { Button, cn } from "../ui/primitives.js";
 import { AgentName } from "./AgentName.js";
-import { NOTHING_TO_COMPARE, NOT_CONFIRMED, NO_REASON, agoText, compactState, plural, stateSentence } from "./cardCopy.js";
+import { NOTHING_TO_COMPARE, NOT_CONFIRMED, agoText, compactState, noReason, plural, stateSentence } from "./cardCopy.js";
 import { Sigil } from "./Sigil.js";
 import { StateGlyph } from "./StateGlyph.js";
 import { useBreath } from "./useBreath.js";
@@ -78,8 +78,14 @@ function attentionCopy(agent: AgentVM, clockAt: number | undefined): { l1: React
       return { l1: <><b>Waiting for you</b><span className="opt"> · wants to run</span></>, tone: "need", l2: asked ?? "The request is in the dock.", mono: false, actions: ["review"] };
     }
     case "failed": {
+      if (agent.research) {
+        // A worker gets no retry or skip: the supervisor decides what happens to its topic.
+        const word = agent.research.wireState === "timed_out" ? "Timed out" : "Failed";
+        const after = agent.durationMs !== null ? ` after ${durationText(agent.durationMs)}` : "";
+        return { l1: <><b>{word}</b>{after}</>, tone: "fail", l2: agent.failure?.text ?? noReason(agent), mono: false, actions: [] };
+      }
       const after = `after ${plural(agent.attempt, "attempt")}${agent.durationMs !== null ? ` · ${durationText(agent.durationMs)}` : ""}`;
-      return { l1: <><b>Failed</b> {after}</>, tone: "fail", l2: agent.failure?.text ?? NO_REASON, mono: Boolean(agent.failure?.text), actions: ["retry", "skip"] };
+      return { l1: <><b>Failed</b> {after}</>, tone: "fail", l2: agent.failure?.text ?? noReason(agent), mono: Boolean(agent.failure?.text), actions: ["retry", "skip"] };
     }
     case "no-update": {
       const silence = agent.silenceMs ?? 0;

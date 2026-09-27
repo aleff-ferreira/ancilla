@@ -1,6 +1,7 @@
 import { formatClock, formatTokens } from "../../model/format.js";
+import { phaseLine } from "../../model/research.js";
 import type { SwarmFilter } from "../../model/store.js";
-import { durationText, pendingKey, phasesOf, runLive, usageTotal, type AgentState, type AgentVM, type PendingAction, type PhaseVM, type RunNeedVM, type RunVM } from "../../model/swarm.js";
+import { durationText, pendingKey, phasesOf, researchCounters, runLive, usageTotal, type AgentState, type AgentVM, type PendingAction, type PhaseVM, type RunNeedVM, type RunVM } from "../../model/swarm.js";
 
 /**
  * The words and orderings the Swarm panel shares between its roster, Timeline and inspector. Everything here is a
@@ -44,9 +45,9 @@ export function isEnded(agent: Pick<AgentVM, "state">): boolean {
   return ENDED.has(agent.state);
 }
 
-/** Whether the row needs its second line. */
-export function isTall(agent: Pick<AgentVM, "state" | "pending">): boolean {
-  return agent.pending !== null || TALL.has(agent.state);
+/** Whether the row needs its second line; a research worker's counters take one once it has started. */
+export function isTall(agent: Pick<AgentVM, "state" | "pending" | "research">): boolean {
+  return agent.pending !== null || TALL.has(agent.state) || (agent.research !== undefined && agent.state !== "scheduled");
 }
 
 export function filterMatches(agent: Pick<AgentVM, "state">, filter: SwarmFilter): boolean {
@@ -328,6 +329,17 @@ export function subline(agent: AgentVM, run: Pick<RunVM, "clockAt" | "longestFin
   const clock = run?.clockAt ?? agent.lastEventAt ?? 0;
   if (agent.pending === "retry") return { word: "Retrying", tone: "work", rest: [`attempt ${agent.attempt + 1} starting`, "Muse has not confirmed yet"] };
   if (agent.pending === "stop") return { word: "Stopping…", tone: "work", rest: ["Muse has not confirmed yet"] };
+  if (agent.research) {
+    // The daemon reports counters, not lifecycle steps, so a worker's second line is what it has done so far.
+    const counters = researchCounters(agent.research);
+    switch (agent.state) {
+      case "working": return { word: "Working", tone: "work", rest: [counters] };
+      case "failed": return { word: agent.research.wireState === "timed_out" ? "Timed out" : "Failed", tone: "fail", rest: [counters, agent.failure?.text ?? "the run does not say why"] };
+      case "done": return { word: "Done", tone: "mute", rest: [counters] };
+      case "skipped": return { word: skippedWord(agent), tone: "mute", rest: [counters] };
+      default: return null;
+    }
+  }
   switch (agent.state) {
     case "failed": {
       const rest = [`attempt ${agent.attempt} of ${agent.attempt}`];
@@ -422,7 +434,10 @@ export function summaryParts(run: RunVM): SummaryPart[] {
       parts.push({ text: "Starting", strong: true }, { text: "no agents scheduled yet" });
       return parts;
     case "running":
-      if (run.plannedKnown) {
+      if (run.research) {
+        // A research run says which phase the daemon is in; its rounds are planned as it goes.
+        parts.push({ text: phaseLine(run.research), strong: true }, { text: `${counts.done} done` }, { text: `${counts.working + counts.finishing + counts.noUpdate} working` });
+      } else if (run.plannedKnown) {
         parts.push({ text: `${counts.done} of ${counts.total} done`, strong: true });
         if (run.currentPhase) parts.push({ text: run.currentPhase });
       } else {
@@ -430,9 +445,11 @@ export function summaryParts(run: RunVM): SummaryPart[] {
       }
       break;
     case "finished":
-    case "finished-with-failures":
-      parts.push({ text: `${counts.done} of ${counts.total} agents finished`, strong: true }, { text: `${run.phases.length} ${run.phases.length === 1 ? "phase" : "phases"}` });
+    case "finished-with-failures": {
+      const unit = run.research ? ["round", "rounds"] : ["phase", "phases"];
+      parts.push({ text: `${counts.done} of ${counts.total} agents finished`, strong: true }, { text: `${run.phases.length} ${run.phases.length === 1 ? unit[0] : unit[1]}` });
       break;
+    }
     case "stopped":
       parts.push({ text: "Stopped", strong: true }, { text: `${counts.done} of ${counts.total} had landed` });
       break;

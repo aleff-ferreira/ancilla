@@ -84,14 +84,15 @@ export function SwarmPanel(props: { sessionId: string }) {
 
   const fold = thread?.fold ?? null;
   const stale = connection !== "open" || Boolean(fold?.closed || thread?.stalled || thread?.historySync || thread?.readOnly || thread?.stale);
-  const busy = fold ? swarmBusy(fold) : false;
+  const researchRuns = thread?.researchRuns;
+  const busy = fold ? swarmBusy(fold, researchRuns) : false;
   const now = useNow(15_000, busy && !stale);
   const sessionModel = session?.modelId ?? null;
   const view = useMemo(
-    () => (fold ? swarmView(fold, session, now, { stale, partialHistory: thread?.truncated === true, pending, skipped, models, sessionModel }) : null),
-    // The view moves with the agent items, the trace, the requests and the clock; a text delta elsewhere leaves it alone.
+    () => (fold ? swarmView(fold, session, now, { stale, partialHistory: thread?.truncated === true, pending, skipped, models, sessionModel, researchRuns }) : null),
+    // The view moves with the agent items, the trace, the requests, the research runs and the clock; a text delta elsewhere leaves it alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fold?.agentItems, fold?.swarm, fold?.approvals, fold?.userInputs, fold?.order, fold?.meta.modelId, session?.sessionId, sessionModel, now, stale, thread?.truncated, pending, skipped, models],
+    [fold?.agentItems, fold?.swarm, fold?.approvals, fold?.userInputs, fold?.order, fold?.meta.modelId, session?.sessionId, sessionModel, now, stale, thread?.truncated, pending, skipped, models, researchRuns],
   );
   const shown = view ? panelRun(view.runs) : null;
   const run = useMemo(() => (shown ? withPending(shown, sessionId, pending) : null), [shown, sessionId, pending]);
@@ -281,7 +282,8 @@ export function SwarmPanel(props: { sessionId: string }) {
       }
       case "stop": {
         const agent = target();
-        if (agent && (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled" || agent.state === "waiting-on-you") && !readOnly) {
+        // A research worker takes no stop of its own, so `x` on one asks about the run instead.
+        if (agent && agent.kind !== "research" && (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled" || agent.state === "waiting-on-you") && !readOnly) {
           setConfirm({ kind: "stop", id: agent.id });
           return true;
         }
@@ -453,7 +455,7 @@ export function SwarmPanel(props: { sessionId: string }) {
 
   const inspector = inspected ? (
     <Inspector
-      run={inspected.kind === "workflow" ? run : null}
+      run={inspected.kind === "workflow" || inspected.kind === "research" ? run : null}
       agent={inspected}
       tab={tab}
       layout={split ? "column" : "full"}

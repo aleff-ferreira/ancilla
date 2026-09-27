@@ -1,5 +1,5 @@
 import { formatClock, formatTokens } from "../../model/format.js";
-import { durationText, usageTotal, type AgentVM, type RunVM } from "../../model/swarm.js";
+import { durationText, researchCounters, usageTotal, type AgentVM, type RunVM } from "../../model/swarm.js";
 import { Sigil } from "./Sigil.js";
 import { StateGlyph } from "./StateGlyph.js";
 import { stateSentence } from "./cardCopy.js";
@@ -33,6 +33,10 @@ export function Peek({ agent, run, stale = false }: PeekProps) {
   if (agent.kind === "workflow") {
     facts.push(agent.tokens ? { k: "Tokens", v: formatTokens(usageTotal(agent.tokens)) } : { k: "Tokens", v: agent.state === "done" ? "Not reported" : "reported near the end", nr: true });
     facts.push({ k: "Tool calls", v: agent.toolCalls !== null ? String(agent.toolCalls) : "At run end", nr: agent.toolCalls === null });
+  }
+  if (agent.research) {
+    facts.push({ k: "Calls", v: researchCounters(agent.research) });
+    facts.push({ k: "Tool calls", v: String(agent.toolCalls ?? 0) });
   }
   const sub = [agent.phase, agent.kind === "workflow" ? `attempt ${agent.attempt}` : null, stateSentence(agent, stale)].filter((part): part is string => part !== null).join(" · ");
   return (

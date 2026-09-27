@@ -32,7 +32,7 @@ import { SinceYouLeft } from "./SinceYouLeft.js";
 import { SwarmAnnouncer } from "./SwarmAnnouncer.js";
 import { MoreLine, SwarmLine, TaskLine, rolling, taskLive } from "./SwarmLine.js";
 import { Ticking } from "./Ticking.js";
-import { plural } from "./cardCopy.js";
+import { plural, runKindWord } from "./cardCopy.js";
 import { useCardKeys } from "./useCardKeys.js";
 
 /** The key the card keeps its collapsed state under in `prefs.collapsedCards`. */
@@ -98,8 +98,8 @@ export function focusSwarmCard(controller: AncillaController, sessionId: string)
 /** The head's sub line: `Workflow · started 14:02 · 9 agents · 1 planned · 1.1M tokens · ~$4.18 est.` */
 export function headSub(run: RunVM): { long: ReactNode; text: string } {
   const scheduled = run.counts.total - run.counts.planned;
-  const parts: ReactNode[] = ["Workflow"];
-  const texts: string[] = ["Workflow"];
+  const parts: ReactNode[] = [runKindWord(run)];
+  const texts: string[] = [runKindWord(run)];
   if (run.startedAt !== null && !run.elapsedApprox) {
     const started = `started ${formatClock(run.startedAt, run.clockAt)}`;
     parts.push(started);
@@ -252,6 +252,8 @@ export function SwarmCard(props: SwarmCardProps) {
     skip: (id) => setConfirming({ id, action: "skip" }),
     stop: (id) => {
       const agent = agentsById.get(id);
+      // A research worker takes no stop of its own: the run does.
+      if (agent?.kind === "research") return;
       if (agent && (agent.kind === "task" || agent.kind === "subagent")) props.onAction(id, "stop");
       else if (agent) setConfirming({ id, action: "stop" });
     },
@@ -422,7 +424,7 @@ export function SwarmCard(props: SwarmCardProps) {
                 <span className="nm">{run.name}</span>
                 <span className="sub long">{sub.long}</span>
                 <span className="sub short">
-                  Workflow · <Ticking ms={run.elapsedMs} at={run.clockAt} live={!stale} approx={run.elapsedApprox} />
+                  {runKindWord(run)} · <Ticking ms={run.elapsedMs} at={run.clockAt} live={!stale} approx={run.elapsedApprox} />
                 </span>
               </span>
             </button>
@@ -628,6 +630,8 @@ export function SwarmDockCard(props: SwarmDockCardProps) {
         focusRequestPanel(agent.needs?.requestId ?? null);
         return;
       }
+      // Research workers run on their own; the rows offer nothing, and a key lands here with nothing to send.
+      if (agent.kind === "research") return;
       // Stop on a workflow agent is a skip: the run goes on without it.
       const routed = action === "stop" && agent.kind === "workflow" ? "skip" : action;
       void controller.swarmAction(sessionId, agent, routed);

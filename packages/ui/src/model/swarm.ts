@@ -1,8 +1,12 @@
-import type { ApprovalRequest, LiveView, ModelOption, MspItem, SessionSummary, TokenUsage, UserInputRequest, WorkflowChild } from "../types.js";
+import type {
+  ApprovalRequest, LiveView, ModelOption, MspItem, ResearchPhase, ResearchRunView, ResearchStatus, ResearchWorkerState, ResearchWorkerView,
+  SessionSummary, TokenUsage, UserInputRequest, WorkflowChild,
+} from "../types.js";
 import { agentNumbers, type AgentNumbers } from "./agents.js";
 import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold } from "./fold.js";
 import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
 import { costOf, formatCost, listedPrice } from "./pricing.js";
+import { phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
 import { projectForCwd } from "./status.js";
 import type { AppState, ThreadState } from "./store.js";
 import { TERMINAL_FAILURES, reconciled } from "./workflow.js";
@@ -11,14 +15,48 @@ import { TERMINAL_FAILURES, reconciled } from "./workflow.js";
  * The view-models behind the Swarm card, panel, sidebar rows and Activity drawer. Everything here is derived from
  * what Muse sent and what the fold traced about the order it arrived in: a state is never inferred from the clock
  * alone. The one clock rule is the no-update threshold, and that is reported as a fact ("no update for 4m 12s"),
- * never as a verdict.
+ * never as a verdict. A thread's DeepResearch runs join the same view from the store's summaries, so a research
+ * worker is an agent here like any other; the daemon reports those whole, so nothing about them is traced.
  */
 
 export type AgentState =
   | "planned" | "scheduled" | "working" | "finishing" | "no-update"
   | "waiting-on-you" | "failed" | "skipped" | "done" | "unknown";
 
-export type AgentKind = "workflow" | "subagent" | "task";
+export type AgentKind = "workflow" | "subagent" | "task" | "research";
+
+/** What a run is: a Muse workflow, or a DeepResearch run the daemon supervises. */
+export type RunKind = "workflow" | "research";
+
+/** What the daemon counts for a research worker; the run's report carries what the worker found. */
+export type ResearchAgentInfo = {
+  agentId: number;
+  round: number;
+  searches: number;
+  reads: number;
+  saved: number;
+  /** A discovery worker looks for topics rather than answers. */
+  discovery: boolean;
+  /** The worker model the run's config names, when it names one. */
+  model: string | null;
+  /** The daemon's own word for the worker, for the copy that has one. */
+  wireState: ResearchWorkerState;
+};
+
+/** The research run's own facts that the generic run fields cannot carry. */
+export interface ResearchRunInfo {
+  runId: string;
+  status: ResearchStatus;
+  phase: ResearchPhase;
+  round: number;
+  maxRounds: number;
+  question: string;
+  sources: ResearchRunView["sources"];
+  /** When the window routes the run to writing; null once it has ended or before it started. */
+  deadlineAt: number | null;
+  /** The run wrote a report, which the transcript row shows. */
+  reportAvailable: boolean;
+}
 
 /** An action this client sent that Muse has not confirmed with a revision yet. */
 export type PendingAction = "retry" | "stop";
@@ -86,6 +124,8 @@ export interface AgentVM {
   runItemId: string | null;
   workflowRunId: string | null;
   taskInfo?: { command: string; tail: string | null; lastOutputAt: number | null; initiator: "user" | "timeout" | null; approvalId: string | null };
+  /** Present on a research worker: its counters, as the daemon reports them. */
+  research?: ResearchAgentInfo;
 }
 
 export interface Counts {
@@ -129,10 +169,14 @@ export interface RunNeedVM {
 }
 
 export interface RunVM {
+  /** The workflow item's id, or `research:<runId>` for a research run. */
   itemId: string;
   runId: string | null;
-  /** `Item.entryId`, else the script's slug, else `Workflow`. */
+  /** `Item.entryId`, else the script's slug, else `Workflow`; a research run's question, cut to a line. */
   name: string;
+  kind: RunKind;
+  /** Present on a research run. */
+  research: ResearchRunInfo | null;
   status: RunStatus;
   revision: number;
   startedAt: number | null;
@@ -284,6 +328,8 @@ export interface SwarmOptions {
   sessionModel?: string | null;
   models?: readonly ModelOption[];
   numbers?: AgentNumbers;
+  /** The thread's DeepResearch runs, from the store; each becomes a run beside the workflow ones. */
+  researchRuns?: readonly ResearchRunView[];
 }
 
 export type SummaryChip = { kind: "needs" | "failed" | "no-update" | "stale" | "skipped" | "run-failed"; count: number; text: string };
@@ -291,6 +337,32 @@ export type SummaryChip = { kind: "needs" | "failed" | "no-update" | "stale" | "
 /** The key `pending` and `skipped` use for one attempt of one agent. */
 export function pendingKey(sessionId: string, agentId: string, attempt: number): string {
   return `${sessionId}:${agentId}:${attempt}`;
+}
+
+/** A research run's item id: `research:<runId>`, so the controls can tell it from a workflow item by its prefix. */
+export const RESEARCH_ITEM_PREFIX = "research:";
+
+export function researchItemId(runId: string): string {
+  return `${RESEARCH_ITEM_PREFIX}${runId}`;
+}
+
+/** The research run id an item id names, or null for a workflow item. */
+export function researchRunIdOf(itemId: string): string | null {
+  return itemId.startsWith(RESEARCH_ITEM_PREFIX) ? itemId.slice(RESEARCH_ITEM_PREFIX.length) : null;
+}
+
+/** A research worker's agent id: `research:<runId>:A<agentId>`, stable across the run's revisions. */
+export function researchAgentId(runId: string, agentId: number): string {
+  return `${researchItemId(runId)}:A${agentId}`;
+}
+
+/** `2 searches · 3 reads · 1 saved`, or `no calls yet` before the worker has made one. */
+export function researchCounters(info: Pick<ResearchAgentInfo, "searches" | "reads" | "saved">): string {
+  const parts: string[] = [];
+  if (info.searches > 0) parts.push(plural(info.searches, "search", "searches"));
+  if (info.reads > 0) parts.push(plural(info.reads, "read"));
+  if (info.saved > 0) parts.push(`${info.saved} saved`);
+  return parts.length > 0 ? parts.join(" · ") : "no calls yet";
 }
 
 /** Nothing shorter than this is ever remarkable: real agents take minutes. */
@@ -817,7 +889,7 @@ function sameAgent(a: AgentVM, b: AgentVM): boolean {
     && a.approx === b.approx && a.tokens === b.tokens && a.toolCalls === b.toolCalls && a.attempts === b.attempts
     && a.shareOfLongest === b.shareOfLongest && a.runItemId === b.runItemId && a.workflowRunId === b.workflowRunId
     && sameOptional(a.display, b.display) && sameOptional(a.failure, b.failure) && sameOptional(a.task, b.task)
-    && sameOptional(a.quiet, b.quiet) && sameOptional(a.needs, b.needs) && sameOptional(a.taskInfo, b.taskInfo);
+    && sameOptional(a.quiet, b.quiet) && sameOptional(a.needs, b.needs) && sameOptional(a.taskInfo, b.taskInfo) && sameOptional(a.research, b.research);
 }
 
 function attemptEvents(entry: WorkflowChild | undefined, trace: ChildTrace | undefined, outcome: Outcome | null, terminalAt: number | null): AttemptEventVM[] {
@@ -1037,12 +1109,16 @@ export function phasesOf(agents: readonly AgentVM[]): PhaseVM[] {
 
 /** Ten bins of revisions per minute ending at `clock`, oldest first. */
 export function pulseBins(trace: RunTrace | undefined, clock: number): number[] {
+  return binsOf(trace?.eventMinutes ?? [], clock);
+}
+
+/** The pulse over any list of event minutes, sorted ascending. */
+function binsOf(eventMinutes: readonly number[], clock: number): number[] {
   const bins = new Array<number>(PULSE_BINS).fill(0);
-  if (!trace) return bins;
   const last = Math.floor(clock / 60_000);
   const first = last - PULSE_BINS + 1;
-  for (let i = trace.eventMinutes.length - 1; i >= 0; i -= 1) {
-    const minute = trace.eventMinutes[i] as number;
+  for (let i = eventMinutes.length - 1; i >= 0; i -= 1) {
+    const minute = eventMinutes[i] as number;
     if (minute < first) break;
     if (minute <= last) bins[minute - first] = (bins[minute - first] as number) + 1;
   }
@@ -1406,6 +1482,8 @@ function runView(item: MspItem, ctx: RunContext): RunVM {
     itemId: item.itemId,
     runId,
     name: text(item.entryId) ?? launch?.name ?? slugOf(text(item.scriptId)) ?? "Workflow",
+    kind: "workflow",
+    research: null,
     status,
     revision: item.revision,
     startedAt,
@@ -1638,6 +1716,215 @@ function spawnView(spawn: MspItem, waits: readonly MspItem[], ctx: RunContext): 
   };
 }
 
+// ---------------------------------------------------------------- research runs
+
+/** An ISO time as epoch milliseconds, or null when the wire sent none or something unreadable. */
+function isoMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** The daemon's worker word as the row's state: a timed-out worker failed, a cancelled one was skipped. */
+function researchWorkerState(state: ResearchWorkerState): AgentState {
+  switch (state) {
+    case "queued": return "scheduled";
+    case "working": return "working";
+    case "completed": return "done";
+    case "failed": case "timed_out": return "failed";
+    case "cancelled": return "skipped";
+  }
+}
+
+/**
+ * The run's status as the card says it. A queued run, or one still scoping with no worker out, is starting; a
+ * partial report is a finish with failures, since the run ended short of what it planned; a cancelled or
+ * interrupted run was stopped, by the user or by the daemon going down under it.
+ */
+function researchRunStatus(run: ResearchRunView): RunStatus {
+  switch (run.status) {
+    case "queued": return "starting";
+    case "running": return run.workers.length === 0 ? "starting" : "running";
+    case "completed": return "finished";
+    case "partial": return "finished-with-failures";
+    case "failed": return "failed";
+    case "cancelled": case "interrupted": return "stopped";
+  }
+}
+
+/** `Round 2 of 12`: the phase a worker's round names, and the header the rail and the roster show for it. */
+function researchPhaseName(round: number, maxRounds: number): string {
+  return maxRounds > 0 ? `Round ${round} of ${maxRounds}` : `Round ${round}`;
+}
+
+/** The run's usage as the token shape the pricing path takes; the daemon counts cached input apart. */
+function researchUsage(run: ResearchRunView): TokenUsage | null {
+  if (run.usage.totalTokens <= 0) return null;
+  return { inputTokens: run.usage.inputTokens, outputTokens: run.usage.outputTokens, cachedTokens: run.usage.cachedInputTokens };
+}
+
+/** The lifecycle of a worker as one attempt, so the Timeline and the fingerprint draw it like any other lane. */
+function researchAttempt(worker: ResearchWorkerView, state: AgentState, startedAt: number | null, endedAt: number | null, durationMs: number | null): AttemptVM {
+  const events: AttemptEventVM[] = [{ kind: "scheduled", at: null, detail: null }];
+  if (state !== "scheduled") events.push({ kind: "started", at: startedAt, detail: null });
+  const outcome: AttemptVM["outcome"] = state === "done" ? "done" : state === "failed" ? "failed" : state === "skipped" ? "skipped" : null;
+  if (outcome !== null) {
+    const after = durationMs !== null ? `after ${durationText(durationMs)}` : null;
+    events.push({ kind: outcome === "done" ? "completed" : outcome === "failed" ? "failed" : "cancelled", at: endedAt, detail: worker.state === "timed_out" ? "timed out" : after });
+  }
+  return { attempt: 1, events, startedAt, endedAt, outcome };
+}
+
+/**
+ * A DeepResearch run as a run of the Swarm surfaces. The daemon sends the run whole on every change, workers and
+ * counters included, so every field here is read straight off it: the rounds are the phases, a worker is an
+ * agent, and the run's own usage stands for the tokens, since workers do not report theirs. Nothing about a
+ * research run waits on the user, and its workers take no control of their own: the supervisor runs them.
+ */
+function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
+  const { clock } = ctx;
+  const itemId = researchItemId(run.runId);
+  const ended = researchEnded(run);
+  const startedAt = isoMs(run.startedAt) ?? isoMs(run.createdAt);
+  const endedAt = ended ? isoMs(run.endedAt) : null;
+  const workerModel = run.config.models.worker ?? run.config.models.supervisor ?? run.config.models.writer ?? null;
+
+  // Rounds in order, and within a round the daemon's numbering, so the phases read in the order they ran.
+  const workers = [...run.workers].sort((a, b) => a.round - b.round || a.agentId - b.agentId);
+  interface Fact { worker: ResearchWorkerView; state: AgentState; startedAt: number | null; endedAt: number | null; durationMs: number | null }
+  const facts: Fact[] = [];
+  let longestFinishedMs: number | null = null;
+  const eventMinutes: number[] = [];
+  for (const worker of workers) {
+    const state = researchWorkerState(worker.state);
+    const live = LIVE_STATES.has(state);
+    const workerStart = state === "scheduled" ? null : isoMs(worker.startedAt);
+    const workerEnd = live ? null : isoMs(worker.endedAt);
+    const durationMs = workerStart !== null && workerEnd !== null ? Math.max(0, workerEnd - workerStart) : null;
+    if (state === "done" && durationMs !== null && (longestFinishedMs === null || durationMs > longestFinishedMs)) longestFinishedMs = durationMs;
+    if (workerStart !== null) eventMinutes.push(Math.floor(workerStart / 60_000));
+    if (workerEnd !== null) eventMinutes.push(Math.floor(workerEnd / 60_000));
+    facts.push({ worker, state, startedAt: workerStart, endedAt: workerEnd, durationMs });
+  }
+  eventMinutes.sort((a, b) => a - b);
+
+  const cache = runCacheFor(`${ctx.sessionId ?? ""}:${itemId}`);
+  const next = new Map<string, ChildCacheEntry>();
+  const agents: AgentVM[] = [];
+  for (const fact of facts) {
+    const { worker, state } = fact;
+    const id = researchAgentId(run.runId, worker.agentId);
+    const name = `A${worker.agentId} · ${worker.topic}`;
+    const live = LIVE_STATES.has(state);
+    const runningMs = live && fact.startedAt !== null ? Math.max(0, clock - fact.startedAt) : null;
+    const measure = fact.durationMs ?? runningMs;
+    const signature = `${worker.state}|${fact.startedAt ?? ""}|${fact.endedAt ?? ""}`;
+    const cached = cache.children.get(id);
+    const attempts = cached && cached.signature === signature ? cached.vm.attempts : [researchAttempt(worker, state, fact.startedAt, fact.endedAt, fact.durationMs)];
+    const candidate: AgentVM = {
+      id,
+      attempt: 1,
+      name,
+      label: name,
+      // A topic may hold a colon of its own, so the name is never split into a prefix.
+      display: { prefix: null, short: name },
+      phase: researchPhaseName(worker.round, run.maxRounds),
+      kind: "research",
+      state,
+      pending: null,
+      // A worker is only ever cancelled by its run: a stop, or the window closing under it.
+      skippedBy: state === "skipped" ? "run" : null,
+      startedAt: fact.startedAt,
+      endedAt: fact.endedAt,
+      lastEventAt: fact.endedAt ?? fact.startedAt,
+      silenceMs: null,
+      runningMs,
+      durationMs: fact.durationMs,
+      approx: false,
+      tokens: null,
+      toolCalls: worker.toolCalls,
+      attempts,
+      failure: state === "failed"
+        ? { text: worker.state === "timed_out" ? `Timed out after ${plural(run.config.workerWallTimeMinutes, "minute")}` : null, at: fact.endedAt }
+        : null,
+      task: { text: worker.topic, source: "objective" },
+      shareOfLongest: measure !== null && longestFinishedMs !== null && longestFinishedMs > 0 ? measure / longestFinishedMs : null,
+      quiet: null,
+      needs: null,
+      runItemId: itemId,
+      workflowRunId: null,
+      research: { agentId: worker.agentId, round: worker.round, searches: worker.searches, reads: worker.reads, saved: worker.saved, discovery: worker.discovery, model: workerModel, wireState: worker.state },
+    };
+    const vm = cached && sameAgent(cached.vm, candidate) ? cached.vm : candidate;
+    next.set(id, { vm, traces: [], signature });
+    agents.push(vm);
+  }
+  cache.children = next;
+
+  const phases = phasesOf(agents);
+  const counts = runCounts({ phases });
+  const status = researchRunStatus(run);
+  const elapsedMs = startedAt !== null ? Math.max(0, (endedAt ?? clock) - startedAt) : null;
+  const usage = researchUsage(run);
+  const usd = usage && workerModel ? costEstimate(usage, workerModel, ctx.models) : null;
+  let agentTimeMs: number | null = null;
+  for (const agent of agents) {
+    if (agent.durationMs !== null) agentTimeMs = (agentTimeMs ?? 0) + agent.durationMs;
+  }
+  const current = phases.find((phase) => phase.agents.some((agent) => LIVE_STATES.has(agent.state))) ?? null;
+  const sources = sourcesLine(run.sources);
+  const summary = ended
+    ? [sources ?? "No sources were saved", run.reportAvailable ? "The report is in the transcript." : "No report was written."].join("\n")
+    : null;
+
+  return {
+    itemId,
+    runId: run.runId,
+    name: researchThreadTitle(run.question),
+    kind: "research",
+    research: {
+      runId: run.runId,
+      status: run.status,
+      phase: run.phase,
+      round: run.round,
+      maxRounds: run.maxRounds,
+      question: run.question,
+      sources: run.sources,
+      deadlineAt: ended ? null : isoMs(run.researchDeadlineAt),
+      reportAvailable: run.reportAvailable,
+    },
+    status,
+    revision: 0,
+    startedAt,
+    endedAt,
+    elapsedMs,
+    elapsedApprox: false,
+    partialHistory: false,
+    phases,
+    agents,
+    counts,
+    attention: attentionOrder(agents),
+    runNeeds: [],
+    currentPhase: current?.name ?? null,
+    // The daemon plans rounds as it goes, so no total is ever known ahead.
+    plannedKnown: false,
+    // The usage is the run's own; workers report none, so nothing is "reported" by an agent.
+    tokens: usage ? { total: run.usage.totalTokens, reported: 0, of: workers.length } : null,
+    cost: usd !== null && workerModel ? { usd, model: workerModel } : null,
+    slots: run.config.maxParallel > 0 ? { used: counts.working + counts.finishing + counts.noUpdate, max: run.config.maxParallel } : null,
+    pulse: binsOf(eventMinutes, clock),
+    longestFinishedMs,
+    agentTimeMs,
+    peakConcurrency: peakOf(agents, clock),
+    waitedOnYouMs: null,
+    retried: 0,
+    report: ended ? { summary, failure: run.failure, handoffs: [] } : null,
+    stale: ctx.stale,
+    staleAt: ctx.stale ? ctx.staleAt : null,
+    clockAt: clock,
+  };
+}
+
 // ---------------------------------------------------------------- the view
 
 function lastKnownAt(fold: ThreadFold): number | null {
@@ -1692,6 +1979,9 @@ export function swarmView(fold: ThreadFold, session: SessionSummary | null, now:
       subagents.push(subagentView(item, ctx));
     }
   }
+  for (const run of opts.researchRuns ?? []) {
+    runs.push(researchRunView(run, ctx));
+  }
   runs.sort((a, b) => (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER) || a.itemId.localeCompare(b.itemId));
   const index = threadIndex(fold);
   const waits = index.waits.map((id) => fold.items[id]).filter((item): item is MspItem => item !== undefined);
@@ -1715,9 +2005,10 @@ export function runLive(run: Pick<RunVM, "status">): boolean {
 
 /**
  * Whether anything in the thread's agents may still be working, without building the view: a live run with an
- * attempt not yet settled, an open subagent, or a background task still running.
+ * attempt not yet settled, an open subagent, a background task still running, or a research run still out.
  */
-export function swarmBusy(fold: ThreadFold): boolean {
+export function swarmBusy(fold: ThreadFold, researchRuns?: readonly ResearchRunView[]): boolean {
+  if (researchRuns?.some(researchLive)) return true;
   for (const item of Object.values(fold.agentItems ?? fold.items)) {
     if (item.kind === "workflow") {
       if (item.status === "inProgress" && Array.isArray(item.children) && item.children.some((child) => child && childOutcome(child) === null)) return true;
@@ -1746,7 +2037,10 @@ export function summaryLine(run: RunVM): { progress: string; chips: SummaryChip[
       progress = "Starting · no agents scheduled yet";
       break;
     case "running":
-      if (run.plannedKnown) {
+      if (run.research) {
+        // A research run plans its rounds as it goes, so the line leads with the phase the daemon reports.
+        progress = `${phaseLine(run.research)} · ${counts.done} done · ${counts.working + counts.finishing + counts.noUpdate} working`;
+      } else if (run.plannedKnown) {
         progress = `${run.currentPhase ?? "Finishing"} · ${counts.done} of ${total}`;
       } else {
         progress = `${counts.done} done · ${counts.working + counts.finishing + counts.noUpdate} working · more may start`;
@@ -1821,12 +2115,17 @@ function factLine(run: RunVM): string {
   const failed = run.agents.filter((agent) => agent.state === "failed");
   const unknown = run.agents.filter((agent) => agent.state === "unknown");
   const attemptsOf = (agent: AgentVM) => `after ${plural(agent.attempt - (agent.state === "skipped" ? 1 : 0), "failed attempt")}`;
-  if (run.status === "stopped") {
+  if (run.research && run.report?.failure) {
+    // The daemon says why a research run ended short, whatever the status; a partial report carries it too.
+    facts.push(run.report.failure);
+  } else if (run.status === "stopped") {
     facts.push(unknown.length > 0 ? `${plural(unknown.length, "agent was", "agents were")} still working` : "Nothing was still working");
   } else if (run.status === "failed") {
     facts.push(run.report?.failure ?? "Muse has not reported a reason");
+  } else if (run.research && run.status === "finished-with-failures") {
+    facts.push("The run ended before every round was done");
   } else if (skipped.length === 0 && failed.length === 0 && unknown.length === 0) {
-    facts.push("Every phase reached its end");
+    facts.push(run.research ? "Every round reached its end" : "Every phase reached its end");
   }
   for (const agent of skipped) {
     facts.push(`${agent.name} was ${agent.skippedBy === "you" ? "skipped by you" : agent.skippedBy === "run" ? "stopped with the run" : "cancelled by Muse"}${agent.attempt > 1 ? ` ${attemptsOf(agent)}` : ""}`);
@@ -1950,7 +2249,7 @@ export function completionView(run: RunVM): CompletionVM | null {
   const stats: StatVM[] = [
     { value: String(scheduled), label: scheduled === 1 ? "agent" : "agents" },
     { value: run.elapsedApprox ? aboutText(run.elapsedMs ?? 0) : durationText(run.elapsedMs), label: "wall clock" },
-    run.tokens ? { value: formatTokens(run.tokens.total), label: "tokens, reported by Muse" } : { value: "—", label: "tokens not reported" },
+    run.tokens ? { value: formatTokens(run.tokens.total), label: run.research ? "tokens, the run's own count" : "tokens, reported by Muse" } : { value: "—", label: "tokens not reported" },
   ];
   if (run.cost) stats.push({ value: `~${formatCost(run.cost.usd)}`, label: "estimate at list price" });
   return {
@@ -2030,6 +2329,7 @@ export interface SidebarSummaryOptions {
   sessionId?: string;
   stale?: boolean;
   staleAt?: number | null;
+  researchRuns?: readonly ResearchRunView[];
 }
 
 /**
@@ -2039,7 +2339,7 @@ export interface SidebarSummaryOptions {
  */
 export function sidebarSwarmSummary(fold: ThreadFold | null, _live: LiveView | null, now: number, opts: SidebarSummaryOptions = {}): SidebarSwarmSummary | null {
   if (!fold) return null;
-  const view = swarmView(fold, null, now, { stale: opts.stale, staleAt: opts.staleAt, numbers: opts.sessionId ? agentNumbers(opts.sessionId) : undefined });
+  const view = swarmView(fold, null, now, { stale: opts.stale, staleAt: opts.staleAt, numbers: opts.sessionId ? agentNumbers(opts.sessionId) : undefined, researchRuns: opts.researchRuns });
   const running = view.runs.filter(runLive);
   const run = running[running.length - 1] ?? view.runs[view.runs.length - 1] ?? null;
   const needs = Object.keys(fold.approvals).length + Object.keys(fold.userInputs).length;
@@ -2146,6 +2446,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
       pending: state.swarm.pending,
       skipped: state.swarm.skipped,
       models: state.models,
+      researchRuns: thread.researchRuns,
     });
     let runs = 0;
     let tasks = 0;
@@ -2178,7 +2479,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
   }
   for (const session of Object.values(state.sessions)) {
     const thread = state.threads[session.sessionId];
-    if (thread?.stale && (session.live?.activeTurnId || swarmBusy(thread.fold))) untracked = true;
+    if (thread?.stale && (session.live?.activeTurnId || swarmBusy(thread.fold, thread.researchRuns))) untracked = true;
   }
   const empty = needsYou.length + working.length + finishedToday.length === 0;
   const foot = working.length > 0

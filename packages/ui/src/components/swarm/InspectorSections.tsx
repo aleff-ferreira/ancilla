@@ -3,8 +3,9 @@ import {
   ArrowCounterClockwiseIcon, ChatCircleDotsIcon, CircleDashedIcon, ClockIcon, CodeIcon, EyeIcon, EyeSlashIcon, SkipForwardIcon, StopCircleIcon, WarningCircleIcon,
 } from "../ui/icons.js";
 import { formatTokens } from "../../model/format.js";
-import { durationText, runLive, usageTotal, type AgentVM, type AttemptEventVM, type RunVM } from "../../model/swarm.js";
+import { durationText, researchCounters, runLive, usageTotal, type AgentVM, type AttemptEventVM, type RunVM } from "../../model/swarm.js";
 import { Button, cn } from "../ui/primitives.js";
+import { RESEARCH_NO_REASON, RESEARCH_OWN } from "./cardCopy.js";
 import { Sigil } from "./Sigil.js";
 import { clockSeconds, longestFinished, measureOf, mostTokens, silenceText, skippedWord, stateTone, stateWord } from "./panel.js";
 import { AgentName, RowGlyph, type RowAction, type RowConfirm } from "./RosterRow.js";
@@ -29,12 +30,42 @@ export interface LifeItem {
 }
 
 function kindWord(agent: Pick<AgentVM, "kind">): string {
-  return agent.kind === "task" ? "Background task" : agent.kind === "subagent" ? "Subagent" : "Workflow agent";
+  return agent.kind === "task" ? "Background task" : agent.kind === "subagent" ? "Subagent" : agent.kind === "research" ? "Research worker" : "Workflow agent";
+}
+
+/** A research worker's steps: the daemon reports its state and counters, not lifecycle events, so these are read off those. */
+function researchItems(agent: AgentVM): LifeItem[] {
+  const info = agent.research;
+  if (!info) return [];
+  const items: LifeItem[] = [];
+  const counters = researchCounters(info);
+  if (agent.state === "scheduled") {
+    items.push({ key: "queued", glyph: "scheduled", title: "Queued", sub: `${agent.phase} · waiting for a slot`, at: null, approx: false, mute: false, attempt: 1 });
+    return items;
+  }
+  items.push({ key: "start", glyph: "working", title: "Started", sub: `${agent.phase}${info.discovery ? " · discovery" : ""}`, at: agent.startedAt, approx: false, mute: false, attempt: 1 });
+  switch (agent.state) {
+    case "done":
+      items.push({ key: "end", glyph: "done", title: agent.durationMs !== null ? `Done after ${durationText(agent.durationMs)}` : "Done", sub: counters, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
+      break;
+    case "failed":
+      items.push({ key: "end", glyph: "failed", title: info.wireState === "timed_out" ? "Timed out" : "Failed", sub: agent.failure?.text ?? RESEARCH_NO_REASON, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
+      break;
+    case "skipped":
+      items.push({ key: "end", glyph: "skipped", title: skippedWord(agent), sub: counters, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
+      break;
+    default:
+      items.push({ key: "tail", glyph: "no-update", title: `Working · ${counters}`, sub: "The counters move as the worker calls its tools", at: "now", approx: false, mute: true, attempt: 1 });
+  }
+  return items;
 }
 
 /** "What happened", one line per lifecycle step Muse reported, per attempt, oldest first. */
 export function lifecycleItems(agent: AgentVM, run: RunVM | null): LifeItem[] {
   const items: LifeItem[] = [];
+  if (agent.kind === "research") {
+    return researchItems(agent);
+  }
   if (agent.kind !== "workflow") {
     const who = agent.taskInfo?.initiator === "timeout" ? "Muse backgrounded it after a timeout" : agent.kind === "task" ? "You sent it to the background" : null;
     items.push({ key: "start", glyph: "working", title: agent.kind === "task" ? "Sent to the background" : "Spawned", sub: who, at: agent.startedAt, approx: agent.approx, mute: false, attempt: 1 });
@@ -159,6 +190,7 @@ function tokensFact(agent: AgentVM, live: boolean): Fact {
     return { key: "tokens", label: "Tokens", value: parts.join(" · ") };
   }
   if (agent.kind === "task") return { key: "tokens", label: "Tokens", value: "Not reported for background tasks", nr: true };
+  if (agent.kind === "research") return { key: "tokens", label: "Tokens", value: "Not reported per worker · the run counts its own", nr: true };
   return { key: "tokens", label: "Tokens", value: live ? NEAR_END : NOT_REPORTED, nr: true };
 }
 
@@ -213,7 +245,19 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
       : { key: "longest", label: "Longest finished", value: "None yet · no agent has finished", nr: true });
   }
   facts.push(tokensFact(agent, live));
-  if (agent.kind !== "task") {
+  if (agent.kind === "research" && agent.research) {
+    // The daemon's counters, as the run reports them; each is a figure even at zero, since zero is what it did.
+    const info = agent.research;
+    facts.push({ key: "searches", label: "Searches", value: String(info.searches) });
+    facts.push({ key: "reads", label: "Reads", value: String(info.reads) });
+    facts.push({ key: "saved", label: "Saved", value: String(info.saved) });
+    facts.push({ key: "tool-calls", label: "Tool calls", value: String(agent.toolCalls ?? 0) });
+    facts.push(info.model !== null
+      ? { key: "model", label: "Model", value: info.model }
+      : { key: "model", label: "Model", value: "Not named in the run's config", nr: true });
+    facts.push({ key: "result", label: "Result", value: "Its findings go into the run's report", nr: true });
+    facts.push({ key: "round", label: "Round", value: `${info.round}${info.discovery ? " · discovery worker" : ""}` });
+  } else if (agent.kind !== "task") {
     facts.push(agent.toolCalls !== null
       ? { key: "tool-calls", label: "Tool calls", value: String(agent.toolCalls) }
       : { key: "tool-calls", label: "Tool calls", value: agent.kind === "workflow" && runGoing ? AT_RUN_END : NOT_REPORTED, nr: true });
@@ -330,19 +374,23 @@ export function Callout(props: CalloutProps) {
     const lastMs = last && last.startedAt !== null && last.endedAt !== null ? last.endedAt - last.startedAt : agent.durationMs;
     const after = lastMs !== null && lastMs !== undefined ? ` after ${durationText(lastMs)}` : "";
     const workflow = agent.kind === "workflow";
+    const research = agent.kind === "research";
     return (
       <div className={cn(box, "bg-danger-soft shadow-[inset_0_0_0_1px_color-mix(in_oklch,var(--danger)_24%,transparent)]")} data-callout="failed">
         <div className="flex items-center gap-[7px] font-medium text-fg">
           <WarningCircleIcon size={14} className="text-danger" />
-          {workflow ? `Failed on attempt ${agent.attempt}${after}` : `Failed${after}`}
+          {workflow ? `Failed on attempt ${agent.attempt}${after}` : research && agent.research?.wireState === "timed_out" ? `Timed out${after}` : `Failed${after}`}
         </div>
         {agent.failure?.text ? (
-          <div className="mt-1 font-mono text-xs text-fg [overflow-wrap:anywhere]">{agent.failure.text}</div>
+          <div className={cn("mt-1 text-xs text-fg [overflow-wrap:anywhere]", !research && "font-mono")}>{agent.failure.text}</div>
         ) : (
           <p className="m-0 mt-1 text-fg">
-            {workflow ? "Muse has not reported a reason yet. Workflow agents report reasons only in the run's final report, if at all." : "Muse has not reported a reason yet."}
+            {workflow ? "Muse has not reported a reason yet. Workflow agents report reasons only in the run's final report, if at all." : research ? RESEARCH_NO_REASON : "Muse has not reported a reason yet."}
           </p>
         )}
+        {research ? (
+          <div className="mt-1.5 text-xs leading-[18px] text-muted">{RESEARCH_OWN}: the supervisor decides whether its topic is tried again. Stop the run to end them all.</div>
+        ) : null}
         {workflow ? (
           <div className="mt-1.5 text-xs leading-[18px] text-muted">
             {agent.failure?.at !== null && agent.failure?.at !== undefined ? `Muse reported this at ${clockSeconds(agent.failure.at)}. ` : ""}
@@ -409,7 +457,7 @@ export function TaskSection(props: { agent: AgentVM }) {
   const { agent } = props;
   if (agent.kind === "task") return null;
   return (
-    <Section title="Task" aside={agent.task ? <><CodeIcon size={11} />{agent.task.source === "script" ? "from the workflow script" : "the objective Muse gave it"}</> : null}>
+    <Section title="Task" aside={agent.task ? <><CodeIcon size={11} />{agent.task.source === "script" ? "from the workflow script" : agent.kind === "research" ? "the topic the supervisor gave it" : "the objective Muse gave it"}</> : null}>
       <p className={cn("m-0 text-sm leading-5", agent.task ? "text-fg" : "text-subtle")}>{agent.task?.text ?? "Muse did not share this agent's task."}</p>
     </Section>
   );
@@ -455,7 +503,9 @@ export function HonestyNote(props: { agent: Pick<AgentVM, "kind"> }) {
     ? "What Muse streams for a background task: its output lines. It does not report an exit code."
     : props.agent.kind === "subagent"
       ? "What Muse does not stream: a subagent's tool calls or transcript. Its summary arrives when the lead waits on it."
-      : "What Muse does not stream: a workflow agent's tool calls, transcript or result. Tool-call counts arrive when the run ends.";
+      : props.agent.kind === "research"
+        ? "What the run reports for a worker: its state and its counters. Its findings and its tokens go into the run's report and the run's own usage."
+        : "What Muse does not stream: a workflow agent's tool calls, transcript or result. Tool-call counts arrive when the run ends.";
   const [strong, ...rest] = text.split(": ");
   return (
     <div className="mx-4 mt-3 flex items-start gap-2 rounded-[10px] bg-sunken px-3 py-[9px] text-xs leading-[18px] text-muted shadow-[inset_0_0_0_1px_var(--border)]" data-honesty="">
@@ -486,6 +536,15 @@ export function ResultTab(props: { agent: AgentVM; run: RunVM | null }) {
     );
   }
   const finished = props.run !== null && !runLive(props.run);
+  if (agent.kind === "research") {
+    const written = props.run?.research?.reportAvailable === true;
+    return (
+      <Section title="Result">
+        <p className="m-0 text-sm leading-5 text-subtle">A worker's findings go into the run's report; the run does not share them apart.</p>
+        {finished ? <p className="m-0 mt-1 text-sm leading-5 text-muted">{written ? "The run's report is in the transcript." : "The run wrote no report."}</p> : null}
+      </Section>
+    );
+  }
   return (
     <Section title="Result">
       <p className="m-0 text-sm leading-5 text-subtle">Muse does not share a workflow agent's result. The run's report cites it.</p>

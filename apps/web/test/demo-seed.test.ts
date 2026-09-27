@@ -97,6 +97,28 @@ describe("the demo seed", () => {
     assert.ok(Date.parse(running.createdAt) > Date.parse(done.endedAt as string), "the running one came after the finished one");
   });
 
+  it("folds the research thread's runs into the Swarm view, a phase per round and an agent per worker", () => {
+    const seeded = seed(NOW);
+    const thread = seeded.threads.find((candidate) => candidate.summary.sessionId === THREADS.research) as SeedThread;
+    const fold = foldFromLoad(loadOf(thread));
+    const vm = swarmView(fold, thread.summary, NOW, { researchRuns: seeded.research });
+    assert.deepEqual(vm.runs.map((run) => [run.kind, run.itemId, run.status]), [
+      ["research", `research:${RESEARCH_RUNS.done}`, "finished"],
+      ["research", `research:${RESEARCH_RUNS.running}`, "running"],
+    ]);
+    const [done, running] = vm.runs as [RunVM, RunVM];
+    assert.deepEqual(running.phases.map((phase) => [phase.name, phase.agents.map((agent) => agent.state)]), [
+      ["Round 1 of 12", ["done", "done", "failed"]],
+      ["Round 2 of 12", ["working", "working", "scheduled"]],
+    ]);
+    assert.equal(summaryLine(running).progress, "Researching, round 2 of 12 · 2 done · 2 working");
+    assert.deepEqual(running.attention.map((agent) => agent.name), ["A3 · Material 3 tonal palettes"]);
+    assert.equal(running.tokens?.total, 91_420);
+    assert.equal(completionView(done)?.headline, "All five landed.");
+    assert.equal(completionView(done)?.excerpt, "14 sources · 11 verified · 4 curated\nThe report is in the transcript.");
+    assert.equal(sidebarSwarmSummary(fold, thread.summary.live, NOW, { researchRuns: seeded.research })?.text, "2 done · 2 working");
+  });
+
   it("sends labels only when an agent is scheduled and usage on exactly one revision, as Muse does", () => {
     const { thread } = viewOf("running");
     const revisions = workflowEvents(thread);
