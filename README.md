@@ -8,7 +8,7 @@
 
 **Deep research and agent monitoring for Muse Code.**
 
-Ancilla is an open-source desktop and web app from **AMAZONIA WORKS**. Turn a question into a cited research report,
+Ancilla is an open-source desktop and web app. Turn a question into a cited research report,
 follow parallel agents as they work, and keep coding threads, approvals and background tasks in one workspace.
 It connects to Meta's **Muse Code CLI** (`muse`) using your existing login, on Windows, macOS or Linux.
 
