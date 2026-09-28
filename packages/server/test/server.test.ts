@@ -1,7 +1,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAonia } from "@harjjotsinghh/aonia";
@@ -1488,6 +1488,150 @@ describe("AncillaServer", () => {
     assert.equal(res.byAccount.work.window.usedPercent, 90);
     assert.equal(res.byAccount.personal.window.usedPercent, 12);
     assert.equal(res.usage.window.usedPercent, 12, "usage holds the newest across accounts");
+  });
+
+  it("restores subscription readings only for the same login and runtime without starting a host", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-cache-"));
+    const aonia = createAonia({ home: join(dataDir, "accounts"), platform: "linux", musePath: "muse" });
+    const profile = await aonia.createProfile("work");
+    const authDir = join(profile.roots.config, "muse");
+    await mkdir(authDir, { recursive: true });
+    const login = (email: string) => writeFile(join(authDir, "auth.json"), JSON.stringify({
+      providers: { meta: { mechanism: "oauth", user_email: email } },
+    }));
+    await login("first@example.test");
+    const first = new FakeConnection();
+    first.replies.set("session/start", { session: { sessionId: "w1" } });
+    const options = { dataDir, aonia, home: join(dataDir, "home") };
+    const initial = await start(first, options);
+    await send(initial.base, "/api/sessions", { cwd: "/proj", accountId: "work" });
+    const reading = { tier: "high", observedAtMs: Date.now(),
+      window: { usedPercent: 125, resetsAtMs: Date.now() + 60_000, windowDurationMins: 300 },
+      weekly: { usedPercent: 65, resetsAtMs: Date.now() + 600_000, windowDurationMins: null } };
+    first.notify("usage/changed", reading);
+    assert.equal((await get(initial.base, "/api/plan-usage")).saved, false);
+    await initial.server.close();
+
+    const probe: FactoryProbe = { targets: [], exits: [] };
+    const second = new FakeConnection();
+    const restored = await start(second, { ...options, hostFactory: fakeFactory(second, probe) });
+    const cache = await get(restored.base, "/api/plan-usage");
+    assert.deepEqual(cache.usage, reading);
+    assert.equal(cache.accountId, "work");
+    assert.equal(cache.byAccount.work.window.usedPercent, 125);
+    assert.equal(cache.saved, true);
+    assert.deepEqual(cache.savedAccountIds, ["work"]);
+    assert.equal(cache.status, "no-host");
+    assert.equal(probe.targets.length, 0, "a quota read never starts a host or model call");
+
+    const otherRuntime = await start(new FakeConnection(), { ...options, musePath: "/another/muse" });
+    assert.equal((await get(otherRuntime.base, "/api/plan-usage")).usage, null, "a different runtime cannot reuse the snapshot");
+    await login("second@example.test");
+    assert.equal((await get(restored.base, "/api/plan-usage")).usage, null, "a different login cannot reuse the snapshot");
+  });
+
+  it("does not restore a previous login when overlapping quota reads finish out of order", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-race-"));
+    const aonia = createAonia({ home: join(dataDir, "accounts"), platform: "linux", musePath: "muse" });
+    const profile = await aonia.createProfile("work");
+    const authDir = join(profile.roots.config, "muse");
+    await mkdir(authDir, { recursive: true });
+    const login = (email: string) => writeFile(join(authDir, "auth.json"), JSON.stringify({
+      providers: { meta: { mechanism: "oauth", user_email: email } },
+    }));
+    await login("first@example.test");
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "w1" } });
+    const { base } = await start(connection, { aonia, home: join(dataDir, "home") });
+    await send(base, "/api/sessions", { cwd: "/proj", accountId: "work" });
+    const reading = { tier: "high", observedAtMs: 100,
+      window: { usedPercent: 90, resetsAtMs: 500, windowDurationMins: 300 },
+      weekly: { usedPercent: 70, resetsAtMs: 1000 } };
+    let finish: ((value: unknown) => void) | undefined;
+    connection.replies.set("usage/read", () => new Promise((resolve) => { finish = resolve; }));
+    const oldRead = get(base, "/api/plan-usage");
+    await waitFor(() => finish !== undefined, "first login quota read");
+    await login("second@example.test");
+    const current = await get(base, "/api/plan-usage");
+    assert.equal(current.usage, null);
+    finish!({ usage: reading });
+    const late = await oldRead;
+    assert.equal(late.usage, null, "a late reply cannot restore the old login's quota");
+    assert.deepEqual(late.byAccount, {});
+    assert.equal((await get(base, "/api/plan-usage")).usage, null);
+  });
+
+  it("ignores quota notifications and reads from a removed account even without a verified login scope", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-removed-"));
+    const aonia = createAonia({ home: join(dataDir, "accounts"), platform: "linux", musePath: "muse" });
+    await aonia.createProfile("work");
+    const connection = new FakeConnection();
+    const replacement = new FakeConnection();
+    let starts = 0;
+    const factory = (target: ServeTarget) => fakeFactory(starts++ === 0 ? connection : replacement)(target);
+    connection.replies.set("session/start", { session: { sessionId: "w1" } });
+    replacement.replies.set("session/start", { session: { sessionId: "w2" } });
+    const { base } = await start(connection, { aonia, home: join(dataDir, "home"), hostFactory: factory });
+    await send(base, "/api/sessions", { cwd: "/proj", accountId: "work" });
+    const reading = { tier: "high", observedAtMs: 100,
+      window: { usedPercent: 90, resetsAtMs: 500, windowDurationMins: 300 },
+      weekly: { usedPercent: 70, resetsAtMs: 1000 } };
+    connection.notify("usage/changed", reading);
+    assert.equal((await get(base, "/api/plan-usage")).usage.window.usedPercent, 90);
+    assert.equal((await send(base, "/api/accounts/work", undefined, "DELETE")).status, 200);
+    connection.notify("usage/changed", { ...reading, observedAtMs: 200 });
+    connection.replies.set("usage/read", { usage: { ...reading, observedAtMs: 300 } });
+    const removed = await get(base, "/api/plan-usage");
+    assert.equal(removed.usage, null);
+    assert.deepEqual(removed.byAccount, {});
+    await aonia.createProfile("work");
+    await send(base, "/api/sessions", { cwd: "/another-project", accountId: "work" });
+    replacement.notify("usage/changed", { ...reading, observedAtMs: 400, window: { ...reading.window, usedPercent: 25 } });
+    connection.notify("usage/changed", { ...reading, observedAtMs: 900 });
+    connection.replies.set("usage/read", { usage: { ...reading, observedAtMs: 1000 } });
+    const recreated = await get(base, "/api/plan-usage");
+    assert.equal(recreated.usage.window.usedPercent, 25, "recreating a profile never re-enables its old hosts");
+    assert.equal(recreated.byAccount.work.window.usedPercent, 25);
+  });
+
+  it("ignores late quota replies and notifications from a retired host generation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-quota-generation-"));
+    const old = new FakeConnection();
+    const fresh = new FakeConnection();
+    const probe: FactoryProbe = { targets: [], exits: [] };
+    let starts = 0;
+    const factory = (target: ServeTarget) => fakeFactory(starts++ === 0 ? old : fresh, probe)(target);
+    old.replies.set("session/start", { session: { sessionId: "old" } });
+    fresh.replies.set("session/start", { session: { sessionId: "fresh" } });
+    const { base } = await start(old, { home, hostFactory: factory });
+    await send(base, "/api/sessions", { cwd: "/proj" });
+    let finish: ((value: unknown) => void) | undefined;
+    old.replies.set("usage/read", () => new Promise((resolve) => { finish = resolve; }));
+    const oldRead = get(base, "/api/plan-usage");
+    await waitFor(() => finish !== undefined, "old host quota read");
+    probe.exits[0]!({ code: 1, signal: null });
+    await send(base, "/api/sessions", { cwd: "/proj" });
+    const reading = (at: number, percent: number) => ({ tier: "high", observedAtMs: at,
+      window: { usedPercent: percent, resetsAtMs: 5000, windowDurationMins: 300 },
+      weekly: { usedPercent: 20, resetsAtMs: 10000 } });
+    fresh.notify("usage/changed", reading(200, 25));
+    finish!({ usage: reading(900, 90) });
+    assert.equal((await oldRead).usage.window.usedPercent, 25, "a retired reader cannot overwrite its replacement");
+    old.notify("usage/changed", reading(1000, 95));
+    assert.equal((await get(base, "/api/plan-usage")).usage.window.usedPercent, 25, "a retired callback cannot inherit the replacement's identity");
+  });
+
+  it("distinguishes an unreported quota from an unavailable quota reader", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const { base } = await start(connection);
+    assert.equal((await get(base, "/api/plan-usage")).status, "no-host");
+    await send(base, "/api/sessions", { cwd: "/work/proj" });
+    assert.equal((await get(base, "/api/plan-usage")).status, "unobserved");
+    connection.replies.set("usage/read", new Error("method not found"));
+    const unavailable = await get(base, "/api/plan-usage");
+    assert.equal(unavailable.status, "unavailable");
+    assert.equal(unavailable.usage, null);
   });
 
   it("does not re-broadcast plan-usage when a repeat GET re-reads the same window", async () => {

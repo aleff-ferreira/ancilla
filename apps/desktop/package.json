@@ -2,7 +2,7 @@
   "name": "ancilla-desktop",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Ancilla desktop shell (Tauri): window plus local server sidecar",
   "scripts": {
     "dev": "tauri dev",

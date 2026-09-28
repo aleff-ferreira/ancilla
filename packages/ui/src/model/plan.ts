@@ -7,9 +7,14 @@ export type PlanTone = "ok" | "warn" | "danger";
 export interface PlanRow {
   key: "window" | "weekly";
   label: string;
+  /** The reported percentage may exceed 100; only the visual bar is capped. */
   percent: number;
+  barPercent: number;
+  remainingPercent: number;
   tone: PlanTone;
-  /** "Resets in 2h 14m", or "Reset" once the time has passed and Muse has not reported the new window yet. */
+  resetsAtMs: number;
+  expired: boolean;
+  /** A passed reset does not establish the new allowance until Muse reports it. */
   resets: string;
 }
 
@@ -50,7 +55,7 @@ function tone(percent: number): PlanTone {
 
 function windowLabel(window: PlanWindow): string {
   const minutes = window.windowDurationMins;
-  if (!minutes) {
+  if (!minutes || !Number.isFinite(minutes) || minutes <= 0) {
     return "Current window";
   }
   return minutes % 60 === 0 ? `${minutes / 60}-hour window` : `${minutes}-minute window`;
@@ -70,21 +75,31 @@ export function formatReset(ms: number): string {
 }
 
 function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number): PlanRow {
-  const percent = Math.max(0, Math.min(100, Math.round(window.usedPercent)));
+  const percent = Math.max(0, Math.round(window.usedPercent));
   const left = window.resetsAtMs - now;
-  return { key, label, percent, tone: tone(percent), resets: left > 0 ? `Resets in ${formatReset(left)}` : "Reset" };
+  return {
+    key, label, percent,
+    barPercent: Math.min(100, percent),
+    remainingPercent: Math.max(0, 100 - percent),
+    tone: tone(percent),
+    resetsAtMs: window.resetsAtMs,
+    expired: left <= 0,
+    resets: left > 0 ? `Resets in ${formatReset(left)}` : "Reset time passed · awaiting Muse",
+  };
 }
 
 /** The plan meter as the UI shows it: the short window and the weekly cap, each with how long until it resets. */
 export function planView(usage: PlanUsage | null, now: number): PlanView | null {
-  if (!usage) {
+  if (!usage || !Number.isFinite(usage.observedAtMs) || Math.abs(usage.observedAtMs) > 8_640_000_000_000_000 ||
+    ![usage.window, usage.weekly].every((window) => window && Number.isFinite(window.usedPercent) &&
+      Number.isFinite(window.resetsAtMs) && Math.abs(window.resetsAtMs) <= 8_640_000_000_000_000)) {
     return null;
   }
   return {
     tier: /^[a-z][a-z0-9_ -]{0,31}$/i.test(usage.tier) ? humanize(usage.tier) : null,
-    rows: [row("window", windowLabel(usage.window), usage.window, now), row("weekly", "Weekly", usage.weekly, now)],
+    rows: [row("window", windowLabel(usage.window), usage.window, now), row("weekly", "Weekly limit", usage.weekly, now)],
     observedAtMs: usage.observedAtMs,
-    stale: now - usage.observedAtMs > STALE_MS,
+    stale: now - usage.observedAtMs > STALE_MS || usage.window.resetsAtMs <= now || usage.weekly.resetsAtMs <= now,
     age: planAge(usage.observedAtMs, now),
   };
 }

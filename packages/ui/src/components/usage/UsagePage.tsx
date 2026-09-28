@@ -72,23 +72,7 @@ export function UsagePage() {
         </Button>
         <div className="min-w-0 flex-1">
           <h1 className="text-lg font-semibold text-fg">Usage</h1>
-          <p className="text-pretty text-xs text-muted">What these threads would have cost billed per token, not what your plan charged.</p>
-        </div>
-        <div className="flex w-full shrink-0 items-center gap-1 overflow-x-auto rounded-lg bg-sunken p-0.5 @min-[520px]:ml-auto @min-[520px]:w-auto">
-          {USAGE_RANGES.map((range) => (
-            <button
-              key={range.days}
-              type="button"
-              onClick={() => setDays(range.days)}
-              aria-pressed={days === range.days}
-              className={cn(
-                "h-7 rounded-md px-2.5 text-xs font-medium transition-colors duration-100",
-                days === range.days ? "selected-control bg-raised text-fg" : "text-muted hover:text-fg",
-              )}
-            >
-              {range.label}
-            </button>
-          ))}
+          <p className="text-pretty text-xs text-muted">Muse subscription limits and activity in Ancilla.</p>
         </div>
       </header>
       </div>
@@ -98,6 +82,28 @@ export function UsagePage() {
           <PlanMeter />
         </div>
         <AccountMeters />
+        <div className="mb-4 flex flex-wrap items-center gap-3 border-t border-line pt-5">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-sm font-medium text-fg">Thread activity</h2>
+            <p className="mt-1 text-xs text-muted">Local token totals and API-rate estimates for this date range. These estimates are separate from your subscription allowance.</p>
+          </div>
+          <div className="flex w-full shrink-0 items-center gap-1 overflow-x-auto rounded-lg bg-sunken p-0.5 @min-[520px]:ml-auto @min-[520px]:w-auto">
+            {USAGE_RANGES.map((range) => (
+              <button
+                key={range.days}
+                type="button"
+                onClick={() => setDays(range.days)}
+                aria-pressed={days === range.days}
+                className={cn(
+                  "h-7 rounded-md px-2.5 text-xs font-medium transition-colors duration-100",
+                  days === range.days ? "selected-control bg-raised text-fg" : "text-muted hover:text-fg",
+                )}
+              >
+                {range.label}
+              </button>
+            ))}
+          </div>
+        </div>
         {error ? (
           <p className="rounded-xl bg-danger-soft px-4 py-3 text-sm text-danger-text">{error}</p>
         ) : !view ? (

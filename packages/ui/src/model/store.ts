@@ -325,6 +325,11 @@ export interface AppState {
   picker: ComposerPicker | null;
   /** The subscription window Muse last reported; null until a host has seen one. */
   planUsage: PlanUsage | null;
+  planUsageAccountId: string | null;
+  planUsageSaved: boolean;
+  planUsageSavedAccounts: string[];
+  planUsageStatus: import("../types.js").PlanUsageStatus;
+  planUsageLoading: boolean;
   /** Every account Ancilla can run; null until the first load answers. */
   accounts: import("../types.js").AccountView[] | null;
   /** True when META_API_KEY in Ancilla's environment makes every account share one Meta login. */
@@ -392,6 +397,11 @@ export function initialState(prefs: Prefs): AppState {
     bypassThreads: [],
     hostError: null,
     planUsage: null,
+    planUsageAccountId: null,
+    planUsageSaved: false,
+    planUsageSavedAccounts: [],
+    planUsageStatus: "unobserved",
+    planUsageLoading: false,
     accounts: null,
     metaApiKeyInherited: false,
     accountLogin: null,

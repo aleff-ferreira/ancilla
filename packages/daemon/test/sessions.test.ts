@@ -355,6 +355,17 @@ describe("SessionManager", () => {
     );
   });
 
+  it("rejects non-finite subscription observations and preserves over-quota values", () => {
+    const usage = { tier: "high", observedAtMs: 100,
+      window: { usedPercent: 135, resetsAtMs: 300, windowDurationMins: 300 },
+      weekly: { usedPercent: 40, resetsAtMs: 900 } };
+    assert.equal(parseSubscriptionUsage(usage)?.window.usedPercent, 135);
+    assert.equal(parseSubscriptionUsage({ ...usage, observedAtMs: NaN }), null);
+    assert.equal(parseSubscriptionUsage({ ...usage, window: { ...usage.window, usedPercent: Infinity } }), null);
+    assert.equal(parseSubscriptionUsage({ ...usage, weekly: { ...usage.weekly, resetsAtMs: 1e20 } }), null);
+    assert.equal(parseSubscriptionUsage({ ...usage, window: { ...usage.window, windowDurationMins: -1 } })?.window.windowDurationMins, null);
+  });
+
   it("validates the closed approval mode set", () => {
     assert.equal(isApprovalMode("onRequest"), true);
     assert.equal(isApprovalMode("allowAll"), true);

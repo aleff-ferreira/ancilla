@@ -526,6 +526,19 @@ export interface PlanUsage {
 
 export type PlanUsageByAccount = Record<string, PlanUsage>;
 
+export type PlanUsageStatus = "ready" | "no-host" | "unobserved" | "unavailable";
+
+export interface PlanUsageReport {
+  usage: PlanUsage | null;
+  byAccount: PlanUsageByAccount;
+  /** The source of `usage`, which is the latest reading across accounts. */
+  accountId?: string | null;
+  /** A saved reading has not been observed by a host in this server run. */
+  saved?: boolean;
+  savedAccountIds?: string[];
+  status?: PlanUsageStatus;
+}
+
 export interface AccountView {
   id: string;
   name: string;

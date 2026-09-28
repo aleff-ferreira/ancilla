@@ -25,8 +25,6 @@ import {
   type AncillaEvent,
   type ModelOption,
   type OutputRange,
-  type PlanUsage,
-  type PlanUsageByAccount,
   type ProjectView,
   type ReasoningEffort,
   type SandboxSettings,
@@ -457,9 +455,9 @@ export class WebAncillaClient implements AncillaClient {
     return (await call<{ output: OutputRange }>("GET", path)).output;
   }
 
-  async planUsage(): Promise<{ usage: PlanUsage | null; byAccount: PlanUsageByAccount }> {
-    const res = await call<{ usage: PlanUsage | null; byAccount?: PlanUsageByAccount }>("GET", "/api/plan-usage");
-    return { usage: res.usage, byAccount: res.byAccount ?? {} };
+  async planUsage(): Promise<import("@ancilla/ui").PlanUsageReport> {
+    const res = await call<import("@ancilla/ui").PlanUsageReport>("GET", "/api/plan-usage");
+    return { ...res, byAccount: res.byAccount ?? {} };
   }
 
   listFiles(cwd: string, path: string): Promise<FileListing> {

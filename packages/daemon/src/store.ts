@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { parseSubscriptionUsage, type SubscriptionUsage } from "./sessions.js";
 import { DEFAULT_RESEARCH_SETTINGS, resolveResearchConfig, type ResearchConfig, type ResearchSettings } from "./research/config.js";
 import type { ResearchEvent, ResearchRunState, ResearchStatus, WorkerStatus } from "./research/types.js";
 
@@ -217,6 +218,11 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS subscription_usage (
+  scope TEXT PRIMARY KEY,
+  observed_at_ms INTEGER NOT NULL,
+  usage TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS research_runs (
   id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), command_id TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL, question TEXT NOT NULL, config TEXT NOT NULL, state TEXT NOT NULL,
@@ -433,6 +439,22 @@ export class AncillaStore {
         this.db.exec(migration.ddl);
       }
     }
+  }
+
+  /** Cached quota observations are keyed by the runtime and login fingerprint supplied by the server. */
+  getSubscriptionUsage(scope: string): SubscriptionUsage | null {
+    const row = this.db.prepare("SELECT usage FROM subscription_usage WHERE scope = ?").get(scope) as Row | undefined;
+    if (!row) return null;
+    try { return parseSubscriptionUsage(JSON.parse(String(row["usage"]))); } catch { return null; }
+  }
+
+  setSubscriptionUsage(scope: string, usage: SubscriptionUsage): void {
+    this.db.prepare(`INSERT INTO subscription_usage (scope, observed_at_ms, usage) VALUES (?, ?, ?)
+      ON CONFLICT(scope) DO UPDATE SET observed_at_ms = excluded.observed_at_ms, usage = excluded.usage
+      WHERE excluded.observed_at_ms > subscription_usage.observed_at_ms`).run(scope, usage.observedAtMs, JSON.stringify(usage));
+    // Login changes can leave older scopes behind; retain only a small recent observation cache.
+    this.db.prepare(`DELETE FROM subscription_usage WHERE scope NOT IN
+      (SELECT scope FROM subscription_usage ORDER BY observed_at_ms DESC LIMIT 64)`).run();
   }
 
   /** Malformed rows fall back to defaults rather than breaking the worker that reads them. */

@@ -10,7 +10,6 @@ import type {
   ModelOption,
   OutgoingAttachment,
   OutputRange,
-  PlanUsage,
   ProjectView,
   ReasoningEffort,
   SandboxSettings,
@@ -180,7 +179,7 @@ export interface AncillaClient {
   /** One page of a tool's full stored output, from `offset` bytes in. */
   readOutput(sessionId: string, itemId: string, outputRef: string, offset?: number): Promise<OutputRange>;
   /** The window Muse last saw for the default login, plus a per-account map; empty until a host has seen one. */
-  planUsage(): Promise<{ usage: PlanUsage | null; byAccount: import("./types.js").PlanUsageByAccount }>;
+  planUsage(): Promise<import("./types.js").PlanUsageReport>;
   /** One folder of a project, folders first. `path` is relative to the project; "" is its root. */
   listFiles(cwd: string, path: string): Promise<FileListing>;
   /** A project file: text inline, media described. `path` may also be absolute inside the project. */

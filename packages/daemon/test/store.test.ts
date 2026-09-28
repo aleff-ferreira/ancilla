@@ -8,6 +8,19 @@ import { AncillaStore, ProjectFolderError, researchStateProblem } from "../src/s
 import { DEFAULT_RESEARCH_CONFIG, type ResearchEvent, type ResearchRunState } from "../src/research/index.js";
 
 describe("AncillaStore", () => {
+  it("keeps the newest quota observation per verified login scope", () => {
+    const store = new AncillaStore();
+    after(() => store.close());
+    const reading = { tier: "high", observedAtMs: 200,
+      window: { usedPercent: 125, resetsAtMs: 500, windowDurationMins: 300 },
+      weekly: { usedPercent: 45, resetsAtMs: 1000, windowDurationMins: null } };
+    assert.equal(store.getSubscriptionUsage("work"), null);
+    store.setSubscriptionUsage("work", reading);
+    store.setSubscriptionUsage("work", { ...reading, observedAtMs: 100 });
+    assert.deepEqual(store.getSubscriptionUsage("work"), reading);
+    assert.equal(store.getSubscriptionUsage("personal"), null);
+  });
+
   it("groups sessions under projects by directory", () => {
     const store = new AncillaStore();
     after(() => store.close());

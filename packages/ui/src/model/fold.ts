@@ -173,7 +173,7 @@ export interface CrewTrace {
 
 export interface ThreadFold {
   items: Record<string, MspItem>;
-  /** Small stable index for the agent panel; ordinary text deltas do not replace it. */
+  /** Crew items and their tool calls; ordinary transcript text does not replace this index. */
   agentItems?: Record<string, MspItem>;
   /** Item ids in first-opened order. */
   order: string[];
@@ -193,6 +193,12 @@ export interface ThreadFold {
 }
 
 export const HIDDEN_KINDS: ReadonlySet<string> = new Set(["reminderChild"]);
+
+/** Only activity the Crew reads: native items, launch/wait tools, and background commands. */
+function isCrewItem(item: MspItem): boolean {
+  return item.kind === "workflow" || item.kind === "subagent" ||
+    (item.kind === "toolCall" && (item.background === true || item.tool === "workflow" || item.tool === "subagent_spawn" || item.tool === "subagent_wait"));
+}
 
 /** The pulse only looks back ten minutes, so a run keeps at most this many revision minutes. */
 const EVENT_MINUTES_CAP = 600;
@@ -399,14 +405,16 @@ class Draft {
   }
 
   putAgentItem(item: MspItem): void {
-    if (item.kind !== "workflow" && item.kind !== "subagent") return;
+    const relevant = isCrewItem(item);
+    if (!relevant && !this.fold.agentItems?.[item.itemId]) return;
     if (!this.agentsCopied) {
       this.fold.agentItems = { ...(this.fold.agentItems ?? Object.fromEntries(
-        Object.entries(this.fold.items).filter(([, entry]) => entry.kind === "workflow" || entry.kind === "subagent"),
+        Object.entries(this.fold.items).filter(([, entry]) => isCrewItem(entry)),
       )) };
       this.agentsCopied = true;
     }
-    this.fold.agentItems![item.itemId] = item;
+    if (relevant) this.fold.agentItems![item.itemId] = item;
+    else delete this.fold.agentItems![item.itemId];
   }
 
   /** The trace, copied once per batch so the fold on screen keeps the one it had. */
@@ -799,6 +807,7 @@ function appendDelta(draft: Draft, params: Record<string, unknown>, at: number |
     next[field] = (typeof previous === "string" ? previous : "") + delta;
   }
   d.items[id] = next;
+  draft.putAgentItem(next);
 }
 
 /** A pause longer than this between text chunks means a new model call, so its speed is measured afresh. */

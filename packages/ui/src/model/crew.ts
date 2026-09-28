@@ -712,32 +712,50 @@ interface ThreadIndex {
   waits: string[];
 }
 
-const indexes = new WeakMap<readonly string[], ThreadIndex>();
+const indexes = new WeakMap<Record<string, MspItem>, { order: readonly string[]; index: ThreadIndex }>();
+const itemPositions = new WeakMap<readonly string[], ReadonlyMap<string, number>>();
+
+function transcriptPositions(order: readonly string[]): ReadonlyMap<string, number> {
+  let positions = itemPositions.get(order);
+  if (!positions) {
+    positions = new Map(order.map((id, position) => [id, position]));
+    itemPositions.set(order, positions);
+  }
+  return positions;
+}
 
 /**
- * Where the thread's launch and subagent tool calls are. The fold copies `order` only when an item is added, so
- * the scan runs once per new item rather than once per revision of a long thread.
+ * Where the thread's launch and subagent tool calls are. Tool metadata can arrive after an output placeholder,
+ * so invalidate on the small Crew index, not just transcript order. Prose deltas leave this index alone.
  */
 function threadIndex(fold: ThreadFold): ThreadIndex {
-  const cached = indexes.get(fold.order);
-  if (cached) {
-    return cached;
+  const items = fold.agentItems ?? fold.items;
+  const cached = indexes.get(items);
+  if (cached?.order === fold.order) {
+    return cached.index;
   }
   const index: ThreadIndex = { launches: [], spawns: [], waits: [] };
-  for (const id of fold.order) {
-    const item = fold.items[id];
-    if (item?.kind !== "toolCall") {
+  for (const item of Object.values(items)) {
+    if (item.kind !== "toolCall") {
       continue;
     }
     if (item.tool === "workflow") {
-      index.launches.push(id);
+      index.launches.push(item.itemId);
     } else if (item.tool === "subagent_spawn") {
-      index.spawns.push(id);
+      index.spawns.push(item.itemId);
     } else if (item.tool === "subagent_wait") {
-      index.waits.push(id);
+      index.waits.push(item.itemId);
     }
   }
-  indexes.set(fold.order, index);
+  // The launch fallback picks the first matching name in its turn, and native rows keep first-opened order.
+  // Index insertion follows metadata arrival, which can be later than the item's output placeholder.
+  if (index.launches.length > 1 || index.spawns.length > 1) {
+    const positions = transcriptPositions(fold.order);
+    const compare = (a: string, b: string): number => (positions.get(a) ?? -1) - (positions.get(b) ?? -1);
+    index.launches.sort(compare);
+    index.spawns.sort(compare);
+  }
+  indexes.set(items, { order: fold.order, index });
   return index;
 }
 
@@ -1661,26 +1679,56 @@ function subagentView(item: MspItem, ctx: RunContext): AgentVM {
   };
 }
 
-/** A native subagent Muse surfaced as a `subagent_spawn` tool call, with its `subagent_wait` when one landed. */
-function spawnView(spawn: MspItem, waits: readonly MspItem[], ctx: RunContext): AgentVM {
-  const args = parseArgs(spawn.args);
+const nativeWaitIndexes = new WeakMap<Record<string, MspItem>, { order: readonly string[]; waits: ReadonlyMap<string, MspItem> }>();
+
+/** Match each child once, using transcript order even when a wait's tool metadata arrived late. */
+function nativeWaits(fold: ThreadFold, ids: readonly string[]): ReadonlyMap<string, MspItem> {
+  const items = fold.agentItems ?? fold.items;
+  const cached = nativeWaitIndexes.get(items);
+  if (cached?.order === fold.order) return cached.waits;
+  const waits = new Map<string, MspItem>();
+  if (ids.length > 0) {
+    const positions = transcriptPositions(fold.order);
+    for (const id of ids) {
+      const item = items[id];
+      if (!item || item.status === "inProgress") continue;
+      const childId = text(parseArgs(item.args)?.["subagent_id"]);
+      if (!childId) continue;
+      const previous = waits.get(childId);
+      if (!previous || (positions.get(id) ?? -1) > (positions.get(previous.itemId) ?? -1)) waits.set(childId, item);
+    }
+  }
+  nativeWaitIndexes.set(items, { order: fold.order, waits });
+  return waits;
+}
+
+/** A wait tool finishing is not the child finishing: only its reported result settles the child. */
+function nativeSubagent(spawn: MspItem, waits: ReadonlyMap<string, MspItem>): { id: string; state: AgentState; settled: MspItem | null; result: Record<string, unknown> | null } {
   const output = parseArgs(spawn.visibleOutput);
   const id = text(output?.["subagent_id"]) ?? `spawn:${spawn.itemId}`;
-  const label = text(args?.["task_name"]) ?? text(args?.["role"]);
-  const name = label ?? `Agent ${numberFor(ctx.numbers, id)}`;
-  const wait = [...waits].reverse().find((item) => {
-    const waitArgs = parseArgs(item.args);
-    return item.status !== "inProgress" && text(waitArgs?.["subagent_id"]) === id;
-  });
+  const admission = outcomeOfTerminal(spawn.status);
+  if (spawn.status !== "inProgress" && (admission === "skipped" || admission === "failed" || text(spawn.failureKind) || text(spawn.failureReason))) {
+    return { id, state: admission === "skipped" ? "skipped" : "failed", settled: spawn, result: output };
+  }
+  const wait = waits.get(id);
   const waitOutput = wait ? parseArgs(wait.visibleOutput) : null;
   const word = normalizedWord(text(waitOutput?.["status"]) ?? undefined);
   const state: AgentState = !wait ? "working"
-    : ["completed", "complete", "done", "success", "succeeded", "resultready"].includes(word) ? "done"
+    : ["ready", "completed", "complete", "done", "success", "succeeded", "resultready"].includes(word) ? "done"
     : ["failed", "error", "rejected"].includes(word) ? "failed"
     : ["cancelled", "canceled", "stopped"].includes(word) ? "skipped"
     : "working";
+  return { id, state, settled: state === "working" ? null : wait ?? null, result: waitOutput };
+}
+
+/** A native subagent Muse surfaced as a `subagent_spawn` tool call, with its `subagent_wait` when one landed. */
+function spawnView(spawn: MspItem, waits: ReadonlyMap<string, MspItem>, ctx: RunContext): AgentVM {
+  const args = parseArgs(spawn.args);
+  const { id, state, settled, result } = nativeSubagent(spawn, waits);
+  const label = text(args?.["task_name"]) ?? text(args?.["role"]);
+  const name = label ?? `Agent ${numberFor(ctx.numbers, id)}`;
   const startedRaw = spawn.recordedAt ? Date.parse(spawn.recordedAt) : NaN;
-  const endedRaw = wait?.recordedAt ? Date.parse(wait.recordedAt) : NaN;
+  const endedRaw = settled?.recordedAt ? Date.parse(settled.recordedAt) : NaN;
   const startedAt = Number.isFinite(startedRaw) ? startedRaw : null;
   const endedAt = state === "working" ? null : Number.isFinite(endedRaw) ? endedRaw : null;
   const objective = text(args?.["objective"]);
@@ -1706,7 +1754,7 @@ function spawnView(spawn: MspItem, waits: readonly MspItem[], ctx: RunContext): 
     tokens: null,
     toolCalls: null,
     attempts: [],
-    failure: state === "failed" ? { text: text(waitOutput?.["summary"]), at: endedAt } : null,
+    failure: state === "failed" ? { text: text(settled?.failureReason) ?? text(settled?.failureKind) ?? text(result?.["summary"]), at: endedAt } : null,
     task: objective ? { text: objective, source: "objective" } : null,
     shareOfLongest: null,
     quiet: null,
@@ -1984,7 +2032,7 @@ export function crewView(fold: ThreadFold, session: SessionSummary | null, now: 
   }
   runs.sort((a, b) => (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER) || a.itemId.localeCompare(b.itemId));
   const index = threadIndex(fold);
-  const waits = index.waits.map((id) => fold.items[id]).filter((item): item is MspItem => item !== undefined);
+  const waits = nativeWaits(fold, index.waits);
   for (const id of index.spawns) {
     const spawn = fold.items[id];
     if (spawn) subagents.push(spawnView(spawn, waits, ctx));
@@ -2019,6 +2067,12 @@ export function crewBusy(fold: ThreadFold, researchRuns?: readonly ResearchRunVi
   for (const [id, task] of Object.entries(fold.crew?.tasks ?? {})) {
     const item = fold.items[id];
     if (task.endedAt === null && item?.background === true && item.status === "inProgress") return true;
+  }
+  const index = threadIndex(fold);
+  const waits = nativeWaits(fold, index.waits);
+  for (const id of index.spawns) {
+    const spawn = fold.items[id];
+    if (spawn && LIVE_STATES.has(nativeSubagent(spawn, waits).state)) return true;
   }
   return false;
 }

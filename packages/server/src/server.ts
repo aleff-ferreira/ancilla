@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
@@ -76,7 +76,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
-export const ANCILLA_VERSION = "0.20.0";
+export const ANCILLA_VERSION = "0.20.1";
 
 export interface HostExit {
   code: number | null;
@@ -180,6 +180,8 @@ export interface ServerOptions {
 const RESEARCH_DIR = [".ancilla", "research"];
 
 interface ManagedHost {
+  quotaCacheScope: string | null;
+  quotaAccountGeneration: number;
   key: string;
   accountId: string | null;
   target: ServeTarget;
@@ -743,6 +745,13 @@ export class AncillaServer {
   private readonly skillCache = new Map<string, SkillListing>();
   /** The newest subscription window any host reported; `usage/changed` carries no session, so it lives here. */
   private planUsage: SubscriptionUsage | null = null;
+  private defaultPlanUsage: SubscriptionUsage | null = null;
+  private planUsageAccountId: string | null = null;
+  private readonly quotaScopes = new Map<string | null, string | null>();
+  private readonly savedQuotaSources = new Set<string | null>();
+  private readonly removedQuotaAccounts = new Set<string>();
+  private readonly quotaAccountGenerations = new Map<string, number>();
+  private planUsageReadRevision = 0;
   /** The newest window per account, keyed by aonia profile id. The default login is not keyed here. */
   private readonly planUsageByAccount = new Map<string, SubscriptionUsage>();
   /** The reasoning effort each session is known to be running at, so a turn only re-sets it when it changes. */
@@ -1675,6 +1684,10 @@ export class AncillaServer {
       const id = decodeURIComponent(path.slice("/api/accounts/".length));
       try {
         await this.aonia.removeProfile(id);
+        this.removedQuotaAccounts.add(id);
+        this.quotaAccountGenerations.set(id, (this.quotaAccountGenerations.get(id) ?? 0) + 1);
+        this.planUsageReadRevision += 1;
+        this.forgetQuota(id);
       } catch (error) {
         throw this.accountError(error);
       }
@@ -3687,7 +3700,10 @@ export class AncillaServer {
   }
 
   private async spawnHost(key: string, cwd: string, accountId: string | null): Promise<ManagedHost> {
+    const quotaAccountGeneration = accountId ? this.quotaAccountGenerations.get(accountId) ?? 0 : 0;
     const target = await this.serveTargetFor(cwd, accountId);
+    if (accountId) this.removedQuotaAccounts.delete(accountId);
+    const quotaCacheScope = await this.quotaCacheScope(accountId);
     const handle = this.options.hostFactory(target);
     let started: { fingerprintWarning?: unknown; initializeResult?: unknown } | null;
     try {
@@ -3700,7 +3716,11 @@ export class AncillaServer {
     this.lastHostError = null;
     this.fingerprints.set(key, started?.fingerprintWarning ?? null);
     const manager = new SessionManager(handle.connection);
-    manager.onNotification((notification) => this.forward(key, notification));
+    manager.onNotification((notification) => {
+      // Quota has no session id: a retired host's late observation must not inherit its replacement's login.
+      if (notification.method === "usage/changed" && this.hosts.get(key)?.handle !== handle) return;
+      this.forward(key, notification);
+    });
     // A frame the SDK refuses never becomes a notification, so without this it is indistinguishable
     // from the backend having nothing to send (#42, H3).
     const reportsProtocolErrors = manager.onProtocolError((error) => {
@@ -3713,6 +3733,8 @@ export class AncillaServer {
     }
     const serverInfo = asRecord(asRecord(started?.initializeResult)?.["serverInfo"]);
     const managed: ManagedHost = {
+      quotaCacheScope,
+      quotaAccountGeneration,
       key,
       accountId,
       target,
@@ -3982,8 +4004,12 @@ export class AncillaServer {
       const params = asRecord(notification.params) ?? {};
       if (notification.method === "usage/changed") {
         const usage = parseSubscriptionUsage(params);
-        const accountId = this.hosts.get(hostKey)?.accountId ?? null;
-        this.observeUsage(usage, accountId);
+        const host = this.hosts.get(hostKey);
+        if (!host || !this.isCurrentQuotaHost(host)) return;
+        const accountId = host.accountId;
+        if (!this.quotaScopes.has(accountId) || this.quotaScopes.get(accountId) === host.quotaCacheScope) {
+          this.observeUsage(usage, accountId, false, host.quotaCacheScope);
+        }
         return;
       }
       const event = toWireEvent(notification.method, params, notification.emittedAtMs);
@@ -4309,40 +4335,102 @@ export class AncillaServer {
     return false;
   }
 
-  /** A newer subscription window from any host replaces the one held, and every open window hears about it. */
-  private observeUsage(usage: SubscriptionUsage | null, accountId: string | null = null): void {
-    if (!usage) {
-      return;
-    }
-    let changed = false;
-    if (accountId) {
-      const prior = this.planUsageByAccount.get(accountId);
-      if (!prior || prior.observedAtMs < usage.observedAtMs) {
-        this.planUsageByAccount.set(accountId, usage);
-        changed = true;
-      }
-    }
+  /** Aonia exposes only the non-secret identity; no credentials enter the quota cache. */
+  private async quotaCacheScope(accountId: string | null): Promise<string | null> {
+    const runtime = await this.museRuntime();
+    // A WSL login or an inherited API key cannot be verified through the local auth-file identity.
+    if (runtime === "wsl" || process.env["META_API_KEY"]) return null;
+    try {
+      const profile = accountId ? await this.aonia.getProfile(accountId) : {
+        id: "default", name: "Default login", createdAt: "", lastUsedAt: null,
+        roots: { config: process.env["XDG_CONFIG_HOME"] || join(this.options.home, ".config"), data: "" },
+      };
+      const identity = await this.aonia.identityOf(profile);
+      if (!identity.hasLogin || !identity.email) return null;
+      return createHash("sha256").update(JSON.stringify([
+        this.options.platform, runtime, this.options.musePath ?? "muse", accountId, profile.roots.config, identity.email,
+      ])).digest("hex");
+    } catch { return null; }
+  }
+
+  /** A newer observation wins; cached readings keep their original timestamp and source account. */
+  private observeUsage(usage: SubscriptionUsage | null, accountId: string | null = null, saved = false, scope: string | null = null): void {
+    if (!usage || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+    const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
+    if (prior && prior.observedAtMs > usage.observedAtMs) return;
+    const changed = !prior || prior.observedAtMs < usage.observedAtMs;
+    if (accountId) this.planUsageByAccount.set(accountId, usage);
+    else this.defaultPlanUsage = usage;
+    if (saved && changed) this.savedQuotaSources.add(accountId);
+    else if (!saved) this.savedQuotaSources.delete(accountId);
+    this.quotaScopes.set(accountId, scope);
     if (!this.planUsage || this.planUsage.observedAtMs < usage.observedAtMs) {
       this.planUsage = usage;
-      changed = true;
+      this.planUsageAccountId = accountId;
     }
-    if (changed) {
+    if (changed && !saved) {
+      if (scope) this.store.setSubscriptionUsage(scope, usage);
       this.emit("ancilla", { type: "plan-usage", usage, accountId });
     }
   }
 
-  /** Asks every running host what it last saw; none is started just for this, since it would have seen nothing. */
-  private async readPlanUsage(): Promise<{ usage: SubscriptionUsage | null; byAccount: Record<string, SubscriptionUsage> }> {
-    await Promise.all(
-      [...this.hosts.values()].map(async (managed) => {
-        try {
-          this.observeUsage(await managed.manager.readSubscriptionUsage(), managed.accountId);
-        } catch {
-          /* an older host without usage/read */
-        }
-      }),
-    );
-    return { usage: this.planUsage, byAccount: Object.fromEntries(this.planUsageByAccount) };
+  private forgetQuota(accountId: string | null): void {
+    if (accountId) this.planUsageByAccount.delete(accountId);
+    else this.defaultPlanUsage = null;
+    this.savedQuotaSources.delete(accountId);
+    this.quotaScopes.delete(accountId);
+    const readings: [string | null, SubscriptionUsage][] = [...this.planUsageByAccount];
+    if (this.defaultPlanUsage) readings.push([null, this.defaultPlanUsage]);
+    readings.sort((a, b) => b[1].observedAtMs - a[1].observedAtMs);
+    this.planUsage = readings[0]?.[1] ?? null;
+    this.planUsageAccountId = readings[0]?.[0] ?? null;
+  }
+
+  private isCurrentQuotaHost(host: ManagedHost): boolean {
+    return this.hosts.get(host.key) === host && (!host.accountId ||
+      (!this.removedQuotaAccounts.has(host.accountId) &&
+        host.quotaAccountGeneration === (this.quotaAccountGenerations.get(host.accountId) ?? 0)));
+  }
+
+  /** Reads running hosts and matching saved observations; never launches a session or model call. */
+  private async readPlanUsage(): Promise<{
+    usage: SubscriptionUsage | null; byAccount: Record<string, SubscriptionUsage>; accountId: string | null;
+    saved: boolean; savedAccountIds: string[]; status: "ready" | "no-host" | "unobserved" | "unavailable";
+  }> {
+    const revision = ++this.planUsageReadRevision;
+    const profiles = await this.aonia.listProfiles().catch(() => []);
+    const sources = new Set<string | null>([null, ...profiles.map((profile) => profile.id), ...this.planUsageByAccount.keys()]);
+    const scopes = new Map<string | null, string | null>();
+    await Promise.all([...sources].map(async (accountId) => { scopes.set(accountId, await this.quotaCacheScope(accountId)); }));
+    for (const [accountId, scope] of scopes) {
+      if (revision !== this.planUsageReadRevision || (accountId && this.removedQuotaAccounts.has(accountId))) continue;
+      if (this.quotaScopes.has(accountId) && this.quotaScopes.get(accountId) !== scope) this.forgetQuota(accountId);
+      if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, true, scope);
+      this.quotaScopes.set(accountId, scope);
+    }
+    const hosts = [...this.hosts.values()];
+    let failed = 0;
+    await Promise.all(hosts.map(async (managed) => {
+      try {
+        // A host started under a different login must not overwrite the newly selected login's reading.
+        if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
+          managed.quotaCacheScope !== (scopes.get(managed.accountId) ?? null)) return;
+        const usage = await managed.manager.readSubscriptionUsage();
+        // Identity checks happen asynchronously. A newer read, account removal, or host replacement can
+        // invalidate this request while Muse is answering; only the still-current source may publish it.
+        if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
+          this.quotaScopes.get(managed.accountId) !== managed.quotaCacheScope) return;
+        this.observeUsage(usage, managed.accountId, false, managed.quotaCacheScope);
+      } catch { failed += 1; }
+    }));
+    return {
+      usage: this.planUsage,
+      byAccount: Object.fromEntries(this.planUsageByAccount),
+      accountId: this.planUsageAccountId,
+      saved: this.planUsage !== null && this.savedQuotaSources.has(this.planUsageAccountId),
+      savedAccountIds: [...this.savedQuotaSources].filter((id): id is string => id !== null),
+      status: hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
+    };
   }
 
   /** Muse named or renamed the session, here or in another client; the newest name wins, and a typed title stays typed. */

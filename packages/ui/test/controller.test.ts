@@ -337,8 +337,11 @@ class FakeClient implements AncillaClient {
   }
   plan: import("../src/types.js").PlanUsage | null = null;
   planByAccount: Record<string, import("../src/types.js").PlanUsage> = {};
-  async planUsage() {
-    return { usage: this.plan, byAccount: this.planByAccount };
+  planMetadata: Pick<import("../src/types.js").PlanUsageReport, "accountId" | "saved" | "savedAccountIds" | "status"> = {};
+  planError: Error | null = null;
+  async planUsage(): Promise<import("../src/types.js").PlanUsageReport> {
+    if (this.planError) throw this.planError;
+    return { usage: this.plan, byAccount: this.planByAccount, ...this.planMetadata };
   }
   accounts: import("../src/types.js").AccountView[] = [];
   accountCalls: { kind: "create" | "rename" | "remove" | "default"; id?: string; cwd?: string; accountId?: string | null; name?: string }[] = [];
@@ -1617,6 +1620,55 @@ describe("AncillaController", () => {
     assert.equal(controller.store.get().planUsage?.window.usedPercent, 35);
     client.handler?.({ type: "plan-usage", usage: reading(1, 150), accountId: null });
     assert.equal(controller.store.get().planUsage?.window.usedPercent, 35, "an older reading does not replace a newer one");
+    stop();
+  });
+
+  it("keeps subscription source and saved state, and removes invalidated account readings", async () => {
+    const client = new FakeClient();
+    client.plan = { tier: "high", observedAtMs: 200,
+      window: { usedPercent: 125, resetsAtMs: 500, windowDurationMins: 300 },
+      weekly: { usedPercent: 4, resetsAtMs: 900, windowDurationMins: null } };
+    client.planByAccount = { work: client.plan };
+    client.planMetadata = { accountId: "work", saved: true, status: "no-host" };
+    const { controller, stop } = await started(client);
+    assert.equal(controller.store.get().planUsageAccountId, "work");
+    assert.equal(controller.store.get().planUsageSaved, true);
+    assert.equal(controller.store.get().planUsageStatus, "no-host");
+    assert.equal(controller.store.get().planUsageLoading, false);
+    client.planError = new Error("offline");
+    await controller.loadPlanUsage();
+    assert.equal(controller.store.get().planUsageStatus, "unavailable");
+    assert.equal(controller.store.get().planUsage?.window.usedPercent, 125, "a failed refresh retains the last observation");
+    client.planError = null;
+    client.plan = null;
+    client.planByAccount = {};
+    client.planMetadata = { accountId: null, saved: false, status: "no-host" };
+    await controller.loadPlanUsage();
+    assert.equal(controller.store.get().planUsage, null, "a login change can invalidate a saved observation");
+    assert.deepEqual(controller.store.get().planUsageByAccount, {});
+    assert.equal(controller.store.get().planUsageSaved, false);
+    stop();
+  });
+
+  it("does not let a delayed subscription refresh relabel a newer live reading as saved or unavailable", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const reading = (percent: number, at: number) => ({ tier: "high", observedAtMs: at,
+      window: { usedPercent: percent, resetsAtMs: at + 5000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: at + 9000, windowDurationMins: null } });
+    let finish!: (report: import("../src/types.js").PlanUsageReport) => void;
+    client.planUsage = () => new Promise((resolve) => { finish = resolve; });
+    const refresh = controller.loadPlanUsage();
+    client.handler?.({ type: "plan-usage", usage: reading(45, 300), accountId: "personal" });
+    finish({ usage: reading(20, 200), byAccount: { work: reading(20, 200) },
+      accountId: "work", saved: true, savedAccountIds: ["work"], status: "unavailable" });
+    await refresh;
+    assert.equal(controller.store.get().planUsage?.window.usedPercent, 45);
+    assert.equal(controller.store.get().planUsageAccountId, "personal");
+    assert.equal(controller.store.get().planUsageSaved, false);
+    assert.equal(controller.store.get().planUsageStatus, "ready");
+    assert.deepEqual(controller.store.get().planUsageSavedAccounts, ["work"], "the older account reading still carries its saved provenance");
+    assert.equal(controller.store.get().planUsageLoading, false);
     stop();
   });
 

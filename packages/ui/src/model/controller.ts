@@ -142,8 +142,20 @@ export function browserPlatform(): Platform {
   return {
     loadPrefs: () => {
       try {
-        const raw = readStored(PREFS_KEY, LEGACY_PREFS_KEY);
-        return raw ? (JSON.parse(raw) as unknown) : null;
+        const own = window.localStorage.getItem(PREFS_KEY);
+        if (own !== null) {
+          return own ? (JSON.parse(own) as unknown) : null;
+        }
+        const raw = window.localStorage.getItem(LEGACY_PREFS_KEY);
+        const legacy: unknown = raw ? JSON.parse(raw) : null;
+        if (legacy && typeof legacy === "object" && !Array.isArray(legacy)) {
+          // Helicon's release history does not make this an Ancilla upgrade. The first launch
+          // records Ancilla's own version without interrupting the user with inherited notes.
+          const inherited = { ...(legacy as Record<string, unknown>) };
+          delete inherited["lastSeenVersion"];
+          return inherited;
+        }
+        return legacy;
       } catch {
         return null;
       }
@@ -538,6 +550,8 @@ export class AncillaController {
   /** Threads whose child sessions showed activity since the last flush. */
   private readonly childActivity = new Set<string>();
   private refreshing: Promise<void> | null = null;
+  private planUsageLoad: Promise<void> | null = null;
+  private planUsageEventRevision = 0;
   private refreshQueued = false;
   private toastSeq = 0;
   /** Bumped by every title-settings request, so only the latest completion or rollback lands. */
@@ -1193,7 +1207,7 @@ export class AncillaController {
         this.queueEvent(event.sessionId, { method: event.method, params: event.params, at: event.at });
         break;
       case "plan-usage":
-        this.takePlanUsage(event.usage, event.accountId);
+        this.takePlanUsage(event.usage, event.accountId, true);
         break;
       case "session-status": {
         const known = this.state.sessions[event.sessionId];
@@ -2365,31 +2379,73 @@ export class AncillaController {
   // ---------------------------------------------------------------- plan usage
 
   /** The subscription window Muse last saw, from the server; it also arrives as an event whenever it moves. */
-  async loadPlanUsage(): Promise<void> {
+  loadPlanUsage(): Promise<void> {
+    if (this.planUsageLoad) return this.planUsageLoad;
+    this.planUsageLoad = this.readPlanUsage().finally(() => { this.planUsageLoad = null; });
+    return this.planUsageLoad;
+  }
+
+  private async readPlanUsage(): Promise<void> {
+    const eventRevision = this.planUsageEventRevision;
+    const before = this.state.planUsage;
+    const accountsBefore = this.state.planUsageByAccount;
+    this.update((s) => ({ ...s, planUsageLoading: true }));
     try {
-      const { usage, byAccount } = await this.client.planUsage();
-      if (usage) {
-        this.takePlanUsage(usage);
+      const { usage, byAccount, accountId: sourceAccount, saved, savedAccountIds, status } = await this.client.planUsage();
+      if (status !== undefined) {
+        // A full report can invalidate a saved login's reading. Events received while this read was in
+        // flight still win, so a delayed response cannot erase newly reported quota data.
+        this.update((s) => ({
+          ...s,
+          planUsage: s.planUsage === before ? usage : s.planUsage,
+          planUsageAccountId: s.planUsage === before ? sourceAccount ?? null : s.planUsageAccountId,
+          planUsageByAccount: {
+            ...byAccount,
+            ...Object.fromEntries(Object.entries(s.planUsageByAccount).filter(([id, reading]) => reading !== accountsBefore[id])),
+          },
+        }));
       }
       for (const [accountId, accountUsage] of Object.entries(byAccount)) {
         this.takePlanUsage(accountUsage, accountId);
       }
+      if (usage) {
+        // New servers identify the newest account explicitly; older servers keep their inferred source.
+        const accountId = sourceAccount === undefined
+          ? Object.entries(byAccount).find(([, reading]) => reading.observedAtMs === usage.observedAtMs)?.[0] ?? null
+          : sourceAccount;
+        this.takePlanUsage(usage, accountId);
+      }
+      this.update((s) => ({
+        ...s,
+        planUsageStatus: eventRevision !== this.planUsageEventRevision ? s.planUsageStatus : status ?? (s.planUsage ? "ready" : "unobserved"),
+        planUsageSaved: !s.planUsage ? false : s.planUsage === usage ? saved === true : s.planUsageSaved,
+        planUsageSavedAccounts: Object.keys(s.planUsageByAccount).filter((id) =>
+          s.planUsageByAccount[id] === byAccount[id] ? savedAccountIds?.includes(id) : s.planUsageSavedAccounts.includes(id)),
+      }));
     } catch {
-      /* the meter is extra: a server without it leaves the usage page as it was */
+      if (eventRevision === this.planUsageEventRevision) this.update((s) => ({ ...s, planUsageStatus: "unavailable" }));
+    } finally {
+      this.update((s) => ({ ...s, planUsageLoading: false }));
     }
   }
 
-  private takePlanUsage(usage: import("../types.js").PlanUsage, accountId: string | null = null): void {
+  private takePlanUsage(usage: import("../types.js").PlanUsage, accountId: string | null = null, fromEvent = false): void {
     const current = this.state.planUsage;
     const currentForAccount = accountId ? this.state.planUsageByAccount[accountId] : undefined;
-    const takeGlobal = !current || current.observedAtMs <= usage.observedAtMs;
-    const takeForAccount = accountId !== null && (!currentForAccount || currentForAccount.observedAtMs <= usage.observedAtMs);
+    const takeGlobal = !current || current.observedAtMs < usage.observedAtMs || (fromEvent && current.observedAtMs === usage.observedAtMs);
+    const takeForAccount = accountId !== null && (!currentForAccount || currentForAccount.observedAtMs < usage.observedAtMs ||
+      (fromEvent && currentForAccount.observedAtMs === usage.observedAtMs));
     if (!takeGlobal && !takeForAccount) {
       return;
     }
+    if (fromEvent) this.planUsageEventRevision += 1;
     this.update((s) => ({
       ...s,
       planUsage: takeGlobal ? usage : s.planUsage,
+      planUsageAccountId: takeGlobal ? accountId : s.planUsageAccountId,
+      planUsageSaved: takeGlobal ? false : s.planUsageSaved,
+      planUsageSavedAccounts: fromEvent && takeForAccount ? s.planUsageSavedAccounts.filter((id) => id !== accountId) : s.planUsageSavedAccounts,
+      planUsageStatus: "ready",
       planUsageByAccount: takeForAccount ? { ...s.planUsageByAccount, [accountId as string]: usage } : s.planUsageByAccount,
     }));
   }

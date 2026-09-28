@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.20.1
+
+### Changed
+
+- **Usage puts Muse subscription limits first.** The reported rolling window and weekly limit show used and remaining percentages, reset countdowns and timestamps, and when Muse last reported them. Refresh reads the runtime's last observation without sending a prompt. Saved readings survive restarts when Ancilla can verify the same login and runtime; missing, expired and unavailable readings are labeled explicitly. Local token totals and API-rate estimates stay in their own section.
+- **Deep Research and Crew lead the project overview.** The README shows research runs, cited reports and agent monitoring in the current interface, with clearer installation guidance and a map of the codebase.
+
+### Fixed
+
+- **Importing Helicon preferences no longer opens inherited release notes on Ancilla's first launch.** Other preferences still carry over, and later Ancilla updates retain their own release notes.
+- **Crew follows agents and background tasks as their events arrive.** Native agent metadata received after an output placeholder, commands moved to the background, and streamed task output now refresh the card, sidebar and panel. Muse's native-agent `ready` result settles the agent, and an older wait arriving late cannot undo a newer completion. Wait matching stays linear as the number of native agents grows.
+
 ## 0.20.0
 
 ### Changed

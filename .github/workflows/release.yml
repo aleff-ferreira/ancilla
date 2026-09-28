@@ -16,7 +16,13 @@ concurrency:
 env:
   # The GitHub release page. tauri-action also copies it into latest.json as the update's notes.
   RELEASE_BODY: |
-    Ancilla ${{ github.ref_name }} for Windows, macOS and Linux. What changed is in the [changelog](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md).
+    Ancilla ${{ github.ref_name }} — Deep research. Agents in view.
+
+    An open-source desktop and web workspace for Muse Code by AMAZONIA WORKS, available on Windows, macOS and Linux.
+
+    **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and export cited reports as PDF, Word or HTML. **Crew:** monitor workflows, native agents and background tasks with phase indicators, timelines, live status and controls for work that needs you.
+
+    Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
     **What you need.** Ancilla bundles Node.js, so the only thing to install is Meta's Muse Code CLI, signed in once with `muse login`: Muse for Windows natively, or Muse inside WSL2.
 

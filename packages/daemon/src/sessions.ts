@@ -622,13 +622,16 @@ export interface SubscriptionUsage {
 
 function usageWindow(value: unknown): UsageWindow | null {
   const r = asRecord(value);
-  if (!r || typeof r["usedPercent"] !== "number" || typeof r["resetsAtMs"] !== "number") {
+  if (!r || typeof r["usedPercent"] !== "number" || !Number.isFinite(r["usedPercent"]) ||
+    typeof r["resetsAtMs"] !== "number" || !Number.isFinite(r["resetsAtMs"]) ||
+    Math.abs(r["resetsAtMs"]) > 8_640_000_000_000_000) {
     return null;
   }
   return {
     usedPercent: r["usedPercent"],
     resetsAtMs: r["resetsAtMs"],
-    windowDurationMins: typeof r["windowDurationMins"] === "number" ? r["windowDurationMins"] : null,
+    windowDurationMins: typeof r["windowDurationMins"] === "number" && Number.isFinite(r["windowDurationMins"]) && r["windowDurationMins"] > 0
+      ? r["windowDurationMins"] : null,
   };
 }
 
@@ -640,7 +643,8 @@ export function parseSubscriptionUsage(value: unknown): SubscriptionUsage | null
   }
   const window = usageWindow(r["window"]);
   const weekly = usageWindow(r["weekly"]);
-  if (!window || !weekly || typeof r["observedAtMs"] !== "number") {
+  if (!window || !weekly || typeof r["observedAtMs"] !== "number" || !Number.isFinite(r["observedAtMs"]) ||
+    Math.abs(r["observedAtMs"]) > 8_640_000_000_000_000) {
     return null;
   }
   return { tier: typeof r["tier"] === "string" ? r["tier"] : "unknown", observedAtMs: r["observedAtMs"], window, weekly };
