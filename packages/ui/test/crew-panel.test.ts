@@ -278,7 +278,7 @@ describe("CrewPanel", () => {
     const both = renderPanel({ fold: lanternFold(NOW, [TASK]) });
     assert.deepEqual(rows(both).slice(-2), ["phase:Background", "task-1"]);
     const empty = renderPanel({ fold: emptyFold() });
-    assert.match(textOf(empty), /No agents in this thread A workflow's agents and background tasks appear here when Muse starts them\./);
+    assert.match(textOf(empty), /No agents in this thread Send a prompt to follow Muse, its tools, delegated agents and background tasks here\./);
     const loading = renderPanel({ fold: emptyFold(), thread: { load: "loading" } });
     assert.match(textOf(loading), /Loading agent activity/);
   });

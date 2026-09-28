@@ -124,9 +124,12 @@ export interface AncillaClient {
   /** Sets which account new threads in a project default to; null clears it. */
   setProjectDefaultAccount(cwd: string, accountId: string | null): Promise<void>;
   /** Whether META_API_KEY in the environment makes every account share one Meta login. */
-  accountsHealth(): Promise<{ metaApiKeyInherited: boolean }>;
-  /** Starts a device-code sign-in for an account; a WSL runtime returns a fallback instead of a link. */
-  loginAccount(id: string): Promise<{ url: string; code: string | null } | { fallback: string }>;
+  accountsHealth(): Promise<import("./types.js").AccountsHealth>;
+  /** Starts Muse's browser sign-in; null uses the default CLI login without creating a profile. */
+  loginAccount(id: string | null): Promise<import("./types.js").AccountLoginResult>;
+  /** Optional for older transports. A login attempt is confirmed by its own CLI process finishing. */
+  accountLoginProgress?(id: string | null, loginId: string): Promise<import("./types.js").AccountLoginProgress>;
+  cancelAccountLogin?(id: string | null, loginId: string): Promise<void>;
   getYoloSettings(): Promise<YoloSettings>;
   setYoloSettings(patch: { enabled?: boolean }): Promise<YoloSettings>;
   setSessionModel(sessionId: string, modelId: string): Promise<void>;
@@ -152,6 +155,8 @@ export interface AncillaClient {
   getResearch(runId: string): Promise<import("./types.js").ResearchRunView>;
   // POST /api/research/:runId/export {format} -> the document written beside report.md; 409 when there is no report.
   exportResearch(runId: string, format: import("./types.js").ResearchExportFormat): Promise<import("./types.js").ResearchExport>;
+  /** Reads a generated document through the active connection, including remote daemon authentication. */
+  readResearchExport(runId: string, format: import("./types.js").ResearchExportFormat): Promise<Uint8Array>;
   // GET /api/research-settings -> settings; PATCH with a partial (config partial is merged and clamped).
   getResearchSettings(): Promise<import("./types.js").ResearchSettings>;
   setResearchSettings(patch: { enabled?: boolean; config?: Partial<import("./types.js").ResearchConfig> }): Promise<import("./types.js").ResearchSettings>;

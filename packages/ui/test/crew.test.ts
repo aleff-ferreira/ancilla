@@ -876,7 +876,7 @@ describe("sidebar, activity and the window title", () => {
     assert.deepEqual(activity.needsYou.map((item) => [item.thread, item.text, item.stale]), [["Migrate auth to passkeys", "1 request waiting", true]]);
     assert.deepEqual(activity.working.map((item) => [item.kind, item.text, item.sub]), [["run", "offline-sync-research-design", "Judge · 6 of 10"]]);
     assert.deepEqual(activity.stopAll, { runs: 1, tasks: 0 });
-    assert.equal(activity.note, "Other threads appear here once Ancilla tracks them (coming in 1.1)");
+    assert.equal(activity.note, "Open a thread to load its agent activity. Disconnected threads show their last known state.");
     assert.equal(activity.foot, "1 running in 1 thread · 1.3M tokens today");
     assert.equal(windowTitleCount(s), 1);
     const quiet = activityView(state({}, {}), NOW);

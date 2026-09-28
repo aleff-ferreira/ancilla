@@ -94,6 +94,10 @@ class FakeLoginChild {
     this.killCount += 1;
     setImmediate(() => this.emitter.emit("close", null));
   }
+
+  finish(exitCode: number): void {
+    this.emitter.emit("close", exitCode);
+  }
 }
 
 function fakeFactory(connection: FakeConnection, probe?: FactoryProbe): (target: ServeTarget) => HostHandle {
@@ -2386,6 +2390,68 @@ describe("AncillaServer", () => {
     assert.equal(res.metaApiKeyInherited, false);
   });
 
+  it("reports only the default login's non-secret identity", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-identity-"));
+    const original = createAonia({ home, platform: "linux", musePath: "muse", env: {} });
+    const { base } = await start(new FakeConnection(), {
+      home, platform: "linux", aonia: {
+        ...original,
+        identityOf: async () => ({ hasLogin: true, email: "person@example.test", name: "Person" }),
+      },
+    });
+    const health = await get(base, "/api/accounts/health");
+    assert.deepEqual(health.defaultLogin, { hasLogin: true, email: "person@example.test" });
+    assert.deepEqual(Object.keys(health).sort(), ["defaultLogin", "metaApiKeyInherited"]);
+    assert.deepEqual((await get(base, "/api/accounts")).accounts, []);
+  });
+
+  it("does not label an unreadable WSL default credential store as signed out", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-wsl-identity-"));
+    const original = createAonia({ home, platform: "linux", musePath: "muse", env: {} });
+    const { base } = await start(new FakeConnection(), {
+      home, platform: "win32", runtime: "wsl", distro: "Ubuntu", musePath: "/home/dev/muse", aonia: {
+        ...original,
+        identityOf: async () => { throw new Error("must not read Windows identity for the WSL default"); },
+      },
+    });
+    assert.deepEqual((await get(base, "/api/accounts/health")).defaultLogin, { hasLogin: null, email: null });
+  });
+
+  it("does not read an unrelated default identity when MUSE_AUTH_PATH is set, while still confirming browser sign-in", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-custom-auth-"));
+    const original = createAonia({ home, platform: "linux", musePath: "muse", env: {} });
+    const previous = process.env["MUSE_AUTH_PATH"];
+    const child = new FakeLoginChild();
+    let identityReads = 0;
+    process.env["MUSE_AUTH_PATH"] = join(home, "custom", "auth.json");
+    try {
+      const { base } = await start(new FakeConnection(), {
+        home, platform: "linux", musePath: "/custom/muse", aonia: {
+          ...original,
+          identityOf: async () => {
+            identityReads += 1;
+            return { hasLogin: true, email: "unrelated@example.test", name: "Unrelated" };
+          },
+        },
+        loginSpawn: (_command, _args, options) => {
+          assert.equal(options.env["MUSE_AUTH_PATH"], process.env["MUSE_AUTH_PATH"]);
+          setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=CUSTOM-1234\n"));
+          return child as unknown as LoginChild;
+        },
+      });
+      assert.deepEqual((await get(base, "/api/accounts/health")).defaultLogin, { hasLogin: null, email: null });
+      const response = await send(base, "/api/login", undefined);
+      assert.equal(response.status, 200);
+      child.finish(0);
+      assert.deepEqual(await get(base, `/api/login?loginId=${response.json.loginId}`), { status: "done" });
+      assert.deepEqual((await get(base, "/api/accounts/health")).defaultLogin, { hasLogin: null, email: null });
+      assert.equal(identityReads, 0, "the default file is not used to identify a login with an explicit auth path");
+    } finally {
+      if (previous === undefined) delete process.env["MUSE_AUTH_PATH"];
+      else process.env["MUSE_AUTH_PATH"] = previous;
+    }
+  });
+
   it("logs an account in: resolves url and code from staged stdout, through the server's own muse path", async () => {
     const connection = new FakeConnection();
     const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
@@ -2408,35 +2474,41 @@ describe("AncillaServer", () => {
 
     const res = await send(base, "/api/accounts/work/login", undefined);
     assert.equal(res.status, 200);
-    assert.deepEqual(res.json, { url: "https://auth.meta.com/oauth/device/?code=ABCD-1234", code: "ABCD-1234" });
+    assert.equal(res.json.url, "https://auth.meta.com/oauth/device/?code=ABCD-1234");
+    assert.equal(res.json.code, "ABCD-1234");
+    assert.equal(typeof res.json.loginId, "string");
     assert.equal(calls.length, 1);
     assert.equal(calls[0].command, "/custom/muse");
     assert.deepEqual(calls[0].args, ["login"]);
   });
 
-  it("returns a WSL fallback for the login route instead of spawning", async () => {
+  it("signs in through the selected WSL runtime and forwards the profile folders", async () => {
     const connection = new FakeConnection();
     const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     await aonia.createProfile("work");
-    let spawned = false;
-    const loginSpawn: LoginSpawn = () => {
-      spawned = true;
-      throw new Error("must not spawn when Muse runs in WSL");
+    const calls: { command: string; args: string[]; env: Record<string, string> }[] = [];
+    const loginSpawn: LoginSpawn = (command, args, opts) => {
+      calls.push({ command, args, env: opts.env });
+      const child = new FakeLoginChild();
+      setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=WSL-1234\n"));
+      return child as unknown as LoginChild;
     };
     const { base } = await start(connection, {
       platform: "win32",
       musePath: "/home/dev/.local/bin/muse",
+      distro: "Ubuntu-24.04",
       aonia,
       loginSpawn,
     });
 
     const res = await send(base, "/api/accounts/work/login", undefined);
     assert.equal(res.status, 200);
-    assert.deepEqual(res.json, {
-      fallback: "In-app login is not available when Muse runs in WSL. Log in from a terminal with: aonia login work.",
-    });
-    assert.equal(spawned, false);
+    assert.equal(res.json.code, "WSL-1234");
+    assert.equal(calls[0]?.command, "wsl");
+    assert.deepEqual(calls[0]?.args, ["-d", "Ubuntu-24.04", "-e", "/home/dev/.local/bin/muse", "login"]);
+    assert.equal(calls[0]?.env["XDG_CONFIG_HOME"], (await aonia.getProfile("work")).roots.config);
+    assert.match(calls[0]?.env["WSLENV"] ?? "", /XDG_CONFIG_HOME\/p/);
   });
 
   it("kills the first login child when a second login call arrives for the same account", async () => {
@@ -2462,11 +2534,166 @@ describe("AncillaServer", () => {
     children[1]?.stdout.emit("data", "Open this page to sign in: https://auth.meta.com/oauth/device/?code=WXYZ-9999\n");
     const secondRes = await second;
     assert.equal(secondRes.status, 200);
-    assert.deepEqual(secondRes.json, { url: "https://auth.meta.com/oauth/device/?code=WXYZ-9999", code: "WXYZ-9999" });
+    assert.equal(secondRes.json.url, "https://auth.meta.com/oauth/device/?code=WXYZ-9999");
+    assert.equal(secondRes.json.code, "WXYZ-9999");
+    assert.equal(typeof secondRes.json.loginId, "string");
 
     // The killed first child's own close event lands async; give it a moment to settle its request.
     const firstRes = await first;
     assert.equal(firstRes.status, 504);
+  });
+
+  for (const delayedSetup of ["profile", "runtime"] as const) {
+    it(`does not let an older sign-in delayed by ${delayedSetup} discovery replace the newer attempt`, async () => {
+      const home = await mkdtemp(join(tmpdir(), "ancilla-login-admission-"));
+      const aonia = createAonia({ home, platform: "linux", musePath: "muse", env: {} });
+      await aonia.createProfile("work");
+      const children: FakeLoginChild[] = [];
+      let waiting = false;
+      let reads = 0;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const { base } = await start(new FakeConnection(), {
+        home, musePath: delayedSetup === "runtime" ? null : "/custom/muse",
+        aonia: {
+          ...aonia,
+          getProfile: async (id) => {
+            if (delayedSetup === "profile" && reads++ === 0) { waiting = true; await gate; }
+            return aonia.getProfile(id);
+          },
+        },
+        exec: async () => {
+          if (delayedSetup === "runtime" && reads++ === 0) { waiting = true; await gate; }
+          return { stdout: "/custom/muse\n", exitCode: 0 };
+        },
+        loginSpawn: () => {
+          const child = new FakeLoginChild();
+          children.push(child);
+          setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=LATEST-1234\n"));
+          return child as unknown as LoginChild;
+        },
+      });
+      const route = delayedSetup === "runtime" ? "/api/login" : "/api/accounts/work/login";
+      const first = send(base, route, undefined);
+      await waitFor(() => waiting, "the first request to wait during sign-in setup");
+      try {
+        const second = await send(base, route, undefined);
+        assert.equal(second.status, 200);
+        release();
+        const stale = await first;
+        assert.equal(stale.status, 409);
+        assert.match(stale.json.error, /newer sign-in request/);
+        assert.equal(children.length, 1, "the stale request must not spawn another CLI process");
+        assert.equal(children[0]?.killCount, 0, "the newer login must keep running");
+        const statusPath = `${route}?loginId=${second.json.loginId}`;
+        assert.deepEqual(await get(base, statusPath), { status: "waiting" });
+        await send(base, `${route}?loginId=discarded-attempt`, undefined, "DELETE");
+        assert.equal(children[0]?.killCount, 0, "stale cancellation still cannot touch the admitted login");
+        children[0]?.finish(0);
+        assert.deepEqual(await get(base, statusPath), { status: "done" });
+      } finally { release(); await first; }
+    });
+  }
+
+  it("keeps pending sign-in admissions independent for different account profiles", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-independent-"));
+    const aonia = createAonia({ home, platform: "linux", musePath: "muse", env: {} });
+    await aonia.createProfile("work");
+    await aonia.createProfile("personal");
+    let waiting = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const children: FakeLoginChild[] = [];
+    const { base } = await start(new FakeConnection(), {
+      home, musePath: "/custom/muse", aonia: {
+        ...aonia,
+        getProfile: async (id) => {
+          if (id === "work") { waiting = true; await gate; }
+          return aonia.getProfile(id);
+        },
+      },
+      loginSpawn: () => {
+        const child = new FakeLoginChild();
+        children.push(child);
+        setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=USER-1234\n"));
+        return child as unknown as LoginChild;
+      },
+    });
+    const work = send(base, "/api/accounts/work/login", undefined);
+    await waitFor(() => waiting, "work account sign-in to wait during setup");
+    try {
+      assert.equal((await send(base, "/api/accounts/personal/login", undefined)).status, 200);
+      release();
+      assert.equal((await work).status, 200);
+      assert.equal(children.length, 2);
+      assert.ok(children.every((child) => child.killCount === 0));
+    } finally { release(); await work; }
+  });
+
+  it("signs in to the default subscription without creating a named profile, and confirms process completion", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-default-"));
+    const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
+    const child = new FakeLoginChild();
+    const calls: string[][] = [];
+    const { base } = await start(new FakeConnection(), {
+      home, musePath: "/custom/muse", aonia,
+      loginSpawn: (_command, args) => {
+        calls.push(args);
+        setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=USER-1234\n"));
+        return child as unknown as LoginChild;
+      },
+    });
+    const response = await send(base, "/api/login", undefined);
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [["login"]]);
+    assert.deepEqual(await aonia.listProfiles(), []);
+    const path = `/api/login?loginId=${response.json.loginId}`;
+    assert.deepEqual(await get(base, path), { status: "waiting" });
+    child.finish(0);
+    assert.deepEqual(await get(base, path), { status: "done" });
+  });
+
+  it("reports failed approval and ignores stale cancellation of a replacement login", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-cancel-"));
+    const children: FakeLoginChild[] = [];
+    const { base } = await start(new FakeConnection(), {
+      home, musePath: "/custom/muse", aonia: createAonia({ home, platform: "linux", musePath: "muse" }),
+      loginSpawn: () => {
+        const child = new FakeLoginChild();
+        children.push(child);
+        setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=USER-1234\n"));
+        return child as unknown as LoginChild;
+      },
+    });
+    const first = await send(base, "/api/login", undefined);
+    const second = await send(base, "/api/login", undefined);
+    assert.notEqual(first.json.loginId, second.json.loginId);
+    assert.deepEqual(await get(base, `/api/login?loginId=${first.json.loginId}`), { status: "idle" });
+    await send(base, `/api/login?loginId=${first.json.loginId}`, undefined, "DELETE");
+    assert.equal(children[1]?.killCount, 0);
+    children[1]?.finish(1);
+    const failed = await get(base, `/api/login?loginId=${second.json.loginId}`);
+    assert.equal(failed.status, "error");
+    assert.match(failed.message, /Start again/);
+    assert.doesNotMatch(failed.message, /USER-1234/);
+  });
+
+  it("cancels only the pending login process and gives a retry message", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-login-close-"));
+    const child = new FakeLoginChild();
+    const { base } = await start(new FakeConnection(), {
+      home, musePath: "/custom/muse", aonia: createAonia({ home, platform: "linux", musePath: "muse" }),
+      loginSpawn: () => {
+        setImmediate(() => child.stdout.emit("data", "Open https://auth.meta.com/oauth/device/?code=USER-1234\n"));
+        return child as unknown as LoginChild;
+      },
+    });
+    const started = await send(base, "/api/login", undefined);
+    await send(base, `/api/login?loginId=${started.json.loginId}`, undefined, "DELETE");
+    assert.equal(child.killCount, 1);
+    const status = await get(base, `/api/login?loginId=${started.json.loginId}`);
+    assert.equal(status.status, "error");
+    assert.match(status.message, /cancelled/);
   });
 
   it("sets a project's default account", async () => {

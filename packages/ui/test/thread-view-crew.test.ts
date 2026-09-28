@@ -150,6 +150,36 @@ describe("ThreadView with the Crew card", () => {
     assert.match(section, /class="crew-line stale"|crew-stale/);
     assert.doesNotMatch(section, /spin-ring/);
   });
+
+  it("keeps the header working after the lead finishes while a background task continues", () => {
+    const activity = fold([
+      { method: "turn/started", at: S(0, 0), params: { turnId: "t1" } },
+      { method: "item/started", at: S(0, 1), params: { item: { itemId: "background", kind: "toolCall", status: "inProgress", revision: 1, turnId: "t1", tool: "bash", args: '{"command":"npm run watch"}', background: true } } },
+      { method: "turn/completed", at: S(0, 2), params: { turnId: "t1", terminal: "completed" } },
+    ]);
+    const state = { threads: { s1: thread({ fold: activity }) } };
+    const markup = render(state);
+    const header = /<header[\s\S]*?<\/header>/.exec(markup)?.[0] ?? "";
+    assert.match(text(header), /Working/);
+    assert.doesNotMatch(text(header), /Crew landed|Done/);
+    assert.doesNotMatch(card(markup), /Muse did not attach a report|crew-landed/);
+    const stale = render({ ...state, connection: "connecting" });
+    const staleHeader = /<header[\s\S]*?<\/header>/.exec(stale)?.[0] ?? "";
+    assert.match(text(staleHeader), /Last known/);
+    assert.doesNotMatch(staleHeader, /spin-ring/);
+  });
+
+  it("does not announce success in the header for an unreported turn outcome", () => {
+    const now = Date.now();
+    const activity = fold([
+      { method: "turn/started", at: now - 2000, params: { turnId: "t1" } },
+      { method: "turn/completed", at: now, params: { turnId: "t1", terminal: "unknown" } },
+    ]);
+    const markup = render({ threads: { s1: thread({ fold: activity }) } });
+    const header = /<header[\s\S]*?<\/header>/.exec(markup)?.[0] ?? "";
+    assert.doesNotMatch(text(header), /Crew landed|Done|Working/);
+    assert.match(text(card(markup)), /Turn ended/);
+  });
 });
 
 /** A request panel as `focusRequestPanel` handles it: scrolled into view, its button focused, its ring flashed. */

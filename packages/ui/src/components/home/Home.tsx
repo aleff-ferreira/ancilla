@@ -11,6 +11,7 @@ import { CopyButton } from "../ui/Markdown.js";
 import { Menu, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger } from "../ui/overlays.js";
 import { Button, Logo, Spinner, cn } from "../ui/primitives.js";
 import { FolderArt } from "./FolderArt.js";
+import { MuseSubscriptionCard } from "../settings/MuseSignIn.js";
 
 const DISPLAY = "font-display text-[2.125rem] leading-[1.15] font-normal tracking-[-0.015em] text-fg text-balance";
 
@@ -21,6 +22,7 @@ export function NewThread(props: { cwd: string | null }) {
   const accounts = useApp((s) => s.accounts);
   const planUsage = useApp((s) => s.planUsage);
   const planUsageByAccount = useApp((s) => s.planUsageByAccount);
+  const needsLogin = useApp((s) => s.defaultLogin?.hasLogin === false && !s.metaApiKeyInherited);
   const now = useNow(60_000);
   const project = projectForCwd(projects, props.cwd) ?? projects[0] ?? null;
   // The thread starts in the folder the route names when it is one of the project's; otherwise in the project's own.
@@ -51,6 +53,7 @@ export function NewThread(props: { cwd: string | null }) {
             Start a thread in <ProjectSwitcher project={project} projects={projects} />
           </h1>
           {project.folders.length > 1 ? <FolderSwitcher project={project} folder={folder ?? project.cwd} /> : null}
+          {needsLogin && project.defaultAccountId === null ? <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div> : null}
           <div className="mt-7">
             <Composer sessionId={null} cwd={folder ?? project.cwd} running={false} readOnly={false} variant="home" autoFocus />
           </div>
@@ -220,14 +223,15 @@ export function Welcome() {
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       <TopBar />
-      <div className="flex min-h-0 flex-1 items-center justify-center overflow-y-auto px-6 pb-[10vh]">
-        <div className="w-full max-w-[540px]">
+      <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto px-6 pb-[10vh]">
+        <div className="my-auto w-full max-w-[540px] py-6">
           <FolderArt label="Add your first project" onActivate={() => input.current?.focus()} />
           <h1 className={cn(DISPLAY, "mt-8")}>Welcome to Ancilla</h1>
           <p className="mt-3 text-md leading-relaxed text-pretty text-muted">
             Point Muse at a project and start a thread. Threads live in the sidebar, grouped by project, and tell you when
             they need you.
           </p>
+          <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div>
           <form className="mt-8 flex gap-2" onSubmit={submit}>
             <input
               ref={input}
@@ -275,47 +279,54 @@ export function Onboarding() {
   }
   const windows = env.platform === "win32";
   const install = "irm https://dev.meta.ai/install.ps1 | iex";
+  const posixInstall = "curl -fsSL https://dev.meta.ai/install.sh | bash";
   const steps: Step[] = [];
-  if (windows && (env.runtime === "native" || !env.wslAvailable)) {
+  const useWsl = windows && (env.runtime === "wsl" || (env.runtime === undefined && env.wslAvailable));
+  if (windows && !useWsl) {
     // Muse runs natively on Windows now, so a new setup needs no WSL at all.
     steps.push({
       ok: env.museFound,
       title: "Muse for Windows",
       detail: env.museFound
         ? `Found at ${env.musePath}.`
-        : "Install Muse from PowerShell. No WSL needed. Already use Muse inside WSL? Set WSL up and Ancilla uses it there.",
+        : "Open PowerShell from the Start menu, paste this command, and wait for installation to finish.",
       command: env.museFound ? undefined : install,
     });
   } else if (windows) {
-    steps.push({ ok: true, title: "WSL2 with a Linux distro", detail: `Using ${env.defaultDistro ?? "your default distro"}.` });
+    steps.push({
+      ok: env.wslAvailable,
+      title: "WSL2 with a Linux distro",
+      detail: env.wslAvailable ? `Using ${env.defaultDistro ?? "your default distro"}.` : "Ancilla is configured to run Muse in WSL. Open PowerShell as administrator, run this command, then restart Windows if prompted.",
+      command: env.wslAvailable ? undefined : "wsl --install",
+    });
     steps.push({
       ok: env.museFound,
-      title: "The Muse CLI",
+      title: "Install Muse Code in WSL",
       detail: env.museFound
         ? `Found at ${env.musePath}.`
-        : `Install Muse for Windows from PowerShell (no WSL needed), or install it inside ${env.defaultDistro ?? "your WSL distro"}.`,
-      command: env.museFound ? undefined : install,
+        : `Open ${env.defaultDistro ?? "your WSL distro"} from the Start menu and paste this command in its Linux terminal. Ancilla is using Muse in this distro.`,
+      command: env.museFound ? undefined : posixInstall,
     });
   } else {
     steps.push({
       ok: env.museFound,
-      title: "The Muse CLI",
-      detail: env.museFound ? `Found at ${env.musePath}.` : "Install Muse so the muse command is on your PATH.",
+      title: "Install Muse Code",
+      detail: env.museFound ? `Found at ${env.musePath}.` : "Open Terminal, paste this command, and wait for installation to finish.",
+      command: env.museFound ? undefined : posixInstall,
     });
   }
   steps.push({
     ok: null,
-    title: "Signed in to Muse",
-    detail: "Run this once in a terminal. Ancilla uses your own login and never sees your credentials.",
-    command: "muse login",
+    title: "Connect your Meta subscription",
+    detail: "Choose Check installation below. On the next screen, choose Sign in with Meta, approve access using the account that owns your Muse Code plan, then return to Ancilla. An existing Muse login is reused. No API key is needed.",
   });
   return (
-    <div className="flex h-full items-center justify-center overflow-y-auto bg-bg px-6 py-10">
-      <div className="w-full max-w-[560px]">
+    <div className="flex h-full items-start justify-center overflow-y-auto bg-bg px-6 py-10">
+      <div className="my-auto w-full max-w-[560px]">
         <Logo size={40} />
-        <h1 className={cn(DISPLAY, "mt-7")}>Set up Muse</h1>
+        <h1 className={cn(DISPLAY, "mt-7")}>Connect Ancilla to Muse Code</h1>
         <p className="mt-3 text-md leading-relaxed text-muted">
-          Ancilla drives the Muse Code CLI on this computer. Finish these steps, then check again.
+          Install Muse once on this computer, then connect your Meta account. Ancilla uses your Muse Code subscription.
         </p>
         <ol className="mt-8 flex flex-col gap-2.5">
           {steps.map((step, index) => (
@@ -334,7 +345,7 @@ export function Onboarding() {
                 <p className="mt-1 text-sm break-words text-muted">{step.detail}</p>
                 {step.command ? (
                   <div className="mt-2.5 flex items-center gap-2 rounded-lg bg-sunken py-1 pr-1 pl-3 font-mono text-xs text-fg shadow-[0_0_0_1px_var(--border)]">
-                    <span className="min-w-0 flex-1 truncate">{step.command}</span>
+                    <span className="min-w-0 flex-1 break-all">{step.command}</span>
                     <CopyButton text={step.command} label="Copy command" />
                   </div>
                 ) : null}
@@ -344,8 +355,9 @@ export function Onboarding() {
         </ol>
         <div className="mt-6">
           <Button variant="primary" onClick={() => controller.retryBoot()} loading={checking}>
-            <ArrowsClockwiseIcon size={14} /> Check again
+            <ArrowsClockwiseIcon size={14} /> Check installation
           </Button>
+          <p className="mt-3 text-xs leading-relaxed text-subtle">If Muse is still not found after installation, close and reopen Ancilla so it can pick up the updated command path.</p>
         </div>
       </div>
     </div>

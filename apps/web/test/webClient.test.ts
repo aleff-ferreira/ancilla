@@ -100,6 +100,35 @@ describe("web client", () => {
     assert.doesNotMatch(call?.url ?? "", /token=/);
   });
 
+  it("downloads report bytes from the selected daemon using header authentication", async () => {
+    browser({ stored: { "ancilla:daemon": JSON.stringify({ base: "https://box.example:3127", token: "secret" }) } });
+    const { WebAncillaClient } = await freshClient();
+    const bytes = new Uint8Array([80, 75, 3, 4, 255]);
+    const fetcher = mock.method(globalThis, "fetch", async (target: string | URL | Request, init?: RequestInit) => {
+      assert.equal(target, "https://box.example:3127/api/research/run%2F1/export/report.docx");
+      assert.equal((init?.headers as Record<string, string>)["authorization"], "Bearer secret");
+      assert.equal(init?.credentials, "include");
+      assert.ok(init?.signal);
+      return new Response(bytes, { headers: { "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document" } });
+    });
+    try {
+      assert.deepEqual(await new WebAncillaClient().readResearchExport("run/1", "docx"), bytes);
+    } finally {
+      fetcher.mock.restore();
+    }
+  });
+
+  it("reports failed document downloads instead of saving the server error as a document", async () => {
+    browser();
+    const { WebAncillaClient } = await freshClient();
+    const fetcher = mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ error: "That export has not been generated yet." }), { status: 404 }));
+    try {
+      await assert.rejects(new WebAncillaClient().readResearchExport("r1", "pdf"), /That export has not been generated yet/);
+    } finally {
+      fetcher.mock.restore();
+    }
+  });
+
   it("addresses a daemon elsewhere absolutely, and sends its cookie with it", async () => {
     const world = browser({
       stored: { "ancilla:daemon": JSON.stringify({ base: "https://box.example:3127", token: "secret" }) },

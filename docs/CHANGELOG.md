@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.20.2
+
+### New
+
+- **Sign in to your Muse Code plan directly from Ancilla.** Home and Settings offer **Sign in with Meta**, with a guided browser flow, a copyable code, explicit confirmation, retry and cancellation. No named account or API key is required. Setup includes installation instructions for the selected operating system and runtime; existing Muse logins are reused.
+- **Choose where to save research reports.** PDF, Word and HTML exports open a native Save As dialog on desktop and a file picker in supported browsers. Choose the destination before the report is generated; cancelling starts no export. Other browsers use their configured download location, with guidance for enabling a location prompt.
+
+### Fixed
+
+- **Crew monitors ordinary prompts as well as parallel work.** The lead turn and foreground tools now appear in the card, panel and timeline. Completed tools remain inspectable, background tasks and native agents stay live after the lead finishes, and missing outcomes remain explicitly unreported. Stop everything includes native agents and waits for Muse to confirm each stop.
+- **Plans follow the work that is actually running.** Muse's active step states are recognized, approvals and disconnected feeds pause the activity indicator, and a later prompt does not revive an older checklist. Associated workers can keep a plan active after the lead finishes. Unconfirmed steps stay visible, and completed plans remain available as an expandable summary.
+- **Sign-in confirmation belongs to the current attempt.** Saved credentials cannot falsely confirm a new login, cancellation cannot stop a newer attempt, and a slow earlier request cannot replace a retry. Windows and WSL use the selected Muse runtime; an inherited API key is explained when it overrides subscription sign-in.
+
+### Changed
+
+- **Everyday monitoring stays compact and responsive.** Ordinary turns use a small completion summary instead of a workflow report. Inspectors distinguish the lead, foreground tools and background tasks, including reported shell exits. Execution indexes avoid repeatedly scanning a long thread's tool history while text streams.
+- **The project overview explains the complete research and monitoring workflow.** The README and activity guide cover cited reports, document exports, ordinary prompt activity, native agents, background work, task plans and guided setup.
+
 ## 0.20.1
 
 ### Changed

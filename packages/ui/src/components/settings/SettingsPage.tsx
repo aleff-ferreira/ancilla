@@ -1,11 +1,11 @@
-import { ArrowClockwiseIcon, ArrowLeftIcon, ArrowLineDownIcon, ArrowSquareOutIcon, ArrowsClockwiseIcon, CheckCircleIcon, MinusIcon, PencilSimpleIcon, PlusIcon, ScrollIcon, SignInIcon, TrashIcon, WarningIcon } from "../ui/icons.js";
+import { ArrowClockwiseIcon, ArrowLeftIcon, ArrowLineDownIcon, ArrowsClockwiseIcon, MinusIcon, PencilSimpleIcon, PlusIcon, ScrollIcon, SignInIcon, TrashIcon, WarningIcon } from "../ui/icons.js";
 import { useEffect, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
 import type { AncillaController } from "../../model/controller.js";
 import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber } from "../../model/research.js";
-import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type AccountLoginState, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
+import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
 import type { AccountView, ApprovalMode, ReasoningEffort, ResearchConfig, ResearchModelIds } from "../../types.js";
 import { LEVELS, MODES } from "../composer/Composer.js";
 import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
@@ -13,6 +13,7 @@ import { Modal } from "../ui/overlays.js";
 import { TopBar } from "../chrome.js";
 import { Button, IconButton, MOD, Toggle, cn } from "../ui/primitives.js";
 import { About } from "./About.js";
+import { MuseSubscriptionCard } from "./MuseSignIn.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
 function Pick<T extends string | number | null>(props: {
@@ -208,64 +209,66 @@ function AddAccountModal(props: { open: boolean; onOpenChange: (open: boolean) =
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [seedFromDefault, setSeedFromDefault] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const accounts = useApp((s) => s.accounts);
+  const suggestedId = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 32);
+  const profileId = id.trim() || suggestedId;
+  const validId = /^[a-z0-9][a-z0-9-]{0,31}$/.test(profileId);
+  const duplicate = accounts?.some((account) => account.id === profileId) === true;
 
   async function submit() {
-    const trimmedId = id.trim();
-    if (!trimmedId) return;
-    const ok = await props.controller.createAccount(trimmedId, name.trim() || undefined, seedFromDefault);
+    if (!validId || duplicate || creating) return;
+    setCreating(true);
+    const ok = await props.controller.createAccount(profileId, name.trim() || undefined, seedFromDefault);
+    setCreating(false);
     if (ok) {
       setId("");
       setName("");
       setSeedFromDefault(false);
       props.onOpenChange(false);
+      void props.controller.beginLogin(profileId);
     }
   }
 
   return (
     <Modal
       open={props.open}
-      onOpenChange={props.onOpenChange}
+      onOpenChange={(open) => { if (!creating) props.onOpenChange(open); }}
       title="Add account"
-      description="Separate logins for work, personal, or a client. Each runs under its own Muse profile."
+      description="Give this login a label, then sign in with Meta. Each account keeps its own Muse profile."
     >
       <div className="mt-4 flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted" htmlFor="account-add-id">
-            Account id
-          </label>
-          <input
-            id="account-add-id"
-            type="text"
-            value={id}
-            onChange={(event) => setId(event.target.value)}
-            placeholder="work"
-            className={INPUT_CLASS}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
           <label className="text-xs font-medium text-muted" htmlFor="account-add-name">
-            Name
+            Account label
           </label>
           <input
             id="account-add-name"
             type="text"
             value={name}
             onChange={(event) => setName(event.target.value)}
-            placeholder="Optional"
+            placeholder="Personal, Work, or a client name"
             className={INPUT_CLASS}
           />
         </div>
+        <details className="text-xs text-muted">
+          <summary className="cursor-pointer">Profile id: {profileId || "generated from your label"}</summary>
+          <label className="mt-2 block" htmlFor="account-add-id">Lowercase letters, numbers and hyphens; up to 32 characters.</label>
+          <input id="account-add-id" type="text" value={id} onChange={(event) => setId(event.target.value)} placeholder={suggestedId || "personal"} className={`${INPUT_CLASS} mt-1.5`} />
+        </details>
+        {duplicate ? <p role="alert" className="text-xs text-warn-text">This label already has a profile. Choose another label or change the profile id.</p> : null}
+        {(profileId || name.trim()) && !validId ? <p role="alert" className="text-xs text-warn-text">Choose a profile id using lowercase letters, numbers and hyphens.</p> : null}
         <div className="flex items-center justify-between gap-4">
-          <p className="text-sm text-fg">Copy settings from the default login</p>
+          <div><p className="text-sm text-fg">Copy settings from the default login</p><p className="mt-1 text-xs text-subtle">Copies preferences and trusted folders, never credentials.</p></div>
           <Toggle checked={seedFromDefault} onChange={setSeedFromDefault} label="Copy settings from the default login" />
         </div>
       </div>
       <div className="mt-6 flex justify-end gap-2">
-        <Button variant="ghost" onClick={() => props.onOpenChange(false)}>
+        <Button variant="ghost" disabled={creating} onClick={() => props.onOpenChange(false)}>
           Cancel
         </Button>
-        <Button variant="primary" disabled={!id.trim()} onClick={() => void submit()}>
-          Add account
+        <Button variant="primary" disabled={!validId || duplicate || creating} loading={creating} onClick={() => void submit()}>
+          Continue to Meta sign-in
         </Button>
       </div>
     </Modal>
@@ -339,87 +342,12 @@ function RemoveAccountModal(props: { account: AccountView | null; onOpenChange: 
   );
 }
 
-/** A button styled like `Button` `variant="primary" size="md"`, as an anchor so opening the device page is a real navigation. */
-function OpenLinkButton(props: { href: string; children: ReactNode }) {
-  return (
-    <a
-      href={props.href}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex h-8 shrink-0 items-center justify-center gap-2 rounded-lg bg-inverse px-3 text-sm font-medium whitespace-nowrap text-inverse-fg transition-[background-color,color,opacity,transform] duration-150 ease-out hover:opacity-90 active:scale-[0.97]"
-    >
-      {props.children}
-    </a>
-  );
-}
-
-/** The device-code sign-in modal: a code to enter on Meta's own page, or a fallback message under WSL. */
-function DeviceLoginModal(props: { login: AccountLoginState | null; controller: AncillaController }) {
-  const login = props.login;
-  const isFallback = login !== null && "fallback" in login;
-  const isDone = login !== null && "status" in login && login.status === "done";
-
-  useEffect(() => {
-    if (!isDone) return;
-    const handle = setTimeout(() => props.controller.cancelLogin(), 1500);
-    return () => clearTimeout(handle);
-  }, [isDone, props.controller]);
-
-  return (
-    <Modal
-      open={login !== null}
-      onOpenChange={(open) => !open && props.controller.cancelLogin()}
-      title={isDone ? "Signed in" : "Log in with a device code"}
-    >
-      {login && isFallback ? (
-        <>
-          <p className="mt-4 text-sm text-fg">{login.fallback}</p>
-          <div className="mt-6 flex justify-end">
-            <Button variant="secondary" onClick={() => props.controller.cancelLogin()}>
-              Close
-            </Button>
-          </div>
-        </>
-      ) : null}
-      {login && !isFallback && "status" in login ? (
-        isDone ? (
-          <p className="mt-4 flex items-center gap-2 text-sm text-fg">
-            <CheckCircleIcon size={16} className="text-ok-text" /> Signed in.
-          </p>
-        ) : (
-          <div className="mt-4 flex flex-col gap-3">
-            {login.code ? (
-              <code className="self-start rounded-lg bg-sunken px-3 py-2 font-mono text-lg tabular-nums text-fg">{login.code}</code>
-            ) : (
-              <p className="text-sm text-subtle">Waiting for Muse to print the sign-in link…</p>
-            )}
-            <p className="text-sm text-muted">Open the sign-in page and enter this code.</p>
-            <p className="text-xs text-subtle">This window updates on its own once sign-in completes.</p>
-            <div className="mt-3 flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => props.controller.cancelLogin()}>
-                Close
-              </Button>
-              {login.url ? (
-                <OpenLinkButton href={login.url}>
-                  <ArrowSquareOutIcon size={14} /> Open sign-in page
-                </OpenLinkButton>
-              ) : null}
-            </div>
-          </div>
-        )
-      ) : null}
-    </Modal>
-  );
-}
-
 /** Everything Ancilla lets you set, in one place: the menus around the app are shortcuts into this. */
 export function SettingsPage() {
   const controller = useController();
   const prefs = useApp((s) => s.prefs);
   const models = useApp((s) => s.models);
   const accounts = useApp((s) => s.accounts);
-  const metaApiKeyInherited = useApp((s) => s.metaApiKeyInherited);
-  const accountLogin = useApp((s) => s.accountLogin);
   const titleSettings = useApp((s) => s.titleSettings);
   const researchSettings = useApp((s) => s.researchSettings);
   const sandboxSettings = useApp((s) => s.sandboxSettings);
@@ -550,19 +478,8 @@ export function SettingsPage() {
         </Section>
 
         <Section title="Accounts">
-          {metaApiKeyInherited ? (
-            <Row
-              label={
-                <span className="inline-flex items-center gap-1.5">
-                  <WarningIcon size={14} className="text-warn-text" />
-                  Accounts share one login
-                </span>
-              }
-              description="META_API_KEY is set in Ancilla's environment. Every account inherits it, so they all use the same Meta login. Unset it in your environment to keep accounts separate."
-              descriptionClassName="text-warn-text"
-            />
-          ) : null}
-          <Row label="Add account" description="Separate logins for work, personal, or a client. Each runs under its own Muse profile.">
+          <div className="p-4"><MuseSubscriptionCard /></div>
+          <Row label="Additional accounts" description="Optional: keep work, personal or client logins separate. Choose an account beside the model picker for new threads.">
             {accounts === null ? (
               <p className="text-xs text-subtle">Loading…</p>
             ) : (
@@ -573,10 +490,10 @@ export function SettingsPage() {
           </Row>
           {accounts?.map((account) => (
             <Row key={account.id} label={account.name} description={account.hasLogin ? (account.email ?? "Signed in") : "Not signed in"}>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {!account.hasLogin ? (
                   <Button size="sm" variant="secondary" onClick={() => void controller.beginLogin(account.id)}>
-                    <SignInIcon size={13} /> Log in
+                    <SignInIcon size={13} /> Sign in with Meta
                   </Button>
                 ) : null}
                 <Button size="sm" variant="secondary" onClick={() => setRenaming(account)}>
@@ -846,7 +763,6 @@ export function SettingsPage() {
       <AddAccountModal open={addOpen} onOpenChange={setAddOpen} controller={controller} />
       <RenameAccountModal account={renaming} onOpenChange={(open) => !open && setRenaming(null)} controller={controller} />
       <RemoveAccountModal account={removing} onOpenChange={(open) => !open && setRemoving(null)} controller={controller} />
-      <DeviceLoginModal login={accountLogin} controller={controller} />
     </div>
   );
 }

@@ -10,11 +10,14 @@
 
 Ancilla is an open-source desktop and web app. Turn a question into a cited research report,
 follow parallel agents as they work, and keep coding threads, approvals and background tasks in one workspace.
-It connects to Meta's **Muse Code CLI** (`muse`) using your existing login, on Windows, macOS or Linux.
+It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windows, macOS or Linux.
 
 **[Download Ancilla](https://github.com/aleff-ferreira/ancilla/releases/latest)** ·
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
+
+> **New in 0.20.2:** guided Meta sign-in, report Save As dialogs, Crew monitoring for ordinary prompts and tools,
+> and task plans that follow running and completed work. [Read the release notes](docs/CHANGELOG.md#0202).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
@@ -37,7 +40,8 @@ reads run through Muse; no separate model or search API key is needed.
 3. **Keep control.** Let the run finish, stop and ask for a report from its findings so far, or stop immediately.
    A partial report is labelled as such.
 4. **Read and reuse.** Follow the report's numbered citations, copy its Markdown, open `report.md`, or download
-   **PDF, Word or HTML**. Edit the question or run it again with the same options.
+   **PDF, Word or HTML**. Choose a filename and destination in the desktop Save As dialog or a supported browser's
+   file picker. Edit the question or run it again with the same options.
 
 ### Reports with traceable sources
 
@@ -49,22 +53,25 @@ verify every claim in the report.
 
 Reports and source registries are saved under `.ancilla/research/<runId>/` in the project. Run history persists across
 restarts; **resuming an interrupted research run is not available yet**. You can start it again from its question.
+Downloading a document saves an additional copy to your chosen location. Browsers without a save picker use their
+download settings; enable **Ask where to save** in that browser to choose a destination for each download.
 The [research implementation notes](docs/deep-research-plan.md#12-implementation-notes-what-the-build-changed)
 describe the engine, budgets and current limits.
 
 ## Crew: agent monitoring
 
-See the work behind the lead agent's replies. Crew brings Muse workflows, native subagents, Deep Research workers
-and background shell tasks into the thread's monitoring surfaces.
+See the work behind ordinary prompts as well as parallel research. Crew follows the lead agent's turns and foreground
+tools, Muse workflows, native subagents, Deep Research workers and background shell tasks in the thread's monitoring
+surfaces. Research mode is not required.
 
 ![The Crew panel showing workflow phases, agent timeline, attention states and a searchable roster](docs/assets/agents.png)
 
 | Surface | What you can follow |
 | --- | --- |
-| **Crew card** | A compact run summary above the composer: phase, completed agents, pending requests and failures. Expand it for agent rows and controls. |
-| **Crew panel** | Workflow and research timelines, phase groups, filters, an agent inspector, recorded lifecycle events, token totals and completion summaries. Open with `Ctrl/Cmd+Shift+M`. |
+| **Crew card** | A compact summary above the composer for the lead turn or a parallel run: current activity, phase, completed agents, pending requests and failures. Expand it for agent rows and controls. |
+| **Crew panel** | Lead-agent, workflow and research activity, timelines, phase groups, filters, an agent inspector, recorded lifecycle events, token totals and completion summaries. Open with `Ctrl/Cmd+Shift+M`. |
 | **Background tasks** | The command, current state and latest output, with output inspection and task controls. |
-| **Activity drawer** | Pending requests across threads, plus runs and tasks from threads this window has opened. Open with `Ctrl/Cmd+Shift+A`. |
+| **Activity drawer** | Pending requests across threads, plus lead turns, runs and tasks from threads this window has opened. Open with `Ctrl/Cmd+Shift+A`. |
 | **Sidebar** | Small phase and progress indicators alongside each tracked thread, so you can switch context without losing the overview. |
 
 Review approvals, inspect a failure, and retry, skip or stop work where Muse exposes those controls. Research workers
@@ -94,6 +101,7 @@ subscription windows.
 | --- | --- |
 | **Projects and threads** | Group folders into projects, pin and archive threads, and discover sessions started from the `muse` terminal. |
 | **Conversation control** | Read streamed replies and diffs; approve, steer, stop, queue and resend prompts using Muse's approval modes. |
+| **Plans** | Follow the latest reported steps alongside their turn and workers. Completed plans remain available; unfinished steps are not marked complete just because a turn ended. |
 | **Files beside the work** | Browse the project and preview files without leaving the thread. |
 | **Multiple logins** | Choose named Muse accounts and set a default account per project. |
 | **Desktop and web** | Use the same interface in a Tauri desktop app or a browser connected to a local or remote server. |
@@ -111,8 +119,20 @@ subscription windows.
 
 Download the installer for your platform from the
 [latest release](https://github.com/aleff-ferreira/ancilla/releases/latest). Ancilla bundles its own Node.js, so the
-only requirement is the `muse` CLI with `muse login` done once, however you installed it. Ancilla uses the login you
-already have; there is no separate Ancilla account to create.
+only runtime requirement is the `muse` CLI. Ancilla reuses a login you already have; there is no separate Ancilla account
+to create. Connect a new login directly from the app:
+
+1. **Install Muse if needed.** Ancilla's setup screen shows the command for your operating system and selected runtime.
+   Finish installation, then choose **Check installation**.
+2. **Choose Sign in with Meta** on Home or in **Settings → Accounts**. Use the Meta account that owns your Muse Code plan.
+3. **Open Meta sign-in**, check or enter the displayed code, and approve access in the browser. Return to Ancilla for
+   confirmation; **Check sign-in** checks immediately if needed.
+4. **Add a project and start a thread.** Named accounts are optional. Add one in Settings when you want a separate login
+   for work, personal projects or a client.
+
+No API key is needed for this subscription flow. If `META_API_KEY` is set, Ancilla explains that it overrides browser
+sign-in; remove that variable from Muse's launch environment and restart Ancilla to use your plan. Separately created
+API keys use pay-as-you-go billing.
 
 **Windows:** run `Ancilla_<version>_x64-setup.exe`. The installer is not Authenticode-signed yet, so SmartScreen may
 warn that it is from an unknown publisher; choose **More info**, then **Run anyway**. Updates after that are
@@ -142,8 +162,8 @@ See [Migrating from Helicon](docs/migrating-from-helicon.md) for exactly what co
 
 ## Build from source
 
-Prerequisites: Node 22+, the `muse` CLI with `muse login` done once (natively, or in WSL2 on Windows), and this
-repository checked out.
+Prerequisites: Node 22+, the `muse` CLI (natively, or in WSL2 on Windows), and this repository checked out.
+Use **Sign in with Meta** on Home or in Settings after starting the app, or keep using your existing Muse login.
 
 ```bash
 npm ci
@@ -153,7 +173,7 @@ npm test
 
 # Web app (serves the built UI plus the API on :3127)
 npm run serve --workspace @ancilla/web
-# open http://127.0.0.1:3127, add a folder, start a thread
+# open http://127.0.0.1:3127, sign in if needed, add a folder, start a thread
 ```
 
 Projects, pins, thread titles and archive state persist in `~/.ancilla/ancilla.db` (pass `--data-dir` to the server to

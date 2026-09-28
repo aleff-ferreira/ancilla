@@ -334,6 +334,7 @@ export interface AppState {
   accounts: import("../types.js").AccountView[] | null;
   /** True when META_API_KEY in Ancilla's environment makes every account share one Meta login. */
   metaApiKeyInherited: boolean;
+  defaultLogin: import("../types.js").DefaultLoginIdentity | null;
   /** The in-app device-code login in progress, if any; null once closed or never started. */
   accountLogin: AccountLoginState | null;
   /** The plan window per account, from `GET /api/plan-usage` and the `plan-usage` event. */
@@ -353,10 +354,10 @@ export interface AppState {
 /** `confirmFullAccess` is the full-access confirmation, which `/permissions full` must still pass through. */
 export type ComposerPicker = "model" | "effort" | "permissions" | "confirmFullAccess" | "confirmBypass" | "confirmYolo" | "account" | "research";
 
-/** The device-code login modal's state: a device prompt waiting or done, or a runtime fallback message. */
+/** Browser sign-in stays visible through preparation, completion, timeout and recoverable errors. */
 export type AccountLoginState =
-  | { accountId: string; url: string; code: string | null; status: "waiting" | "done" }
-  | { accountId: string; fallback: string };
+  | { accountId: string | null; url: string; code: string | null; status: "starting" | "waiting" | "done" | "timeout" | "error"; loginId?: string; message?: string }
+  | { accountId: string | null; fallback: string };
 
 export interface SkillsState {
   status: "loading" | "ready" | "error";
@@ -405,6 +406,7 @@ export function initialState(prefs: Prefs): AppState {
     accounts: null,
     metaApiKeyInherited: false,
     accountLogin: null,
+    defaultLogin: null,
     planUsageByAccount: {},
     filePanels: {},
     fileDrafts: {},

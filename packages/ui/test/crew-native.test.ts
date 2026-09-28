@@ -131,7 +131,7 @@ describe("native subagents reported as tool calls", () => {
       itemId: "old-wait", recordedAt: new Date(END + 10_000).toISOString(),
     }))]);
     assert.deepEqual(after.order, ["spawn-child-1", "old-wait", "new-wait"]);
-    assert.deepEqual(Object.keys(after.agentItems ?? {}), ["spawn-child-1", "new-wait", "old-wait"]);
+    assert.deepEqual(Object.keys(after.agentItems ?? {}), ["spawn-child-1", "old-wait", "new-wait"]);
     assert.equal(crewView(after, null, END + 20_000).subagents[0]?.state, "done", "transcript order wins over metadata arrival and timestamps");
     assert.equal(crewBusy(after), false);
   });

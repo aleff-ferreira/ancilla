@@ -10,9 +10,9 @@ Desktop builds of Ancilla also redistribute the third-party components below, ea
 An installed copy carries this file, [LICENSE](LICENSE), [LICENSE-HELICON](LICENSE-HELICON), [NOTICE.md](NOTICE.md), the Node.js license and the Rust crates' license texts in its
 `resources/legal` folder.
 
-- [JavaScript packages](#javascript-packages): 83 bundled into the local server, 133 into the interface
+- [JavaScript packages](#javascript-packages): 83 bundled into the local server, 135 into the interface
 - [Node.js runtime](#nodejs-runtime): Node.js v22.23.2
-- [Rust crates](#rust-crates): 531 crates from Cargo.lock
+- [Rust crates](#rust-crates): 534 crates from Cargo.lock
 
 Code the build tools generate into the bundles themselves (esbuild's and Rollup's module helpers, Vite's
 module-preload polyfill) is not listed.
@@ -66,6 +66,8 @@ module-preload polyfill) is not listed.
 | @radix-ui/react-visually-hidden | 1.2.11 | MIT | interface |
 | @swc/helpers | 0.5.23 | Apache-2.0 | server |
 | @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | interface |
+| @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | interface |
+| @tauri-apps/plugin-fs | 2.5.2 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-notification | 2.4.0 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-process | 2.3.1 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-updater | 2.11.0 | MIT OR Apache-2.0 | interface |
@@ -2184,6 +2186,124 @@ limitations under the License.
 MIT License
 
 Copyright (c) 2017 - Present Tauri Apps Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### @tauri-apps/plugin-dialog 2.7.3
+
+- License: MIT OR Apache-2.0
+- Source: <https://github.com/tauri-apps/plugins-workspace>
+- Shipped in: the interface (`resources/frontend`)
+
+The published package's license file is an SPDX summary, which names its licenses rather than quoting them. The MIT License's standard text is added below.
+
+`LICENSE.spdx`:
+
+```text
+SPDXVersion: SPDX-2.1
+DataLicense: CC0-1.0
+PackageName: tauri
+DataFormat: SPDXRef-1
+PackageSupplier: Organization: The Tauri Programme in the Commons Conservancy
+PackageHomePage: https://tauri.app
+PackageLicenseDeclared: Apache-2.0
+PackageLicenseDeclared: MIT
+PackageCopyrightText: 2019-2022, The Tauri Programme in the Commons Conservancy
+PackageSummary: <text>Tauri is a rust project that enables developers to make secure
+and small desktop applications using a web frontend.
+                </text>
+PackageComment: <text>The package includes the following libraries; see
+Relationship information.
+                </text>
+Created: 2019-05-20T09:00:00Z
+PackageDownloadLocation: git://github.com/tauri-apps/tauri
+PackageDownloadLocation: git+https://github.com/tauri-apps/tauri.git
+PackageDownloadLocation: git+ssh://github.com/tauri-apps/tauri.git
+Creator: Person: Daniel Thompson-Yvetot
+```
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) 2019-2022, The Tauri Programme in the Commons Conservancy
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### @tauri-apps/plugin-fs 2.5.2
+
+- License: MIT OR Apache-2.0
+- Source: <https://github.com/tauri-apps/plugins-workspace>
+- Shipped in: the interface (`resources/frontend`)
+
+The published package's license file is an SPDX summary, which names its licenses rather than quoting them. The MIT License's standard text is added below.
+
+`LICENSE.spdx`:
+
+```text
+SPDXVersion: SPDX-2.1
+DataLicense: CC0-1.0
+PackageName: tauri
+DataFormat: SPDXRef-1
+PackageSupplier: Organization: The Tauri Programme in the Commons Conservancy
+PackageHomePage: https://tauri.app
+PackageLicenseDeclared: Apache-2.0
+PackageLicenseDeclared: MIT
+PackageCopyrightText: 2019-2022, The Tauri Programme in the Commons Conservancy
+PackageSummary: <text>Tauri is a rust project that enables developers to make secure
+and small desktop applications using a web frontend.
+                </text>
+PackageComment: <text>The package includes the following libraries; see
+Relationship information.
+                </text>
+Created: 2019-05-20T09:00:00Z
+PackageDownloadLocation: git://github.com/tauri-apps/tauri
+PackageDownloadLocation: git+https://github.com/tauri-apps/tauri.git
+PackageDownloadLocation: git+ssh://github.com/tauri-apps/tauri.git
+Creator: Person: Daniel Thompson-Yvetot
+```
+
+`MIT License (standard text)`:
+
+```text
+MIT License
+
+Copyright (c) 2019-2022, The Tauri Programme in the Commons Conservancy
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -6315,6 +6435,7 @@ license too.
 - [regex-automata 0.4.18](https://crates.io/crates/regex-automata/0.4.18)
 - [regex-syntax 0.8.11](https://crates.io/crates/regex-syntax/0.8.11)
 - [reqwest 0.13.5](https://crates.io/crates/reqwest/0.13.5)
+- [rfd 0.16.0](https://crates.io/crates/rfd/0.16.0)
 - [ring 0.17.14](https://crates.io/crates/ring/0.17.14)
 - [rustc-hash 2.1.3](https://crates.io/crates/rustc-hash/2.1.3)
 - [rustc_version 0.4.1](https://crates.io/crates/rustc_version/0.4.1)
@@ -6387,6 +6508,8 @@ license too.
 - [tauri-codegen 2.6.3](https://crates.io/crates/tauri-codegen/2.6.3)
 - [tauri-macros 2.6.3](https://crates.io/crates/tauri-macros/2.6.3)
 - [tauri-plugin 2.6.3](https://crates.io/crates/tauri-plugin/2.6.3)
+- [tauri-plugin-dialog 2.7.3](https://crates.io/crates/tauri-plugin-dialog/2.7.3)
+- [tauri-plugin-fs 2.5.2](https://crates.io/crates/tauri-plugin-fs/2.5.2)
 - [tauri-plugin-notification 2.4.0](https://crates.io/crates/tauri-plugin-notification/2.4.0)
 - [tauri-plugin-opener 2.5.5](https://crates.io/crates/tauri-plugin-opener/2.5.5)
 - [tauri-plugin-process 2.3.1](https://crates.io/crates/tauri-plugin-process/2.3.1)

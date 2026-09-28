@@ -7,7 +7,7 @@ import { CompletionReport, emphasized, reportMeta, type CompletionReportProps } 
 import { SinceYouLeft, recapText } from "../src/components/crew/SinceYouLeft.js";
 import { CrewCard } from "../src/components/crew/CrewCard.js";
 import { completionView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
-import { S, finishedFeed, finishedRun, flatten, mkRun, referenceAgents, textOf as text, view } from "./fixtures/lantern.js";
+import { S, finishedFeed, finishedRun, flatten, mkAgent, mkRun, mkTask, referenceAgents, textOf as text, view } from "./fixtures/lantern.js";
 
 const noop = () => {};
 
@@ -19,6 +19,20 @@ function render(run: RunVM, overrides: Partial<CompletionReportProps> = {}): { m
 }
 
 describe("CompletionReport", () => {
+  it("keeps ordinary turn summaries compact without workflow reports or agent highlights", () => {
+    const run = mkRun([mkAgent("Muse", "done", { kind: "lead" }), mkTask("npm run build", "done", {}, { background: false })], { kind: "turn", status: "finished", endedAt: S(1, 0) });
+    const { markup } = render(run);
+    assert.match(markup, /data-completion="turn"/);
+    assert.match(text(markup), /Turn finished 1 tool completed/);
+    assert.match(text(markup), /View activity Timeline/);
+    assert.doesNotMatch(markup, /crew-landed|crew-stats|<h2>|Muse did not attach a report|Highlights|All 2 agents/);
+    assert.match(markup, /aria-label="Dismiss turn summary"/);
+    const unknown = mkRun([mkAgent("Muse", "unknown", { kind: "lead" })], { kind: "turn", status: "finished", endedAt: S(1, 0) });
+    const provisional = render(unknown).markup;
+    assert.match(text(provisional), /Turn ended.*1 outcome not reported/);
+    assert.doesNotMatch(provisional, /crew-tile ok/);
+  });
+
   it("opens with the seal, the serif headline and the fact line", () => {
     const { markup } = render(finishedRun());
     assert.match(markup, /class="crew-tile ok"/);

@@ -7,6 +7,7 @@ export * from "./model/store.js";
 export * from "./model/crew.js";
 export * from "./model/research.js";
 export { AncillaController, browserPlatform, hashToRoute, routeToHash, type Platform } from "./model/controller.js";
+export type { FileSaveOptions, FileSaveResult, FileSaver } from "./model/fileSave.js";
 export { AncillaApp, type AncillaAppProps } from "./app/AncillaApp.js";
 export type { WindowFrame } from "./app/frame.js";
 export * from "./model/updates.js";

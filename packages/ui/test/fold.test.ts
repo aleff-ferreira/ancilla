@@ -848,7 +848,7 @@ describe("crew trace", () => {
     assert.equal(fold.crew.tasks["t2"]?.lastOutputAt, null);
     fold = applyEvents(fold, [tool("t1", 3, "completed", T + 90_000, { background: true }), tool("t2", 2, "completed", T + 91_000)]);
     assert.equal(fold.crew.tasks["t1"]?.endedAt, T + 90_000);
-    assert.equal(fold.crew.tasks["t2"], undefined, "an ordinary call that finished needs no trace");
+    assert.equal(fold.crew.tasks["t2"]?.endedAt, T + 91_000, "a foreground tool keeps its completion for monitoring");
     // A history page without event times reads the start off the UUIDv7 item id.
     const id = "01a0f3c4-6d2e-7b1a-8c3f-5e9d2a7b4c10";
     const paged = foldAll([{ method: "item/updated", params: { item: { itemId: id, kind: "toolCall", status: "inProgress", revision: 1, background: true } } }]);

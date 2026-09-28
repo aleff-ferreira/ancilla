@@ -1,8 +1,8 @@
 # Agents and tasks in every thread
 
-Muse Code can delegate work: a native workflow fans out to agents that run in parallel, a subagent takes a
-side task, a shell command keeps running in the background. The transcript shows the lead agent's steps, not
-what the delegated work is doing. Ancilla shows that in three places that grow out of one another: the
+Crew follows ordinary prompts as well as delegated work. Muse appears as the lead while a turn runs, with
+foreground tools grouped beneath it. A native workflow can fan out to agents, a subagent can take a side task,
+and a shell command can keep running in the background. Ancilla shows this activity in three places: the
 **Crew card** in the dock, the **Crew panel** beside the thread, and the **Activity** drawer over the sidebar.
 Each is one keystroke deeper than the last, and `Esc` always goes back exactly one level.
 
@@ -11,8 +11,15 @@ arrived in. Nothing is inferred from the clock alone; see [what Muse reports](#w
 
 ## The Crew card
 
-A thread with a live run, subagent or background task gets one card in the dock, above the request panel and
-the composer. A thread with nothing running gets no card and no strip: the idle cost is zero.
+A thread with a live turn, workflow, research run, subagent or background task gets one card in the dock,
+above the request panel and composer. Recent completions remain available until dismissed or expired;
+a thread with no tracked activity gets no card or strip.
+
+**Ordinary prompts** use Lead and Tools groups in the same roster and timeline. Finished foreground tools
+remain inspectable, including their reported output and shell exit status. A tool without a terminal result
+when its turn ends reads **Outcome not reported**. Background tasks and native agents continue to show their
+own state after the lead finishes. The turn's completion card stays compact, with **View activity** and
+**Timeline** links; workflow and research runs retain their fuller completion reports.
 
 **Collapsed**, the card is one line per run or task, and that line answers three questions at once: is
 everything fine, what needs me, how far along is it. Left to right: a status glyph, the run's name (the name the
@@ -174,7 +181,17 @@ The rules that follow from that:
 - Reopening a thread that is still running reads its current state instead of issuing `session/resume`, so
   active work and pending questions are left alone.
 
-## Coming in 1.1
+## Task plans
+
+The Plan panel follows Muse's reported checklist, including its `in_progress` step states. It records which
+turn updated the plan, so a later unrelated prompt cannot make an older plan look active. Approvals pause the
+activity indicator, and a disconnected feed shows **Last known**. Associated workers can keep a plan marked
+**Workers running** after the lead finishes.
+
+Ending a turn does not complete its checklist. Unconfirmed steps remain visible with an explanation, and
+completed plans remain available as an expandable summary. Only a reported plan change completes a step.
+
+## Reporting limits
 
 These need a wire field or server work Ancilla does not have yet. Each shows its fallback meanwhile:
 

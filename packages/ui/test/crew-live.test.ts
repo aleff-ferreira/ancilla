@@ -46,20 +46,21 @@ describe("live Crew projection", () => {
     assert.equal(crewView(after, null, T).tasks[0]?.taskInfo?.tail, "Build complete");
   });
 
-  it("keeps Crew's index stable for ordinary transcript text and foreground tools", () => {
+  it("keeps Crew's index stable for prose but publishes foreground tools", () => {
     const before = applyEvent(emptyFold(), item({ tool: "subagent_spawn", args: '{"task_name":"review"}' }));
     const message = applyEvent(before, { method: "item/delta", params: { itemId: "message", field: "text", delta: "Working" } });
     const foreground = applyEvent(message, item({ itemId: "foreground", tool: "bash" }));
     assert.equal(message.agentItems, before.agentItems);
-    assert.equal(foreground.agentItems, before.agentItems);
+    assert.notEqual(foreground.agentItems, before.agentItems);
+    assert.equal(foreground.agentItems?.foreground, foreground.items.foreground);
     assert.deepEqual(Object.keys(before.agentItems ?? {}), ["tool"]);
   });
 
-  it("removes an item from the Crew index if its new revision is no longer Crew activity", () => {
+  it("keeps a foreground tool in the execution index after it leaves the background", () => {
     const before = applyEvent(emptyFold(), item({ tool: "bash", background: true }));
     const after = applyEvent(before, item({ revision: 2, tool: "bash", background: false }));
     assert.notEqual(after.agentItems, before.agentItems);
-    assert.equal(after.agentItems?.tool, undefined);
+    assert.equal(after.agentItems?.tool, after.items.tool);
     assert.equal(crewView(after, null, T).tasks.length, 0);
   });
 });

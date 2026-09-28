@@ -4,8 +4,9 @@ import { useApp, useController, useNow } from "../../app/context.js";
 import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
 import { basename } from "../../model/format.js";
 import { goalView } from "../../model/goal.js";
+import { taskPlanItems, taskPlanView } from "../../model/taskPlan.js";
 import { agentFeedRecovered, agentNumbers, markAgentFeed, type AgentFeedMark } from "../../model/agents.js";
-import { runLive, crewBusy, crewView, type CrewVM } from "../../model/crew.js";
+import { runLive, crewBusy, crewTurnKey, crewView, type CrewVM } from "../../model/crew.js";
 import type { ThreadState } from "../../model/store.js";
 import type { SessionSummary } from "../../types.js";
 import { SidebarToggle, TrafficLightSpacer } from "../chrome.js";
@@ -53,7 +54,7 @@ export function ThreadView(props: { sessionId: string }) {
   const crew = useMemo<CrewVM | null>(
     () => (fold && loaded ? crewView(fold, session, now, { stale: crewStale, partialHistory: thread?.truncated, pending, skipped, models, numbers: agentNumbers(props.sessionId), researchRuns }) : null),
     // The view reads the agent items, the item order, the requests, the trace and the research runs; streamed reply text changes none of them.
-    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.crew, session, now, crewStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId, researchRuns],
+    [agentItems, fold?.order, fold?.approvals, fold?.userInputs, fold?.crew, fold?.meta.calls, crewTurnKey(fold), session, now, crewStale, thread?.truncated, pending, skipped, models, loaded, props.sessionId, researchRuns],
   );
   if (!session) {
     return <MissingThread />;
@@ -61,7 +62,7 @@ export function ThreadView(props: { sessionId: string }) {
   const running = thread ? thread.fold.activeTurnId !== null : Boolean(session.live?.activeTurnId);
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-      <ThreadHeader session={session} thread={thread} running={running} crew={crew} />
+      <ThreadHeader session={session} thread={thread} running={running} busy={busy} crew={crew} crewStale={crewStale} />
       <div className="flex min-h-0 flex-1">
         <div className="@container flex min-w-0 flex-1 flex-col">
           {thread ? <Transcript sessionId={props.sessionId} thread={thread} /> : <div className="min-h-0 flex-1" />}
@@ -74,7 +75,7 @@ export function ThreadView(props: { sessionId: string }) {
   );
 }
 
-function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; crew: CrewVM | null }) {
+function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | null; running: boolean; busy: boolean; crew: CrewVM | null; crewStale: boolean }) {
   const controller = useController();
   const { session, thread } = props;
   const [renaming, setRenaming] = useState(false);
@@ -140,13 +141,15 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
       <NeedsYouChip count={needs} onClick={() => focusRequestPanel()} />
       {needs > 0 ? (
         <CrewStatus kind="waiting" />
-      ) : props.running ? (
+      ) : (props.running || props.busy) && props.crewStale ? (
+        <CrewStatus kind="stale" />
+      ) : props.running || props.busy ? (
         <CrewStatus kind="working" ms={startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : null} at={Date.now()} live />
-      ) : landed && run ? (
-        <CrewStatus kind="landed" ms={run.elapsedMs} />
+      ) : landed && run && run.counts.unknown === 0 ? (
+        <CrewStatus kind={run.kind === "turn" ? "done" : "landed"} ms={run.elapsedMs} />
       ) : run && run.stale && liveRun ? (
         <CrewStatus kind="stale" ms={staleAge(run, run.clockAt)} />
-      ) : run && !liveRun && !reportDismissed && run.status === "finished" ? (
+      ) : run && !liveRun && !reportDismissed && run.status === "finished" && run.counts.unknown === 0 ? (
         <CrewStatus kind="done" />
       ) : thread?.readOnly ? (
         <span className="flex shrink-0 items-center gap-1.5 px-1 text-xs text-subtle">
@@ -162,7 +165,7 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
         </Tip>
       ) : null}
       <HiddenCardsButton sessionId={session.sessionId} running={props.running} />
-      <CrewToggle active={sidePanel === "crew"} count={liveRun ? run.counts.total : null} onClick={() => controller.toggleCrewPanel()} />
+      <CrewToggle active={sidePanel === "crew"} count={props.crew ? (liveRun ? run.counts.total : 0) + props.crew.tasks.length + props.crew.subagents.length || null : null} onClick={() => controller.toggleCrewPanel()} />
       <Tip label={filesOpen ? "Hide files" : "Show files"} shortcut={[MOD, "Shift", "E"]}>
         <IconButton label={filesOpen ? "Hide files" : "Show files"} active={filesOpen} onClick={() => controller.toggleFiles()}>
           <TreeStructureIcon size={15} />
@@ -263,10 +266,6 @@ function TitleField(props: { initial: string; onDone: (title: string | null) => 
   );
 }
 
-function planShown(todo: ThreadState["fold"]["meta"]["todoList"] | null | undefined, running: boolean): boolean {
-  return Boolean(todo && todo.length > 0 && (running || todo.some((t) => t.status !== "completed")));
-}
-
 /** Shown while a dock card the user closed has something to show; brings every closed card in the thread back. */
 function HiddenCardsButton(props: { sessionId: string; running: boolean }) {
   const controller = useController();
@@ -277,7 +276,7 @@ function HiddenCardsButton(props: { sessionId: string; running: boolean }) {
       return "";
     }
     const out: string[] = [];
-    if (hidden.includes(`plan:${props.sessionId}`) && planShown(fold.meta.todoList, props.running)) {
+    if (hidden.includes(`plan:${props.sessionId}`) && taskPlanItems(fold.meta.todoList).length > 0) {
       out.push("plan");
     }
     if (hidden.includes(`goal:${props.sessionId}`) && goalView(fold) !== null) {
@@ -305,8 +304,7 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
   const approvals = fold ? Object.values(fold.approvals) : [];
   const inputs = fold ? Object.values(fold.userInputs) : [];
   const queued = fold ? fold.echoes.filter((e) => e.disposition === "queued") : [];
-  const todo = fold?.meta.todoList ?? null;
-  const showPlan = planShown(todo, props.running);
+  const plan = fold ? taskPlanView(fold, { stale: props.crewStale, crew: props.crew }) : null;
   return (
     <div className="shrink-0">
       <div className="mx-auto flex w-full max-w-[776px] flex-col gap-2 px-4 pb-2 @min-[520px]:px-6">
@@ -340,7 +338,7 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
           <QuestionPanel key={request.userInputId} request={request} keyboard={approvals.length === 0 && index === 0} />
         ))}
         <GoalPanel sessionId={session.sessionId} running={props.running} readOnly={Boolean(thread?.readOnly)} />
-        {showPlan && todo ? <PlanPanel sessionId={session.sessionId} items={todo} /> : null}
+        {plan ? <PlanPanel key={session.sessionId} sessionId={session.sessionId} view={plan} /> : null}
         {queued.length > 0 ? <QueuedList sessionId={session.sessionId} items={queued} /> : null}
         <TelemetryPills sessionId={session.sessionId} />
         <Composer

@@ -1,6 +1,6 @@
 import { memo, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { formatTokens } from "../../model/format.js";
-import { durationText, usageTotal, type AgentVM } from "../../model/crew.js";
+import { canStopAgent, durationText, usageTotal, type AgentVM } from "../../model/crew.js";
 import { ArrowCounterClockwiseIcon, CaretRightIcon, ChatCircleDotsIcon, EyeIcon, SkipForwardIcon, StopCircleIcon } from "../ui/icons.js";
 import { Button, cn } from "../ui/primitives.js";
 import { AgentName } from "./AgentName.js";
@@ -85,7 +85,7 @@ function attentionCopy(agent: AgentVM, clockAt: number | undefined): { l1: React
         return { l1: <><b>{word}</b>{after}</>, tone: "fail", l2: agent.failure?.text ?? noReason(agent), mono: false, actions: [] };
       }
       const after = `after ${plural(agent.attempt, "attempt")}${agent.durationMs !== null ? ` · ${durationText(agent.durationMs)}` : ""}`;
-      return { l1: <><b>Failed</b> {after}</>, tone: "fail", l2: agent.failure?.text ?? noReason(agent), mono: Boolean(agent.failure?.text), actions: ["retry", "skip"] };
+      return { l1: <><b>Failed</b> {after}</>, tone: "fail", l2: agent.failure?.text ?? noReason(agent), mono: Boolean(agent.failure?.text), actions: agent.kind === "workflow" ? ["retry", "skip"] : [] };
     }
     case "no-update": {
       const silence = agent.silenceMs ?? 0;
@@ -96,7 +96,7 @@ function attentionCopy(agent: AgentVM, clockAt: number | undefined): { l1: React
         tone: "",
         l2: longest !== null ? `Longer than any finished agent (${durationText(longest)}). Muse does not report what it is doing.` : NOTHING_TO_COMPARE,
         mono: false,
-        actions: ["stop"],
+        actions: canStopAgent(agent) ? ["stop"] : [],
       };
     }
     default:

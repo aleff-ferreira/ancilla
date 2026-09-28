@@ -15,6 +15,7 @@ import {
 import { activityKey, itemElapsed, splitProgress, stopQuestion, stoppable } from "../src/components/crew/ActivityItem.js";
 import { MOD } from "../src/components/ui/primitives.js";
 import type { ActivityItemVM, ActivityVM } from "../src/model/crew.js";
+import type { ViewEvent } from "../src/types.js";
 import { APPROVAL_COMMAND, NOW, RUN_NAME, TASK_COMMAND, appState, approvalEvents, fold, runEvents, session, taskEvents, thread } from "./crew-fixtures.js";
 
 const base = { sessionId: "s1", project: "lantern", thread: "Design the offline sync engine", stale: false } as const;
@@ -133,6 +134,8 @@ describe("ActivityDrawer", () => {
     assert.match(text(calm), /2 running in 1 thread · 1\.1M tokens today/);
     assert.equal(stopAllText({ runs: 2, tasks: 0 }), "Stop everything stops 2 runs in this thread. Approvals stay open.");
     assert.equal(stopAllQuestion({ runs: 2, tasks: 1 }), "Stop everything? Stops 2 runs and 1 task. Approvals stay open.");
+    assert.equal(stopAllText({ runs: 0, tasks: 0, agents: 1 }), "Stop everything stops 1 native agent in this thread. Approvals stay open.");
+    assert.equal(stopAllQuestion({ runs: 1, tasks: 2, agents: 3 }), "Stop everything? Stops 1 run, 2 tasks and 3 native agents. Approvals stay open.");
   });
 
   it("is all quiet when nothing runs and nothing waits", () => {
@@ -207,5 +210,32 @@ describe("ActivityDrawer", () => {
     assert.match(markup, /class="crew-strip"/);
     assert.match(markup, /1 needs you/);
     assert.match(text(markup), /Stop everything stops 1 run and 1 task in this thread/);
+  });
+
+  it("offers bulk stop for native-only work and names only the live agents in the open thread", () => {
+    const native = (id: string, status: string, controlStatus?: string): ViewEvent => ({
+      method: "item/updated", at: NOW,
+      params: { item: {
+        itemId: `item-${id}`, kind: "subagent", subagentId: id, status, revision: 1,
+        role: id, controlStatus, recordedAt: new Date(NOW).toISOString(),
+      } },
+    });
+    const events = [native("review", "inProgress"), native("queued", "inProgress", "starting"), native("done", "completed")];
+    const state = appState({
+      route: { kind: "thread", sessionId: "s1" },
+      sessions: { s1: session("s1", "Review the module", { live: null }), s2: session("s2", "Other thread", { live: null }) },
+      threads: { s1: thread(fold(events)), s2: thread(fold([native("elsewhere", "inProgress")])) },
+    });
+    const model = activityModel(state, NOW);
+    assert.deepEqual(model.view.stopAll, { runs: 0, tasks: 0, agents: 2 });
+    assert.deepEqual(model.stopNames, { runs: [], tasks: [], agents: ["review", "queued"] });
+    assert.equal(model.view.working.filter((item) => item.kind === "subagent").length, 3, "the list still includes other threads");
+    assert.deepEqual(model.view.finishedToday.map((item) => item.text), ["done"]);
+    const markup = render({ view: model.view, stopNames: model.stopNames });
+    assert.match(text(markup), /Stop everything stops 2 native agents in this thread/);
+
+    const away = activityModel({ ...state, route: { kind: "home" } }, NOW);
+    assert.equal(away.view.stopAll, null);
+    assert.equal(away.stopNames, null);
   });
 });

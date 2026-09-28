@@ -7,6 +7,7 @@ import { bindDesktopLinks } from "./links.js";
 import { appNotifier } from "./notifier.js";
 import { desktopUpdater } from "./updater.js";
 import { WebAncillaClient } from "./webClient.js";
+import { appPlatform } from "./platform.js";
 import "./theme.css";
 
 bindDesktopZoom();
@@ -37,6 +38,7 @@ function Root() {
   return (
     <AncillaApp
       client={new WebAncillaClient()}
+      platform={appPlatform()}
       frame={desktopFrame()}
       titlebarOverlay={titlebarOverlay()}
       updater={desktopUpdater()}

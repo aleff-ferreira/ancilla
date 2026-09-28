@@ -20,11 +20,18 @@ env:
 
     An open-source desktop and web workspace for Muse Code by AMAZONIA WORKS, available on Windows, macOS and Linux.
 
-    **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and export cited reports as PDF, Word or HTML. **Crew:** monitor workflows, native agents and background tasks with phase indicators, timelines, live status and controls for work that needs you.
+    **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
+
+    **New in 0.20.2**
+    - Guided **Sign in with Meta** from Home and Settings, with browser instructions, a copyable code, confirmation, retry and cancellation.
+    - **Save As** for PDF, Word and HTML research reports on desktop and supported browsers.
+    - Crew now tracks the lead and foreground tools during ordinary prompts, keeps completed work inspectable, and follows workers that outlive the lead.
+    - Plans follow their actual turn and workers, preserve unfinished steps, and retain completed checklists.
+    - Compact completion summaries, clearer tool inspectors, faster history handling, and reliable login cancellation and retry.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
-    **What you need.** Ancilla bundles Node.js, so the only thing to install is Meta's Muse Code CLI, signed in once with `muse login`: Muse for Windows natively, or Muse inside WSL2.
+    **What you need.** Ancilla bundles Node.js. Install Meta's Muse Code CLI, then choose **Sign in with Meta** in Ancilla and approve access using the account that owns your Muse Code plan. An existing Muse login is reused. Windows supports native Muse or Muse inside WSL2; setup shows the instructions for your selected runtime.
 
     **Which file.** Windows: the `x64-setup.exe` installer. macOS, Apple Silicon and Intel alike: the `universal.dmg`. Linux: the `amd64.AppImage`; mark it executable, then run it. From then on Ancilla updates itself from these releases, and refuses any update that is not signed with its key.
 

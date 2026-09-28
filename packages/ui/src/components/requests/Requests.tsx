@@ -3,7 +3,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useApp, useController } from "../../app/context.js";
 import type { LocalEcho } from "../../model/fold.js";
 import { describeApproval, formatFullDate } from "../../model/format.js";
-import type { ApprovalChoice, ApprovalRequest, TodoItem, UserInputAnswer, UserInputQuestion, UserInputRequest } from "../../types.js";
+import type { TaskPlanView, TaskStepStatus } from "../../model/taskPlan.js";
+import type { ApprovalChoice, ApprovalRequest, UserInputAnswer, UserInputQuestion, UserInputRequest } from "../../types.js";
 import { Tip } from "../ui/overlays.js";
 import { Button, IconButton, Shortcut, Spinner, cn } from "../ui/primitives.js";
 import { RollingDigits } from "../ui/sourced.js";
@@ -415,14 +416,20 @@ export function QuestionPanel(props: { request: UserInputRequest; keyboard: bool
   );
 }
 
-function TodoMark(props: { status: string }) {
+function TodoMark(props: { status: TaskStepStatus; plan: TaskPlanView }) {
   switch (props.status) {
     case "completed":
       return <CheckCircleIcon size={15} className="shrink-0 text-ok" aria-label="Done" />;
     case "inProgress":
-      return <Spinner size={13} className="m-px text-accent-text" label="In progress" />;
+      return props.plan.animate
+        ? <Spinner size={13} className="m-px text-accent-text" label="In progress" />
+        : <ClockIcon size={15} className="shrink-0 text-subtle" aria-label={props.plan.state === "waiting" ? "Waiting for you" : "Last reported active; completion unconfirmed"} />;
     case "cancelled":
       return <XCircleIcon size={15} className="shrink-0 text-subtle" aria-label="Cancelled" />;
+    case "failed":
+      return <XCircleIcon size={15} className="shrink-0 text-danger" aria-label="Failed" />;
+    case "unknown":
+      return <CircleIcon size={15} className="shrink-0 text-subtle" aria-label="Status not reported" />;
     default:
       return <CircleIcon size={15} className="shrink-0 text-[var(--border-strong)]" aria-label="To do" />;
   }
@@ -439,14 +446,32 @@ export function CloseCard(props: { label: string; onClose: () => void }) {
   );
 }
 
-export function PlanPanel(props: { sessionId: string; items: TodoItem[] }) {
+export function PlanPanel(props: { sessionId: string; view: TaskPlanView }) {
   const controller = useController();
+  const { view } = props;
   // Kept in prefs, not here: this panel unmounts whenever the user looks at another thread.
   const cardKey = `plan:${props.sessionId}`;
-  const open = useApp((s) => !s.prefs.collapsedCards.includes(cardKey));
+  const savedOpen = useApp((s) => !s.prefs.collapsedCards.includes(cardKey));
   const hidden = useApp((s) => s.prefs.hiddenCards.includes(cardKey));
-  const done = props.items.filter((i) => i.status === "completed").length;
-  const active = props.items.find((i) => i.status === "inProgress");
+  // Keep the final result available without filling the dock with an already finished checklist.
+  const [finishedOpen, setFinishedOpen] = useState(false);
+  const finished = view.state === "complete";
+  const open = finished ? finishedOpen : savedOpen;
+  const active = view.activeIndex >= 0 ? view.items[view.activeIndex] : null;
+  const list = useRef<HTMLOListElement>(null);
+  useEffect(() => {
+    if (!finished) setFinishedOpen(false);
+  }, [finished]);
+  useEffect(() => {
+    const container = list.current;
+    const row = container?.children[view.activeIndex] as HTMLElement | undefined;
+    if (!open || !container || !row) return;
+    // Scroll only this checklist: a plan update must not move the user's transcript or focus.
+    const top = row.offsetTop;
+    if (top < container.scrollTop || top + row.offsetHeight > container.scrollTop + container.clientHeight) {
+      container.scrollTop = Math.max(0, top - 8);
+    }
+  }, [view.activeIndex, open, props.sessionId]);
   if (hidden) {
     return null;
   }
@@ -456,40 +481,58 @@ export function PlanPanel(props: { sessionId: string; items: TodoItem[] }) {
         <button
           type="button"
           aria-expanded={open}
-          onClick={() => controller.setCardOpen(cardKey, !open)}
+          onClick={() => finished ? setFinishedOpen(!open) : controller.setCardOpen(cardKey, !open)}
           className="flex h-10 min-w-0 flex-1 items-center gap-2.5 pl-3.5 text-left"
         >
           <ListChecksIcon size={15} className="shrink-0 text-subtle" />
           <span className="text-sm font-medium text-fg">Plan</span>
-          <span className="shrink-0 text-xs text-subtle tabular-nums">
-            <RollingDigits value={String(done)} /> of {props.items.length} done
+          <span className={cn("shrink-0 rounded-md px-1.5 py-px text-2xs font-medium",
+            view.animate ? "bg-accent-soft text-accent-text" : finished ? "bg-active text-ok-text"
+              : view.state === "waiting" || view.state === "stopped" ? "bg-warn-soft text-warn-text" : "bg-active text-muted")}>
+            {view.label}
           </span>
-          {!open && active ? <span className="min-w-0 truncate text-xs text-muted">{active.activeForm ?? active.text}</span> : null}
+          <span className="shrink-0 text-xs text-subtle tabular-nums">
+            <RollingDigits value={String(view.done)} />/{view.items.length}
+            <span className="sr-only"> steps complete</span>
+          </span>
+          {!open && active ? <span className="min-w-0 truncate text-xs text-muted">{view.animate ? active.activeForm ?? active.text : active.text}</span> : null}
           <span className="flex-1" />
           <CaretDownIcon size={14} className={cn("shrink-0 text-subtle transition-transform duration-200", !open && "-rotate-90")} />
         </button>
         <CloseCard label="Hide the plan" onClose={() => controller.setCardHidden(cardKey, true)} />
       </div>
+      <div className="h-px bg-line" role="progressbar" aria-label="Plan steps completed" aria-valuemin={0} aria-valuemax={view.items.length} aria-valuenow={view.done}>
+        <div className="h-full bg-ok transition-[width] duration-150 motion-reduce:transition-none" style={{ width: `${view.done / view.items.length * 100}%` }} />
+      </div>
       {open ? (
-        <ol className="flex max-h-52 flex-col gap-1.5 overflow-y-auto px-3.5 pb-3">
-          {props.items.map((item, index) => (
-            <li key={index} className="flex items-start gap-2.5 text-sm">
-              <span className="mt-0.5 flex size-4 items-center justify-center">
-                <TodoMark status={item.status} />
-              </span>
-              <span
-                className={cn(
-                  "min-w-0",
-                  item.status === "completed" && "text-subtle line-through decoration-[var(--border-strong)]",
-                  item.status === "inProgress" && "font-medium text-fg",
-                  item.status !== "completed" && item.status !== "inProgress" && "text-muted",
-                )}
-              >
-                {item.status === "inProgress" ? (item.activeForm ?? item.text) : item.text}
-              </span>
-            </li>
-          ))}
-        </ol>
+        <>
+          <ol ref={list} className="relative flex max-h-52 flex-col gap-1.5 overflow-y-auto px-3.5 py-3">
+            {view.items.map((item, index) => (
+              <li key={`${index}:${item.text}`} className="flex items-start gap-2.5 text-sm" aria-current={item.status === "inProgress" && view.animate ? "step" : undefined}>
+                <span className="mt-0.5 flex size-4 items-center justify-center">
+                  <TodoMark status={item.status} plan={view} />
+                </span>
+                <span
+                  className={cn(
+                    "min-w-0 [overflow-wrap:anywhere]",
+                    item.status === "completed" && "text-subtle line-through decoration-[var(--border-strong)]",
+                    item.status === "inProgress" && (view.animate ? "font-medium text-fg" : "text-muted"),
+                    item.status !== "completed" && item.status !== "inProgress" && "text-muted",
+                  )}
+                >
+                  {item.status === "inProgress" && view.animate ? (item.activeForm ?? item.text) : item.text}
+                  {item.status === "inProgress" && !view.animate ? <span className="ml-1.5 text-2xs text-subtle">{view.state === "waiting" ? "waiting" : "last active"}</span> : null}
+                </span>
+              </li>
+            ))}
+          </ol>
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-line px-3.5 py-2 text-2xs text-subtle">
+            <p role="status">{view.detail}</p>
+            {view.updatedAt !== null ? <time dateTime={new Date(view.updatedAt).toISOString()} title={formatFullDate(view.updatedAt)}>
+              Updated {new Date(view.updatedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
+            </time> : null}
+          </div>
+        </>
       ) : null}
     </section>
   );

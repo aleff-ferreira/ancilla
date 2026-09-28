@@ -1188,7 +1188,11 @@ export class DemoAncillaClient implements AncillaClient {
   }
 
   async exportResearch(): Promise<never> {
-    throw new Error("The demo has no files to write; a real project gets the document beside report.md.");
+    throw new Error("Report exports are available when Ancilla is connected to a real project.");
+  }
+
+  async readResearchExport(): Promise<never> {
+    throw new Error("Report exports are available when Ancilla is connected to a real project.");
   }
 
   async stopResearch(runId: string, writeReport: boolean): Promise<ResearchRunView> {

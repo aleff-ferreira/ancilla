@@ -3,7 +3,7 @@ import {
   ArrowCounterClockwiseIcon, CaretRightIcon, ChatCircleDotsIcon, CheckCircleIcon, CircleDashedIcon, ClockCounterClockwiseIcon,
   EyeIcon, HourglassIcon, MinusCircleIcon, QuestionIcon, ShieldWarningIcon, SkipForwardIcon, StopCircleIcon, WarningCircleIcon,
 } from "../ui/icons.js";
-import { durationText, type AgentState, type AgentVM, type RunNeedVM, type RunVM } from "../../model/crew.js";
+import { canStopAgent, durationText, type AgentState, type AgentVM, type RunNeedVM, type RunVM } from "../../model/crew.js";
 import { Button, Spinner, cn } from "../ui/primitives.js";
 import { Peek } from "./Peek.js";
 import { Sigil } from "./Sigil.js";
@@ -139,7 +139,7 @@ function RowActions(props: { agent: AgentVM; readOnly: boolean; confirm: RowConf
       );
     } else if (agent.state === "waiting-on-you") {
       buttons.push(<Button key="review" size="sm" variant="secondary" className={small} onClick={() => props.onAction(agent, "review")}>{agent.needs?.kind === "input" ? "Answer" : "Review"}</Button>);
-    } else if (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled") {
+    } else if (canStopAgent(agent) && (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled")) {
       buttons.push(<Button key="stop" size="sm" variant="ghost" className={small} onClick={() => props.onConfirm({ kind: "stop", id: agent.id })}><StopCircleIcon size={12} />Stop</Button>);
     }
   }

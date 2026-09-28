@@ -35,7 +35,11 @@ interface Cell {
 export function KpiStrip(props: KpiStripProps) {
   const { run } = props;
   const live = runLive(run);
-  const cells: Cell[] = live ? runningCells(run) : finishedCells(run);
+  const cells: Cell[] = run.kind === "turn" ? [
+    { key: "tools", label: "Tools", value: String(run.agents.filter((agent) => agent.kind === "task").length), sub: `${run.agents.filter((agent) => agent.kind === "task" && agent.state === "done").length} completed` },
+    tokensCell(run, live),
+    { key: "elapsed", label: live ? "Elapsed" : "Wall time", value: durationText(run.elapsedMs), sub: run.elapsedMs === null ? "timing not reported" : run.stale ? "last known" : "this prompt" },
+  ] : live ? runningCells(run) : finishedCells(run);
   return (
     <div
       className={cn("mt-2 grid gap-px overflow-hidden rounded-[10px] shadow-[0_0_0_1px_var(--border)]", props.className)}

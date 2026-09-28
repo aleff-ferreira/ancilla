@@ -306,6 +306,11 @@ class FakeClient implements AncillaClient {
     if (this.exportFails) throw new Error(this.exportFails);
     return { path: `.ancilla/research/${runId}/report.${format}`, name: `report.${format}`, size: 1234, url: `/api/research/${runId}/export/report.${format}` };
   }
+  exportReads: { runId: string; format: ResearchExportFormat }[] = [];
+  async readResearchExport(runId: string, format: ResearchExportFormat): Promise<Uint8Array> {
+    this.exportReads.push({ runId, format });
+    return new TextEncoder().encode(`report.${format}`);
+  }
   skillSessions: (string | undefined)[] = [];
   efforts: string[] = [];
   goalError: Error | null = null;
@@ -377,12 +382,17 @@ class FakeClient implements AncillaClient {
   async accountsHealth() {
     return { metaApiKeyInherited: this.metaApiKeyInherited };
   }
-  loginAccountResult: { url: string; code: string | null } | { fallback: string } = {
+  loginAccountResult: import("../src/types.js").AccountLoginResult = {
     url: "https://auth.meta.com/oauth/device/?code=TEST-CODE",
     code: "TEST-CODE",
   };
-  loginAccountCalls: string[] = [];
-  async loginAccount(id: string) {
+  loginAccountCalls: (string | null)[] = [];
+  accountLoginProgress?: AncillaClient["accountLoginProgress"];
+  cancelledLoginCalls: { id: string | null; loginId: string }[] = [];
+  async cancelAccountLogin(id: string | null, loginId: string) {
+    this.cancelledLoginCalls.push({ id, loginId });
+  }
+  async loginAccount(id: string | null) {
     this.loginAccountCalls.push(id);
     return this.loginAccountResult;
   }
@@ -1815,6 +1825,111 @@ describe("AncillaController", () => {
     assert.equal(client.loginAccountCalls.length, 1);
   });
 
+  it("confirms default subscription sign-in from its own process without a named profile", async () => {
+    const client = new FakeClient();
+    client.loginAccountResult = { url: "https://auth.meta.com/oauth/device/?code=TEST-CODE", code: "TEST-CODE", loginId: "default-attempt" };
+    let status: "waiting" | "done" = "waiting";
+    client.accountLoginProgress = async (id, loginId) => {
+      assert.equal(id, null);
+      assert.equal(loginId, "default-attempt");
+      return { status };
+    };
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    await controller.beginLogin(null);
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "waiting");
+    status = "done";
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "done");
+    assert.deepEqual(client.accounts, []);
+    controller.cancelLogin();
+    assert.deepEqual(client.cancelledLoginCalls, [], "closing confirmed sign-in does not cancel it");
+  });
+
+  it("does not confuse an existing credential with completion of a new browser sign-in", async () => {
+    const client = new FakeClient();
+    client.accounts = [{ id: "work", name: "Work", hasLogin: true, email: "old@example.test", lastUsedAt: null }];
+    client.loginAccountResult = { url: "https://auth.meta.com/?code=NEW-CODE", code: "NEW-CODE", loginId: "new-attempt" };
+    client.accountLoginProgress = async () => ({ status: "waiting" });
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    await controller.loadAccounts();
+    await controller.beginLogin("work");
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "waiting");
+    controller.cancelLogin();
+    assert.deepEqual(client.cancelledLoginCalls, [{ id: "work", loginId: "new-attempt" }]);
+  });
+
+  it("keeps a failed sign-in visible with a retry action instead of dismissing the dialog", async () => {
+    const client = new FakeClient();
+    client.loginAccount = async () => { throw new Error("Muse could not start sign-in."); };
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    await controller.beginLogin(null);
+    const login = controller.store.get().accountLogin;
+    assert.ok(login && "status" in login);
+    assert.equal(login.status, "error");
+    assert.match(login.message ?? "", /could not start/);
+    assert.equal(controller.store.get().toasts.length, 0);
+  });
+
+  it("recovers a temporarily unreachable login check without starting another browser flow", async () => {
+    const client = new FakeClient();
+    client.loginAccountResult = { url: "https://auth.meta.com/?code=TEST-CODE", code: "TEST-CODE", loginId: "attempt" };
+    client.accountLoginProgress = async () => { throw new Error("offline"); };
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    await controller.beginLogin(null);
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "timeout");
+    client.accountLoginProgress = async () => ({ status: "done" });
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "done");
+    assert.equal(client.loginAccountCalls.length, 1);
+    controller.cancelLogin();
+  });
+
+  it("makes the end of automatic sign-in checking explicit and lets the user check again", async () => {
+    const client = new FakeClient();
+    client.loginAccountResult = { url: "https://auth.meta.com/?code=TEST-CODE", code: "TEST-CODE", loginId: "attempt" };
+    client.accountLoginProgress = async () => ({ status: "waiting" });
+    let next: (() => void) | null = null;
+    const controller = new AncillaController(client, {
+      ...platform(),
+      schedule: (fn) => { next = fn; return fn; },
+      cancel: () => { next = null; },
+    });
+    await controller.beginLogin(null);
+    for (let check = 0; check < 300; check += 1) {
+      assert.ok(next, "a waiting login keeps scheduling checks");
+      const tick: () => void = next;
+      next = null;
+      tick();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    const timedOut = controller.store.get().accountLogin;
+    assert.ok(timedOut && "status" in timedOut);
+    assert.equal(timedOut.status, "timeout");
+    assert.match(timedOut.message ?? "", /check again/);
+    assert.equal(next, null);
+    client.accountLoginProgress = async () => ({ status: "done" });
+    await controller.checkLogin();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "done");
+    controller.cancelLogin();
+  });
+
+  it("cancels a login link that arrives after its dialog was closed", async () => {
+    const client = new FakeClient();
+    let resolveLogin!: (result: import("../src/types.js").AccountLoginResult) => void;
+    client.loginAccount = () => new Promise((resolve) => { resolveLogin = resolve; });
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    const pending = controller.beginLogin(null);
+    controller.cancelLogin();
+    resolveLogin({ url: "https://auth.meta.com/?code=OLD-CODE", code: "OLD-CODE", loginId: "closed-attempt" });
+    await pending;
+    assert.equal(controller.store.get().accountLogin, null);
+    assert.deepEqual(client.cancelledLoginCalls, [{ id: null, loginId: "closed-attempt" }]);
+  });
+
   it("renames and removes accounts, reloading the list each time", async () => {
     const client = new FakeClient();
     client.accounts = [{ id: "default", name: "Default", hasLogin: true, email: "a@b.com", lastUsedAt: null }];
@@ -2171,23 +2286,30 @@ describe("AncillaController", () => {
       stop();
     });
 
-    it("exports a report: a browser downloads it, the desktop app keeps it in the project and offers to open it", async () => {
+    it("chooses a destination before rendering each report format, including with a desktop updater", async () => {
       const client = new FakeClient();
-      const downloads: { url: string; name: string }[] = [];
+      const saves: { name: string; extension: string; mimeType: string; bytes: string }[] = [];
       const shell = platform("#/t/s1");
-      shell.download = (url, name) => downloads.push({ url, name });
+      shell.saveFile = async (options, contents) => {
+        assert.equal(client.exports.length, saves.length, "the dialog opens before the server renders a file");
+        assert.equal(controller.store.get().busy["research-export:r1"], true);
+        await controller.exportResearchReport("s1", "r1", "html");
+        assert.equal(client.exports.length, saves.length, "a second click cannot open a second dialog");
+        const bytes = new TextDecoder().decode(await contents());
+        saves.push({ name: options.name, extension: options.extension, mimeType: options.mimeType, bytes });
+        return { kind: "saved", name: `chosen.${options.extension}`, path: `/chosen/chosen.${options.extension}` };
+      };
       const controller = new AncillaController(client, shell);
       const stop = controller.start();
       await settle();
       await settle();
       await controller.exportResearchReport("s1", "r1", "pdf");
       assert.deepEqual(client.exports, [{ runId: "r1", format: "pdf" }]);
-      assert.deepEqual(downloads, [{ url: "/api/research/r1/export/report.pdf", name: "report.pdf" }]);
-      assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /Downloading report\.pdf/);
-      assert.equal(controller.store.get().toasts.at(-1)?.action, undefined);
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Saved chosen.pdf");
+      assert.equal(controller.store.get().toasts.at(-1)?.detail, "/chosen/chosen.pdf");
       assert.equal(controller.store.get().busy["research-export:r1"], undefined, "the export is no longer busy");
 
-      // The desktop app, the shell with an updater, has the project folder on hand.
+      // Having an updater must not bypass destination selection on the desktop.
       controller.attachUpdater({
         currentVersion: async () => "0.19.1",
         check: async () => null,
@@ -2197,19 +2319,55 @@ describe("AncillaController", () => {
         onClose: () => () => {},
       });
       await controller.exportResearchReport("s1", "r1", "docx");
-      assert.equal(downloads.length, 1, "nothing is downloaded on the desktop");
-      const toast = controller.store.get().toasts.at(-1);
-      assert.match(toast?.title ?? "", /Saved report\.docx in the project/);
-      assert.equal(toast?.detail, ".ancilla/research/r1/report.docx");
-      toast?.action?.run();
-      await settle();
-      assert.deepEqual(client.openedFiles, [{ cwd: "/work/app", path: ".ancilla/research/r1/report.docx" }]);
+      await controller.exportResearchReport("s1", "r1", "html");
+      assert.deepEqual(saves, [
+        { name: "report.pdf", extension: "pdf", mimeType: "application/pdf", bytes: "report.pdf" },
+        { name: "report.docx", extension: "docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", bytes: "report.docx" },
+        { name: "report.html", extension: "html", mimeType: "text/html", bytes: "report.html" },
+      ]);
+      assert.deepEqual(client.exportReads, client.exports);
+      assert.deepEqual(client.openedFiles, []);
 
       client.exportFails = "The run has no report to export.";
       await controller.exportResearchReport("s1", "r1", "html");
       assert.match(controller.store.get().toasts.at(-1)?.title ?? "", /Could not export the report as HTML/);
       assert.equal(controller.store.get().toasts.at(-1)?.detail, "The run has no report to export.");
+      assert.equal(client.exportReads.length, 3, "a failed export never attempts to download old bytes");
       stop();
+    });
+
+    it("cancels an export without rendering, writing or reporting success, and reports save failures", async () => {
+      const client = new FakeClient();
+      const shell = platform("#/t/s1");
+      const controller = new AncillaController(client, shell);
+      shell.saveFile = async () => null;
+      await controller.exportResearchReport("s1", "r1", "pdf");
+      assert.deepEqual(client.exports, []);
+      assert.deepEqual(client.exportReads, []);
+      assert.equal(controller.store.get().toasts.length, 0);
+      assert.equal(controller.store.get().busy["research-export:r1"], undefined);
+
+      shell.saveFile = async (_options, contents) => {
+        await contents();
+        throw new Error("The destination is not writable.");
+      };
+      await controller.exportResearchReport("s1", "r1", "docx");
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not export the report as Word");
+      assert.equal(controller.store.get().toasts.at(-1)?.detail, "The destination is not writable.");
+      assert.equal(controller.store.get().busy["research-export:r1"], undefined);
+    });
+
+    it("explains a browser-controlled fallback download instead of claiming a file was saved", async () => {
+      const client = new FakeClient();
+      const shell = platform();
+      shell.saveFile = async (options, contents) => {
+        await contents();
+        return { kind: "download", name: options.name };
+      };
+      const controller = new AncillaController(client, shell);
+      await controller.exportResearchReport("s1", "r1", "html");
+      assert.equal(controller.store.get().toasts.at(-1)?.title, "Downloading report.html");
+      assert.match(controller.store.get().toasts.at(-1)?.detail ?? "", /browser controls the save location/);
     });
 
     it("stops a run, with or without a report, and shows the server's answer", async () => {
@@ -3463,11 +3621,26 @@ describe("crew controls", () => {
     type: "msp", sessionId: "s1", method: status === "inProgress" ? "item/updated" : "item/completed", at: T + revision * 1000,
     params: { item: { itemId: "task-1", kind: "toolCall", status, revision, tool: "bash", args: JSON.stringify({ command: "npm run docs:build" }), background: true } },
   });
+  const nativeSpawn = (id: string): AncillaEvent => ({
+    type: "msp", sessionId: "s1", method: "item/completed", at: T,
+    params: { item: {
+      itemId: `spawn-${id}`, kind: "toolCall", status: "completed", revision: 1, tool: "subagent_spawn", turnId: "t9",
+      args: JSON.stringify({ task_name: `native-${id}`, objective: "Inspect the code." }),
+      visibleOutput: JSON.stringify({ status: "accepted", subagent_id: id }),
+    } },
+  });
+  const nativeDone = (id: string): AncillaEvent => ({
+    type: "msp", sessionId: "s1", method: "item/completed", at: T + 1000,
+    params: { item: {
+      itemId: `wait-${id}`, kind: "toolCall", status: "completed", revision: 1, tool: "subagent_wait", turnId: "t9",
+      args: JSON.stringify({ subagent_id: id }), visibleOutput: JSON.stringify({ status: "ready", subagent_id: id }),
+    } },
+  });
   const agentOf = (controller: AncillaController, id: string) => {
     const thread = controller.store.get().threads["s1"]!;
     const vm = crewView(thread.fold, SESSION, Date.now(), { pending: controller.store.get().crew.pending });
     const run = vm.runs[0];
-    const agent = run?.agents.find((a) => a.id === id) ?? vm.tasks.find((t) => t.id === id);
+    const agent = run?.agents.find((a) => a.id === id) ?? vm.tasks.find((t) => t.id === id) ?? vm.subagents.find((a) => a.id === id);
     assert.ok(agent, `no agent ${id}`);
     return agent;
   };
@@ -3603,6 +3776,71 @@ describe("crew controls", () => {
       assert.equal(await controller.stopRun("s1", "wf"), true);
       assert.equal(client.actions.at(-1), "workflow:s1:cancel:run-1");
       assert.equal(await controller.stopRun("s1", "nope"), false);
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops live native agents with everything else and waits for acceptance without inventing completion", async () => {
+    const client = new FakeClient();
+    let accept!: () => void;
+    const admitted = new Promise<void>((resolve) => { accept = resolve; });
+    client.subagent = async (sessionId, action, id) => {
+      client.actions.push(`subagent:${sessionId}:${action}:${id}`);
+      await admitted;
+    };
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
+      client.handler?.(task(1, "inProgress"));
+      client.handler?.(nativeSpawn("working"));
+      client.handler?.(nativeSpawn("finished"));
+      client.handler?.(nativeDone("finished"));
+      await settle();
+
+      let answered = false;
+      const stopping = controller.stopEverything("s1").then((result) => { answered = true; return result; });
+      await flushMicrotasks();
+      assert.equal(answered, false, "a pending command is not reported as an accepted stop");
+      assert.equal(agentOf(controller, "working").state, "working");
+      assert.equal(agentOf(controller, "working").pending, "stop");
+      assert.ok(client.actions.includes("workflow:s1:cancel:run-1"));
+      assert.ok(client.actions.includes("task:s1:stopAll"), "native admission does not hold up background stops");
+      assert.deepEqual(client.actions.filter((action) => action.startsWith("subagent:")), ["subagent:s1:stop:working"]);
+
+      accept();
+      assert.deepEqual(await stopping, { runs: ["audit"], tasks: ["npm run docs:build"], agents: ["native-working"] });
+      assert.equal(agentOf(controller, "working").state, "working", "admission does not mean the child has stopped");
+      assert.equal(agentOf(controller, "working").pending, "stop");
+      client.handler?.(nativeDone("working"));
+      await settle();
+      assert.equal(agentOf(controller, "working").state, "done");
+      assert.equal(agentOf(controller, "working").pending, null);
+    } finally {
+      accept();
+      stop();
+    }
+  });
+
+  it("returns only accepted bulk stops and clears pending native and task flags on refusal", async () => {
+    const client = new FakeClient();
+    client.workflowError = new Error("The run refused the stop.");
+    client.task = async () => { throw new Error("The tasks refused the stop."); };
+    client.subagent = async (_sessionId, _action, id) => {
+      if (id === "refused") throw new Error("The agent refused the stop.");
+    };
+    const { controller, stop } = await started(client);
+    try {
+      client.handler?.(workflow(1, [{ childId: "c1", attempt: 1, status: "started", label: "audit:routes" }]));
+      client.handler?.(task(1, "inProgress"));
+      client.handler?.(nativeSpawn("accepted"));
+      client.handler?.(nativeSpawn("refused"));
+      await settle();
+      assert.deepEqual(await controller.stopEverything("s1"), { runs: [], tasks: [], agents: ["native-accepted"] });
+      assert.deepEqual(controller.store.get().crew.pending, { "s1:accepted:1": "stop" });
+      assert.equal(agentOf(controller, "refused").pending, null);
+      assert.equal(agentOf(controller, "refused").state, "working");
+      assert.equal(agentOf(controller, "task-1").pending, null);
     } finally {
       stop();
     }

@@ -2,7 +2,7 @@
   "name": "@ancilla/web",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.20.1",
+  "version": "0.20.2",
   "description": "Ancilla web app: shared UI wired to the local server over REST and SSE",
   "type": "module",
   "scripts": {
@@ -20,6 +20,8 @@
     "@ancilla/ui": "*",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "~2.7.3",
+    "@tauri-apps/plugin-fs": "~2.5.2",
     "@tauri-apps/plugin-notification": "^2.4.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.11.0",

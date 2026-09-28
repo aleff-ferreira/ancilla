@@ -547,6 +547,26 @@ export interface AccountView {
   lastUsedAt: string | null;
 }
 
+/** The default CLI login can live in the OS credential store or another runtime; null means unverified. */
+export interface DefaultLoginIdentity {
+  hasLogin: boolean | null;
+  email: string | null;
+}
+
+export interface AccountsHealth {
+  metaApiKeyInherited: boolean;
+  defaultLogin?: DefaultLoginIdentity;
+}
+
+export type AccountLoginResult =
+  | { url: string; code: string | null; loginId?: string }
+  | { fallback: string };
+
+export interface AccountLoginProgress {
+  status: "waiting" | "done" | "error" | "idle";
+  message?: string;
+}
+
 /** What the file viewer does with a file: text and markdown come inline, media is loaded from its own URL. */
 export type FileKind = "text" | "markdown" | "image" | "video" | "audio" | "pdf" | "binary";
 

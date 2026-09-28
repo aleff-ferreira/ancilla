@@ -4,7 +4,7 @@ import { useApp } from "../../app/context.js";
 import type { ThreadFold } from "../../model/fold.js";
 import type { ThreadStatus } from "../../model/status.js";
 import type { AppState, ThreadState } from "../../model/store.js";
-import { sidebarCrewSummary, crewBusy, type SidebarCrewSummary } from "../../model/crew.js";
+import { sidebarCrewSummary, crewBusy, crewTurnKey, type SidebarCrewSummary } from "../../model/crew.js";
 import type { SessionSummary } from "../../types.js";
 import { cn } from "../ui/primitives.js";
 import { Strip } from "./Strip.js";
@@ -88,6 +88,7 @@ interface CrewParts {
   researchRuns: ThreadState["researchRuns"];
   busy: boolean;
   stale: boolean;
+  turnKey: string;
 }
 
 /** Whether the fold stands for what the thread is doing now, rather than what it last saw. */
@@ -110,6 +111,7 @@ function sameParts(a: CrewParts | null, b: CrewParts | null): boolean {
     a.userInputs === b.userInputs &&
     a.researchRuns === b.researchRuns &&
     a.busy === b.busy &&
+    a.turnKey === b.turnKey &&
     a.stale === b.stale
   );
 }
@@ -135,6 +137,7 @@ export function useSidebarCrew(session: SessionSummary, status: ThreadStatus, no
       userInputs: fold.userInputs,
       researchRuns: thread.researchRuns,
       busy,
+      turnKey: crewTurnKey(fold),
       stale: busy && !foldLive(s, thread),
     };
   }, sameParts);

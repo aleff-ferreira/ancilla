@@ -24,7 +24,7 @@ export interface ActivityDrawerProps {
   /** Strip cells and chips for the run items, by `activityKey`. */
   runs?: Readonly<Record<string, ActivityRunExtra>>;
   /** What Stop everything would stop in the open thread, by name, for the confirm. */
-  stopNames?: { runs: readonly string[]; tasks: readonly string[] } | null;
+  stopNames?: { runs: readonly string[]; tasks: readonly string[]; agents?: readonly string[] } | null;
   /** The sidebar's width; under 900 px the drawer takes it plus 200. */
   sidebarWidth?: number;
   onFilter(filter: ActivityFilter): void;
@@ -96,7 +96,7 @@ export function drawerKeyAction(event: { key: string; ctrlKey: boolean; metaKey:
   }
 }
 
-function stopList(stopAll: { runs: number; tasks: number }): string {
+function stopList(stopAll: NonNullable<ActivityVM["stopAll"]>): string {
   const parts: string[] = [];
   if (stopAll.runs > 0) {
     parts.push(`${stopAll.runs} ${stopAll.runs === 1 ? "run" : "runs"}`);
@@ -104,16 +104,19 @@ function stopList(stopAll: { runs: number; tasks: number }): string {
   if (stopAll.tasks > 0) {
     parts.push(`${stopAll.tasks} ${stopAll.tasks === 1 ? "task" : "tasks"}`);
   }
-  return parts.join(" and ");
+  if ((stopAll.agents ?? 0) > 0) {
+    parts.push(`${stopAll.agents} native ${stopAll.agents === 1 ? "agent" : "agents"}`);
+  }
+  return parts.length < 3 ? parts.join(" and ") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 }
 
 /** The foot's sentence while something in the open thread can be stopped. */
-export function stopAllText(stopAll: { runs: number; tasks: number }): string {
+export function stopAllText(stopAll: NonNullable<ActivityVM["stopAll"]>): string {
   return `Stop everything stops ${stopList(stopAll)} in this thread. Approvals stay open.`;
 }
 
 /** The question Stop everything asks first. */
-export function stopAllQuestion(stopAll: { runs: number; tasks: number }): string {
+export function stopAllQuestion(stopAll: NonNullable<ActivityVM["stopAll"]>): string {
   return `Stop everything? Stops ${stopList(stopAll)}. Approvals stay open.`;
 }
 
@@ -182,7 +185,7 @@ export function ActivityDrawer(props: ActivityDrawerProps) {
     running: view.working.length,
     finished: view.finishedToday.length,
   };
-  const stopNames = [...(props.stopNames?.runs ?? []), ...(props.stopNames?.tasks ?? [])];
+  const stopNames = [...(props.stopNames?.runs ?? []), ...(props.stopNames?.tasks ?? []), ...(props.stopNames?.agents ?? [])];
   const noteAfter = view.note && filter !== "needs" && filter !== "finished" ? (sections.find((section) => section.id === "running")?.id ?? "end") : null;
   const note = (
     <div className="mx-2 mt-1.5 mb-0.5 flex items-start gap-2 rounded-[10px] bg-sunken px-2.5 py-2 text-xs leading-[18px] text-muted shadow-[inset_0_0_0_1px_var(--border)]">
@@ -349,7 +352,7 @@ export function ActivityDrawer(props: ActivityDrawerProps) {
 export interface ActivityModel {
   view: ActivityVM;
   runs: Record<string, ActivityRunExtra>;
-  stopNames: { runs: string[]; tasks: string[] } | null;
+  stopNames: { runs: string[]; tasks: string[]; agents?: string[] } | null;
 }
 
 function crewOf(state: AppState, sessionId: string, now: number) {
@@ -389,9 +392,11 @@ export function activityModel(state: AppState, now: number): ActivityModel {
       }
     }
     if (sessionId === open && view.stopAll) {
+      const agents = vm.subagents.filter((agent) => ["scheduled", "working", "finishing", "no-update", "waiting-on-you"].includes(agent.state)).map((agent) => agent.name);
       stopNames = {
         runs: vm.runs.filter((run) => runLive(run) && run.runId !== null).map((run) => run.name),
         tasks: vm.tasks.filter((task) => task.state === "working" || task.state === "no-update" || task.state === "waiting-on-you").map((task) => task.name),
+        ...(agents.length > 0 ? { agents } : {}),
       };
     }
   }

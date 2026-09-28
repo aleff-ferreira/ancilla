@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Lets the UI served by the local Ancilla server control its window, and check for, download and install app updates, and open outside links in the default browser.",
+  "description": "Lets the UI served by the local Ancilla server control its window, update the app, open outside links and save reports to files selected in a native Save As dialog.",
   "windows": ["main"],
   "remote": {
     "urls": ["http://127.0.0.1:*"]
@@ -21,6 +21,8 @@
     "process:allow-restart",
     "notification:default",
     "opener:allow-open-url",
-    "opener:allow-default-urls"
+    "opener:allow-default-urls",
+    "dialog:allow-save",
+    "fs:allow-write-file"
   ]
 }

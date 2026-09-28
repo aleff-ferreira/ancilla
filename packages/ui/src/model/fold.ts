@@ -88,6 +88,8 @@ export interface ThreadMeta {
   /** Ordering evidence for accepting newer metadata from a non-authoritative history page. */
   observed?: Partial<Record<MetaField, MetaObservation>>;
   todoList: TodoItem[] | null;
+  /** The turn that last changed this plan; a later turn must not animate an older unfinished plan. */
+  todoTurnId?: string | null;
   branch: string | null;
   contextUsage: ContextUsage | null;
   tokenTotals: TokenTotals | null;
@@ -194,10 +196,9 @@ export interface ThreadFold {
 
 export const HIDDEN_KINDS: ReadonlySet<string> = new Set(["reminderChild"]);
 
-/** Only activity the Crew reads: native items, launch/wait tools, and background commands. */
+/** Execution activity, including the foreground tools used during an ordinary turn. */
 function isCrewItem(item: MspItem): boolean {
-  return item.kind === "workflow" || item.kind === "subagent" ||
-    (item.kind === "toolCall" && (item.background === true || item.tool === "workflow" || item.tool === "subagent_spawn" || item.tool === "subagent_wait"));
+  return item.kind === "workflow" || item.kind === "subagent" || item.kind === "toolCall";
 }
 
 /** The pulse only looks back ten minutes, so a run keeps at most this many revision minutes. */
@@ -554,32 +555,24 @@ function traceWorkflow(draft: Draft, previous: MspItem | undefined, next: MspIte
 }
 
 /**
- * A tool call is traced while it runs, so that one sent to the background later still knows when it started; a
- * finished call that never ran in the background drops its trace again, and a long thread keeps only its tasks.
+ * Keep a tool's start and finish, including foreground calls. Crew uses these to show the current turn's actual
+ * execution history; completing a tool must settle its row instead of making it disappear.
  */
 function traceTask(draft: Draft, next: MspItem, eventAt: number | undefined): void {
   const at = revisionTime(next, eventAt);
   const running = next.status === "inProgress";
-  const background = next.background === true;
   const current = draft.fold.crew?.tasks[next.itemId];
   if (!current) {
-    if (!running && !background) {
-      return;
-    }
     const guess = uuidTime(next.itemId);
     draft.crew().tasks[next.itemId] = {
-      firstSeenAt: at ?? guess,
-      approx: at === undefined,
+      firstSeenAt: running ? at ?? guess : guess ?? at ?? null,
+      approx: !running || at === undefined,
       lastOutputAt: null,
       endedAt: running ? null : at ?? null,
     };
     return;
   }
   if (running) {
-    return;
-  }
-  if (!background) {
-    delete draft.crew().tasks[next.itemId];
     return;
   }
   if (current.endedAt === null) {
@@ -982,6 +975,7 @@ function applyOne(draft: Draft, event: ViewEvent): void {
     }
     case "session/todoListChanged":
       d.meta.todoList = Array.isArray(params["items"]) ? (params["items"] as TodoItem[]) : [];
+      d.meta.todoTurnId = str(params["turnId"]) ?? d.activeTurnId;
       observeMeta(d.meta, "todoList", event);
       break;
     case "session/branchChanged":

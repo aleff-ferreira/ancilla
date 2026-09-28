@@ -3,7 +3,7 @@ import {
   ArrowCounterClockwiseIcon, ChatCircleDotsIcon, CircleDashedIcon, ClockIcon, CodeIcon, EyeIcon, EyeSlashIcon, SkipForwardIcon, StopCircleIcon, WarningCircleIcon,
 } from "../ui/icons.js";
 import { formatTokens } from "../../model/format.js";
-import { durationText, researchCounters, runLive, usageTotal, type AgentVM, type AttemptEventVM, type RunVM } from "../../model/crew.js";
+import { canStopAgent, durationText, researchCounters, runLive, usageTotal, type AgentVM, type AttemptEventVM, type RunVM } from "../../model/crew.js";
 import { Button, cn } from "../ui/primitives.js";
 import { RESEARCH_NO_REASON, RESEARCH_OWN } from "./cardCopy.js";
 import { Sigil } from "./Sigil.js";
@@ -29,8 +29,8 @@ export interface LifeItem {
   attempt: number;
 }
 
-function kindWord(agent: Pick<AgentVM, "kind">): string {
-  return agent.kind === "task" ? "Background task" : agent.kind === "subagent" ? "Subagent" : agent.kind === "research" ? "Research worker" : "Workflow agent";
+function kindWord(agent: Pick<AgentVM, "kind" | "taskInfo">): string {
+  return agent.kind === "lead" ? "Lead agent" : agent.kind === "task" ? agent.taskInfo?.background === false ? "Foreground tool" : "Background task" : agent.kind === "subagent" ? "Subagent" : agent.kind === "research" ? "Research worker" : "Workflow agent";
 }
 
 /** A research worker's steps: the daemon reports its state and counters, not lifecycle events, so these are read off those. */
@@ -67,16 +67,18 @@ export function lifecycleItems(agent: AgentVM, run: RunVM | null): LifeItem[] {
     return researchItems(agent);
   }
   if (agent.kind !== "workflow") {
-    const who = agent.taskInfo?.initiator === "timeout" ? "Muse backgrounded it after a timeout" : agent.kind === "task" ? "You sent it to the background" : null;
-    items.push({ key: "start", glyph: "working", title: agent.kind === "task" ? "Sent to the background" : "Spawned", sub: who, at: agent.startedAt, approx: agent.approx, mute: false, attempt: 1 });
+    const who = agent.taskInfo?.background === false ? null : agent.taskInfo?.initiator === "timeout" ? "Muse backgrounded it after a timeout" : agent.taskInfo?.initiator === "user" ? "You sent it to the background" : null;
+    items.push({ key: "start", glyph: "working", title: agent.kind === "lead" || agent.taskInfo?.background === false ? "Started" : agent.kind === "task" ? "Task started" : "Spawned", sub: who, at: agent.startedAt, approx: agent.approx, mute: false, attempt: 1 });
     if (agent.kind === "task" && agent.taskInfo?.lastOutputAt !== null && agent.taskInfo?.lastOutputAt !== undefined) {
       items.push({ key: "output", glyph: "usage", title: "Last output", sub: agent.taskInfo.tail, at: agent.taskInfo.lastOutputAt, approx: false, mute: true, attempt: 1 });
     }
-    if (agent.state === "done") items.push({ key: "end", glyph: "done", title: agent.kind === "task" ? "Finished · no failure reported" : "Done", sub: agent.task?.source === "objective" && agent.failure === null ? null : null, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
+    if (agent.state === "done") items.push({ key: "end", glyph: "done", title: agent.kind === "task" ? agent.taskInfo?.exitCode === 0 ? "Finished · exit code 0" : "Finished · no failure reported" : "Done", sub: null, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
     else if (agent.state === "failed") items.push({ key: "end", glyph: "failed", title: "Failed", sub: agent.failure?.text ?? "Muse has not reported a reason yet", at: agent.endedAt, approx: false, mute: false, attempt: 1 });
     else if (agent.state === "skipped") items.push({ key: "end", glyph: "skipped", title: skippedWord(agent), sub: null, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
     else if (agent.state === "no-update") items.push({ key: "quiet", glyph: "no-update", title: `No output for ${silenceText(agent)}`, sub: "The task printed nothing in that time", at: "now", approx: false, mute: true, attempt: 1 });
     else if (agent.state === "waiting-on-you") items.push({ key: "need", glyph: "waiting-on-you", title: "Waiting for you", sub: agent.needs?.command ?? null, at: agent.needs?.askedAt ?? null, approx: false, mute: false, attempt: 1 });
+    else if (agent.state === "unknown") items.push({ key: "end", glyph: "unknown", title: "Outcome not reported", sub: null, at: agent.endedAt, approx: false, mute: false, attempt: 1 });
+    if (agent.pending === "stop") items.push({ key: "pending", glyph: "working", title: "Stopping…", sub: "Muse has not confirmed yet", at: "now", approx: false, mute: true, attempt: 1 });
     return items;
   }
   if (agent.state === "planned") {
@@ -182,15 +184,16 @@ export interface Fact {
 }
 
 function tokensFact(agent: AgentVM, live: boolean): Fact {
-  if (agent.tokens && usageTotal(agent.tokens) > 0) {
+  if (agent.tokens && (usageTotal(agent.tokens) > 0 || agent.kind === "lead")) {
     const parts = [formatTokens(usageTotal(agent.tokens))];
     if (agent.tokens.inputTokens !== undefined) parts.push(`in ${formatTokens(agent.tokens.inputTokens)}`);
     if (agent.tokens.outputTokens !== undefined) parts.push(`out ${formatTokens(agent.tokens.outputTokens)}`);
     if (agent.tokens.reasoningTokens !== undefined && agent.tokens.reasoningTokens > 0) parts.push(`reasoning ${formatTokens(agent.tokens.reasoningTokens)}`);
     return { key: "tokens", label: "Tokens", value: parts.join(" · ") };
   }
-  if (agent.kind === "task") return { key: "tokens", label: "Tokens", value: "Not reported for background tasks", nr: true };
+  if (agent.kind === "task") return { key: "tokens", label: "Tokens", value: agent.taskInfo?.background === false ? "Not reported for individual tools" : "Not reported for background tasks", nr: true };
   if (agent.kind === "research") return { key: "tokens", label: "Tokens", value: "Not reported per worker · the run counts its own", nr: true };
+  if (agent.kind === "lead") return { key: "tokens", label: "Tokens", value: live ? "Not reported yet" : NOT_REPORTED, nr: true };
   return { key: "tokens", label: "Tokens", value: live ? NEAR_END : NOT_REPORTED, nr: true };
 }
 
@@ -212,7 +215,7 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
   } else if (agent.state === "finishing") {
     status = "Finishing · usage reported, completion follows";
   } else if (agent.state === "failed") {
-    status = `Failed, terminal${runGoing ? " · the run went on without it" : ""}`;
+    status = agent.kind === "lead" ? "Turn failed" : `Failed, terminal${runGoing ? " · the run went on without it" : ""}`;
   } else if (agent.state === "done" && agent.durationMs !== null) {
     status = `Done · ${durationText(agent.durationMs)}`;
   }
@@ -224,8 +227,10 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
     facts.push({ key: "attempts", label: "Attempts", value: `${Math.max(1, agent.attempts.length)}${known ? ` · ${durations.join(" + ")}` : ""}` });
   }
   if (agent.kind === "task" && agent.taskInfo) {
-    facts.push({ key: "command", label: "Command", value: agent.taskInfo.command, mono: true });
-    facts.push({ key: "initiator", label: "Sent by", value: agent.taskInfo.initiator === "timeout" ? "Muse, after a timeout" : agent.taskInfo.initiator === "user" ? "You" : "Not reported", nr: agent.taskInfo.initiator === null });
+    const foreground = agent.taskInfo.background === false;
+    facts.push({ key: "command", label: foreground ? "Operation" : "Command", value: agent.taskInfo.command, mono: true });
+    if (foreground) facts.push({ key: "execution", label: "Execution", value: "Foreground" });
+    else facts.push({ key: "initiator", label: "Sent by", value: agent.taskInfo.initiator === "timeout" ? "Muse, after a timeout" : agent.taskInfo.initiator === "user" ? "You" : "Not reported", nr: agent.taskInfo.initiator === null });
   }
   if (agent.state !== "planned") {
     const into = agent.startedAt !== null && run?.startedAt !== null && run !== null ? ` · ${durationText(Math.max(0, agent.startedAt - run.startedAt))} into the run` : "";
@@ -237,7 +242,7 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
     }
   }
   if (agent.kind === "task" && agent.taskInfo) {
-    facts.push(agent.taskInfo.lastOutputAt !== null ? { key: "output", label: "Last output", value: clockSeconds(agent.taskInfo.lastOutputAt) } : { key: "output", label: "Last output", value: "No output yet", nr: true });
+    facts.push(agent.taskInfo.lastOutputAt !== null ? { key: "output", label: "Last output", value: clockSeconds(agent.taskInfo.lastOutputAt) } : { key: "output", label: "Last output", value: agent.taskInfo.tail ? "Time not reported" : live ? "No output yet" : "No output reported", nr: true });
   }
   if (agent.kind === "workflow" && (agent.state === "no-update" || agent.state === "working")) {
     facts.push(longest && longest.durationMs !== null
@@ -261,9 +266,16 @@ export function factsOf(agent: AgentVM, run: RunVM | null, model: string | null)
     facts.push(agent.toolCalls !== null
       ? { key: "tool-calls", label: "Tool calls", value: String(agent.toolCalls) }
       : { key: "tool-calls", label: "Tool calls", value: agent.kind === "workflow" && runGoing ? AT_RUN_END : NOT_REPORTED, nr: true });
-    facts.push({ key: "model", label: "Model", value: `Not reported for ${agent.kind === "workflow" ? "workflow agents" : "subagents"}${model ? ` · the lead runs ${model}` : ""}`, nr: true });
+    facts.push(agent.kind === "lead"
+      ? { key: "model", label: "Model", value: model ?? NOT_REPORTED, nr: model === null }
+      : { key: "model", label: "Model", value: `Not reported for ${agent.kind === "workflow" ? "workflow agents" : "subagents"}${model ? ` · the lead runs ${model}` : ""}`, nr: true });
   } else {
-    facts.push({ key: "exit", label: "Exit code", value: "Not reported for background tasks", nr: true });
+    const exitCode = agent.taskInfo?.exitCode;
+    const exitSignal = agent.taskInfo?.exitSignal;
+    facts.push(typeof exitCode === "number" && Number.isFinite(exitCode)
+      ? { key: "exit", label: "Exit code", value: String(exitCode) }
+      : { key: "exit", label: "Exit code", value: live ? "Not finished" : NOT_REPORTED, nr: true });
+    if (typeof exitSignal === "number" && Number.isFinite(exitSignal)) facts.push({ key: "signal", label: "Exit signal", value: String(exitSignal) });
   }
   if (agent.kind === "workflow") {
     const result = agent.state === "failed" ? "None · this agent did not finish"
@@ -420,9 +432,11 @@ export function Callout(props: CalloutProps) {
         <p className="m-0 mt-1 text-fg">
           {task
             ? "The task is still running but has printed nothing in that time. Muse does not say what it is doing."
-            : `Running for ${durationText(agent.runningMs ?? 0)}, ${longest !== null ? `longer than any finished agent (${durationText(longest)})` : "with no finished agent to compare with"}. Muse does not report what a workflow agent is doing between its start and its result, so this is a fact, not a verdict.`}
+            : agent.kind === "workflow"
+              ? `Running for ${durationText(agent.runningMs ?? 0)}, ${longest !== null ? `longer than any finished agent (${durationText(longest)})` : "with no finished agent to compare with"}. Muse does not report what a workflow agent is doing between its start and its result, so this is a fact, not a verdict.`
+              : `Running for ${durationText(agent.runningMs ?? 0)}. Muse has not reported another update.`}
         </p>
-        {!props.readOnly ? (
+        {!props.readOnly && canStopAgent(agent) ? (
           confirming === "stop" ? confirmRow("stop") : (
             <div className="mt-2.5 flex gap-1.5">
               <Button size="sm" variant="secondary" onClick={() => props.onConfirm({ kind: "stop", id: agent.id })}><StopCircleIcon size={13} />{task ? "Stop task" : "Stop agent"}</Button>
@@ -457,8 +471,8 @@ export function TaskSection(props: { agent: AgentVM }) {
   const { agent } = props;
   if (agent.kind === "task") return null;
   return (
-    <Section title="Task" aside={agent.task ? <><CodeIcon size={11} />{agent.task.source === "script" ? "from the workflow script" : agent.kind === "research" ? "the topic the supervisor gave it" : "the objective Muse gave it"}</> : null}>
-      <p className={cn("m-0 text-sm leading-5", agent.task ? "text-fg" : "text-subtle")}>{agent.task?.text ?? "Muse did not share this agent's task."}</p>
+    <Section title={agent.kind === "lead" ? "Activity" : "Task"} aside={agent.task && agent.kind !== "lead" ? <><CodeIcon size={11} />{agent.task.source === "script" ? "from the workflow script" : agent.kind === "research" ? "the topic the supervisor gave it" : "the objective Muse gave it"}</> : null}>
+      <p className={cn("m-0 text-sm leading-5", agent.task ? "text-fg" : "text-subtle")}>{agent.task?.text ?? (agent.kind === "lead" ? "Follow this turn's messages and tool activity in the transcript." : "Muse did not share this agent's task.")}</p>
     </Section>
   );
 }
@@ -498,13 +512,15 @@ export function Compared(props: { agent: AgentVM; run: RunVM }) {
 }
 
 /** What Muse does not stream, so nobody waits for it. */
-export function HonestyNote(props: { agent: Pick<AgentVM, "kind"> }) {
+export function HonestyNote(props: { agent: Pick<AgentVM, "kind" | "taskInfo"> }) {
   const text = props.agent.kind === "task"
-    ? "What Muse streams for a background task: its output lines. It does not report an exit code."
+    ? `What Muse reports for ${props.agent.taskInfo?.background === false ? "this tool" : "a background task"}: its status and available output. Exit code or signal is shown when reported.`
     : props.agent.kind === "subagent"
       ? "What Muse does not stream: a subagent's tool calls or transcript. Its summary arrives when the lead waits on it."
       : props.agent.kind === "research"
         ? "What the run reports for a worker: its state and its counters. Its findings and its tokens go into the run's report and the run's own usage."
+        : props.agent.kind === "lead"
+          ? "What Muse reports: this turn's status, tool activity and usage. Its messages and response appear in the transcript."
         : "What Muse does not stream: a workflow agent's tool calls, transcript or result. Tool-call counts arrive when the run ends.";
   const [strong, ...rest] = text.split(": ");
   return (
@@ -518,6 +534,15 @@ export function HonestyNote(props: { agent: Pick<AgentVM, "kind"> }) {
 /** The Result tab: what Muse shares of an agent's result, which for a workflow agent is nothing but the run's report. */
 export function ResultTab(props: { agent: AgentVM; run: RunVM | null }) {
   const { agent } = props;
+  if (agent.kind === "lead") {
+    return (
+      <Section title="Response">
+        <p className="m-0 text-sm leading-5 text-subtle">Read the transcript for this turn's messages, response and tool results.</p>
+        {agent.state === "unknown" ? <p className="m-0 mt-1 text-sm leading-5 text-muted">The turn ended without a reported outcome.</p> : null}
+        {agent.failure?.text ? <p className="m-0 mt-2 text-sm text-danger-text [overflow-wrap:anywhere]">{agent.failure.text}</p> : null}
+      </Section>
+    );
+  }
   if (agent.kind === "task") {
     return (
       <Section title="Last output">

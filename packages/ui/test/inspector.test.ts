@@ -4,7 +4,9 @@ import { createElement } from "react";
 import { Inspector, type InspectorProps } from "../src/components/crew/Inspector.js";
 import { AT_RUN_END, NEAR_END, NOT_REPORTED, factsOf, lifecycleItems } from "../src/components/crew/InspectorSections.js";
 import { withPending } from "../src/components/crew/panel.js";
-import { pendingKey, type AgentVM, type RunVM } from "../src/model/crew.js";
+import { crewView, pendingKey, type AgentVM, type RunVM } from "../src/model/crew.js";
+import { applyEvents, emptyFold } from "../src/model/fold.js";
+import type { MspItem, ViewEvent } from "../src/types.js";
 import { S, lanternDone, lanternRun, panelStore, renderWith, textOf } from "./crew-panel-fixture.js";
 
 function agent(run: RunVM, name: string): AgentVM {
@@ -198,7 +200,108 @@ describe("Inspector", () => {
       ["started", `${new Date(S(30, 0)).getHours()}:${String(new Date(S(30, 0)).getMinutes()).padStart(2, "0")}:00`],
       ["output", `${new Date(S(30, 30)).getHours()}:${String(new Date(S(30, 30)).getMinutes()).padStart(2, "0")}:30`],
       ["tokens", "Not reported for background tasks"],
-      ["exit", "Not reported for background tasks"],
+      ["exit", "Not finished"],
     ]);
+  });
+});
+
+const T = Date.UTC(2026, 8, 28, 12);
+const START: ViewEvent = { method: "turn/started", at: T, params: { turnId: "turn-1" } };
+const TOOL: MspItem = { itemId: "tool", kind: "toolCall", tool: "bash", args: '{"command":"npm run check"}', turnId: "turn-1", revision: 1, status: "inProgress" };
+function promptRun(item?: Partial<MspItem>, extra: ViewEvent[] = []): RunVM {
+  const events: ViewEvent[] = [START];
+  if (item) events.push({ method: "item/updated", at: T + 1_000, params: { item: { ...TOOL, ...item } } });
+  events.push(...extra);
+  const run = crewView(applyEvents(emptyFold(), events), null, T + 3_000).runs.find((candidate) => candidate.kind === "turn");
+  assert.ok(run);
+  return run;
+}
+
+describe("Inspector for ordinary prompts", () => {
+  it("shows the lead's model, current activity and transcript response without workflow or subagent claims", () => {
+    const run = promptRun();
+    const overview = render(run, "Muse");
+    assert.equal(fact(overview, "model"), "muse-spark-1.3");
+    assert.equal(fact(overview, "tool-calls"), "0");
+    assert.equal(fact(overview, "tokens"), "Not reported yet");
+    assert.match(textOf(overview), /Lead agent/);
+    assert.match(textOf(overview), /Activity Working on your prompt/);
+    assert.match(textOf(overview), /What Muse reports: this turn's status, tool activity and usage/);
+    assert.doesNotMatch(textOf(overview), /workflow|subagent|background|objective Muse gave/i);
+    const result = textOf(render(run, "Muse", { tab: "result" }));
+    assert.match(result, /Read the transcript for this turn's messages, response and tool results/);
+    assert.doesNotMatch(result, /workflow|run's report/i);
+    assert.deepEqual(factsOf(agent(run, "Muse"), run, null).find((entry) => entry.key === "model"), {
+      key: "model", label: "Model", value: NOT_REPORTED, nr: true,
+    });
+  });
+
+  it("keeps a reported zero in the lead's usage instead of treating it as absent", () => {
+    const run = promptRun();
+    const lead = { ...agent(run, "Muse"), tokens: { inputTokens: 0, outputTokens: 0 } };
+    const tokens = factsOf(lead, run, null).find((entry) => entry.key === "tokens");
+    assert.equal(tokens?.value, "0 · in 0 · out 0");
+    assert.equal(tokens?.nr, undefined);
+  });
+
+  it("describes a foreground tool as foreground and does not claim missing exit data is never reported", () => {
+    const run = promptRun({});
+    const markup = render(run, "npm run check");
+    const text = textOf(markup);
+    assert.match(text, /Tools · Foreground tool/);
+    assert.equal(fact(markup, "execution"), "Foreground");
+    assert.equal(fact(markup, "tokens"), "Not reported for individual tools");
+    assert.equal(fact(markup, "exit"), "Not finished");
+    assert.match(text, /Exit code or signal is shown when reported/);
+    assert.doesNotMatch(text, /background|workflow|Sent by|does not report an exit code/i);
+    assert.equal(lifecycleItems(agent(run, "npm run check"), run)[0]?.title, "Started");
+  });
+
+  it("shows zero exit status and available final output even when no output timestamp arrived", () => {
+    const run = promptRun({ status: "completed", exitCode: 0, visibleOutput: "Checks passed" });
+    const row = agent(run, "npm run check");
+    assert.equal(row.taskInfo?.exitCode, 0, "the model carries the reported status into the inspector");
+    const markup = render(run, row.name);
+    assert.equal(fact(markup, "exit"), "0");
+    assert.equal(fact(markup, "output"), "Time not reported");
+    assert.match(textOf(markup), /Finished · exit code 0/);
+    assert.match(textOf(render(run, row.name, { tab: "result" })), /Checks passed/);
+    assert.doesNotMatch(textOf(markup), /No output yet|does not report an exit code/);
+  });
+
+  it("shows the reported failure exit code or signal without substituting a success", () => {
+    const codeRun = promptRun({ status: "completed", exitCode: 7 });
+    assert.equal(fact(render(codeRun, "npm run check"), "exit"), "7");
+    const signalRun = promptRun({ status: "completed", exitSignal: 15 });
+    const markup = render(signalRun, "npm run check");
+    assert.equal(fact(markup, "signal"), "15");
+    assert.equal(fact(markup, "exit"), NOT_REPORTED);
+    assert.match(textOf(markup), /Stopped by signal 15/);
+    assert.doesNotMatch(textOf(markup), /no failure reported/);
+  });
+
+  it("keeps background terminology while showing reported background exit data", () => {
+    const run = promptRun();
+    const row: AgentVM = {
+      ...agent(promptRun({ status: "completed", exitCode: 0 }), "npm run check"), phase: "Background",
+      taskInfo: { command: "npm run check", tail: "Finished", lastOutputAt: T + 2_000, initiator: "user", approvalId: null, background: true, exitCode: 0 },
+    };
+    const markup = render(run, "Muse", { agent: row });
+    assert.equal(fact(markup, "tokens"), "Not reported for background tasks");
+    assert.equal(fact(markup, "exit"), "0");
+    assert.equal(fact(markup, "initiator"), "You");
+    assert.match(textOf(markup), /What Muse reports for a background task/);
+    assert.doesNotMatch(textOf(markup), /does not report an exit code/);
+  });
+
+  it("states unknown lead and tool outcomes in lifecycle and response sections", () => {
+    const run = promptRun({}, [{ method: "turn/completed", at: T + 2_000, params: { turnId: "turn-1", terminal: "unknown" } }]);
+    for (const row of run.agents) {
+      assert.equal(row.state, "unknown");
+      assert.equal(lifecycleItems(row, run).at(-1)?.title, "Outcome not reported");
+    }
+    assert.match(textOf(render(run, "Muse", { tab: "result" })), /The turn ended without a reported outcome/);
+    const stopped = { ...agent(promptRun(), "Muse"), pending: "stop" as const };
+    assert.equal(lifecycleItems(stopped, null).at(-1)?.title, "Stopping…");
   });
 });

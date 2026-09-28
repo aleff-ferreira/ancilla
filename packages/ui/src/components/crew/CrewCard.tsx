@@ -105,7 +105,7 @@ export function headSub(run: RunVM): { long: ReactNode; text: string } {
     parts.push(started);
     texts.push(started);
   }
-  const agents = `${plural(scheduled, "agent")}${run.counts.planned > 0 ? ` · ${run.counts.planned} planned` : ""}`;
+  const agents = run.kind === "turn" ? `Muse · ${plural(run.agents.filter((agent) => agent.kind === "task").length, "tool")}` : `${plural(scheduled, "agent")}${run.counts.planned > 0 ? ` · ${run.counts.planned} planned` : ""}`;
   parts.push(agents);
   texts.push(agents);
   if (run.tokens) {
@@ -140,7 +140,7 @@ export function phaseHeadText(run: RunVM, name: string): string | null {
   const phase = run.phases.find((candidate) => candidate.name === name);
   if (!phase) return null;
   const listed = phase.agents.filter((agent) => run.attention.some((candidate) => candidate.id === agent.id)).length;
-  const parts = [plural(phase.counts.total, "agent"), `${phase.counts.done} done`];
+  const parts = [plural(phase.counts.total, name === "Tools" ? "tool" : "agent"), `${phase.counts.done} done`];
   if (phase.counts.failed > 0) parts.push(`${phase.counts.failed} failed`);
   if (phase.counts.skipped > 0) parts.push(`${phase.counts.skipped} skipped`);
   if (listed > 0) parts.push(`${listed} listed above`);
@@ -489,7 +489,7 @@ export function CrewCard(props: CrewCardProps) {
             <div className="crew-foot">
               <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("roster")}>
                 <RowsIcon size={12} />
-                <span className="lbl">All {rolling(String(run.counts.total))} agents</span>
+                <span className="lbl">{run.kind === "turn" ? "View activity" : <>All {rolling(String(run.counts.total))} agents</>}</span>
               </Button>
               <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("timeline")}>
                 <ChartBarIcon size={12} />

@@ -22,7 +22,7 @@ import type {
   WorkflowAction,
 } from "../types.js";
 import { describeTool, modelDisplayName } from "./format.js";
-import { pendingKey, researchRunIdOf, runLive, crewBusy, crewView, type AgentVM } from "./crew.js";
+import { canStopAgent, pendingKey, researchRunIdOf, turnIdOf, runLive, crewBusy, crewView, type AgentVM } from "./crew.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
 import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
@@ -79,6 +79,7 @@ import {
 } from "./store.js";
 import { NotificationManager, type Notifier } from "./notify.js";
 import { UpdateManager, type AppUpdater } from "./updates.js";
+import { saveBrowserFile, type FileSaver } from "./fileSave.js";
 
 /** The environment the controller runs in; injectable so the logic stays testable without a DOM. */
 export interface Platform {
@@ -94,8 +95,8 @@ export interface Platform {
   focused(): boolean;
   /** Names the window, as `(2) Design the sync engine — Ancilla`; a shell without a title bar leaves it out. */
   setWindowTitle?(title: string): void;
-  /** Saves a file the server serves at `url` the way this shell saves files: a browser downloads it. */
-  download?(url: string, name: string): void;
+  /** Lets the user choose a destination before rendering a document; cancellation does not save anything. */
+  saveFile?: FileSaver;
 }
 
 /** How the export formats are named in copy. */
@@ -188,15 +189,7 @@ export function browserPlatform(): Platform {
     cancel: (handle) => window.clearTimeout(handle as number),
     // A window with no document at all is not one anybody is looking at.
     focused: () => typeof document !== "undefined" && document.hasFocus(),
-    download: (url, name) => {
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = name;
-      anchor.rel = "noopener";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-    },
+    saveFile: saveBrowserFile,
     setWindowTitle: (title) => {
       if (typeof document !== "undefined" && document.title !== title) {
         document.title = title;
@@ -289,8 +282,8 @@ const HISTORY_SYNC_MS = 15_000;
 const RECOVERY_RETRY_MS = 30_000;
 /** How often an in-progress device-code login checks whether the account has signed in. */
 const LOGIN_POLL_MS = 2_000;
-/** Gives up polling after this many attempts (two minutes at `LOGIN_POLL_MS`); the modal stays open. */
-const LOGIN_POLL_MAX_ATTEMPTS = 60;
+/** Browser approval can involve account recovery or MFA; leave a clear retry state after ten minutes. */
+const LOGIN_POLL_MAX_ATTEMPTS = 300;
 /** A fold still showing a turn the server finished this long ago missed its ending: reload it. */
 const DIVERGED_GRACE_MS = 30_000;
 /** Both sides agree a turn is running, but nothing landed for this long: reload it. */
@@ -568,6 +561,7 @@ export class AncillaController {
   private yoloSettingsChain: Promise<void> = Promise.resolve();
   /** Bumped by every accounts request, so only the latest completion or rollback lands. */
   private accountsRev = 0;
+  private accountsHealthRev = 0;
   /** Account mutations queue behind each other so rapid edits land in order. */
   private accountsChain: Promise<void> = Promise.resolve();
   /** Bumped by every project-default-account request, so only the latest completion or rollback lands. */
@@ -2467,9 +2461,12 @@ export class AncillaController {
 
   /** Whether META_API_KEY in the environment makes every account share one Meta login. A server without the route leaves this false. */
   async loadAccountsHealth(): Promise<void> {
+    const rev = ++this.accountsHealthRev;
     try {
       const res = await this.client.accountsHealth();
-      this.update((s) => ({ ...s, metaApiKeyInherited: res.metaApiKeyInherited }));
+      if (rev === this.accountsHealthRev) {
+        this.update((s) => ({ ...s, metaApiKeyInherited: res.metaApiKeyInherited, defaultLogin: res.defaultLogin ?? null }));
+      }
     } catch {
       /* a server without the route leaves the flag false */
     }
@@ -2547,42 +2544,56 @@ export class AncillaController {
   /**
    * Starts an in-app device-code sign-in for an account: spawns `muse login` on the server and shows
    * the code the moment it arrives. Opens the modal right away with an empty marker so the wait for
-   * Muse to print the link is not silent, then polls `loadAccounts` until the account reports it is
-   * signed in (or gives up after `LOGIN_POLL_MAX_ATTEMPTS`, leaving the modal open with its link).
+   * Muse to print the link is not silent. New servers confirm this attempt's own process exit;
+   * older transports fall back to the named profile's identity.
    */
-  async beginLogin(id: string): Promise<void> {
-    this.stopLoginPoll();
+  async beginLogin(id: string | null): Promise<void> {
+    this.cancelLogin();
     const rev = ++this.loginRev;
-    this.update((s) => ({ ...s, accountLogin: { accountId: id, url: "", code: null, status: "waiting" } }));
+    this.update((s) => ({ ...s, accountLogin: { accountId: id, url: "", code: null, status: "starting" } }));
     try {
       const result = await this.client.loginAccount(id);
       if (rev !== this.loginRev) {
+        if ("loginId" in result && result.loginId) void this.client.cancelAccountLogin?.(id, result.loginId).catch(() => undefined);
         return;
       }
       if ("fallback" in result) {
         this.update((s) => ({ ...s, accountLogin: { accountId: id, fallback: result.fallback } }));
         return;
       }
-      this.update((s) => ({ ...s, accountLogin: { accountId: id, url: result.url, code: result.code, status: "waiting" } }));
+      this.update((s) => ({ ...s, accountLogin: { accountId: id, url: result.url, code: result.code, status: "waiting", ...(result.loginId ? { loginId: result.loginId } : {}) } }));
       this.loginPollAttempts = 0;
       this.scheduleLoginPoll(id, rev);
     } catch (error) {
       if (rev !== this.loginRev) {
         return;
       }
-      this.update((s) => ({ ...s, accountLogin: null }));
-      this.toast("error", "Could not start sign-in", errorMessage(error));
+      this.update((s) => ({ ...s, accountLogin: { accountId: id, url: "", code: null, status: "error", message: errorMessage(error) } }));
     }
   }
 
   /** Closes the device-code modal and stops its poll. Safe to call whether or not a login is running. */
   cancelLogin(): void {
+    const current = this.state.accountLogin;
     this.loginRev += 1;
     this.stopLoginPoll();
     this.update((s) => ({ ...s, accountLogin: null }));
+    if (current && "loginId" in current && current.loginId && current.status !== "done") {
+      void this.client.cancelAccountLogin?.(current.accountId, current.loginId).catch(() => undefined);
+    }
   }
 
-  private scheduleLoginPoll(id: string, rev: number): void {
+  /** Checks immediately after returning from the browser, and can resume a stopped polling loop. */
+  async checkLogin(): Promise<void> {
+    const login = this.state.accountLogin;
+    if (!login || !("status" in login) || login.status === "starting" || login.status === "done") return;
+    this.stopLoginPoll();
+    const rev = ++this.loginRev;
+    this.update((s) => ({ ...s, accountLogin: { ...login, status: "waiting", message: undefined } }));
+    await this.pollLogin(login.accountId, rev);
+  }
+
+  private scheduleLoginPoll(id: string | null, rev: number): void {
     if (this.disposed || rev !== this.loginRev) {
       return;
     }
@@ -2592,17 +2603,37 @@ export class AncillaController {
     }, LOGIN_POLL_MS);
   }
 
-  private async pollLogin(id: string, rev: number): Promise<void> {
+  private async pollLogin(id: string | null, rev: number): Promise<void> {
     if (rev !== this.loginRev || !this.isWaitingLogin(id)) {
       return;
     }
     this.loginPollAttempts += 1;
-    await this.loadAccounts();
+    const current = this.state.accountLogin;
+    let done = false;
+    if (current && "loginId" in current && current.loginId && this.client.accountLoginProgress) {
+      try {
+        const result = await this.client.accountLoginProgress(id, current.loginId);
+        if (rev !== this.loginRev || !this.isWaitingLogin(id)) return;
+        if (result.status === "error" || result.status === "idle") {
+          this.update((s) => ({ ...s, accountLogin: {
+            ...current, status: "error", message: result.message ?? "This sign-in is no longer active. Start again for a new code.",
+          } }));
+          return;
+        }
+        done = result.status === "done";
+      } catch {
+        if (rev !== this.loginRev || !this.isWaitingLogin(id)) return;
+        this.update((s) => ({ ...s, accountLogin: { ...current, status: "timeout", message: "Ancilla could not check sign-in. Check your connection, then choose Check sign-in." } }));
+        return;
+      }
+    } else {
+      await this.loadAccounts();
+      done = id !== null && this.state.accounts?.some((account) => account.id === id && account.hasLogin) === true;
+    }
     if (rev !== this.loginRev || !this.isWaitingLogin(id)) {
       return;
     }
-    const account = this.state.accounts?.find((a) => a.id === id);
-    if (account?.hasLogin) {
+    if (done) {
       this.update((s) => {
         const login = s.accountLogin;
         if (!login || login.accountId !== id || !("status" in login)) {
@@ -2610,16 +2641,25 @@ export class AncillaController {
         }
         return { ...s, accountLogin: { ...login, status: "done" } };
       });
+      void this.loadAccounts();
+      void this.loadModels();
+      void this.loadPlanUsage();
       return;
     }
     if (this.loginPollAttempts >= LOGIN_POLL_MAX_ATTEMPTS) {
+      this.update((s) => {
+        const login = s.accountLogin;
+        return login && "status" in login
+          ? { ...s, accountLogin: { ...login, status: "timeout", message: "Sign-in has not been confirmed. If you finished in the browser, check again. Otherwise, start again for a new code." } }
+          : s;
+      });
       return;
     }
     this.scheduleLoginPoll(id, rev);
   }
 
   /** Whether `accountLogin` is still the device prompt for `id`, waiting on a poll. */
-  private isWaitingLogin(id: string): boolean {
+  private isWaitingLogin(id: string | null): boolean {
     const login = this.state.accountLogin;
     return !!login && login.accountId === id && "status" in login && login.status === "waiting";
   }
@@ -3201,26 +3241,33 @@ export class AncillaController {
     }
   }
 
-  /**
-   * Turns a run's report into a PDF, Word or HTML document. The server writes it beside report.md, so in the
-   * desktop app (the shell with an updater) the toast offers to open it from there, while a browser, which has
-   * no such folder to hand, downloads the copy the server serves.
-   */
-  async exportResearchReport(sessionId: string, runId: string, format: ResearchExportFormat): Promise<void> {
+  /** Opens Save As before rendering the report, so the user chooses the exported copy's destination. */
+  async exportResearchReport(_sessionId: string, runId: string, format: ResearchExportFormat): Promise<void> {
     const key = `research-export:${runId}`;
     if (this.state.busy[key]) {
       return;
     }
     this.setBusy(key, true);
     try {
-      const out = await this.client.exportResearch(runId, format);
-      const cwd = this.state.sessions[sessionId]?.cwd ?? null;
-      if (this.updates && cwd) {
-        this.toast("success", `Saved ${out.name} in the project`, out.path, { label: "Open", run: () => void this.openProjectFile(cwd, out.path) });
-      } else {
-        this.platform.download?.(out.url, out.name);
-        this.toast("success", `Downloading ${out.name}`, out.path);
+      if (!this.platform.saveFile) {
+        throw new Error("This window cannot save files. Open Ancilla in the desktop app or a supported browser.");
       }
+      const mimeType = format === "pdf" ? "application/pdf" : format === "docx" ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "text/html";
+      const saved = await this.platform.saveFile(
+        { name: `report.${format}`, extension: format, mimeType, description: `${RESEARCH_EXPORT_WORD[format]} document` },
+        async () => {
+          await this.client.exportResearch(runId, format);
+          return this.client.readResearchExport(runId, format);
+        },
+      );
+      if (!saved) {
+        return;
+      }
+      this.toast(
+        "success",
+        saved.kind === "saved" ? `Saved ${saved.name}` : `Downloading ${saved.name}`,
+        saved.path ?? (saved.kind === "download" ? "Your browser controls the save location. Enable its “Ask where to save” setting to choose a folder." : undefined),
+      );
     } catch (error) {
       this.toast("error", `Could not export the report as ${RESEARCH_EXPORT_WORD[format]}`, errorMessage(error));
     } finally {
@@ -3909,6 +3956,7 @@ export class AncillaController {
       return;
     }
     const attempts = new Map<string, { latest: number; ended: Set<number> }>();
+    let nativeStates: Map<string, AgentVM["state"]> | null = null;
     for (const item of Object.values(fold.agentItems ?? fold.items)) {
       if (item.kind !== "workflow" || !Array.isArray(item.children)) continue;
       for (const child of item.children) {
@@ -3926,9 +3974,14 @@ export class AncillaController {
       const attempt = Number(rest.slice(colon + 1));
       const known = attempts.get(agentId);
       const item = fold.items[agentId];
-      const confirmed = known
+      const turnId = turnIdOf(agentId);
+      if (turnId === null && !known && !item && nativeStates === null) {
+        nativeStates = new Map(crewView(fold, this.state.sessions[sessionId] ?? null, this.platform.now()).subagents.map((agent) => [agent.id, agent.state]));
+      }
+      const native = nativeStates?.get(agentId);
+      const confirmed = turnId !== null ? Boolean(fold.turns[turnId]?.terminal) : known
         ? action === "retry" ? known.latest > attempt : known.ended.has(attempt) || known.latest > attempt
-        : item !== undefined && item.status !== "inProgress";
+        : item !== undefined ? item.status !== "inProgress" : native !== undefined && ["done", "failed", "skipped", "unknown"].includes(native);
       if (confirmed) {
         this.setPending(key, null);
       }
@@ -3941,6 +3994,7 @@ export class AncillaController {
    */
   async crewAction(sessionId: string, agent: AgentVM, action: "retry" | "skip" | "stop"): Promise<boolean> {
     const key = pendingKey(sessionId, agent.id, agent.attempt);
+    if (agent.kind === "lead") return action === "stop" ? this.stopRun(sessionId, agent.id) : false;
     if (agent.kind === "research") {
       // The daemon's supervisor runs research workers; only the run as a whole can be stopped.
       return false;
@@ -3965,7 +4019,7 @@ export class AncillaController {
       return ok;
     }
     if (agent.kind === "task") {
-      if (action !== "stop") {
+      if (action !== "stop" || !canStopAgent(agent)) {
         return false;
       }
       this.setPending(key, "stop");
@@ -3991,6 +4045,20 @@ export class AncillaController {
    * carries its prefix, and stops the way the composer's switch says: with a report from what it has, or without.
    */
   async stopRun(sessionId: string, itemId: string): Promise<boolean> {
+    const turnId = turnIdOf(itemId);
+    if (turnId !== null) {
+      if (this.state.threads[sessionId]?.fold.activeTurnId !== turnId) return false;
+      const key = pendingKey(sessionId, itemId, 1);
+      this.setPending(key, "stop");
+      try {
+        await this.client.interruptTurn(sessionId, turnId);
+        return true;
+      } catch (error) {
+        this.setPending(key, null);
+        this.toast("error", "Could not stop the turn", errorMessage(error));
+        return false;
+      }
+    }
     const researchId = researchRunIdOf(itemId);
     if (researchId !== null) {
       return this.stopResearch(researchId, this.state.researchStopWrites);
@@ -4005,10 +4073,10 @@ export class AncillaController {
   }
 
   /**
-   * Stops every live run and background task in one thread, research runs included. Approvals stay open. Returns
-   * what was asked to stop, by name, since `task/stopAll` does not say what it stopped.
+   * Requests a stop for every live run, native agent and background task in one thread. Approvals stay open.
+   * Returns the accepted requests by name; observed lifecycle events still decide when each item has stopped.
    */
-  async stopEverything(sessionId: string): Promise<{ runs: string[]; tasks: string[] }> {
+  async stopEverything(sessionId: string): Promise<{ runs: string[]; tasks: string[]; agents?: string[] }> {
     const thread = this.state.threads[sessionId];
     const session = this.state.sessions[sessionId] ?? null;
     if (!thread) {
@@ -4022,18 +4090,32 @@ export class AncillaController {
     });
     const runs = view.runs.filter((run) => runLive(run) && run.runId !== null);
     const tasks = view.tasks.filter((task) => task.state === "working" || task.state === "no-update" || task.state === "waiting-on-you");
-    await Promise.all(runs.map((run) => (run.kind === "research" ? this.stopRun(sessionId, run.itemId) : this.workflowAction(sessionId, "cancel", run.runId as string))));
-    if (tasks.length > 0) {
+    const agents = view.subagents.filter((agent) => ["scheduled", "working", "finishing", "no-update", "waiting-on-you"].includes(agent.state));
+    const stopTasks = async (): Promise<boolean> => {
+      if (tasks.length === 0) return false;
       for (const task of tasks) {
-        this.setPending(pendingKey(sessionId, task.id, 1), "stop");
+        this.setPending(pendingKey(sessionId, task.id, task.attempt), "stop");
       }
-      if (!(await this.taskAction(sessionId, "stopAll"))) {
+      const accepted = await this.taskAction(sessionId, "stopAll");
+      if (!accepted) {
         for (const task of tasks) {
-          this.setPending(pendingKey(sessionId, task.id, 1), null);
+          this.setPending(pendingKey(sessionId, task.id, task.attempt), null);
         }
       }
-    }
-    return { runs: runs.map((run) => run.name), tasks: tasks.map((task) => task.name) };
+      return accepted;
+    };
+    // A run may wait while producing its final research report; dispatch the independent stops immediately.
+    const [runAccepted, agentAccepted, tasksAccepted] = await Promise.all([
+      Promise.all(runs.map((run) => this.stopRun(sessionId, run.itemId))),
+      Promise.all(agents.map((agent) => this.crewAction(sessionId, agent, "stop"))),
+      stopTasks(),
+    ]);
+    const acceptedAgents = agents.filter((_agent, index) => agentAccepted[index]).map((agent) => agent.name);
+    return {
+      runs: runs.filter((_run, index) => runAccepted[index]).map((run) => run.name),
+      tasks: tasksAccepted ? tasks.map((task) => task.name) : [],
+      ...(acceptedAgents.length > 0 ? { agents: acceptedAgents } : {}),
+    };
   }
 
   dismissReport(sessionId: string, itemId: string): void {

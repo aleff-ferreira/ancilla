@@ -1,5 +1,6 @@
 import { formatClock, formatTokens } from "../../model/format.js";
 import { phaseLine } from "../../model/research.js";
+import { initiatorText, plural } from "./cardCopy.js";
 import type { CrewFilter } from "../../model/store.js";
 import { durationText, pendingKey, phasesOf, researchCounters, runLive, usageTotal, type AgentState, type AgentVM, type PendingAction, type PhaseVM, type RunNeedVM, type RunVM } from "../../model/crew.js";
 
@@ -362,8 +363,8 @@ export function subline(agent: AgentVM, run: Pick<RunVM, "clockAt" | "longestFin
     }
     case "working": {
       if (agent.kind === "task") {
-        const who = agent.taskInfo?.initiator === "timeout" ? "Muse backgrounded it after a timeout" : "You sent it to the background";
-        return { word: "Running", tone: "work", rest: [who, ...(agent.taskInfo?.tail ? [agent.taskInfo.tail] : [])], mono: Boolean(agent.taskInfo?.tail) };
+        const who = agent.taskInfo?.background === false ? null : initiatorText(agent.taskInfo?.initiator ?? null);
+        return { word: "Running", tone: "work", rest: [...(who ? [who] : []), ...(agent.taskInfo?.tail ? [agent.taskInfo.tail] : [])], mono: Boolean(agent.taskInfo?.tail) };
       }
       const silentSinceStart = agent.lastEventAt !== null && agent.startedAt !== null && agent.lastEventAt <= agent.startedAt;
       if (silentSinceStart) return { word: "Working", tone: "work", rest: ["no update since it started"] };
@@ -434,7 +435,9 @@ export function summaryParts(run: RunVM): SummaryPart[] {
       parts.push({ text: "Starting", strong: true }, { text: "no agents scheduled yet" });
       return parts;
     case "running":
-      if (run.research) {
+      if (run.kind === "turn") {
+        parts.push({ text: run.agents[0]?.state === "waiting-on-you" ? "Waiting for you" : run.agents[0]?.state === "working" ? "Muse working" : "Work continues", strong: true }, { text: `${plural(run.agents.filter((agent) => agent.kind === "task" && agent.state === "done").length, "tool")} completed` });
+      } else if (run.research) {
         // A research run says which phase the daemon is in; its rounds are planned as it goes.
         parts.push({ text: phaseLine(run.research), strong: true }, { text: `${counts.done} done` }, { text: `${counts.working + counts.finishing + counts.noUpdate} working` });
       } else if (run.plannedKnown) {
@@ -446,8 +449,12 @@ export function summaryParts(run: RunVM): SummaryPart[] {
       break;
     case "finished":
     case "finished-with-failures": {
+      if (run.kind === "turn" && run.agents[0]?.state === "unknown") {
+        parts.push({ text: "Turn ended", strong: true }, { text: "outcome not reported" });
+        break;
+      }
       const unit = run.research ? ["round", "rounds"] : ["phase", "phases"];
-      parts.push({ text: `${counts.done} of ${counts.total} agents finished`, strong: true }, { text: `${run.phases.length} ${run.phases.length === 1 ? unit[0] : unit[1]}` });
+      parts.push({ text: run.kind === "turn" ? `${counts.done} of ${counts.total} activities finished` : `${counts.done} of ${counts.total} agents finished`, strong: true }, { text: `${run.phases.length} ${run.phases.length === 1 ? unit[0] : unit[1]}` });
       break;
     }
     case "stopped":
@@ -473,8 +480,9 @@ export function summaryText(run: RunVM): string {
 }
 
 /** The pill in the panel's head. */
-export function statusPill(run: Pick<RunVM, "status" | "stale">): { text: string; tone: "run" | "ok" | "mute" | "fail" } {
+export function statusPill(run: Pick<RunVM, "status" | "stale"> & Partial<Pick<RunVM, "kind" | "agents">>): { text: string; tone: "run" | "ok" | "mute" | "fail" } {
   if (run.stale) return { text: "Last known", tone: "mute" };
+  if (run.kind === "turn" && run.status !== "running" && run.agents?.[0]?.state === "unknown") return { text: "Outcome not reported", tone: "mute" };
   switch (run.status) {
     case "starting": return { text: "Starting", tone: "run" };
     case "running": return { text: "Running", tone: "run" };

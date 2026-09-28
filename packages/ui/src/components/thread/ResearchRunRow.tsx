@@ -293,7 +293,7 @@ const EXPORTS: { format: ResearchExportFormat; label: string; hint: string }[] =
   { format: "html", label: "Web page", hint: ".html" },
 ];
 
-/** The report as a document: the server writes it beside report.md, and the shell saves or opens it from there. */
+/** The report as a document, saved to the destination the user chooses. */
 function DownloadMenu(props: { run: ResearchRunView; sessionId: string }) {
   const controller = useController();
   const busy = useApp((s) => Boolean(s.busy[`research-export:${props.run.runId}`]));

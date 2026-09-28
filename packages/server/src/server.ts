@@ -76,7 +76,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 
-export const ANCILLA_VERSION = "0.20.1";
+export const ANCILLA_VERSION = "0.20.2";
 
 export interface HostExit {
   code: number | null;
@@ -297,6 +297,7 @@ const ENV_CACHE_MS = 30_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const AUTO_SETTLE_SWEEP_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 30_000;
+const LOGIN_COMPLETE_TIMEOUT_MS = 10 * 60_000;
 
 class HttpError extends Error {
   constructor(
@@ -804,6 +805,9 @@ export class AncillaServer {
     };
   /** `muse login` children in flight, keyed by account id; a reopened modal kills and replaces the old one. */
   private readonly loginChildren = new Map<string, LoginChild>();
+  private readonly loginAttempts = new Map<string, { loginId: string; status: "waiting" | "done" | "error"; message?: string }>();
+  /** Reserved before async setup, so a slow earlier POST cannot replace a newer account sign-in. */
+  private readonly loginStartGenerations = new Map<string, number>();
   private readonly researchJobs: ResearchJobManager;
   /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
   private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
@@ -899,6 +903,8 @@ export class AncillaServer {
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const child of this.loginChildren.values()) child.kill();
+    this.loginChildren.clear();
     if (this.changeTimer) {
       clearTimeout(this.changeTimer);
       this.changeTimer = null;
@@ -1665,6 +1671,38 @@ export class AncillaServer {
       }
       return true;
     }
+    const accountLoginMatch = /^\/api\/accounts\/([^/]+)\/login$/.exec(path);
+    if (path === "/api/login" || accountLoginMatch) {
+      const id = accountLoginMatch ? decodeURIComponent(accountLoginMatch[1] as string) : null;
+      const key = id ?? "";
+      if (method === "GET" || method === "DELETE") {
+        const attempt = this.loginAttempts.get(key);
+        const matches = attempt && attempt.loginId === url.searchParams.get("loginId");
+        if (method === "DELETE") {
+          // Closing an older window must not cancel a newer sign-in for the same account.
+          if (matches && attempt.status === "waiting") {
+            attempt.status = "error";
+            attempt.message = "Sign-in was cancelled. Start again for a new code.";
+            this.loginChildren.get(key)?.kill();
+          }
+          this.json(res, 200, { ok: true });
+        } else {
+          this.json(res, 200, matches ? { status: attempt.status, ...(attempt.message ? { message: attempt.message } : {}) } : { status: "idle" });
+        }
+        return true;
+      }
+      if (method === "POST") {
+        const generation = (this.loginStartGenerations.get(key) ?? 0) + 1;
+        this.loginStartGenerations.set(key, generation);
+        let profile: Profile | null = null;
+        if (id !== null) {
+          try { profile = await this.aonia.getProfile(id); }
+          catch (error) { throw this.accountError(error); }
+        }
+        this.json(res, 200, await this.runLogin(key, profile, generation));
+        return true;
+      }
+    }
     if (method === "PATCH" && path.startsWith("/api/accounts/")) {
       const id = decodeURIComponent(path.slice("/api/accounts/".length));
       const body = await this.readBody(req);
@@ -1696,26 +1734,9 @@ export class AncillaServer {
     }
     if (method === "GET" && path === "/api/accounts/health") {
       const findings = await this.aonia.doctor();
-      const inherited = findings.some((f) => f.code === "meta_api_key_inherited");
-      this.json(res, 200, { metaApiKeyInherited: inherited });
-      return true;
-    }
-    if (method === "POST" && path.startsWith("/api/accounts/") && path.endsWith("/login")) {
-      const id = decodeURIComponent(path.slice("/api/accounts/".length, path.length - "/login".length));
-      if ((await this.museRuntime()) === "wsl") {
-        this.json(res, 200, {
-          fallback: `In-app login is not available when Muse runs in WSL. Log in from a terminal with: aonia login ${id}.`,
-        });
-        return true;
-      }
-      let profile: Profile;
-      try {
-        profile = await this.aonia.getProfile(id);
-      } catch (error) {
-        throw this.accountError(error);
-      }
-      const result = await this.runLogin(id, profile);
-      this.json(res, 200, result);
+      const inherited = findings.some((f) => f.code === "meta_api_key_inherited") ||
+        ((await this.museRuntime()) === "wsl" && Boolean(this.options.wslEnv?.["META_API_KEY"]));
+      this.json(res, 200, { metaApiKeyInherited: inherited, defaultLogin: await this.defaultLoginIdentity() });
       return true;
     }
     if (method === "PATCH" && path === "/api/projects/default-account") {
@@ -3843,6 +3864,23 @@ export class AncillaServer {
     );
   }
 
+  private async defaultLoginIdentity(): Promise<{ hasLogin: boolean | null; email: string | null }> {
+    // Absence of a local auth file does not prove a Keychain or WSL login is missing.
+    // A custom auth path also makes the default XDG file an unrelated source of identity.
+    if (process.env["MUSE_AUTH_PATH"]) return { hasLogin: null, email: null };
+    if ((await this.museRuntime()) === "wsl") return { hasLogin: null, email: null };
+    try {
+      const identity = await this.aonia.identityOf({
+        id: "default", name: "Default login", createdAt: "", lastUsedAt: null,
+        roots: { config: process.env["XDG_CONFIG_HOME"] || join(this.options.home, ".config"), data: "" },
+      });
+      return {
+        hasLogin: identity.hasLogin ? true : this.options.platform === "darwin" ? null : false,
+        email: identity.email,
+      };
+    } catch { return { hasLogin: null, email: null }; }
+  }
+
   /** Turns an aonia error into the right HTTP status: a duplicate is 409, a bad id or missing profile is 400. */
   private accountError(error: unknown): HttpError {
     if (error instanceof AoniaError) {
@@ -3859,8 +3897,8 @@ export class AncillaServer {
    * The child keeps running after that (the user finishes the sign-in in a browser); it exits on its
    * own. A second call for the same account id kills and replaces whatever is already running for it.
    */
-  private async runLogin(id: string, profile: Profile): Promise<{ url: string; code: string | null }> {
-    const command = this.aonia.loginCommand(profile);
+  private async runLogin(id: string, profile: Profile | null, generation: number): Promise<{ url: string; code: string | null; loginId: string }> {
+    const command = profile ? this.aonia.loginCommand(profile) : { command: "muse", args: ["login"], env: {} };
     const runtime = await this.museRuntime();
     const resolved = command.command === "muse"
       ? this.options.musePath ?? (await this.environment(false)).musePath ?? command.command
@@ -3868,61 +3906,99 @@ export class AncillaServer {
     const login = planMuseCli({ platform: this.options.platform, runtime, distro: this.wslDistro(),
       musePath: resolved, args: command.args });
     const loginEnv: Record<string, string> = this.options.platform === "win32" && runtime === "wsl"
-      ? wslSpawnEnv({ ...process.env, ...command.env }, this.wslEnvWithout(command.env), PROFILE_WSLENV)
+      ? wslSpawnEnv({ ...process.env, ...command.env }, this.wslEnvWithout(command.env), profile ? PROFILE_WSLENV : [])
       : Object.fromEntries(
           Object.entries({ ...process.env, ...command.env }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         );
+    // Both the account lookup and runtime/path discovery can finish out of order. Check before touching the
+    // live child; the rest of admission is synchronous, and stale DELETEs remain guarded by their attempt id.
+    if (this.closed || this.loginStartGenerations.get(id) !== generation) {
+      throw new HttpError(409, "A newer sign-in request replaced this one. Use the latest sign-in code.");
+    }
     const previous = this.loginChildren.get(id);
     if (previous) {
       previous.kill();
       this.loginChildren.delete(id);
     }
-    const child = this.options.loginSpawn(login.command, login.args, { env: loginEnv });
+    if (runtime === "native") {
+      const releaseInfo = this.releaseInfoFor(resolved);
+      if (releaseInfo) loginEnv["MUSE_RELEASE_INFO"] = releaseInfo;
+    }
+    const attempt = { loginId: randomUUID(), status: "waiting" as "waiting" | "done" | "error", message: undefined as string | undefined };
+    this.loginAttempts.set(id, attempt);
+    let child: LoginChild;
+    try { child = this.options.loginSpawn(login.command, login.args, { env: loginEnv }); }
+    catch {
+      attempt.status = "error";
+      attempt.message = "Muse could not start sign-in. Check that Muse is installed in the selected runtime, then try again.";
+      throw new HttpError(503, attempt.message);
+    }
     this.loginChildren.set(id, child);
     return new Promise((resolvePromise, reject) => {
       let settled = false;
       let accumulated = "";
+      let completionTimer: ReturnType<typeof setTimeout> | null = null;
+      const fail = (message: string) => {
+        if (attempt.status === "waiting") {
+          attempt.status = "error";
+          attempt.message = message;
+        }
+      };
       const timer = setTimeout(() => {
         if (settled) {
           return;
         }
         settled = true;
+        fail("Muse did not provide a sign-in link within 30 seconds. Check your connection, then try again.");
         child.kill();
-        this.loginChildren.delete(id);
-        reject(new HttpError(504, "Muse did not return a sign-in link."));
+        if (this.loginChildren.get(id) === child) this.loginChildren.delete(id);
+        reject(new HttpError(504, attempt.message as string));
       }, LOGIN_TIMEOUT_MS);
       const onData = (chunk: unknown) => {
         if (settled) {
           return;
         }
-        accumulated += String(chunk);
+        accumulated = (accumulated + String(chunk)).slice(-32_768);
         const parsed = parseLoginOutput(accumulated);
         if (parsed.url) {
           settled = true;
           clearTimeout(timer);
-          resolvePromise({ url: parsed.url, code: parsed.code });
+          completionTimer = setTimeout(() => {
+            fail("Sign-in took too long. Start again for a new code, then finish the approval in your browser.");
+            child.kill();
+          }, LOGIN_COMPLETE_TIMEOUT_MS);
+          completionTimer.unref();
+          resolvePromise({ url: parsed.url, code: parsed.code, loginId: attempt.loginId });
         }
       };
       child.stdout.on("data", onData);
       child.stderr.on("data", onData);
-      child.on("close", () => {
+      child.on("close", (exitCode) => {
+        if (completionTimer) clearTimeout(completionTimer);
         if (this.loginChildren.get(id) === child) {
           this.loginChildren.delete(id);
+        }
+        if (settled && exitCode === 0 && attempt.status === "waiting") {
+          attempt.status = "done";
+        } else {
+          fail("Muse ended sign-in before it was confirmed. Start again and approve the new code in your browser.");
         }
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          reject(new HttpError(504, "Muse did not return a sign-in link."));
+          reject(new HttpError(504, attempt.message ?? "Muse did not return a sign-in link."));
         }
       });
-      child.on("error", (error) => {
+      child.on("error", () => {
+        if (completionTimer) clearTimeout(completionTimer);
+        fail("Muse could not complete sign-in. Check your connection and Muse installation, then try again.");
         if (this.loginChildren.get(id) === child) {
           this.loginChildren.delete(id);
         }
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          reject(error instanceof Error ? error : new Error(String(error)));
+          reject(new HttpError(503, attempt.message as string));
         }
       });
     });

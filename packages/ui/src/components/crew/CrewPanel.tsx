@@ -4,7 +4,7 @@ import { ArrowLeftIcon, CaretRightIcon, CircleDashedIcon, CopyIcon, DotsThreeIco
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { emptyCrewPanel, type CrewFilter } from "../../model/store.js";
-import { runLive, crewBusy, crewView, type AgentVM, type RunNeedVM, type RunVM } from "../../model/crew.js";
+import { canStopAgent, runLive, runCounts, phasesOf, crewBusy, crewTurnKey, crewView, type AgentVM, type RunNeedVM, type RunVM } from "../../model/crew.js";
 import { isTyping } from "../requests/Requests.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Modal, Tip } from "../ui/overlays.js";
 import { Button, IconButton, Kbd, Spinner, cn } from "../ui/primitives.js";
@@ -15,7 +15,7 @@ import { PanelResize } from "./PanelResize.js";
 import { Roster } from "./Roster.js";
 import type { RowAction, RowConfirm } from "./RosterRow.js";
 import { Timeline } from "./Timeline.js";
-import { chipCounts, focusOrder, issueOrder, rosterEntries, statusPill, summaryParts, visibleFilters, withPending, workingNames, type RosterSort } from "./panel.js";
+import { chipCounts, focusOrder, isLive, issueOrder, rosterEntries, statusPill, summaryParts, visibleFilters, withPending, workingNames, type RosterSort } from "./panel.js";
 import { usePanelKeys, type PanelKeyAction } from "./usePanelKeys.js";
 
 /** The thread column keeps at least this much beside a docked panel; below it the panel overlays (SPEC §3.1). */
@@ -92,7 +92,7 @@ export function CrewPanel(props: { sessionId: string }) {
     () => (fold ? crewView(fold, session, now, { stale, partialHistory: thread?.truncated === true, pending, skipped, models, sessionModel, researchRuns }) : null),
     // The view moves with the agent items, the trace, the requests, the research runs and the clock; a text delta elsewhere leaves it alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fold?.agentItems, fold?.crew, fold?.approvals, fold?.userInputs, fold?.order, fold?.meta.modelId, session?.sessionId, sessionModel, now, stale, thread?.truncated, pending, skipped, models, researchRuns],
+    [fold?.agentItems, fold?.crew, fold?.approvals, fold?.userInputs, fold?.order, fold?.meta.modelId, fold?.meta.calls, crewTurnKey(fold), session?.sessionId, sessionModel, now, stale, thread?.truncated, pending, skipped, models, researchRuns],
   );
   const shown = view ? panelRun(view.runs) : null;
   const run = useMemo(() => (shown ? withPending(shown, sessionId, pending) : null), [shown, sessionId, pending]);
@@ -127,10 +127,22 @@ export function CrewPanel(props: { sessionId: string }) {
   const agentOrder = useMemo(() => focusOrder(entries, true), [entries]);
   const issues = useMemo(() => issueOrder(run, entries), [run, entries]);
   const everyAgent = useMemo(() => [...(run?.agents ?? []), ...tasks, ...subagents], [run, tasks, subagents]);
+  // The run controls still address their own run. The summary and timeline include standalone work, which can
+  // keep going after that run ends and must not inherit its Finished badge or frozen time axis.
+  const displayRun = useMemo(() => {
+    if (!run || tasks.length + subagents.length === 0) return run;
+    const phases = phasesOf(everyAgent);
+    const live = runLive(run) || everyAgent.some(isLive);
+    const startedAt = everyAgent.reduce<number | null>((first, agent) => agent.startedAt === null ? first : first === null ? agent.startedAt : Math.min(first, agent.startedAt), run.startedAt);
+    const endedAt = live ? null : everyAgent.reduce<number | null>((last, agent) => agent.endedAt === null ? last : Math.max(last ?? 0, agent.endedAt), run.endedAt);
+    return { ...run, name: !runLive(run) && live ? "Agents and tasks" : run.name, agents: everyAgent, phases, counts: runCounts({ phases }),
+      status: live ? "running" as const : run.status, startedAt, endedAt,
+      elapsedMs: startedAt === null || (!live && endedAt === null) ? null : Math.max(0, (endedAt ?? run.clockAt) - startedAt) };
+  }, [run, tasks, subagents, everyAgent]);
   const inspected = panel.mode === "inspector" && panel.inspectId !== null ? everyAgent.find((agent) => agent.id === panel.inspectId) ?? null : null;
   const mode = inspected ? "inspector" : "roster";
   const focused = focusId !== null && order.includes(focusId) ? focusId : (order[0] ?? null);
-  const counts = useMemo(() => (run ? chipCounts(run) : { all: 0, needs: 0, failed: 0, noUpdate: 0, working: 0, done: 0 }), [run]);
+  const counts = useMemo(() => chipCounts({ counts: runCounts({ phases: phasesOf(everyAgent) }), runNeeds: run?.runNeeds ?? [] }), [everyAgent, run]);
   const closedPhases = useMemo(() => new Set(entries.filter((entry) => entry.kind === "phase" && !entry.open).map((entry) => (entry.kind === "phase" ? entry.phase.name : ""))), [entries]);
   const readOnly = Boolean(thread?.readOnly);
   const finale = run !== null && !runLive(run);
@@ -283,7 +295,7 @@ export function CrewPanel(props: { sessionId: string }) {
       case "stop": {
         const agent = target();
         // A research worker takes no stop of its own, so `x` on one asks about the run instead.
-        if (agent && agent.kind !== "research" && (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled" || agent.state === "waiting-on-you") && !readOnly) {
+        if (agent && canStopAgent(agent) && (agent.state === "working" || agent.state === "finishing" || agent.state === "no-update" || agent.state === "scheduled" || agent.state === "waiting-on-you") && !readOnly) {
           setConfirm({ kind: "stop", id: agent.id });
           return true;
         }
@@ -318,7 +330,7 @@ export function CrewPanel(props: { sessionId: string }) {
   const onKeyDown = usePanelKeys(mode, handleKey);
 
   const style = { "--pane-bg": overlay ? "var(--bg-raised)" : "var(--bg)", width } as CSSProperties;
-  const pill = run ? statusPill(run) : null;
+  const pill = displayRun ? statusPill(displayRun) : null;
   const crumb = mode === "inspector" && !split && inspected;
   const stopRun = () => {
     if (!run) return;
@@ -343,7 +355,7 @@ export function CrewPanel(props: { sessionId: string }) {
         </>
       ) : (
         <>
-          <h2 className="m-0 min-w-0 truncate text-sm font-semibold tracking-[-0.01em]">{run?.name ?? (tasks.length > 0 || subagents.length > 0 ? "Agents and tasks" : "Crew")}</h2>
+          <h2 className="m-0 min-w-0 truncate text-sm font-semibold tracking-[-0.01em]">{displayRun?.name ?? (tasks.length > 0 || subagents.length > 0 ? "Agents and tasks" : "Crew")}</h2>
           {pill ? (
             <span
               className={cn(
@@ -419,7 +431,7 @@ export function CrewPanel(props: { sessionId: string }) {
 
   const rosterColumn = (className?: string) => (
     <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", className)}>
-      {run ? (
+      {everyAgent.length > 0 ? (
         <FilterChips
           counts={counts}
           filter={panel.filter}
@@ -486,7 +498,7 @@ export function CrewPanel(props: { sessionId: string }) {
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 pb-[10vh] text-center">
         <SquaresFourIcon size={22} className="text-subtle" />
         <p className="m-0 text-sm font-medium text-fg">No agents in this thread</p>
-        <p className="m-0 max-w-[36ch] text-xs text-pretty text-muted">A workflow's agents and background tasks appear here when Muse starts them.</p>
+        <p className="m-0 max-w-[36ch] text-xs text-pretty text-muted">Send a prompt to follow Muse, its tools, delegated agents and background tasks here.</p>
       </div>
     );
   } else if (inspector && !split) {
@@ -494,10 +506,10 @@ export function CrewPanel(props: { sessionId: string }) {
   } else {
     body = (
       <>
-        {run ? (
+        {displayRun ? (
           <div className="shrink-0 border-b border-line px-4 pt-2 pb-2.5">
             <p className="m-0 flex items-center gap-2 truncate text-sm leading-5 whitespace-nowrap text-muted" data-summary="">
-              {summaryParts(run).map((part, index) => (
+              {summaryParts(displayRun).map((part, index) => (
                 <span key={index} className="contents">
                   {index > 0 ? <span className="text-subtle">·</span> : null}
                   <span
@@ -515,12 +527,12 @@ export function CrewPanel(props: { sessionId: string }) {
                 </span>
               ))}
             </p>
-            <KpiStrip run={run} />
+            <KpiStrip run={displayRun} />
           </div>
         ) : null}
-        {run ? (
+        {displayRun ? (
           <Timeline
-            run={run}
+            run={displayRun}
             width={width - 32}
             collapsed={!panel.timelineOpen}
             selectedId={inspected?.id ?? null}

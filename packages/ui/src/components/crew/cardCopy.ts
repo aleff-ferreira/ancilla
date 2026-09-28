@@ -32,7 +32,7 @@ export function plural(n: number, word: string, words = `${word}s`): string {
 
 /** What the run is, for the head's sub line: `Workflow` or `Deep research`. */
 export function runKindWord(run: Pick<RunVM, "kind">): string {
-  return run.kind === "research" ? "Deep research" : "Workflow";
+  return run.kind === "research" ? "Deep research" : run.kind === "turn" ? "Prompt execution" : "Workflow";
 }
 
 /** What a failed agent's row says when no reason came: the words differ by who runs the agent. */

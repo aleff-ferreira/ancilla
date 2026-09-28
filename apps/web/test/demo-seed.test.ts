@@ -318,9 +318,13 @@ describe("crewView over the scenarios", () => {
     assert.deepEqual(run.phases.slice(-2).map((phase) => phase.state), ["done", "live"]);
   });
 
-  it("task: no run, three background tasks printing, silent for four minutes, and failed", () => {
+  it("task: the ordinary turn stays visible alongside three background tasks printing, quiet and failed", () => {
     const { vm, fold, seeded } = viewOf("task");
-    assert.deepEqual(vm.runs, []);
+    assert.equal(vm.runs.length, 1);
+    const run = vm.runs[0] as RunVM;
+    assert.equal(run.kind, "turn");
+    assert.equal(run.status, "running");
+    assert.deepEqual(run.agents.filter((agent) => agent.kind === "lead").map((agent) => [agent.name, agent.state]), [["Muse", "working"]]);
     assert.deepEqual(vm.tasks.map((task) => [task.name, task.state]), [
       ["npm run docs:build", "no-update"],
       ["npm run test:e2e -- --grep orders", "working"],
@@ -341,7 +345,11 @@ describe("crewView over the scenarios", () => {
     const seeded = seed(NOW, "running");
     const thread = seeded.threads.find((candidate) => candidate.summary.sessionId === THREADS.lazyCharts) as SeedThread;
     const view = crewView(foldFromLoad(loadOf(thread)), thread.summary, NOW);
-    assert.deepEqual(view.runs, []);
+    assert.equal(view.runs.length, 1);
+    const run = view.runs[0] as RunVM;
+    assert.equal(run.kind, "turn");
+    assert.equal(run.status, "finished");
+    assert.deepEqual(run.agents.filter((agent) => agent.kind === "lead").map((agent) => [agent.name, agent.state]), [["Muse", "done"]]);
     assert.equal(view.subagents.length, 1);
     const survey = view.subagents[0] as AgentVM;
     assert.equal(survey.name, "chart-imports-survey");

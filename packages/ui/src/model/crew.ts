@@ -3,7 +3,7 @@ import type {
   SessionSummary, TokenUsage, UserInputRequest, WorkflowChild,
 } from "../types.js";
 import { agentNumbers, type AgentNumbers } from "./agents.js";
-import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold } from "./fold.js";
+import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold, type TurnInfo } from "./fold.js";
 import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
 import { costOf, formatCost, listedPrice } from "./pricing.js";
 import { phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
@@ -23,10 +23,10 @@ export type AgentState =
   | "planned" | "scheduled" | "working" | "finishing" | "no-update"
   | "waiting-on-you" | "failed" | "skipped" | "done" | "unknown";
 
-export type AgentKind = "workflow" | "subagent" | "task" | "research";
+export type AgentKind = "workflow" | "subagent" | "task" | "research" | "lead";
 
 /** What a run is: a Muse workflow, or a DeepResearch run the daemon supervises. */
-export type RunKind = "workflow" | "research";
+export type RunKind = "workflow" | "research" | "turn";
 
 /** What the daemon counts for a research worker; the run's report carries what the worker found. */
 export type ResearchAgentInfo = {
@@ -92,6 +92,8 @@ export interface AgentVM {
   display: { prefix: string | null; short: string };
   phase: string;
   kind: AgentKind;
+  /** The turn that launched this work; background agents can outlive that turn. */
+  sourceTurnId?: string | null;
   state: AgentState;
   pending: PendingAction | null;
   /** Why a skipped agent stopped: this client asked, the run was stopped, or Muse cancelled it. */
@@ -123,7 +125,7 @@ export interface AgentVM {
   /** The run this workflow agent belongs to, for the controls. */
   runItemId: string | null;
   workflowRunId: string | null;
-  taskInfo?: { command: string; tail: string | null; lastOutputAt: number | null; initiator: "user" | "timeout" | null; approvalId: string | null };
+  taskInfo?: { command: string; tail: string | null; lastOutputAt: number | null; initiator: "user" | "timeout" | null; approvalId: string | null; background?: boolean; stoppable?: boolean; exitCode?: number | null; exitSignal?: number | null };
   /** Present on a research worker: its counters, as the daemon reports them. */
   research?: ResearchAgentInfo;
 }
@@ -303,7 +305,7 @@ export interface ActivityVM {
   working: ActivityItemVM[];
   finishedToday: ActivityItemVM[];
   /** What Stop everything would stop in the open thread; null when nothing. */
-  stopAll: { runs: number; tasks: number } | null;
+  stopAll: { runs: number; tasks: number; agents?: number } | null;
   foot: string;
   empty: boolean;
   /** The v1 note for threads Ancilla does not fold. */
@@ -349,6 +351,17 @@ export function researchItemId(runId: string): string {
 /** The research run id an item id names, or null for a workflow item. */
 export function researchRunIdOf(itemId: string): string | null {
   return itemId.startsWith(RESEARCH_ITEM_PREFIX) ? itemId.slice(RESEARCH_ITEM_PREFIX.length) : null;
+}
+
+/** A turn is controlled by turn/interrupt, never by a workflow or subagent command. */
+export const TURN_ITEM_PREFIX = "turn:";
+export function turnIdOf(itemId: string): string | null {
+  return itemId.startsWith(TURN_ITEM_PREFIX) ? itemId.slice(TURN_ITEM_PREFIX.length) : null;
+}
+
+/** Only shell/background tasks expose task/stop; other foreground tools stop with the lead turn. */
+export function canStopAgent(agent: Pick<AgentVM, "kind" | "taskInfo">): boolean {
+  return agent.kind !== "research" && !(agent.kind === "task" && agent.taskInfo?.stoppable === false);
 }
 
 /** A research worker's agent id: `research:<runId>:A<agentId>`, stable across the run's revisions. */
@@ -704,6 +717,10 @@ function launchInfo(item: MspItem): LaunchInfo {
 }
 
 interface ThreadIndex {
+  workflows: MspItem[];
+  subagents: MspItem[];
+  background: MspItem[];
+  foreground: Map<string, MspItem[]>;
   /** Tool calls that launched a workflow. */
   launches: string[];
   /** `subagent_spawn` tool calls. */
@@ -725,8 +742,8 @@ function transcriptPositions(order: readonly string[]): ReadonlyMap<string, numb
 }
 
 /**
- * Where the thread's launch and subagent tool calls are. Tool metadata can arrive after an output placeholder,
- * so invalidate on the small Crew index, not just transcript order. Prose deltas leave this index alone.
+ * Index execution items once per metadata revision. Group foreground tools by turn so streamed text and clock
+ * ticks do not scan every tool from a long thread. Late tool metadata still invalidates the index.
  */
 function threadIndex(fold: ThreadFold): ThreadIndex {
   const items = fold.agentItems ?? fold.items;
@@ -734,10 +751,18 @@ function threadIndex(fold: ThreadFold): ThreadIndex {
   if (cached?.order === fold.order) {
     return cached.index;
   }
-  const index: ThreadIndex = { launches: [], spawns: [], waits: [] };
+  const index: ThreadIndex = { workflows: [], subagents: [], background: [], foreground: new Map(), launches: [], spawns: [], waits: [] };
   for (const item of Object.values(items)) {
+    if (item.kind === "workflow") index.workflows.push(item);
+    else if (item.kind === "subagent") index.subagents.push(item);
     if (item.kind !== "toolCall") {
       continue;
+    }
+    if (item.background === true) index.background.push(item);
+    else if (item.turnId) {
+      const tools = index.foreground.get(item.turnId) ?? [];
+      tools.push(item);
+      index.foreground.set(item.turnId, tools);
     }
     if (item.tool === "workflow") {
       index.launches.push(item.itemId);
@@ -791,7 +816,7 @@ function outcomeOfTerminal(terminal: string | undefined): Outcome {
       return "done";
     case "failed": case "error": case "rejected": case "timedout":
       return "failed";
-    case "cancelled": case "canceled": case "stopped": case "skipped":
+    case "cancelled": case "canceled": case "stopped": case "skipped": case "interrupted":
       return "skipped";
     default:
       return "unknown";
@@ -1554,8 +1579,9 @@ function taskState(item: MspItem, silenceMs: number | null, needs: AgentVM["need
     if (needs) return "waiting-on-you";
     return silenceMs !== null && silenceMs >= TASK_NO_OUTPUT_MS ? "no-update" : "working";
   }
-  if (text(item.failureKind) || text(item.failureReason)) return "failed";
   const outcome = outcomeOfTerminal(item.status);
+  if (outcome === "skipped") return outcome;
+  if (text(item.failureKind) || text(item.failureReason) || (typeof item.exitCode === "number" && item.exitCode !== 0) || (typeof item.exitSignal === "number" && item.exitSignal !== 0)) return "failed";
   return outcome;
 }
 
@@ -1576,15 +1602,19 @@ function needsOf(fold: ThreadFold, item: MspItem): AgentVM["needs"] {
 
 function taskView(item: MspItem, trace: TaskTrace | undefined, ctx: RunContext): AgentVM {
   const { fold, clock } = ctx;
-  const command = describeTool(item).subject ?? text(item.tool) ?? "task";
-  const live = item.status === "inProgress";
+  const description = describeTool(item);
+  const background = item.background === true;
+  const command = description.subject ?? text(item.tool) ?? "task";
+  const parent = item.turnId ? fold.turns[item.turnId] : undefined;
+  const unreported = !background && item.status === "inProgress" && Boolean(parent?.terminal);
+  const live = item.status === "inProgress" && !unreported;
   const startedAt = trace?.firstSeenAt ?? null;
-  const endedAt = live ? null : trace?.endedAt ?? null;
+  const endedAt = live ? null : trace?.endedAt ?? parent?.completedAt ?? null;
   const lastOutputAt = trace?.lastOutputAt ?? null;
   const since = lastOutputAt ?? startedAt;
   const silenceMs = live && since !== null ? Math.max(0, clock - since) : null;
   const needs = live ? needsOf(fold, item) : null;
-  const state = taskState(item, ctx.stale ? null : silenceMs, needs);
+  const state = unreported ? (outcomeOfTerminal(parent?.terminal) === "skipped" ? "skipped" : "unknown") : taskState(item, ctx.stale ? null : silenceMs, needs);
   const key = ctx.sessionId ? pendingKey(ctx.sessionId, item.itemId, 1) : null;
   const pendingFlag = key ? ctx.pending[key] ?? null : null;
   const initiator = item.backgroundInitiator === "user" || item.backgroundInitiator === "timeout" ? item.backgroundInitiator : null;
@@ -1594,29 +1624,30 @@ function taskView(item: MspItem, trace: TaskTrace | undefined, ctx: RunContext):
     name: command,
     label: command,
     display: { prefix: null, short: command },
-    phase: "Background",
+    phase: background ? "Background" : "Tools",
     kind: "task",
+    sourceTurnId: item.turnId ?? null,
     state,
     pending: live && pendingFlag === "stop" ? "stop" : null,
     skippedBy: state === "skipped" ? (key && ctx.skipped.has(key) ? "you" : "muse") : null,
     startedAt,
     endedAt,
-    lastEventAt: lastOutputAt ?? startedAt,
+    lastEventAt: endedAt ?? lastOutputAt ?? startedAt,
     silenceMs,
     runningMs: live && startedAt !== null ? Math.max(0, clock - startedAt) : null,
-    durationMs: !live && startedAt !== null && endedAt !== null ? Math.max(0, endedAt - startedAt) : null,
+    durationMs: !live ? num(item.durationMs) ?? (startedAt !== null && endedAt !== null ? Math.max(0, endedAt - startedAt) : null) : null,
     approx: trace?.approx ?? true,
     tokens: null,
     toolCalls: null,
     attempts: [],
-    failure: state === "failed" ? { text: text(item.failureReason) ?? text(item.failureKind), at: endedAt } : null,
+    failure: state === "failed" ? { text: text(item.failureReason) ?? text(item.failureKind) ?? (typeof item.exitCode === "number" && item.exitCode !== 0 ? `Exited with code ${item.exitCode}` : typeof item.exitSignal === "number" && item.exitSignal !== 0 ? `Stopped by signal ${item.exitSignal}` : null), at: endedAt } : null,
     task: null,
     shareOfLongest: null,
     quiet: state === "no-update" ? { thresholdMs: TASK_NO_OUTPUT_MS, longestFinishedMs: null } : null,
     needs,
     runItemId: null,
     workflowRunId: null,
-    taskInfo: { command, tail: lastLine(item.visibleOutput), lastOutputAt, initiator, approvalId: text(item.approvalId) },
+    taskInfo: { command, tail: lastLine(item.visibleOutput), lastOutputAt, initiator, approvalId: text(item.approvalId), background, stoppable: background || description.kind === "shell", exitCode: num(item.exitCode), exitSignal: num(item.exitSignal) },
   };
 }
 
@@ -1656,6 +1687,7 @@ function subagentView(item: MspItem, ctx: RunContext): AgentVM {
     display: displayOf(name),
     phase: "Subagents",
     kind: "subagent",
+    sourceTurnId: item.turnId ?? null,
     state,
     pending: live && pendingFlag === "stop" ? "stop" : null,
     skippedBy: state === "skipped" ? (key && ctx.skipped.has(key) ? "you" : "muse") : null,
@@ -1680,6 +1712,16 @@ function subagentView(item: MspItem, ctx: RunContext): AgentVM {
 }
 
 const nativeWaitIndexes = new WeakMap<Record<string, MspItem>, { order: readonly string[]; waits: ReadonlyMap<string, MspItem> }>();
+const nativeArguments = new WeakMap<MspItem, ReturnType<typeof parseArgs>>();
+const nativeOutputs = new WeakMap<MspItem, ReturnType<typeof parseArgs>>();
+function nativeArgs(item: MspItem): ReturnType<typeof parseArgs> {
+  if (!nativeArguments.has(item)) nativeArguments.set(item, parseArgs(item.args));
+  return nativeArguments.get(item) ?? null;
+}
+function nativeOutput(item: MspItem): ReturnType<typeof parseArgs> {
+  if (!nativeOutputs.has(item)) nativeOutputs.set(item, parseArgs(item.visibleOutput));
+  return nativeOutputs.get(item) ?? null;
+}
 
 /** Match each child once, using transcript order even when a wait's tool metadata arrived late. */
 function nativeWaits(fold: ThreadFold, ids: readonly string[]): ReadonlyMap<string, MspItem> {
@@ -1692,7 +1734,7 @@ function nativeWaits(fold: ThreadFold, ids: readonly string[]): ReadonlyMap<stri
     for (const id of ids) {
       const item = items[id];
       if (!item || item.status === "inProgress") continue;
-      const childId = text(parseArgs(item.args)?.["subagent_id"]);
+      const childId = text(nativeArgs(item)?.["subagent_id"]);
       if (!childId) continue;
       const previous = waits.get(childId);
       if (!previous || (positions.get(id) ?? -1) > (positions.get(previous.itemId) ?? -1)) waits.set(childId, item);
@@ -1704,14 +1746,14 @@ function nativeWaits(fold: ThreadFold, ids: readonly string[]): ReadonlyMap<stri
 
 /** A wait tool finishing is not the child finishing: only its reported result settles the child. */
 function nativeSubagent(spawn: MspItem, waits: ReadonlyMap<string, MspItem>): { id: string; state: AgentState; settled: MspItem | null; result: Record<string, unknown> | null } {
-  const output = parseArgs(spawn.visibleOutput);
+  const output = nativeOutput(spawn);
   const id = text(output?.["subagent_id"]) ?? `spawn:${spawn.itemId}`;
   const admission = outcomeOfTerminal(spawn.status);
   if (spawn.status !== "inProgress" && (admission === "skipped" || admission === "failed" || text(spawn.failureKind) || text(spawn.failureReason))) {
     return { id, state: admission === "skipped" ? "skipped" : "failed", settled: spawn, result: output };
   }
   const wait = waits.get(id);
-  const waitOutput = wait ? parseArgs(wait.visibleOutput) : null;
+  const waitOutput = wait ? nativeOutput(wait) : null;
   const word = normalizedWord(text(waitOutput?.["status"]) ?? undefined);
   const state: AgentState = !wait ? "working"
     : ["ready", "completed", "complete", "done", "success", "succeeded", "resultready"].includes(word) ? "done"
@@ -1723,14 +1765,12 @@ function nativeSubagent(spawn: MspItem, waits: ReadonlyMap<string, MspItem>): { 
 
 /** A native subagent Muse surfaced as a `subagent_spawn` tool call, with its `subagent_wait` when one landed. */
 function spawnView(spawn: MspItem, waits: ReadonlyMap<string, MspItem>, ctx: RunContext): AgentVM {
-  const args = parseArgs(spawn.args);
+  const args = nativeArgs(spawn);
   const { id, state, settled, result } = nativeSubagent(spawn, waits);
   const label = text(args?.["task_name"]) ?? text(args?.["role"]);
   const name = label ?? `Agent ${numberFor(ctx.numbers, id)}`;
-  const startedRaw = spawn.recordedAt ? Date.parse(spawn.recordedAt) : NaN;
-  const endedRaw = settled?.recordedAt ? Date.parse(settled.recordedAt) : NaN;
-  const startedAt = Number.isFinite(startedRaw) ? startedRaw : null;
-  const endedAt = state === "working" ? null : Number.isFinite(endedRaw) ? endedRaw : null;
+  const startedAt = ctx.fold.crew?.tasks[spawn.itemId]?.firstSeenAt ?? isoMs(spawn.recordedAt);
+  const endedAt = state === "working" ? null : (settled ? ctx.fold.crew?.tasks[settled.itemId]?.endedAt ?? isoMs(settled.recordedAt) : null);
   const objective = text(args?.["objective"]);
   const key = ctx.sessionId ? pendingKey(ctx.sessionId, id, 1) : null;
   return {
@@ -1741,6 +1781,7 @@ function spawnView(spawn: MspItem, waits: ReadonlyMap<string, MspItem>, ctx: Run
     display: displayOf(name),
     phase: "Subagents",
     kind: "subagent",
+    sourceTurnId: spawn.turnId ?? null,
     state,
     pending: state === "working" && key && ctx.pending[key] === "stop" ? "stop" : null,
     skippedBy: state === "skipped" ? (key && ctx.skipped.has(key) ? "you" : "muse") : null,
@@ -1975,6 +2016,91 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
 
 // ---------------------------------------------------------------- the view
 
+/** The latest real turn; a blank thread does not acquire a made-up lead agent. */
+function monitoredTurn(fold: ThreadFold): TurnInfo | null {
+  if (fold.activeTurnId) return fold.turns[fold.activeTurnId] ?? { turnId: fold.activeTurnId };
+  const turns = Object.values(fold.turns);
+  let latest: TurnInfo | null = null;
+  let latestAt: number | null = null;
+  const comesAfter = (candidate: string, previous: string): boolean => {
+    for (let i = fold.order.length - 1; i >= 0; i -= 1) {
+      const turnId = fold.items[fold.order[i]!]?.turnId;
+      if (turnId === candidate) return true;
+      if (turnId === previous) return false;
+    }
+    return false;
+  };
+  for (const turn of turns) {
+    if (turn.retracted) continue;
+    const at = turn.startedAt ?? uuidTime(turn.turnId) ?? turn.completedAt ?? null;
+    if (!latest || (at !== null && (latestAt === null || at > latestAt)) || (at === latestAt && comesAfter(turn.turnId, latest.turnId))) {
+      latest = turn;
+      latestAt = at;
+    }
+  }
+  return latest;
+}
+
+/** Lifecycle changes refresh monitoring immediately; streamed prose alone does not rebuild workflow rows. */
+export function crewTurnKey(fold: ThreadFold | null | undefined): string {
+  const turn = fold ? monitoredTurn(fold) : null;
+  return turn ? [fold?.activeTurnId, turn.turnId, turn.startedAt, turn.completedAt, turn.terminal, turn.durationMs, turn.retry?.attempt, turn.retry?.nextAttempt, turn.retry?.reason, turn.error?.message].join(":") : "";
+}
+
+/** An ordinary prompt uses the same roster and timeline as delegated work, with explicit lead and tool rows. */
+function turnRunView(turn: TurnInfo, tools: readonly MspItem[], ctx: RunContext): RunVM {
+  const { fold, clock } = ctx;
+  const live = !turn.terminal && fold.activeTurnId === turn.turnId;
+  const itemId = `${TURN_ITEM_PREFIX}${turn.turnId}`;
+  const startedAt = turn.startedAt ?? null;
+  const endedAt = live ? null : turn.completedAt ?? null;
+  const foreground = tools.filter((item) => item.kind === "toolCall" && item.background !== true && item.turnId === turn.turnId);
+  const toolRows = foreground.map((item) => taskView(item, fold.crew?.tasks[item.itemId], ctx));
+  const requests: AgentVM["needs"][] = [
+    ...Object.values(fold.approvals).filter((request) => !request.itemId || fold.items[request.itemId]?.background !== true)
+      .map((request) => ({ kind: "approval" as const, command: describeApproval(request).detail, askedAt: fold.crew?.requests[request.approvalId]?.askedAt ?? null, requestId: request.approvalId })),
+    ...Object.values(fold.userInputs).map((request) => ({ kind: "input" as const, command: request.questions?.[0]?.question ?? null, askedAt: fold.crew?.requests[request.userInputId]?.askedAt ?? null, requestId: request.userInputId })),
+  ];
+  const needs = live ? requests[0] ?? null : null;
+  const state: AgentState = live ? needs ? "waiting-on-you" : "working" : outcomeOfTerminal(turn.terminal);
+  const runningTools = toolRows.filter((agent) => LIVE_STATES.has(agent.state));
+  const latestAt = toolRows.reduce((latest, agent) => Math.max(latest, agent.lastEventAt ?? 0), startedAt ?? 0);
+  const key = ctx.sessionId ? pendingKey(ctx.sessionId, itemId, 1) : null;
+  const usage: TokenUsage = {};
+  let reported = false;
+  for (const call of Object.values(fold.meta.calls)) {
+    if (call.turnId !== turn.turnId) continue;
+    reported = true;
+    for (const field of ["inputTokens", "outputTokens", "reasoningTokens", "cachedTokens", "cacheReadTokens", "cacheWriteTokens"] as const) {
+      usage[field] = (usage[field] ?? 0) + call[field];
+    }
+  }
+  const elapsedMs = turn.durationMs ?? (startedAt === null || (!live && endedAt === null) ? null : Math.max(0, (live ? clock : endedAt!) - startedAt));
+  const lead: AgentVM = {
+    id: itemId, attempt: 1, name: "Muse", label: "Muse", display: { prefix: null, short: "Muse" },
+    phase: "Lead", kind: "lead", sourceTurnId: turn.turnId, state, pending: live && key && ctx.pending[key] === "stop" ? "stop" : null,
+    skippedBy: state === "skipped" ? "muse" : null, startedAt, endedAt, lastEventAt: endedAt ?? (latestAt || null),
+    silenceMs: null, runningMs: live ? elapsedMs : null, durationMs: live ? null : elapsedMs, approx: startedAt === null,
+    tokens: reported ? usage : null, toolCalls: foreground.length, attempts: [],
+    failure: state === "failed" ? { text: turn.error?.message ?? null, at: endedAt } : null,
+    task: { text: needs ? "Waiting for your response" : runningTools.length ? `Using ${runningTools.length === 1 ? runningTools[0]?.name : `${runningTools.length} tools`}` : live ? turn.retry ? "Retrying the response" : "Working on your prompt" : "Turn ended", source: "objective" },
+    shareOfLongest: null, quiet: null, needs, runItemId: itemId, workflowRunId: null,
+  };
+  const agents = [lead, ...toolRows];
+  const phases = phasesOf(agents);
+  const counts = runCounts({ phases });
+  const status: RunStatus = live ? "running" : state === "failed" ? "failed" : state === "skipped" ? "stopped" : counts.failed > 0 ? "finished-with-failures" : "finished";
+  return {
+    itemId, runId: turn.turnId, name: "Thread activity", kind: "turn", research: null, status, revision: foreground.length,
+    startedAt, endedAt, elapsedMs, elapsedApprox: startedAt === null, partialHistory: ctx.partialHistory,
+    phases, agents, counts, attention: attentionOrder(agents), runNeeds: [], currentPhase: live ? "Lead" : null,
+    plannedKnown: false, tokens: reported ? { total: usageTotal(usage), reported: 1, of: 1 } : null, cost: null,
+    slots: null, pulse: [], longestFinishedMs: null, agentTimeMs: null, peakConcurrency: null, waitedOnYouMs: null, retried: 0,
+    report: live ? null : { summary: null, failure: turn.error?.message ?? null, handoffs: [] },
+    stale: ctx.stale, staleAt: ctx.staleAt, clockAt: clock,
+  };
+}
+
 function lastKnownAt(fold: ThreadFold): number | null {
   let last: number | null = null;
   const crew = fold.crew;
@@ -1991,6 +2117,10 @@ function lastKnownAt(fold: ThreadFold): number | null {
     for (const at of [task.firstSeenAt, task.lastOutputAt, task.endedAt]) {
       if (at !== null && (last === null || at > last)) last = at;
     }
+  }
+  const turn = monitoredTurn(fold);
+  for (const at of [turn?.startedAt, turn?.completedAt]) {
+    if (at !== undefined && (last === null || at > last)) last = at;
   }
   return last;
 }
@@ -2019,29 +2149,40 @@ export function crewView(fold: ThreadFold, session: SessionSummary | null, now: 
   };
   const runs: RunVM[] = [];
   const subagents: AgentVM[] = [];
-  const items = Object.values(fold.agentItems ?? fold.items);
-  for (const item of items) {
-    if (item.kind === "workflow") {
-      runs.push(runView(item, ctx));
-    } else if (item.kind === "subagent") {
-      subagents.push(subagentView(item, ctx));
-    }
-  }
+  const index = threadIndex(fold);
+  for (const item of index.workflows) runs.push(runView(item, ctx));
+  for (const item of index.subagents) subagents.push(subagentView(item, ctx));
   for (const run of opts.researchRuns ?? []) {
     runs.push(researchRunView(run, ctx));
   }
-  runs.sort((a, b) => (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER) || a.itemId.localeCompare(b.itemId));
-  const index = threadIndex(fold);
+  const turn = monitoredTurn(fold);
+  // A workflow already shows its own turn's execution. The ordinary turn fills the previous blind spot without
+  // duplicating an active research or workflow roster.
+  const turnWorkflows = turn ? index.workflows.filter((item) => item.turnId === turn.turnId) : [];
+  if (turn && (turnWorkflows.length === 0 || (fold.activeTurnId === turn.turnId && turnWorkflows.every((item) => item.status !== "inProgress"))) && !(opts.researchRuns?.some(researchLive))) {
+    runs.push(turnRunView(turn, index.foreground.get(turn.turnId) ?? [], ctx));
+  }
+  runs.sort((a, b) => Number(a.kind === "turn") - Number(b.kind === "turn") || (a.startedAt ?? Number.MAX_SAFE_INTEGER) - (b.startedAt ?? Number.MAX_SAFE_INTEGER) || a.itemId.localeCompare(b.itemId));
   const waits = nativeWaits(fold, index.waits);
+  const subagentPositions = new Map(subagents.map((agent, index) => [agent.id, index]));
   for (const id of index.spawns) {
     const spawn = fold.items[id];
-    if (spawn) subagents.push(spawnView(spawn, waits, ctx));
+    if (spawn) {
+      const agent = spawnView(spawn, waits, ctx);
+      const existingAt = subagentPositions.get(agent.id);
+      if (existingAt === undefined) {
+        subagentPositions.set(agent.id, subagents.length);
+        subagents.push(agent);
+      } else {
+        const existing = subagents[existingAt]!;
+        if (LIVE_STATES.has(existing.state) && !LIVE_STATES.has(agent.state) && (existing.lastEventAt === null || agent.endedAt === null || agent.endedAt >= existing.lastEventAt)) {
+          subagents[existingAt] = { ...existing, state: agent.state, endedAt: agent.endedAt, lastEventAt: agent.lastEventAt, durationMs: agent.durationMs ?? existing.durationMs, pending: null, failure: agent.failure, needs: null, runningMs: null };
+        }
+      }
+    }
   }
   const tasks: AgentVM[] = [];
-  for (const [id, trace] of Object.entries(fold.crew?.tasks ?? {})) {
-    const item = fold.items[id];
-    if (item?.kind === "toolCall" && item.background === true) tasks.push(taskView(item, trace, ctx));
-  }
+  for (const item of index.background) tasks.push(taskView(item, fold.crew?.tasks[item.itemId], ctx));
   tasks.sort((a, b) => Number(LIVE_STATES.has(b.state)) - Number(LIVE_STATES.has(a.state)) || (a.startedAt ?? 0) - (b.startedAt ?? 0));
   return { runs, tasks, subagents };
 }
@@ -2056,20 +2197,23 @@ export function runLive(run: Pick<RunVM, "status">): boolean {
  * attempt not yet settled, an open subagent, a background task still running, or a research run still out.
  */
 export function crewBusy(fold: ThreadFold, researchRuns?: readonly ResearchRunView[]): boolean {
+  if (fold.activeTurnId && !fold.turns[fold.activeTurnId]?.terminal) return true;
   if (researchRuns?.some(researchLive)) return true;
-  for (const item of Object.values(fold.agentItems ?? fold.items)) {
-    if (item.kind === "workflow") {
-      if (item.status === "inProgress" && Array.isArray(item.children) && item.children.some((child) => child && childOutcome(child) === null)) return true;
-    } else if (item.kind === "subagent" && item.status === "inProgress") {
-      return true;
+  const index = threadIndex(fold);
+  if (index.workflows.some((item) => item.status === "inProgress")) return true;
+  const waits = nativeWaits(fold, index.waits);
+  for (const item of index.subagents) {
+    if (LIVE_STATES.has(subagentState(item))) {
+      const id = text(item.subagentId) ?? text(item["childId"]) ?? text(item.childSessionId);
+      const wait = id ? waits.get(id) : undefined;
+      const word = wait ? normalizedWord(text(nativeOutput(wait)?.["status"]) ?? undefined) : "";
+      const settled = ["ready", "completed", "complete", "done", "success", "succeeded", "resultready", "failed", "error", "rejected", "cancelled", "canceled", "stopped"].includes(word);
+      const waitAt = wait ? fold.crew?.tasks[wait.itemId]?.endedAt ?? isoMs(wait.recordedAt) : null;
+      const itemAt = isoMs(item.recordedAt);
+      if (!settled || (itemAt !== null && waitAt !== null && itemAt > waitAt)) return true;
     }
   }
-  for (const [id, task] of Object.entries(fold.crew?.tasks ?? {})) {
-    const item = fold.items[id];
-    if (task.endedAt === null && item?.background === true && item.status === "inProgress") return true;
-  }
-  const index = threadIndex(fold);
-  const waits = nativeWaits(fold, index.waits);
+  if (index.background.some((item) => item.status === "inProgress" && fold.crew?.tasks[item.itemId]?.endedAt == null)) return true;
   for (const id of index.spawns) {
     const spawn = fold.items[id];
     if (spawn && LIVE_STATES.has(nativeSubagent(spawn, waits).state)) return true;
@@ -2101,7 +2245,7 @@ export function summaryLine(run: RunVM): { progress: string; chips: SummaryChip[
       }
       break;
     case "finished":
-      progress = `Done · ${counts.done} of ${total}`;
+      progress = run.kind === "turn" && run.agents[0]?.state === "unknown" ? "Turn ended · outcome not reported" : `Done · ${counts.done} of ${total}`;
       break;
     case "finished-with-failures":
       progress = `Finished · ${counts.done} of ${total}`;
@@ -2301,14 +2445,14 @@ export function completionView(run: RunVM): CompletionVM | null {
   if (runLive(run)) return null;
   const scheduled = run.counts.total - run.counts.planned;
   const stats: StatVM[] = [
-    { value: String(scheduled), label: scheduled === 1 ? "agent" : "agents" },
-    { value: run.elapsedApprox ? aboutText(run.elapsedMs ?? 0) : durationText(run.elapsedMs), label: "wall clock" },
+    { value: String(run.kind === "turn" ? run.agents.filter((agent) => agent.kind === "task").length : scheduled), label: run.kind === "turn" ? "tools" : scheduled === 1 ? "agent" : "agents" },
+    { value: run.elapsedMs === null ? "—" : run.elapsedApprox ? aboutText(run.elapsedMs) : durationText(run.elapsedMs), label: "wall clock" },
     run.tokens ? { value: formatTokens(run.tokens.total), label: run.research ? "tokens, the run's own count" : "tokens, reported by Muse" } : { value: "—", label: "tokens not reported" },
   ];
   if (run.cost) stats.push({ value: `~${formatCost(run.cost.usd)}`, label: "estimate at list price" });
   return {
-    headline: headline(run.counts, run.status, run.elapsedMs),
-    factLine: factLine(run),
+    headline: run.kind === "turn" ? run.status === "failed" ? "Turn failed" : run.status === "stopped" ? "Turn stopped" : run.agents[0]?.state === "done" ? "Turn finished" : "Turn ended" : headline(run.counts, run.status, run.elapsedMs),
+    factLine: run.kind === "turn" ? `${plural(run.agents.filter((agent) => agent.kind === "task" && agent.state === "done").length, "tool")} completed${run.counts.failed > 0 ? ` · ${run.counts.failed} failed` : ""}${run.counts.unknown > 0 ? ` · ${plural(run.counts.unknown, "outcome")} not reported` : ""}` : factLine(run),
     stats,
     highlights: highlightsOf(run),
     fingerprint: fingerprintOf(run),
@@ -2397,13 +2541,20 @@ export function sidebarCrewSummary(fold: ThreadFold | null, _live: LiveView | nu
   const running = view.runs.filter(runLive);
   const run = running[running.length - 1] ?? view.runs[view.runs.length - 1] ?? null;
   const needs = Object.keys(fold.approvals).length + Object.keys(fold.userInputs).length;
-  const task = view.tasks.find((candidate) => LIVE_STATES.has(candidate.state)) ?? view.tasks[0] ?? null;
+  const standalone = [...view.tasks, ...view.subagents];
+  const activeStandalone = standalone.filter((candidate) => LIVE_STATES.has(candidate.state));
+  const task = activeStandalone[0] ?? standalone[0] ?? null;
+  if (view.subagents.length > 0 && (!run || !runLive(run)) && (activeStandalone.length > 0 || !run)) {
+    const counts = runCounts({ phases: phasesOf(standalone) });
+    return { groups: [standalone.map((agent) => agent.state)], text: opts.stale ? "Last known" : `${counts.done} done · ${activeStandalone.length} working`, needs, failed: counts.failed, noUpdate: counts.noUpdate, phase: null, stale: opts.stale === true, task: task?.kind === "task" ? task.name : null, live: activeStandalone.length > 0, endedAt: activeStandalone.length > 0 ? null : task?.endedAt ?? null };
+  }
   if (!run) {
     if (!task) return null;
     return { groups: [], text: task.name, needs, failed: task.state === "failed" ? 1 : 0, noUpdate: task.state === "no-update" ? 1 : 0, phase: null, stale: opts.stale === true, task: task.name, live: LIVE_STATES.has(task.state), endedAt: task.endedAt };
   }
-  const { counts } = run;
-  const isLive = runLive(run);
+  const phases = [...run.phases, ...phasesOf(standalone)];
+  const counts = runCounts({ phases });
+  const isLive = runLive(run) || activeStandalone.length > 0;
   let text: string;
   if (run.stale) {
     const at = run.staleAt;
@@ -2414,26 +2565,28 @@ export function sidebarCrewSummary(fold: ThreadFold | null, _live: LiveView | nu
     text = run.plannedKnown ? `${run.currentPhase ?? "Finishing"} · ${counts.done}/${counts.total}` : `${counts.done} done · ${counts.working + counts.finishing + counts.noUpdate} working`;
   } else if (run.status === "stopped") {
     text = `Stopped · ${counts.done} landed`;
+  } else if (run.kind === "turn" && run.agents[0]?.state === "unknown") {
+    text = "Outcome not reported";
   } else {
     text = `${counts.done} landed`;
   }
   return {
-    groups: run.phases.map((phase) => phase.agents.map((agent) => agent.state)),
+    groups: phases.map((phase) => phase.agents.map((agent) => agent.state)),
     text,
     needs,
     failed: counts.failed,
     noUpdate: counts.noUpdate,
     phase: run.currentPhase,
     stale: run.stale,
-    task: task && !isLive ? task.name : null,
+    task: task?.kind === "task" ? task.name : null,
     live: isLive,
-    endedAt: run.endedAt,
+    endedAt: isLive ? null : run.endedAt,
   };
 }
 
 /** Whether a thread's fold stands for what the thread is doing now. */
-function foldIsLive(state: AppState, thread: ThreadState | undefined): boolean {
-  return thread !== undefined && (thread.load === "ready" || thread.fold.order.length > 0) && !thread.stale && !thread.fold.closed && state.connection === "open";
+function foldIsLive(state: AppState, thread: ThreadState | undefined, session?: SessionSummary): boolean {
+  return thread !== undefined && (thread.load === "ready" || thread.fold.order.length > 0) && !thread.stale && !thread.stalled && !thread.historySync && !thread.readOnly && !thread.fold.closed && state.connection === "open" && session?.live?.viewHealth?.status !== "unavailable";
 }
 
 /** Requests waiting across every thread: the fold's when this client holds the thread live, else the server's count. */
@@ -2441,7 +2594,7 @@ export function windowTitleCount(state: AppState): number {
   let total = 0;
   for (const session of Object.values(state.sessions)) {
     const thread = state.threads[session.sessionId];
-    if (thread && foldIsLive(state, thread)) {
+    if (thread && foldIsLive(state, thread, session)) {
       total += Object.keys(thread.fold.approvals).length + Object.keys(thread.fold.userInputs).length;
     } else {
       total += (session.live?.pendingApprovals ?? 0) + (session.live?.pendingInputs ?? 0);
@@ -2456,7 +2609,7 @@ function startOfDay(now: number): number {
   return date.getTime();
 }
 
-const UNTRACKED_NOTE = "Other threads appear here once Ancilla tracks them (coming in 1.1)";
+const UNTRACKED_NOTE = "Open a thread to load its agent activity. Disconnected threads show their last known state.";
 
 /**
  * The Activity drawer: every request waiting anywhere, then what runs and what finished today in the threads
@@ -2478,7 +2631,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
     const project = projectForCwd(state.projects, session.cwd)?.displayName ?? session.cwd;
     const base = { sessionId: session.sessionId, project, thread: session.title };
     const thread: ThreadState | undefined = state.threads[session.sessionId];
-    if (!thread || !foldIsLive(state, thread)) {
+    if (!thread || !foldIsLive(state, thread, session)) {
       const pending = (session.live?.pendingApprovals ?? 0) + (session.live?.pendingInputs ?? 0);
       if (pending > 0) {
         needsYou.push({ ...base, itemId: null, agentId: null, kind: "request", text: `${plural(pending, "request")} waiting`, sub: null, state: "request", startedAt: null, endedAt: null, stale: true });
@@ -2504,13 +2657,14 @@ export function activityView(state: AppState, now: number): ActivityVM {
     });
     let runs = 0;
     let tasks = 0;
+    let agents = 0;
     for (const run of view.runs) {
       if (runLive(run)) {
         runs += 1;
         threadsWorking.add(session.sessionId);
         working.push({ ...base, itemId: run.itemId, agentId: null, kind: "run", text: run.name, sub: summaryLine(run).progress, state: run.counts.waiting > 0 || run.runNeeds.length > 0 ? "waiting-on-you" : run.counts.failed > 0 ? "failed" : "working", startedAt: run.startedAt, endedAt: null, stale: false });
       } else if (run.endedAt !== null && run.endedAt >= dayStart) {
-        finishedToday.push({ ...base, itemId: run.itemId, agentId: null, kind: "run", text: run.name, sub: summaryLine(run).progress, state: run.status === "finished" ? "done" : run.status === "stopped" ? "skipped" : "failed", startedAt: run.startedAt, endedAt: run.endedAt, stale: false });
+        finishedToday.push({ ...base, itemId: run.itemId, agentId: null, kind: "run", text: run.name, sub: summaryLine(run).progress, state: run.kind === "turn" && run.agents[0]?.state === "unknown" ? "unknown" : run.status === "finished" ? "done" : run.status === "stopped" ? "skipped" : "failed", startedAt: run.startedAt, endedAt: run.endedAt, stale: false });
       }
       if (run.tokens && run.startedAt !== null && run.startedAt >= dayStart) tokensToday += run.tokens.total;
     }
@@ -2525,11 +2679,14 @@ export function activityView(state: AppState, now: number): ActivityVM {
     }
     for (const agent of view.subagents) {
       if (LIVE_STATES.has(agent.state)) {
+        agents += 1;
         threadsWorking.add(session.sessionId);
         working.push({ ...base, itemId: null, agentId: agent.id, kind: "subagent", text: agent.name, sub: agent.task?.text ?? null, state: agent.state, startedAt: agent.startedAt, endedAt: null, stale: false });
+      } else if (agent.endedAt !== null && agent.endedAt >= dayStart) {
+        finishedToday.push({ ...base, itemId: null, agentId: agent.id, kind: "subagent", text: agent.name, sub: agent.failure?.text ?? agent.task?.text ?? null, state: agent.state, startedAt: agent.startedAt, endedAt: agent.endedAt, stale: false });
       }
     }
-    if (session.sessionId === open && runs + tasks > 0) stopAll = { runs, tasks };
+    if (session.sessionId === open && runs + tasks + agents > 0) stopAll = { runs, tasks, ...(agents > 0 ? { agents } : {}) };
   }
   for (const session of Object.values(state.sessions)) {
     const thread = state.threads[session.sessionId];

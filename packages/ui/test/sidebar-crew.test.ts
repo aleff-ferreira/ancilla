@@ -99,7 +99,7 @@ describe("ThreadRow with a crew", () => {
     const markup = row({ session: running, status: status(running) });
     assert.match(markup, /data-crew-row=""/);
     assert.match(markup, /class="crew-strip xs"/);
-    assert.match(text(markup), /Judge · 1\/2/);
+    assert.match(text(markup), /Judge · 1\/3/);
     assert.doesNotMatch(markup, /sync\/design/, "the branch leaves the second line while a strip is present");
     assert.match(markup, />Approval</, "today's word stays");
     assert.match(markup, /attention-pulse/, "today's glyph stays");

@@ -6,6 +6,9 @@ import {
   parseTitleSettings,
   parseYoloSettings,
   type AccountView,
+  type AccountsHealth,
+  type AccountLoginResult,
+  type AccountLoginProgress,
   type ApprovalDecisionInput,
   type ApprovalMode,
   type AttachmentView,
@@ -239,6 +242,30 @@ export class WebAncillaClient implements AncillaClient {
   async exportResearch(runId: string, format: ResearchExportFormat): Promise<ResearchExport> {
     return call<ResearchExport>("POST", `/api/research/${enc(runId)}/export`, { format });
   }
+  async readResearchExport(runId: string, format: ResearchExportFormat): Promise<Uint8Array> {
+    const path = `/api/research/${enc(runId)}/export/report.${format}`;
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), CALL_TIMEOUT_MS);
+    try {
+      const response = await fetch(url(path), {
+        headers: daemon.token ? { authorization: `Bearer ${daemon.token}` } : {},
+        credentials: daemon.base ? "include" : "same-origin",
+        signal: abort.signal,
+      });
+      if (!response.ok) {
+        const failure = (await response.json().catch(() => null)) as { error?: unknown } | null;
+        throw new AncillaError(typeof failure?.error === "string" ? failure.error : `Could not download the report (${response.status}).`, response.status);
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      if (error instanceof AncillaError) {
+        throw error;
+      }
+      throw new AncillaError(abort.signal.aborted ? "The report download took too long." : "The report could not be downloaded. Check the Ancilla server connection.", 0);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async getResearchSettings(): Promise<ResearchSettings> {
     return call<ResearchSettings>("GET", "/api/research-settings");
@@ -372,12 +399,22 @@ export class WebAncillaClient implements AncillaClient {
     await call("PATCH", "/api/projects/default-account", { cwd, accountId });
   }
 
-  async accountsHealth(): Promise<{ metaApiKeyInherited: boolean }> {
-    return call<{ metaApiKeyInherited: boolean }>("GET", "/api/accounts/health");
+  async accountsHealth(): Promise<AccountsHealth> {
+    return call<AccountsHealth>("GET", "/api/accounts/health");
   }
 
-  async loginAccount(id: string): Promise<{ url: string; code: string | null } | { fallback: string }> {
-    return call<{ url: string; code: string | null } | { fallback: string }>("POST", `/api/accounts/${enc(id)}/login`);
+  async loginAccount(id: string | null): Promise<AccountLoginResult> {
+    return call<AccountLoginResult>("POST", id === null ? "/api/login" : `/api/accounts/${enc(id)}/login`);
+  }
+
+  async accountLoginProgress(id: string | null, loginId: string): Promise<AccountLoginProgress> {
+    const path = id === null ? "/api/login" : `/api/accounts/${enc(id)}/login`;
+    return call<AccountLoginProgress>("GET", `${path}?loginId=${enc(loginId)}`);
+  }
+
+  async cancelAccountLogin(id: string | null, loginId: string): Promise<void> {
+    const path = id === null ? "/api/login" : `/api/accounts/${enc(id)}/login`;
+    await call("DELETE", `${path}?loginId=${enc(loginId)}`);
   }
 
   async getYoloSettings(): Promise<YoloSettings> {

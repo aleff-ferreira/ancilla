@@ -7,6 +7,7 @@ import { CommandPalette } from "../components/palette/CommandPalette.js";
 import { isTyping } from "../components/requests/Requests.js";
 import { ActivityDrawerHost } from "../components/crew/ActivityDrawer.js";
 import { SettingsPage } from "../components/settings/SettingsPage.js";
+import { DeviceLoginModal } from "../components/settings/MuseSignIn.js";
 import { Sidebar } from "../components/sidebar/Sidebar.js";
 import { ThreadView } from "../components/thread/ThreadView.js";
 import { UsagePage } from "../components/usage/UsagePage.js";
@@ -64,6 +65,7 @@ export function AncillaApp(props: AncillaAppProps) {
           <WindowTitleSync />
           <AwaySync />
           <Shell />
+          <DeviceLoginModal />
           <ActivityDrawerHost />
           <CommandPalette />
           <AddProjectDialog />

@@ -148,6 +148,37 @@ export function CompletionReport(props: CompletionReportProps) {
   const finished = run.endedAt !== null ? formatClock(run.endedAt, run.clockAt) : null;
   const subLong = [runKindWord(run), started ? `started ${started}` : null, finished ? `finished ${finished}` : null].filter(Boolean).join(" · ");
   const scheduled = run.counts.total - run.counts.planned;
+  if (run.kind === "turn") {
+    return (
+      <div className="crew-run report" data-run={run.itemId} data-completion="turn">
+        <div className="crew-head">
+          <button type="button" className="toggle" aria-expanded={expanded} aria-controls={bodyId} data-crew-focus="head" onClick={props.onToggle}>
+            <span className={cn("crew-tile", completion.sheen ? "ok" : "mute")} aria-hidden="true">
+              {completion.sheen ? <CheckCircleIcon size={16} /> : <MinusCircleIcon size={16} />}
+            </span>
+            <span className="tt">
+              <span className="nm">{completion.headline}</span>
+              <span className="sub">{completion.factLine}</span>
+            </span>
+          </button>
+          <span className="crew-el">{elapsed}</span>
+          <IconButton size="sm" label={expanded ? "Collapse activity" : "Expand activity"} onClick={props.onToggle}>
+            {expanded ? <CaretUpIcon size={14} /> : <CaretDownIcon size={14} />}
+          </IconButton>
+          <IconButton size="sm" label="Dismiss turn summary" onClick={props.onDismiss}><XCircleIcon size={14} /></IconButton>
+        </div>
+        {expanded ? (
+          <div id={bodyId} className="crew-body !py-1">
+            <div className="crew-foot !mt-0 !border-0 !pt-0">
+              <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("roster")}><RowsIcon size={12} /> View activity</Button>
+              <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("timeline")}><ChartBarIcon size={12} /> Timeline</Button>
+              {run.tokens ? <span className="ml-auto text-xs text-subtle tabular-nums">{completion.stats[2]?.value} tokens</span> : null}
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
   return (
     <div className="crew-run report" data-run={run.itemId}>
       <div className="crew-head">
