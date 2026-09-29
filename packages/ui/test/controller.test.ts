@@ -4173,12 +4173,17 @@ describe("guided Linux setup", () => {
   it("keeps non-Linux setup on the existing installation path", async () => {
     const client = new LinuxSetupClient();
     client.probeEnvironment = async () => ({ platform: "darwin", wslAvailable: false, defaultDistro: null, museFound: true, musePath: "/usr/bin/muse", version: "0.20.3", persistent: true });
+    client.startSession = async () => { throw new Error("session/start: read surviving deletion authority: Unsafe path"); };
     const { controller, stop } = linuxController(client);
     await flushMicrotasks(50);
     controller.navigate({ kind: "settings" });
     await controller.installLinuxMuse();
     assert.deepEqual(client.setupAccounts, []);
     assert.equal(controller.store.get().linuxSetup, null);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    assert.equal(await controller.send("Keep this draft"), false);
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not start a thread");
+    assert.equal(controller.store.get().toasts.at(-1)?.action, undefined, "other platforms cannot open Linux setup");
     stop();
   });
 });

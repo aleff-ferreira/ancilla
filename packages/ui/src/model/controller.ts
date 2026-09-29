@@ -1846,7 +1846,7 @@ export class AncillaController {
       }
       return true;
     } catch (error) {
-      if (errorKind(error) === "muse_storage_unavailable" || /(?:deletion (?:registry )?authority|surviving deletion).*unsafe path/i.test(errorMessage(error))) {
+      if (this.state.env?.platform === "linux" && (errorKind(error) === "muse_storage_unavailable" || /(?:deletion (?:registry )?authority|surviving deletion).*unsafe path/i.test(errorMessage(error)))) {
         const accountId = projectForCwd(this.state.projects, cwd)?.defaultAccountId ?? null;
         void this.refreshLinuxSetup(accountId);
         const detail = errorKind(error) === "muse_storage_unavailable" ? errorMessage(error) : "Muse could not access its storage safely. Open Linux setup to check the folder and fix its permissions.";

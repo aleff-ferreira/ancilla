@@ -470,7 +470,7 @@ function errorInfo(error: unknown): { status: number; message: string; kind: str
   }
   const kind = typeof (error as { kind?: unknown })?.kind === "string" ? ((error as { kind: string }).kind) : null;
   const message = error instanceof Error ? error.message : String(error);
-  if (/read surviving deletion authority|deletion registry authority is unavailable/i.test(message)) {
+  if (process.platform === "linux" && /read surviving deletion authority|deletion registry authority is unavailable/i.test(message)) {
     return {
       status: 409,
       kind: "muse_storage_unavailable",
