@@ -1,4 +1,4 @@
-import { describe, it, after } from "node:test";
+import { describe, it, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -22,6 +22,20 @@ import {
 } from "../src/server.js";
 import type { ExecFn, ServeTarget } from "@ancilla/daemon";
 import { MuseSubscriptionReader } from "../src/subscriptionQuota.js";
+
+/** Test credentials must stay inside their fixture even when the runner defines an XDG root or API key. */
+function quotaEnvironment(t: TestContext, home: string): void {
+  const keys = ["XDG_CONFIG_HOME", "MUSE_AUTH_PATH", "META_API_KEY"] as const;
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env["XDG_CONFIG_HOME"] = join(home, ".config");
+  delete process.env["MUSE_AUTH_PATH"];
+  delete process.env["META_API_KEY"];
+  t.after(() => {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  });
+}
 
 interface Call {
   method: string;
@@ -1497,8 +1511,9 @@ describe("AncillaServer", () => {
     assert.equal(res.usage.window.usedPercent, 12, "usage holds the newest across accounts");
   });
 
-  it("refreshes default and named subscription limits directly without starting a host", async () => {
+  it("refreshes default and named subscription limits directly without starting a host", async (t) => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-direct-quota-"));
+    quotaEnvironment(t, home);
     const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
     const profile = await aonia.createProfile("work");
     const saveLogin = async (root: string, token: string) => {
@@ -1540,8 +1555,9 @@ describe("AncillaServer", () => {
     assert.equal(requests, 2, "page and sidebar reads share one short account cache");
   });
 
-  it("keeps a failed direct refresh distinct from an older runtime observation", async () => {
+  it("keeps a failed direct refresh distinct from an older runtime observation", async (t) => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-direct-unavailable-"));
+    quotaEnvironment(t, home);
     const dir = join(home, ".config", "muse");
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "auth.json"), JSON.stringify({ providers: { meta: {
@@ -1616,8 +1632,9 @@ describe("AncillaServer", () => {
     }
   });
 
-  it("keeps newer runtime readings when an earlier direct quota check finishes late", async () => {
+  it("keeps newer runtime readings when an earlier direct quota check finishes late", async (t) => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-quota-order-"));
+    quotaEnvironment(t, home);
     const dir = join(home, ".config", "muse");
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "auth.json"), JSON.stringify({ providers: { meta: {
