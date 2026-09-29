@@ -19,6 +19,7 @@ import {
   type ResearchSettings,
   type DirectoryListing,
   type EnvironmentStatus,
+  type LinuxSetupView,
   type EventHandler,
   type FileContent,
   type FileEntry,
@@ -174,6 +175,22 @@ export class WebAncillaClient implements AncillaClient {
 
   probeEnvironment(refresh = false): Promise<EnvironmentStatus> {
     return call<EnvironmentStatus>("GET", `/api/env${refresh ? "?refresh=1" : ""}`);
+  }
+
+  linuxSetup(accountId: string | null = null): Promise<LinuxSetupView> {
+    return call<LinuxSetupView>("GET", `/api/setup/linux${accountId ? `?accountId=${enc(accountId)}` : ""}`);
+  }
+
+  installLinuxMuse(): Promise<LinuxSetupView> {
+    return call<LinuxSetupView>("POST", "/api/setup/linux/install", {});
+  }
+
+  cancelLinuxMuseInstall(attemptId: string): Promise<LinuxSetupView> {
+    return call<LinuxSetupView>("DELETE", `/api/setup/linux/install?attemptId=${enc(attemptId)}`);
+  }
+
+  repairLinuxStorage(accountId: string | null = null): Promise<LinuxSetupView> {
+    return call<LinuxSetupView>("POST", "/api/setup/linux/repair", { accountId });
   }
 
   async listProjects(): Promise<ProjectView[]> {

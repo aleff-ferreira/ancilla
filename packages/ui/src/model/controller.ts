@@ -4,6 +4,8 @@ import type {
   ApprovalRequest,
   AttachmentView,
   GoalAction,
+  LinuxDesktopStatus,
+  LinuxSetupView,
   AncillaEvent,
   MspItem,
   OutgoingAttachment,
@@ -97,6 +99,11 @@ export interface Platform {
   setWindowTitle?(title: string): void;
   /** Lets the user choose a destination before rendering a document; cancellation does not save anything. */
   saveFile?: FileSaver;
+  linuxDesktop?: {
+    status(): Promise<LinuxDesktopStatus>;
+    install(options: { desktopShortcut: boolean }): Promise<LinuxDesktopStatus>;
+    relaunch(): Promise<void>;
+  };
 }
 
 /** How the export formats are named in copy. */
@@ -526,6 +533,7 @@ export class AncillaController {
   private saveHandle: unknown = null;
   private staleHandle: unknown = null;
   private disposed = false;
+  private bootRev = 0;
   /** When stream events were last applied per session, so a thread that went silent can be noticed. */
   private readonly appliedAt = new Map<string, number>();
   /** Recovery attempts on the current turn, used to back off after the initial quick reads. */
@@ -571,6 +579,9 @@ export class AncillaController {
   /** The scheduled next poll tick for an in-progress device-code login, if one is pending. */
   private loginPollHandle: unknown = null;
   private loginPollAttempts = 0;
+  private linuxSetupRev = 0;
+  private linuxSetupPollHandle: unknown = null;
+  private linuxDesktopRev = 0;
   /** Approval modes from before YOLO was armed, restored when it is switched off. Null when never armed here. */
   private preYolo: { defaultMode: ApprovalMode; threads: Record<string, ApprovalMode | null> } | null = null;
   /** The main route Back leaves the settings/usage pages for; cleared once back on a main route. */
@@ -600,6 +611,8 @@ export class AncillaController {
   }
 
   start(): () => void {
+    // React's development StrictMode mounts, cleans up and starts the same controller again.
+    this.disposed = false;
     this.disposers.push(this.client.subscribe((event) => this.onEvent(event)));
     this.disposers.push(
       this.platform.onHashChange(() => {
@@ -692,29 +705,40 @@ export class AncillaController {
 
   dispose(): void {
     this.disposed = true;
+    this.bootRev++;
+    this.linuxSetupRev++;
+    this.linuxDesktopRev++;
     for (const dispose of this.disposers.splice(0)) {
       dispose();
     }
-    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.loginPollHandle]) {
+    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
       if (handle !== null) {
         this.platform.cancel(handle);
       }
     }
     this.staleHandle = null;
     this.loginPollHandle = null;
+    this.linuxSetupPollHandle = null;
     this.platform.savePrefs(this.state.prefs);
   }
 
   private async boot(refreshEnv: boolean): Promise<void> {
+    const rev = ++this.bootRev;
     this.update((s) => ({ ...s, boot: "loading", bootError: null }));
     try {
       const env = await this.client.probeEnvironment(refreshEnv);
+      if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, env }));
+      if (env.platform === "linux") {
+        void this.refreshLinuxSetup();
+        void this.refreshLinuxDesktop();
+      }
       if (!env.museFound) {
         this.update((s) => ({ ...s, boot: "ready" }));
         return;
       }
       await this.refresh();
+      if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, boot: "ready" }));
       this.applyRoute(hashToRoute(this.platform.readHash()), false);
       void this.discoverAll(true);
@@ -726,12 +750,138 @@ export class AncillaController {
       void this.loadPlanUsage();
       void this.loadAccounts();
     } catch (error) {
+      if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, boot: "error", bootError: errorMessage(error) }));
     }
   }
 
   retryBoot(): void {
     void this.boot(true);
+  }
+
+  // ---------------------------------------------------------------- Linux setup
+
+  private clearLinuxSetupPoll(): void {
+    if (this.linuxSetupPollHandle !== null) this.platform.cancel(this.linuxSetupPollHandle);
+    this.linuxSetupPollHandle = null;
+  }
+
+  private scheduleLinuxSetupPoll(): void {
+    this.clearLinuxSetupPoll();
+    if (this.disposed || this.state.linuxSetup?.installation.status !== "installing") return;
+    this.linuxSetupPollHandle = this.platform.schedule(() => {
+      this.linuxSetupPollHandle = null;
+      void this.refreshLinuxSetup();
+    }, 1_500);
+  }
+
+  private acceptLinuxSetup(linuxSetup: LinuxSetupView, accountId: string | null): void {
+    const found = linuxSetup.museFound && linuxSetup.installation.status === "installed" && this.state.env?.museFound === false;
+    this.update((s) => ({ ...s, linuxSetup, linuxSetupAccountId: accountId, linuxSetupError: null }));
+    this.scheduleLinuxSetupPoll();
+    // Re-probe the executable and load projects/accounts as soon as installation finishes.
+    // No app restart or stale desktop PATH is needed to leave the setup screen.
+    if (found) void this.boot(true);
+  }
+
+  async refreshLinuxSetup(accountId: string | null = this.state.linuxSetupAccountId): Promise<void> {
+    if (this.state.env?.platform !== "linux" || !this.client.linuxSetup) return;
+    if (["install", "cancel", "repair"].some((action) => this.state.busy[`linux-setup:${action}`])) return;
+    const rev = ++this.linuxSetupRev;
+    this.clearLinuxSetupPoll();
+    this.setBusy("linux-setup:check", true);
+    try {
+      const view = await this.client.linuxSetup(accountId);
+      if (this.disposed || rev !== this.linuxSetupRev) return;
+      this.acceptLinuxSetup(view, accountId);
+    } catch (error) {
+      if (this.disposed || rev !== this.linuxSetupRev) return;
+      this.update((s) => ({ ...s, linuxSetupError: error instanceof Error && "status" in error && error.status === 404
+        ? "This Ancilla server needs an update before it can offer guided Linux setup. Update Ancilla, then check again."
+        : `Could not check Linux setup. ${errorMessage(error)}` }));
+      this.scheduleLinuxSetupPoll();
+    } finally {
+      if (rev === this.linuxSetupRev && !this.disposed) this.setBusy("linux-setup:check", false);
+    }
+  }
+
+  private async changeLinuxSetup(action: "install" | "cancel" | "repair", run: () => Promise<LinuxSetupView>, accountId: string | null): Promise<void> {
+    if (this.state.env?.platform !== "linux" || ["install", "cancel", "repair"].some((key) => this.state.busy[`linux-setup:${key}`])) return;
+    const rev = ++this.linuxSetupRev;
+    this.clearLinuxSetupPoll();
+    this.setBusy("linux-setup:check", false);
+    this.setBusy(`linux-setup:${action}`, true);
+    this.update((s) => ({ ...s, linuxSetupError: null }));
+    try {
+      const view = await run();
+      if (this.disposed || rev !== this.linuxSetupRev) return;
+      this.acceptLinuxSetup(view, accountId);
+    } catch (error) {
+      if (this.disposed || rev !== this.linuxSetupRev) return;
+      this.update((s) => ({ ...s, linuxSetupError: errorMessage(error) }));
+      this.scheduleLinuxSetupPoll();
+    } finally {
+      if (rev === this.linuxSetupRev && !this.disposed) this.setBusy(`linux-setup:${action}`, false);
+    }
+  }
+
+  async installLinuxMuse(): Promise<void> {
+    if (!this.client.installLinuxMuse || this.state.linuxSetup?.installation.status === "installing") return;
+    await this.changeLinuxSetup("install", () => this.client.installLinuxMuse!(), null);
+  }
+
+  async cancelLinuxMuseInstall(): Promise<void> {
+    const attempt = this.state.linuxSetup?.installation.attemptId;
+    if (!attempt || !this.client.cancelLinuxMuseInstall) return;
+    await this.changeLinuxSetup("cancel", () => this.client.cancelLinuxMuseInstall!(attempt), null);
+  }
+
+  async repairLinuxStorage(): Promise<void> {
+    if (!this.client.repairLinuxStorage) return;
+    const accountId = this.state.linuxSetupAccountId;
+    await this.changeLinuxSetup("repair", () => this.client.repairLinuxStorage!(accountId), accountId);
+  }
+
+  async refreshLinuxDesktop(): Promise<void> {
+    if (this.state.env?.platform !== "linux" || !this.platform.linuxDesktop || this.state.busy["linux-desktop:install"]) return;
+    const rev = ++this.linuxDesktopRev;
+    try {
+      const linuxDesktop = await this.platform.linuxDesktop.status();
+      if (!this.disposed && rev === this.linuxDesktopRev) this.update((s) => ({ ...s, linuxDesktop, linuxDesktopError: null }));
+    } catch (error) {
+      if (!this.disposed && rev === this.linuxDesktopRev) this.update((s) => ({ ...s, linuxDesktopError: errorMessage(error) }));
+    }
+  }
+
+  async installLinuxDesktop(desktopShortcut: boolean): Promise<void> {
+    if (!this.platform.linuxDesktop || this.state.busy["linux-desktop:install"]) return;
+    const rev = ++this.linuxDesktopRev;
+    this.setBusy("linux-desktop:install", true);
+    this.update((s) => ({ ...s, linuxDesktopError: null }));
+    try {
+      const linuxDesktop = await this.platform.linuxDesktop.install({ desktopShortcut });
+      if (!this.disposed && rev === this.linuxDesktopRev) this.update((s) => ({ ...s, linuxDesktop, linuxDesktopError: null }));
+    } catch (error) {
+      if (!this.disposed && rev === this.linuxDesktopRev) this.update((s) => ({ ...s, linuxDesktopError: errorMessage(error) }));
+    } finally {
+      if (!this.disposed && rev === this.linuxDesktopRev) this.setBusy("linux-desktop:install", false);
+    }
+  }
+
+  async relaunchLinuxDesktop(): Promise<void> {
+    if (!this.platform.linuxDesktop || this.state.busy["linux-desktop:relaunch"]) return;
+    if (this.state.linuxSetup?.installation.status === "installing" || Object.values(this.state.threads).some((thread) => crewBusy(thread.fold, thread.researchRuns)) || Object.values(this.state.sessions).some((session) => Boolean(session.live?.activeTurnId))) {
+      this.update((s) => ({ ...s, linuxDesktopError: "Let installation, running threads and background tasks finish before relaunching Ancilla." }));
+      return;
+    }
+    this.setBusy("linux-desktop:relaunch", true);
+    try {
+      await this.platform.linuxDesktop.relaunch();
+    } catch (error) {
+      if (!this.disposed) this.update((s) => ({ ...s, linuxDesktopError: errorMessage(error) }));
+    } finally {
+      if (!this.disposed) this.setBusy("linux-desktop:relaunch", false);
+    }
   }
 
   // ---------------------------------------------------------------- data
@@ -957,6 +1107,8 @@ export class AncillaController {
     } else if (route.kind === "new" && route.cwd) {
       this.setPrefs({ lastProject: route.cwd });
     } else if (route.kind === "settings") {
+      void this.refreshLinuxSetup();
+      void this.refreshLinuxDesktop();
       if (this.state.titleSettings === null) {
         void this.loadTitleSettings();
       }
@@ -1694,7 +1846,20 @@ export class AncillaController {
       }
       return true;
     } catch (error) {
-      this.toast("error", "Could not start a thread", errorMessage(error));
+      if (errorKind(error) === "muse_storage_unavailable" || /(?:deletion (?:registry )?authority|surviving deletion).*unsafe path/i.test(errorMessage(error))) {
+        const accountId = projectForCwd(this.state.projects, cwd)?.defaultAccountId ?? null;
+        void this.refreshLinuxSetup(accountId);
+        const detail = errorKind(error) === "muse_storage_unavailable" ? errorMessage(error) : "Muse could not access its storage safely. Open Linux setup to check the folder and fix its permissions.";
+        this.toast("error", "Muse storage needs attention", `${detail} Your draft is still here.`, {
+          label: "Open Linux setup",
+          run: () => {
+            this.navigate({ kind: "settings" });
+            void this.refreshLinuxSetup(accountId);
+          },
+        });
+      } else {
+        this.toast("error", "Could not start a thread", errorMessage(error));
+      }
       return false;
     } finally {
       this.setBusy("start", false);

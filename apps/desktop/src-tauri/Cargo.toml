@@ -1,6 +1,6 @@
 [package]
 name = "ancilla"
-version = "0.20.2"
+version = "0.20.3"
 description = "Ancilla: desktop ADE for the Muse Code CLI"
 edition = "2021"
 license = "AGPL-3.0-only"

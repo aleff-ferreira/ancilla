@@ -1,7 +1,7 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAonia } from "@harjjotsinghh/aonia";
@@ -116,18 +116,20 @@ function fakeFactory(connection: FakeConnection, probe?: FactoryProbe): (target:
 }
 
 async function start(connection: FakeConnection, extra: Partial<ConstructorParameters<typeof AncillaServer>[0]> = {}) {
+  const fixtureHome = await mkdtemp(join(tmpdir(), "ancilla-server-home-"));
   const server = new AncillaServer({
     port: 0,
     dataDir: ":memory:",
     platform: "linux",
     musePath: "muse",
+    home: fixtureHome,
     hostFactory: fakeFactory(connection),
     // No test spawns the real CLI by accident; title upgrades see a failed call.
     exec: async () => ({ stdout: "", exitCode: 127 }),
     ...extra,
   });
   // A test that closes the server itself (to restart it on the same data) is not failed by closing it again.
-  after(() => server.close().catch(() => undefined));
+  after(async () => { await server.close().catch(() => undefined); await rm(fixtureHome, { recursive: true, force: true }); });
   const bound = await server.listen();
   return { server, base: `http://127.0.0.1:${bound.port}` };
 }
@@ -2265,13 +2267,16 @@ describe("AncillaServer", () => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-aonia-"));
     const probe: FactoryProbe = { targets: [], exits: [] };
     const { base } = await start(connection, {
+      home,
       hostFactory: fakeFactory(connection, probe),
       aonia: createAonia({ home, platform: "linux", musePath: "muse" }),
     });
     const res = await send(base, "/api/sessions", { cwd: "/work/proj" });
     assert.equal(res.status, 200);
     assert.deepEqual(probe.targets.map((t) => t.args), [["serve"]]);
-    assert.equal(probe.targets[0]?.env, undefined, "no account means no per-profile env, same as today");
+    assert.equal(probe.targets[0]?.env?.HOME, home, "the Linux host uses the home checked by storage preflight");
+    assert.equal(probe.targets[0]?.env?.XDG_CONFIG_HOME, process.env.XDG_CONFIG_HOME);
+    assert.equal(probe.targets[0]?.env?.XDG_DATA_HOME, process.env.XDG_DATA_HOME);
   });
 
   it("spawns a per-account host with the profile environment merged over process.env", async () => {

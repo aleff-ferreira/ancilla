@@ -12,6 +12,7 @@ import { Menu, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator,
 import { Button, Logo, Spinner, cn } from "../ui/primitives.js";
 import { FolderArt } from "./FolderArt.js";
 import { MuseSubscriptionCard } from "../settings/MuseSignIn.js";
+import { LinuxSetupCard } from "../settings/LinuxSetup.js";
 
 const DISPLAY = "font-display text-[2.125rem] leading-[1.15] font-normal tracking-[-0.015em] text-fg text-balance";
 
@@ -53,6 +54,7 @@ export function NewThread(props: { cwd: string | null }) {
             Start a thread in <ProjectSwitcher project={project} projects={projects} />
           </h1>
           {project.folders.length > 1 ? <FolderSwitcher project={project} folder={folder ?? project.cwd} /> : null}
+          <div className="mt-6 empty:hidden"><LinuxSetupCard compact /></div>
           {needsLogin && project.defaultAccountId === null ? <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div> : null}
           <div className="mt-7">
             <Composer sessionId={null} cwd={folder ?? project.cwd} running={false} readOnly={false} variant="home" autoFocus />
@@ -214,6 +216,7 @@ export function Welcome() {
   const discovering = useApp((s) => s.discovering);
   const busy = useApp((s) => Boolean(s.busy["addProject"]));
   const windows = useApp((s) => s.env?.platform === "win32");
+  const linux = useApp((s) => s.env?.platform === "linux");
   const [path, setPath] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const submit = (event: FormEvent) => {
@@ -231,7 +234,13 @@ export function Welcome() {
             Point Muse at a project and start a thread. Threads live in the sidebar, grouped by project, and tell you when
             they need you.
           </p>
-          <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div>
+          {linux ? <div className="mt-6"><LinuxSetupCard firstRun showSubscription /></div> : <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div>}
+          {linux ? (
+            <div className="mt-6">
+              <Button variant="primary" onClick={() => controller.setAddProjectOpen(true)}><FolderPlusIcon size={16} /> Choose a project folder</Button>
+              <p className="mt-2 text-xs leading-relaxed text-subtle">Choose Local folder to browse this computer, or clone a repository. Then describe your task in a new thread.</p>
+            </div>
+          ) : null}
           <form className="mt-8 flex gap-2" onSubmit={submit}>
             <input
               ref={input}
@@ -239,7 +248,7 @@ export function Welcome() {
               value={path}
               spellCheck={false}
               autoComplete="off"
-              autoFocus
+              autoFocus={!linux}
               placeholder={windows ? "D:\\Projects\\my-app" : "/home/you/code/my-app"}
               onChange={(event) => setPath(event.currentTarget.value)}
               className="h-10 min-w-0 flex-1 rounded-lg bg-raised px-3 font-mono text-base text-fg shadow-[0_0_0_1px_var(--border-strong)] outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-ring)] focus-visible:outline-none sm:text-sm"
@@ -276,6 +285,18 @@ export function Onboarding() {
   const checking = useApp((s) => s.boot === "loading");
   if (!env) {
     return null;
+  }
+  if (env.platform === "linux") {
+    return (
+      <div className="flex h-full items-start justify-center overflow-y-auto bg-bg px-6 py-10">
+        <div className="my-auto w-full max-w-[560px]">
+          <Logo size={40} />
+          <h1 className={cn(DISPLAY, "mt-7")}>Set up Ancilla</h1>
+          <p className="mt-3 text-md leading-relaxed text-muted">Install Muse, connect your Meta subscription, then choose a project. Ancilla guides you through each step here.</p>
+          <div className="mt-7"><LinuxSetupCard firstRun showSubscription /></div>
+        </div>
+      </div>
+    );
   }
   const windows = env.platform === "win32";
   const install = "irm https://dev.meta.ai/install.ps1 | iex";

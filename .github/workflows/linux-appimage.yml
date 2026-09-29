@@ -1,4 +1,4 @@
-name: Linux AppImage smoke test
+name: Linux installer smoke tests
 
 # A packaged AppImage lays its files out differently from a `tauri build --no-bundle` tree, and that layout is
 # what decides whether the app finds its bundled Node.js at all. Building the desktop app takes minutes, so this
@@ -53,55 +53,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev xvfb
+            libayatana-appindicator3-dev librsvg2-dev xvfb rpm cpio desktop-file-utils
       - run: npm ci
         if: steps.guard.outputs.ready == 'true'
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
         if: steps.guard.outputs.ready == 'true'
-      - name: Build the AppImage
+      - name: Build Debian, RPM and AppImage installers
         if: steps.guard.outputs.ready == 'true'
         env:
           ANCILLA_NODE_TARGET: x86_64-unknown-linux-gnu
         # No updater signing key on a pull request, so the updater artifacts are left out.
-        run: npm run tauri --workspace ancilla-desktop -- build --target x86_64-unknown-linux-gnu --bundles appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
-      - name: Check what the bundle contains
+        run: npm run tauri --workspace ancilla-desktop -- build --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Check runtimes, dependencies, menu entries and icons in every installer
+        if: steps.guard.outputs.ready == 'true'
+        run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+      - name: Install the Debian package and launch it from its system path
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          bundle=apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage
-          image=$(ls "$bundle"/*.AppImage)
-          echo "Built $image"
-          # --appimage-extract writes squashfs-root into the working directory, so the path has to survive the cd.
-          image=$(realpath "$image")
-          (cd "$bundle" && "$image" --appimage-extract >/dev/null)
-          root="$bundle/squashfs-root"
-          test -x "$root/usr/bin/ancilla" || { echo "no ancilla binary in the bundle"; exit 1; }
-          test -x "$root/usr/bin/node" || { echo "the Node.js sidecar is missing from the bundle"; exit 1; }
-          "$root/usr/bin/node" --version
-          find "$root" -name server.cjs -print -quit | grep . || { echo "server.cjs is missing from the bundle"; exit 1; }
-      - name: Start it and wait for its server
+          debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
+          sudo apt-get install -y "${debs[0]}"
+          bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+      - name: Launch the AppImage without requiring FUSE
         if: steps.guard.outputs.ready == 'true'
         run: |
-          set -uo pipefail
-          root=apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/squashfs-root
-          xvfb-run -a "$root/AppRun" > /tmp/ancilla-stdout.log 2>&1 &
-          app=$!
-          # The app writes its port file next to its database once the server is listening.
-          for _ in $(seq 1 60); do
-            if find "$HOME/.local/share" -name server-port -print -quit 2>/dev/null | grep -q .; then
-              echo "The server came up: $(find "$HOME/.local/share" -name server-port -exec cat {} \;)"
-              kill "$app" 2>/dev/null || true
-              exit 0
-            fi
-            if ! kill -0 "$app" 2>/dev/null; then
-              echo "The app exited before its server started."
-              break
-            fi
-            sleep 2
-          done
-          echo "--- app output"
-          cat /tmp/ancilla-stdout.log || true
-          echo "--- server log"
-          find "$HOME/.local/share" -name "server.log" -exec cat {} \; 2>/dev/null || true
-          kill "$app" 2>/dev/null || true
-          exit 1
+          set -euo pipefail
+          images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          bash apps/desktop/scripts/smoke-linux.sh "${images[0]}" --appimage-extract-and-run

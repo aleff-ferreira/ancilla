@@ -14,6 +14,9 @@ use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
 
+#[cfg(target_os = "linux")]
+mod linux_desktop;
+
 struct ServerChild(Arc<Mutex<Option<Child>>>);
 
 /// Stops the local server when Tauri clears its resources, which the updater does right before it
@@ -170,7 +173,11 @@ fn node_runs(program: &Path) -> bool {
 }
 
 /// The Node.js runtime that ships next to the app executable as a Tauri sidecar, when this build has one.
-fn bundled_node() -> Option<PathBuf> {
+fn bundled_node(resource_dir: Option<&Path>) -> Option<PathBuf> {
+    // Debian/RPM own only Ancilla's private runtime, never the system's /usr/bin/node.
+    if let Some(node) = resource_dir.and_then(|dir| find_resource(dir, "node")).filter(|path| path.is_file()) {
+        return Some(node);
+    }
     let exe = std::env::current_exe().ok()?;
     bundled_node_in(exe.parent()?)
 }
@@ -184,8 +191,8 @@ fn bundled_node_in(dir: &Path) -> Option<PathBuf> {
 /// install), Node.js the way a terminal sees it. GUI apps on macOS start with a minimal PATH that misses
 /// Homebrew, ~/.local/bin and everything a version manager adds through the shell's rc files, so
 /// plain `node` fails for most users when Ancilla is opened from the Finder rather than a terminal.
-fn find_node() -> Option<PathBuf> {
-    if let Some(bundled) = bundled_node().filter(|node| node_runs(node)) {
+fn find_node(resource_dir: &Path) -> Option<PathBuf> {
+    if let Some(bundled) = bundled_node(Some(resource_dir)).filter(|node| node_runs(node)) {
         return Some(bundled);
     }
     let mut candidates = vec![PathBuf::from("node")];
@@ -294,12 +301,12 @@ fn latest_nvm_node(home: &Path) -> Option<PathBuf> {
 /// bin folders, in front of whatever the app inherited. The server's own probes (`muse`, skills)
 /// and the user's `!` commands all run under it.
 #[cfg(unix)]
-fn augmented_path(node: &Path) -> Option<OsString> {
+fn augmented_path(node: &Path, resource_dir: Option<&Path>) -> Option<OsString> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut prepend: Vec<PathBuf> = Vec::new();
     // The bundled node sits beside the app executable; putting that folder first would shadow the
     // user's own node for their `!` commands.
-    if node.is_absolute() && bundled_node().as_deref() != Some(node) {
+    if node.is_absolute() && bundled_node(resource_dir).as_deref() != Some(node) {
         if let Some(dir) = node.parent() {
             prepend.push(dir.to_path_buf());
         }
@@ -373,7 +380,7 @@ fn spawn_server(
 ) -> Result<(Child, String), StartFailure> {
     let mut cmd = command(node);
     #[cfg(unix)]
-    if let Some(path) = augmented_path(node) {
+    if let Some(path) = augmented_path(node, app.path().resource_dir().ok().as_deref()) {
         cmd.env("PATH", path);
     }
     cmd.arg(server).arg("--port").arg(port.to_string());
@@ -410,8 +417,8 @@ fn spawn_server(
 }
 
 fn boot_server(app: &tauri::AppHandle) -> Result<String, BootError> {
-    let node = find_node().ok_or(BootError::NodeMissing)?;
     let resource_dir = app.path().resource_dir().map_err(|_| BootError::ServerMissing)?;
+    let node = find_node(&resource_dir).ok_or(BootError::NodeMissing)?;
     let server = find_resource(&resource_dir, "server.cjs").ok_or(BootError::ServerMissing)?;
     let frontend = find_resource(&resource_dir, "frontend");
     // Projects, pins and thread titles persist per user, next to the app's other data.
@@ -508,8 +515,24 @@ fn is_external_link(url: &Url) -> bool {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
+    let builder = tauri::Builder::default();
+    // System packages are updated by the distribution's installer. The AppImage updater may
+    // replace only an AppImage, and is unavailable altogether in Debian/RPM installations.
+    #[cfg(target_os = "linux")]
+    let builder = if linux_desktop::installation_kind() == "appimage" {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    #[cfg(not(target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    #[cfg(target_os = "linux")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        linux_desktop::linux_installation_status,
+        linux_desktop::install_linux_launcher,
+        linux_desktop::relaunch_installed_linux,
+    ]);
+    builder
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -543,6 +566,13 @@ fn main() {
                 });
             if CUSTOM_FRAME {
                 builder = builder.decorations(false).initialization_script(FRAME_SCRIPT);
+            }
+            #[cfg(target_os = "linux")]
+            {
+                builder = builder.initialization_script(format!(
+                    "window.__ANCILLA_LINUX_INSTALL__ = '{}';",
+                    linux_desktop::installation_kind()
+                ));
             }
             // The traffic lights float over the sidebar's top-left corner; the UI leaves room
             // for them and marks its headers as drag regions, like T3 Code.
@@ -593,7 +623,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_node_in, find_resource, fresh_port, parse_listening_url, plain_path, stable_port, start_with_retry, BootError, StartFailure,
+        bundled_node, bundled_node_in, find_resource, fresh_port, parse_listening_url, plain_path, stable_port, start_with_retry, BootError, StartFailure,
         PORT_FILE, SPLASH_PAGE,
     };
     #[cfg(unix)]
@@ -655,6 +685,15 @@ mod tests {
         let name = if cfg!(windows) { "node.exe" } else { "node" };
         std::fs::write(dir.join(name), "").unwrap();
         assert_eq!(bundled_node_in(&dir), Some(dir.join(name)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_the_private_packaged_runtime_before_any_system_node() {
+        let dir = std::env::temp_dir().join(format!("ancilla-private-node-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("resources")).unwrap();
+        std::fs::write(dir.join("resources/node"), "").unwrap();
+        assert_eq!(bundled_node(Some(&dir)), Some(dir.join("resources/node")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -266,6 +266,12 @@ export interface AppState {
   boot: "loading" | "ready" | "error";
   bootError: string | null;
   env: EnvironmentStatus | null;
+  linuxSetup: import("../types.js").LinuxSetupView | null;
+  linuxSetupError: string | null;
+  /** The named account whose storage is being checked; null is the default Muse login. */
+  linuxSetupAccountId: string | null;
+  linuxDesktop: import("../types.js").LinuxDesktopStatus | null;
+  linuxDesktopError: string | null;
   connection: "connecting" | "open" | "lost";
   projects: ProjectView[];
   sessions: Record<string, SessionSummary>;
@@ -372,6 +378,11 @@ export function initialState(prefs: Prefs): AppState {
     boot: "loading",
     bootError: null,
     env: null,
+    linuxSetup: null,
+    linuxSetupError: null,
+    linuxSetupAccountId: null,
+    linuxDesktop: null,
+    linuxDesktopError: null,
     connection: "connecting",
     projects: [],
     sessions: {},

@@ -89,6 +89,15 @@ async function place(source, triple) {
   await copyFile(source, out);
   await chmod(out, 0o755);
   console.log(`sidecar ready: ${out}`);
+  // Linux packages must never own /usr/bin/node: it belongs to the distribution's Node package.
+  // Keep our runtime under Ancilla's private resources; AppImage uses the same layout.
+  if (triple.includes("linux")) {
+    const privateRuntime = join(appDir, "src-tauri", "resources", "node");
+    await mkdir(dirname(privateRuntime), { recursive: true });
+    await copyFile(source, privateRuntime);
+    await chmod(privateRuntime, 0o755);
+    console.log(`private runtime ready: ${privateRuntime}`);
+  }
 }
 
 async function placeLicense(source) {

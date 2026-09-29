@@ -70,6 +70,11 @@ export interface ApprovalDecisionInput {
 /** Everything the UI needs from a transport. The web and desktop shells both implement it over REST and SSE. */
 export interface AncillaClient {
   probeEnvironment(refresh?: boolean): Promise<EnvironmentStatus>;
+  /** Optional for older daemons; installs Muse without asking the user to run a terminal command. */
+  linuxSetup?(accountId?: string | null): Promise<import("./types.js").LinuxSetupView>;
+  installLinuxMuse?(): Promise<import("./types.js").LinuxSetupView>;
+  cancelLinuxMuseInstall?(attemptId: string): Promise<import("./types.js").LinuxSetupView>;
+  repairLinuxStorage?(accountId?: string | null): Promise<import("./types.js").LinuxSetupView>;
   listProjects(): Promise<ProjectView[]>;
   /** `create` makes the folder first when it does not exist. */
   addProject(cwd: string, options?: { create?: boolean }): Promise<{ cwd: string; warning: string | null }>;

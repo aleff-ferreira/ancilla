@@ -22,18 +22,20 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.20.2**
-    - Guided **Sign in with Meta** from Home and Settings, with browser instructions, a copyable code, confirmation, retry and cancellation.
-    - **Save As** for PDF, Word and HTML research reports on desktop and supported browsers.
-    - Crew now tracks the lead and foreground tools during ordinary prompts, keeps completed work inspectable, and follows workers that outlive the lead.
-    - Plans follow their actual turn and workers, preserve unfinished steps, and retain completed checklists.
-    - Compact completion summaries, clearer tool inspectors, faster history handling, and reliable login cancellation and retry.
+    **New in 0.20.3**
+    - Linux **.deb and .rpm installers** add Ancilla to your application menu and install its system dependencies. Node.js remains private to the app.
+    - **Install Muse Code inside Ancilla**, follow any browser approval, sign in with your Meta subscription, then choose a project folder. Setup includes progress, cancellation and retry.
+    - **Fix for the Linux UnsafePath thread-start error:** Ancilla safely prepares the selected account's Muse data-folder permissions before starting work, preserving login, history and deletion records.
+    - Optional **desktop shortcuts**, plus one-click AppImage installation to a permanent location with an application-menu icon.
+    - Muse is detected after installation even when the desktop PATH omits it. Package installations use package updates; AppImages retain signed automatic updates.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
-    **What you need.** Ancilla bundles Node.js. Install Meta's Muse Code CLI, then choose **Sign in with Meta** in Ancilla and approve access using the account that owns your Muse Code plan. An existing Muse login is reused. Windows supports native Muse or Muse inside WSL2; setup shows the instructions for your selected runtime.
+    **What you need.** Ancilla bundles Node.js. On Linux, choose **Install Muse Code** in the app if needed. On Windows and macOS, setup provides Meta's installation command. Then choose **Sign in with Meta** and approve access using the account that owns your Muse Code plan. An existing Muse login is reused. Windows supports native Muse or Muse inside WSL2.
 
-    **Which file.** Windows: the `x64-setup.exe` installer. macOS, Apple Silicon and Intel alike: the `universal.dmg`. Linux: the `amd64.AppImage`; mark it executable, then run it. From then on Ancilla updates itself from these releases, and refuses any update that is not signed with its key.
+    **Which file.** Windows: `x64-setup.exe`. macOS, Apple Silicon and Intel: `universal.dmg`. Linux x86_64: **amd64.deb** for Ubuntu/Debian/Mint or **x86_64.rpm** for Fedora and compatible distributions; open it with your software installer, then launch Ancilla from the application menu. For a portable copy, use **amd64.AppImage**, allow executing it in your file manager, and open it; setup can install its launcher. If FUSE is unavailable, run it with `--appimage-extract-and-run`. Desktop shortcuts are available in **Settings → Linux setup**; some desktops require right-clicking the shortcut and choosing **Allow Launching**.
+
+    **Updates.** Windows, macOS and AppImage builds accept only updates signed with Ancilla's key. For `.deb` and `.rpm`, download and open the next package; Settings links to the latest release.
 
     **Unsigned installers.** The Windows installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app: choose More info, then Run anyway. The macOS app is not notarized by Apple yet, so its first launch needs a right-click on the app, then Open.
 
@@ -181,7 +183,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Tauri Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools rpm cpio desktop-file-utils
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
@@ -204,6 +206,8 @@ jobs:
           # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
           retryAttempts: 3
           args: --target x86_64-unknown-linux-gnu
+      - name: Check every Linux installer contains its runtime and application-menu icon
+        run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
       # linuxdeploy bundles Ubuntu 22.04's libwayland-*. Newer host Mesa fails EGL init
       # against the stale copy, so WebKitGTK aborts with EGL_BAD_ALLOC before the window
       # opens (tauri-apps/tauri#15665). Repack without those libraries so the AppImage
@@ -247,6 +251,9 @@ jobs:
             const latest = JSON.parse(fs.readFileSync("latest.json", "utf8"));
             const signature = fs.readFileSync(process.env.SIG_FILE, "utf8").trim();
             for (const platform of ["linux-x86_64", "linux-x86_64-appimage"]) {
+              if (!latest.platforms[platform]?.url.endsWith(".AppImage")) {
+                throw new Error(`Expected an AppImage updater URL for ${platform}`);
+              }
               latest.platforms[platform].signature = signature;
             }
             fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));

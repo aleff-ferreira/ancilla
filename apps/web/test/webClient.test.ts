@@ -78,6 +78,27 @@ async function freshClient() {
 }
 
 describe("web client", () => {
+  it("authenticates Linux setup actions and scopes repair/cancellation without sending shell commands", async () => {
+    const world = browser({ stored: { "ancilla:daemon": JSON.stringify({ base: "", token: "secret" }) } });
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
+    await client.linuxSetup();
+    await client.linuxSetup("work/profile");
+    await client.installLinuxMuse();
+    await client.cancelLinuxMuseInstall("attempt/a b");
+    await client.repairLinuxStorage("work/profile");
+    assert.deepEqual(world.calls.map((entry) => [entry.init?.method, entry.url]), [
+      ["GET", "/api/setup/linux"],
+      ["GET", "/api/setup/linux?accountId=work%2Fprofile"],
+      ["POST", "/api/setup/linux/install"],
+      ["DELETE", "/api/setup/linux/install?attemptId=attempt%2Fa%20b"],
+      ["POST", "/api/setup/linux/repair"],
+    ]);
+    assert.equal(world.calls[2]?.init?.body, "{}");
+    assert.equal(world.calls[4]?.init?.body, JSON.stringify({ accountId: "work/profile" }));
+    for (const entry of world.calls) assert.equal((entry.init?.headers as Record<string, string>)["authorization"], "Bearer secret");
+  });
+
   it("takes a token out of the address bar and keeps it", async () => {
     const world = browser({ search: "?token=secret" });
     const { currentDaemon } = await freshClient();

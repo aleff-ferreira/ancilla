@@ -2,7 +2,7 @@
   "name": "ancilla",
   "private": true,
   "license": "AGPL-3.0-only",
-  "version": "0.20.2",
+  "version": "0.20.3",
   "description": "Ancilla - open-source desktop + web ADE for Meta's Muse Code CLI",
   "workspaces": [
     "packages/*",

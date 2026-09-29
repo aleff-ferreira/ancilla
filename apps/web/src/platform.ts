@@ -1,6 +1,14 @@
 import { save } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { writeFile } from "@tauri-apps/plugin-fs";
-import { browserPlatform, type FileSaver, type Platform } from "@ancilla/ui";
+import { browserPlatform, type FileSaver, type LinuxDesktopStatus, type Platform } from "@ancilla/ui";
+
+declare global {
+  interface Window {
+    /** Set by the Linux shell before page load; system packages must never use the AppImage updater. */
+    __ANCILLA_LINUX_INSTALL__?: "appimage" | "package" | "development";
+  }
+}
 
 /** Save As grants access to the chosen file only; no broad filesystem scope is needed. */
 export const saveDesktopFile: FileSaver = async (options, contents) => {
@@ -23,6 +31,13 @@ export function appPlatform(): Platform {
   const platform = browserPlatform();
   if ("__TAURI_INTERNALS__" in window) {
     platform.saveFile = saveDesktopFile;
+    if (window.__ANCILLA_LINUX_INSTALL__) {
+      platform.linuxDesktop = {
+        status: () => invoke<LinuxDesktopStatus>("linux_installation_status"),
+        install: ({ desktopShortcut }) => invoke<LinuxDesktopStatus>("install_linux_launcher", { desktopShortcut }),
+        relaunch: () => invoke<void>("relaunch_installed_linux"),
+      };
+    }
   }
   return platform;
 }

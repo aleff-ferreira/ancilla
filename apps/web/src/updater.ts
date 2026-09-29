@@ -13,6 +13,11 @@ export function desktopUpdater(): AppUpdater | undefined {
   if (!("__TAURI_INTERNALS__" in window)) {
     return undefined;
   }
+  // Debian/RPM installers own /usr/bin/ancilla. Their Settings surface links to a new package;
+  // neither automatic checks nor command-palette actions may start an AppImage replacement.
+  if (window.__ANCILLA_LINUX_INSTALL__ && window.__ANCILLA_LINUX_INSTALL__ !== "appimage") {
+    return undefined;
+  }
   let pending: Update | null = null;
   return {
     currentVersion: () => getVersion(),

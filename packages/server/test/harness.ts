@@ -3,6 +3,9 @@
  * A copy of what `server.test.ts` declares privately, for the suites that live in other files.
  */
 import { after } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AncillaServer, type HostExit, type HostHandle } from "../src/server.js";
 import type { ServeTarget } from "@ancilla/daemon";
 
@@ -75,18 +78,20 @@ export function fakeFactory(connection: FakeConnection, probe?: FactoryProbe): (
 }
 
 export async function start(connection: FakeConnection, extra: Partial<ConstructorParameters<typeof AncillaServer>[0]> = {}) {
+  const fixtureHome = await mkdtemp(join(tmpdir(), "ancilla-server-home-"));
   const server = new AncillaServer({
     port: 0,
     dataDir: ":memory:",
     platform: "linux",
     musePath: "muse",
+    home: fixtureHome,
     hostFactory: fakeFactory(connection),
     // No test spawns the real CLI by accident; title upgrades see a failed call.
     exec: async () => ({ stdout: "", exitCode: 127 }),
     ...extra,
   });
   // A test that closes the server itself (to restart it on the same data) is not failed by closing it again.
-  after(() => server.close().catch(() => undefined));
+  after(async () => { await server.close().catch(() => undefined); await rm(fixtureHome, { recursive: true, force: true }); });
   const bound = await server.listen();
   return { server, base: `http://127.0.0.1:${bound.port}` };
 }

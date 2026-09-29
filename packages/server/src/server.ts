@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { constants, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import type { Readable } from "node:stream";
@@ -75,8 +75,10 @@ import {
 } from "./research/index.js";
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
+import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
+import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
-export const ANCILLA_VERSION = "0.20.2";
+export const ANCILLA_VERSION = "0.20.3";
 
 export interface HostExit {
   code: number | null;
@@ -170,6 +172,8 @@ export interface ServerOptions {
   shellRunner?: ShellRunner;
   /** Spawns `muse login` for the device-code route; a thin wrapper over `node:child_process` spawn by default. */
   loginSpawn?: LoginSpawn;
+  /** The user-requested Linux installer, injectable without downloading or running Muse in tests. */
+  linuxInstaller?: LinuxMuseInstaller;
   /** The DeepResearch engine; the daemon's `runResearch` by default, a fake in tests. */
   researchEngine?: ResearchEngine;
   /** Research workers running at once across every run. */
@@ -466,6 +470,13 @@ function errorInfo(error: unknown): { status: number; message: string; kind: str
   }
   const kind = typeof (error as { kind?: unknown })?.kind === "string" ? ((error as { kind: string }).kind) : null;
   const message = error instanceof Error ? error.message : String(error);
+  if (/read surviving deletion authority|deletion registry authority is unavailable/i.test(message)) {
+    return {
+      status: 409,
+      kind: "muse_storage_unavailable",
+      message: "Muse could not safely open its saved-session registry. Open Settings → Linux setup to check the affected account’s storage. Ancilla keeps your login and history intact; it will not reset the registry.",
+    };
+  }
   if (error instanceof PathError || error instanceof ProjectFolderError) {
     return { status: 400, message, kind: null };
   }
@@ -725,6 +736,7 @@ export class AncillaServer {
   private readonly server: Server;
   private readonly store: AncillaStore;
   private readonly aonia: Aonia;
+  private readonly linuxInstaller: LinuxMuseInstaller;
   private readonly hosts = new Map<string, ManagedHost>();
   private readonly starting = new Map<string, Promise<ManagedHost>>();
   /** Restarts queued by a settings flip, oldest first. Hosts are only acquired past the tail. */
@@ -791,6 +803,7 @@ export class AncillaServer {
       | "findNativeMuse"
       | "aonia"
       | "loginSpawn"
+      | "linuxInstaller"
       | "researchEngine"
       | "researchMaxWorkers"
     >
@@ -842,6 +855,7 @@ export class AncillaServer {
       this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
     );
     this.aonia = options.aonia ?? createAonia(this.options.musePath ? { musePath: this.options.musePath } : {});
+    this.linuxInstaller = options.linuxInstaller ?? new LinuxMuseInstaller({ platform: this.options.platform, home: this.options.home });
     this.researchJobs = new ResearchJobManager({
       store: this.store,
       engine: options.researchEngine ?? runResearch,
@@ -903,6 +917,7 @@ export class AncillaServer {
 
   async close(): Promise<void> {
     this.closed = true;
+    await this.linuxInstaller.close();
     for (const child of this.loginChildren.values()) child.kill();
     this.loginChildren.clear();
     if (this.changeTimer) {
@@ -1176,6 +1191,43 @@ export class AncillaServer {
     }
     if (method === "GET" && path === "/api/env") {
       this.json(res, 200, await this.environment(url.searchParams.get("refresh") === "1"));
+      return true;
+    }
+    if (method === "GET" && path === "/api/setup/linux") {
+      this.json(res, 200, await this.linuxSetup(url.searchParams.get("accountId") || null));
+      return true;
+    }
+    if (method === "POST" && path === "/api/setup/linux/install") {
+      if (this.options.platform !== "linux") throw new HttpError(400, "In-app Muse installation is available on Linux.");
+      if (process.platform === "linux" && process.getuid?.() === 0) {
+        throw new HttpError(409, "Open Ancilla as your normal desktop account to install Muse for that account.");
+      }
+      const configured = this.options.musePath;
+      const managed = join(this.options.home, ".local", "bin", "muse");
+      if (configured && configured.includes("/") && configured !== managed) {
+        throw new HttpError(409, `Ancilla is configured to use Muse at “${configured}”. Restore that installation or remove musePath from Ancilla’s runtime.json to use guided installation.`);
+      }
+      await this.ensureLinuxMuseStorage(null);
+      await this.linuxInstaller.start();
+      this.envCache = null;
+      this.json(res, 202, await this.linuxSetup(null));
+      return true;
+    }
+    if (method === "DELETE" && path === "/api/setup/linux/install") {
+      const attemptId = url.searchParams.get("attemptId");
+      if (!attemptId) throw new HttpError(400, "attemptId is required to cancel this installation.");
+      await this.linuxInstaller.cancel(attemptId);
+      this.envCache = null;
+      this.json(res, 200, await this.linuxSetup(null));
+      return true;
+    }
+    if (method === "POST" && path === "/api/setup/linux/repair") {
+      if (this.options.platform !== "linux") throw new HttpError(400, "This storage check is available on Linux.");
+      const body = await this.readBody(req);
+      const accountId = body["accountId"];
+      if (accountId !== undefined && accountId !== null && typeof accountId !== "string") throw new HttpError(400, "accountId must be a string or null.");
+      const diagnosis = await repairMuseStorage(await this.museStorageOptions(typeof accountId === "string" ? accountId : null));
+      this.json(res, 200, await this.linuxSetup(typeof accountId === "string" ? accountId : null, diagnosis));
       return true;
     }
     if (method === "GET" && path === "/api/events") {
@@ -1952,6 +2004,49 @@ export class AncillaServer {
     return false;
   }
 
+  private async museStorageOptions(accountId: string | null): Promise<MuseStorageOptions> {
+    let profileEnv: Record<string, string> = {};
+    if (accountId) {
+      try { profileEnv = this.aonia.envFor(await this.aonia.getProfile(accountId)); }
+      catch (error) { throw this.accountError(error); }
+    }
+    return {
+      // Simulated platforms in consumers/tests cannot perform Linux inode checks on another OS.
+      platform: process.platform === "linux" ? this.options.platform : process.platform,
+      home: this.options.home,
+      env: { ...process.env, HOME: this.options.home, ...profileEnv },
+    };
+  }
+
+  private async ensureLinuxMuseStorage(accountId: string | null): Promise<void> {
+    if (this.options.platform !== "linux" || process.platform !== "linux") return;
+    const diagnosis = await ensureMuseStorage(await this.museStorageOptions(accountId));
+    if (diagnosis.repaired) this.log(`Prepared Muse storage permissions for ${accountId ? `account ${accountId}` : "the default login"}.`);
+  }
+
+  private async linuxSetup(accountId: string | null, repaired?: MuseStorageDiagnosis): Promise<Record<string, unknown>> {
+    const supported = this.options.platform === "linux";
+    const diagnosis = repaired ?? await inspectMuseStorage(await this.museStorageOptions(accountId));
+    const snapshot = this.linuxInstaller.snapshot();
+    const environment = await this.environment(snapshot.status === "installed" && !this.envCache?.value.museFound);
+    const installation = snapshot.status === "idle" && environment.museFound
+      ? { ...snapshot, status: "installed", phase: "complete", message: "Muse Code is already installed. Ancilla uses your existing installation." }
+      : snapshot;
+    return {
+      supported,
+      installation,
+      museFound: environment.museFound,
+      storage: {
+        status: diagnosis.status === "not-applicable" ? "ready"
+          : diagnosis.issues.some((issue) => issue.code === "missing-root") ? "missing" : diagnosis.status,
+        path: diagnosis.root ?? "",
+        message: diagnosis.issues.length > 0 ? diagnosis.issues.map((issue) => issue.message).join(" ")
+          : diagnosis.repaired ? "Muse storage is ready. Your login and thread history were preserved."
+          : "Muse storage is ready for your threads.",
+      },
+    };
+  }
+
   private async environment(refresh: boolean): Promise<EnvView> {
     if (!refresh && this.envCache && Date.now() - this.envCache.at < ENV_CACHE_MS) {
       return this.envCache.value;
@@ -1980,6 +2075,23 @@ export class AncillaServer {
     // A configured binary on this machine is the one hosts start, so it is the one that has to be there.
     if (configured && (probe.runtime === "native" ? isWindowsAbs(configured) : probe.runtime === "posix" && configured.includes("/"))) {
       musePath = existsSync(configured) ? configured : null;
+    }
+    // A GUI launch does not source shell profiles, and an in-app install must work without restarting it.
+    if (!musePath && this.options.platform === "linux" && (!configured || configured === "muse")) {
+      const installed = join(this.options.home, ".local", "bin", "muse");
+      try {
+        await access(installed, constants.X_OK);
+        if ((await stat(installed)).isFile()) musePath = installed;
+      } catch { /* The setup screen can install the missing launcher. */ }
+    }
+    if (musePath && this.options.platform === "linux") {
+      // A cancelled first install may leave only a launcher. Prove that a CLI is present without
+      // downloading an update or launching a hidden device-login flow in the environment probe.
+      const version = await this.options.exec(musePath, ["--version"], {
+        timeoutMs: 5000,
+        env: { ...process.env, HOME: this.options.home, MUSE_NO_AUTO_UPDATE: "1", MUSE_LOGIN: "0" },
+      });
+      if (version.exitCode !== 0 || version.timedOut || !version.stdout.trim()) musePath = null;
     }
     const value: EnvView = {
       platform: probe.platform,
@@ -2404,7 +2516,20 @@ export class AncillaServer {
   private async cliMusePath(): Promise<string | null> {
     await this.museRuntime();
     const configured = this.options.musePath ?? null;
-    if (this.options.platform !== "win32" || (configured && (configured.includes("/") || configured.includes("\\")))) {
+    if (this.options.platform !== "win32") {
+      if (configured) {
+        if (configured === "muse" && this.options.platform === "linux") {
+          const installed = join(this.options.home, ".local", "bin", "muse");
+          try {
+            await access(installed, constants.X_OK);
+            if ((await stat(installed)).isFile()) return installed;
+          } catch { /* Keep the explicitly configured command when no managed install exists. */ }
+        }
+        return configured;
+      }
+      return (await this.environment(false)).musePath;
+    }
+    if (configured && (configured.includes("/") || configured.includes("\\"))) {
       return configured;
     }
     return (await this.environment(false)).musePath;
@@ -3362,6 +3487,7 @@ export class AncillaServer {
    * completions both go through here, so there is one place that knows how a one-shot model call is made.
    */
   private async planMuseExec(args: string[], accountId: string | null): Promise<MuseExecPlan> {
+    await this.ensureLinuxMuseStorage(accountId);
     const musePath = await this.cliMusePath();
     const runtime = await this.museRuntime();
     const plan = planMuseCli({ platform: this.options.platform, distro: this.wslDistro(), musePath, args, runtime });
@@ -3373,8 +3499,8 @@ export class AncillaServer {
     let env: NodeJS.ProcessEnv | undefined;
     if (this.options.platform === "win32" && runtime === "wsl") {
       env = profileEnv ? this.wslEnvFor(profileEnv, PROFILE_WSLENV) : this.wslEnvFor();
-    } else if (profileEnv) {
-      env = { ...process.env, ...profileEnv };
+    } else if (profileEnv || this.options.platform === "linux") {
+      env = { ...process.env, HOME: this.options.home, ...(profileEnv ?? {}) };
     }
     return { command: plan.command, args: plan.args, ...(env ? { env } : {}) };
   }
@@ -3694,6 +3820,7 @@ export class AncillaServer {
   }
 
   private async hostFor(cwd: string, accountId: string | null = null): Promise<ManagedHost> {
+    await this.ensureLinuxMuseStorage(accountId);
     await this.museRuntime();
     // A flip's restart runs past its PATCH response. Wait it out so a new session never
     // starts on a host with the previous posture. Starts never wait for the chain, so this
@@ -3898,10 +4025,11 @@ export class AncillaServer {
    * own. A second call for the same account id kills and replaces whatever is already running for it.
    */
   private async runLogin(id: string, profile: Profile | null, generation: number): Promise<{ url: string; code: string | null; loginId: string }> {
+    await this.ensureLinuxMuseStorage(profile?.id ?? null);
     const command = profile ? this.aonia.loginCommand(profile) : { command: "muse", args: ["login"], env: {} };
     const runtime = await this.museRuntime();
     const resolved = command.command === "muse"
-      ? this.options.musePath ?? (await this.environment(false)).musePath ?? command.command
+      ? await this.cliMusePath() ?? command.command
       : command.command;
     const login = planMuseCli({ platform: this.options.platform, runtime, distro: this.wslDistro(),
       musePath: resolved, args: command.args });
@@ -3910,6 +4038,7 @@ export class AncillaServer {
       : Object.fromEntries(
           Object.entries({ ...process.env, ...command.env }).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         );
+    if (this.options.platform === "linux") loginEnv["HOME"] = this.options.home;
     // Both the account lookup and runtime/path discovery can finish out of order. Check before touching the
     // live child; the rest of admission is synchronous, and stale DELETEs remain guarded by their attempt id.
     if (this.closed || this.loginStartGenerations.get(id) !== generation) {
@@ -4025,10 +4154,11 @@ export class AncillaServer {
     ];
     if (this.options.platform !== "win32") {
       return {
-        command: this.options.musePath ?? "muse",
+        command: await this.cliMusePath() ?? "muse",
         args: serveArgs,
         cwd: cwd || process.cwd(),
-        ...(profileEnv ? { env: { ...process.env, ...profileEnv } } : {}),
+        ...(profileEnv || this.options.platform === "linux"
+          ? { env: { ...process.env, HOME: this.options.home, ...(profileEnv ?? {}) } } : {}),
       };
     }
     const runtime = await this.museRuntime();

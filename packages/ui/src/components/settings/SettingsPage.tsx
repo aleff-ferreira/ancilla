@@ -14,6 +14,7 @@ import { TopBar } from "../chrome.js";
 import { Button, IconButton, MOD, Toggle, cn } from "../ui/primitives.js";
 import { About } from "./About.js";
 import { MuseSubscriptionCard } from "./MuseSignIn.js";
+import { LinuxSetupCard } from "./LinuxSetup.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
 function Pick<T extends string | number | null>(props: {
@@ -390,6 +391,7 @@ export function SettingsPage() {
       </div>
 
       <div className="mx-auto w-full min-w-0 max-w-[720px] px-4 pb-16 @min-[520px]:px-6">
+        {env?.platform === "linux" ? <div className="mt-6"><LinuxSetupCard /></div> : null}
         <Section title="Appearance">
           <Row label="Theme" description="Light, dark, or whatever this device is set to.">
             <Pick value={prefs.theme} options={THEMES} onChange={(value) => controller.setTheme(value)} />

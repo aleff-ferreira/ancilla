@@ -2,6 +2,7 @@ import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { FileSaveOptions } from "@ancilla/ui";
 import { appPlatform, saveDesktopFile } from "../src/platform.js";
+import { desktopUpdater } from "../src/updater.js";
 
 const globals = globalThis as Record<string, unknown>;
 const originalWindow = globals["window"];
@@ -61,5 +62,39 @@ describe("native report saving", () => {
     globals["window"] = {};
     assert.notEqual(appPlatform().saveFile, saveDesktopFile);
     assert.equal(typeof appPlatform().saveFile, "function");
+  });
+});
+
+describe("Linux desktop integration", () => {
+  it("exposes only the native Linux setup commands and the requested desktop choice", async () => {
+    const calls: [string, unknown][] = [];
+    const status = { kind: "appimage", menuInstalled: false, desktopShortcutInstalled: false, desktopShortcutSupported: true, canInstall: true, restartRequired: false, installedPath: null };
+    globals["window"] = { __ANCILLA_LINUX_INSTALL__: "appimage", __TAURI_INTERNALS__: { invoke: async (command: string, payload: unknown) => {
+      calls.push([command, payload]);
+      return command === "relaunch_installed_linux" ? undefined : status;
+    } } };
+    const desktop = appPlatform().linuxDesktop;
+    assert.ok(desktop);
+    assert.deepEqual(await desktop.status(), status);
+    await desktop.install({ desktopShortcut: true });
+    await desktop.relaunch();
+    assert.deepEqual(calls.map(([command]) => command), ["linux_installation_status", "install_linux_launcher", "relaunch_installed_linux"]);
+    assert.deepEqual(calls[1]?.[1], { desktopShortcut: true });
+  });
+
+  it("never attaches the AppImage updater to a Debian/RPM installation", () => {
+    globals["window"] = { __ANCILLA_LINUX_INSTALL__: "package", __TAURI_INTERNALS__: { invoke: () => assert.fail("must not invoke updater") } };
+    assert.equal(desktopUpdater(), undefined);
+    globals["window"] = { __ANCILLA_LINUX_INSTALL__: "development", __TAURI_INTERNALS__: {} };
+    assert.equal(desktopUpdater(), undefined);
+    globals["window"] = { __ANCILLA_LINUX_INSTALL__: "appimage", __TAURI_INTERNALS__: {} };
+    assert.ok(desktopUpdater());
+  });
+
+  it("keeps Linux integration out of browsers and other desktop platforms", () => {
+    globals["window"] = {};
+    assert.equal(appPlatform().linuxDesktop, undefined);
+    globals["window"] = { __TAURI_INTERNALS__: {} };
+    assert.equal(appPlatform().linuxDesktop, undefined);
   });
 });

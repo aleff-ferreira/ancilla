@@ -241,12 +241,13 @@ function AwaySync() {
 function Shell() {
   const boot = useApp((s) => s.boot);
   const env = useApp((s) => s.env);
+  const linuxInstall = useApp((s) => s.linuxSetup?.installation);
   const collapsed = useApp((s) => s.prefs.sidebarCollapsed);
   // Boot, setup and error screens fill the window with no header, so they get a bare drag strip.
   let screen: ReactElement | null = null;
   if (!env) {
     screen = boot === "error" ? <BootError /> : <BootScreen />;
-  } else if (!env.museFound) {
+  } else if (!env.museFound || env.platform === "linux" && (linuxInstall?.status === "installing" || linuxInstall?.status === "error" || linuxInstall?.status === "cancelled")) {
     screen = <Onboarding />;
   } else if (boot === "error") {
     screen = <BootError />;

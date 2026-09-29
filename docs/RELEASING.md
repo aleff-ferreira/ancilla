@@ -1,6 +1,6 @@
 # Releasing Ancilla
 
-A release is a `vX.Y.Z` tag on `main`. Pushing the tag runs the [Release workflow](../.github/workflows/release.yml), which builds the desktop app for Windows, macOS and Linux, publishes it as the GitHub release "Ancilla vX.Y.Z", and writes `latest.json`, the file every installed copy checks for updates.
+A release is a `vX.Y.Z` tag on `main`. Pushing the tag runs the [Release workflow](../.github/workflows/release.yml), which builds the desktop app for Windows, macOS and Linux, publishes it as the GitHub release "Ancilla vX.Y.Z", and writes `latest.json` for Windows, macOS and AppImage updates. Linux packages are updated by installing the next package.
 
 ## One-time setup
 
@@ -28,11 +28,11 @@ Nothing else needs setting up. The release jobs ask for `contents: write` themse
 2. Set the new version everywhere it is written down:
 
    ```sh
-   npm run version:bump -- 0.18.1
+   npm run version:bump -- 0.20.3
    ```
 
    This writes the root and workspace `package.json` files, `package-lock.json`, `tauri.conf.json`, `Cargo.toml`, the crate's entry in `Cargo.lock` and `ANCILLA_VERSION` in the server. If any of them cannot be found it stops without changing a file.
-3. Add an entry at the top of `docs/CHANGELOG.md`, under a `## 0.18.1` heading, in the style of the entries below it: `### New`, `### Fixed` and `### Changed` sections, each item a bold one-sentence summary followed by what changed in plain words, with a link to the issue or pull request and credit to whoever reported or built it. Then copy it into the app, which shows it after updating itself:
+3. Add an entry at the top of `docs/CHANGELOG.md`, under a `## 0.20.3` heading, in the style of the entries below it: `### New`, `### Fixed` and `### Changed` sections, each item a bold one-sentence summary followed by what changed in plain words, with a link to the issue or pull request and credit to whoever reported or built it. Then copy it into the app, which shows it after updating itself:
 
    ```sh
    node scripts/sync-changelog.mjs
@@ -48,12 +48,12 @@ Nothing else needs setting up. The release jobs ask for `contents: write` themse
    ```
 
    `version:check` is what CI runs on every push: it fails if any version differs, or if the changelog has no entry for it.
-5. Commit ("Release 0.18.1"), push it to `main` or merge its pull request, and wait for CI.
+5. Commit ("Release 0.20.3"), push it to `main` or merge its pull request, and wait for CI and Linux installer smoke tests. The Linux job inspects all three package formats, installs the Debian package and launches it from `/usr/bin/ancilla`, then launches the AppImage without FUSE. Both launches must answer `/api/health`; a port file alone does not count.
 6. Tag that commit and push the tag:
 
    ```sh
-   git tag v0.18.1
-   git push origin v0.18.1
+   git tag v0.20.3
+   git push origin v0.20.3
    ```
 
 ## What the workflow produces
@@ -66,13 +66,17 @@ Before building, the Windows job checks the tag against the version in the files
 | --- | --- | --- |
 | Windows x64 | `Ancilla_X.Y.Z_x64-setup.exe` | the same installer, plus its `.sig` |
 | macOS, Apple Silicon and Intel | `Ancilla_X.Y.Z_universal.dmg` | an `.app.tar.gz`, plus its `.sig` |
-| Linux x86_64 | `Ancilla_X.Y.Z_amd64.AppImage` | the same AppImage, plus its `.sig` |
+| Linux x86_64, Debian/Ubuntu | `Ancilla_X.Y.Z_amd64.deb` | install the next package manually |
+| Linux x86_64, Fedora/RPM | `Ancilla-X.Y.Z-1.x86_64.rpm` | install the next package manually |
+| Linux x86_64, portable | `Ancilla_X.Y.Z_amd64.AppImage` | the same AppImage, plus its `.sig` |
 
 and `latest.json`, which lists each platform's update package, its signature and the release notes. The Linux job then repacks the AppImage without the Wayland libraries the bundler copies in ([tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665)), signs it again and replaces it, along with its entries in `latest.json`.
 
+Linux packages keep Node in `/usr/lib/Ancilla/resources/node`, with the server and frontend beside it. They must never install `/usr/bin/node` or shadow the user's Node. `verify-linux-bundles.sh` checks those paths, package dependencies, menu entries and icons in the Debian, RPM and AppImage outputs. The native shell and web UI both disable the AppImage updater for system packages.
+
 The release is published straight away, not as a draft or pre-release, so `https://github.com/aleff-ferreira/ancilla/releases/latest/download/latest.json`, the only address installed copies check, points at it from the moment the Windows job finishes. Until the macOS and Linux jobs have added their platforms, copies on those systems simply see no update yet.
 
-Afterwards, check that the release page has all three installers and `latest.json`, and that `latest.json` has Windows, macOS and Linux entries. Then update an older installed copy with Check for updates, in Settings or the command palette.
+Afterwards, check that the release page has all five installers and `latest.json`, and that `latest.json` has Windows, macOS and Linux entries pointing at the signed update artifacts. Linux's updater entries must point to the AppImage. Then update an older installed copy with Check for updates, in Settings or the command palette.
 
 ## When something goes wrong
 
@@ -84,7 +88,7 @@ Afterwards, check that the release page has all three installers and `latest.jso
 
 - **Windows**: the installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app; More info, then Run anyway. Updates install in passive mode, with a small progress window and no questions.
 - **macOS**: the app is not notarized by Apple, so its first launch needs a right-click on the app, then Open. It is signed ad hoc rather than with a Developer ID, so macOS asks again for access to protected folders after each update.
-- **Linux**: the AppImage has to be marked executable once; it updates itself after that.
+- **Linux**: open the `.deb` or `.rpm` in the system software installer; it adds the application-menu icon and installs dependencies. Home offers guided Muse installation and sign-in; Settings offers an optional desktop shortcut. The AppImage must be marked executable once and can install its launcher from inside the app. AppImages update themselves; system packages link to the latest installer.
 - **Helicon users**: Ancilla is a separate app with its own identifier (`app.ancilla.desktop`), key and update address, so Helicon never updates into it. Installing Ancilla leaves Helicon in place, and Ancilla copies Helicon's data the first time it starts.
 
 ## Replacing the signing key

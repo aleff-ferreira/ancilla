@@ -16,6 +16,36 @@ export interface EnvironmentStatus {
   persistent: boolean;
 }
 
+/** Linux setup is performed by the authenticated server, under the current user's account. */
+export interface LinuxSetupView {
+  supported: boolean;
+  museFound: boolean;
+  installation: {
+    status: "idle" | "installing" | "installed" | "error" | "cancelled";
+    phase: string;
+    message: string;
+    attemptId: string | null;
+    loginUrl: string | null;
+    loginCode: string | null;
+  };
+  storage: {
+    status: "ready" | "repairable" | "blocked" | "missing";
+    path: string;
+    message: string;
+  };
+}
+
+/** Native Linux shell integration; absent when Ancilla runs in a browser. */
+export interface LinuxDesktopStatus {
+  kind: "appimage" | "package" | "development";
+  menuInstalled: boolean;
+  desktopShortcutInstalled: boolean;
+  desktopShortcutSupported: boolean;
+  canInstall: boolean;
+  restartRequired: boolean;
+  installedPath: string | null;
+}
+
 export interface ProjectView {
   cwd: string;
   displayName: string;

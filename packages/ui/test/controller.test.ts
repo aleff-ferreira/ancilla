@@ -8,6 +8,7 @@ import { crewView } from "../src/model/crew.js";
 import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
+import type { LinuxSetupView, LinuxDesktopStatus } from "../src/types.js";
 
 const SESSION: SessionSummary = {
   sessionId: "s1",
@@ -3947,5 +3948,237 @@ describe("crew controls", () => {
     } finally {
       stop();
     }
+  });
+});
+
+function linuxSetupView(status: LinuxSetupView["installation"]["status"] = "idle"): LinuxSetupView {
+  return {
+    supported: true,
+    museFound: status === "installed",
+    installation: { status, phase: status === "installed" ? "complete" : "idle", message: "Setup status", attemptId: status === "idle" ? null : "install-1", loginUrl: null, loginCode: null },
+    storage: { status: "ready", path: "/home/person/.local/share/muse", message: "Storage is ready." },
+  };
+}
+
+class LinuxSetupClient extends FakeClient {
+  setup = linuxSetupView();
+  setupAccounts: (string | null)[] = [];
+  cancelled: string[] = [];
+  repaired: (string | null)[] = [];
+  probes = 0;
+  override async probeEnvironment() {
+    this.probes++;
+    return { ...await super.probeEnvironment(), museFound: this.setup.museFound };
+  }
+  async linuxSetup(accountId: string | null = null) {
+    this.setupAccounts.push(accountId);
+    return this.setup;
+  }
+  async installLinuxMuse() {
+    this.setup = linuxSetupView("installing");
+    return this.setup;
+  }
+  async cancelLinuxMuseInstall(attemptId: string) {
+    this.cancelled.push(attemptId);
+    this.setup = linuxSetupView("cancelled");
+    return this.setup;
+  }
+  async repairLinuxStorage(accountId: string | null = null) {
+    this.repaired.push(accountId);
+    this.setup = { ...this.setup, storage: { ...this.setup.storage, status: "ready" as const, message: "Folder permissions repaired." } };
+    return this.setup;
+  }
+}
+
+function linuxController(client: FakeClient, desktop?: Platform["linuxDesktop"]) {
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let timer = 0;
+  const shell: Platform = { ...platform(""), linuxDesktop: desktop,
+    schedule: (fn, ms) => { timers.set(++timer, { fn, ms }); return timer; },
+    cancel: (id) => { timers.delete(id as number); },
+  };
+  const controller = new AncillaController(client, shell);
+  const stop = controller.start();
+  return { controller, timers, stop, tick(ms: number) {
+    const pending = [...timers].find(([, value]) => value.ms === ms);
+    assert.ok(pending, `expected a ${ms}ms timer`);
+    timers.delete(pending[0]);
+    pending[1].fn();
+  } };
+}
+
+describe("guided Linux setup", () => {
+  it("continues setup after a mount-cleanup-remount and ignores the older boot", async () => {
+    const client = new LinuxSetupClient();
+    const current = await client.probeEnvironment();
+    let finishOld!: (value: typeof current) => void;
+    let probes = 0;
+    client.probeEnvironment = () => ++probes === 1
+      ? new Promise((resolve) => { finishOld = resolve; })
+      : Promise.resolve(current);
+    const { controller, stop } = linuxController(client);
+    stop();
+    const stopAgain = controller.start();
+    try {
+      await flushMicrotasks();
+      assert.equal(controller.store.get().linuxSetup?.installation.status, "idle");
+      assert.equal(controller.store.get().boot, "ready");
+      finishOld({ ...current, museFound: true });
+      await flushMicrotasks();
+      assert.equal(controller.store.get().env?.museFound, false);
+      await controller.installLinuxMuse();
+      assert.equal(controller.store.get().linuxSetup?.installation.status, "installing");
+    } finally { stopAgain(); }
+  });
+
+  it("polls a Muse installation and opens the product only after the installer completes", async () => {
+    const client = new LinuxSetupClient();
+    const { controller, stop, tick, timers } = linuxController(client);
+    await flushMicrotasks();
+    assert.equal(controller.store.get().env?.museFound, false);
+    assert.equal(controller.store.get().sessionsLoaded, false);
+    await controller.installLinuxMuse();
+    assert.equal(controller.store.get().linuxSetup?.installation.status, "installing");
+    client.setup = { ...client.setup, museFound: true, installation: { ...client.setup.installation, phase: "signin", loginUrl: "https://www.meta.ai/device", loginCode: "ABCD" } };
+    tick(1_500);
+    await flushMicrotasks();
+    assert.equal(controller.store.get().linuxSetup?.installation.loginCode, "ABCD");
+    assert.equal(controller.store.get().env?.museFound, false, "a partially installed launcher must not finish setup");
+    assert.equal(client.probes, 1);
+    client.setup = linuxSetupView("installed");
+    tick(1_500);
+    await flushMicrotasks(50);
+    assert.equal(controller.store.get().env?.museFound, true);
+    assert.equal(controller.store.get().sessionsLoaded, true);
+    assert.equal(controller.store.get().boot, "ready");
+    assert.equal([...timers.values()].some((value) => value.ms === 1_500), false);
+    stop();
+  });
+
+  it("cancels the displayed attempt and ignores a late in-flight poll", async () => {
+    const client = new LinuxSetupClient();
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks();
+    await controller.installLinuxMuse();
+    let resolve!: (view: LinuxSetupView) => void;
+    client.linuxSetup = async () => new Promise<LinuxSetupView>((done) => { resolve = done; });
+    const pending = controller.refreshLinuxSetup();
+    await controller.cancelLinuxMuseInstall();
+    assert.deepEqual(client.cancelled, ["install-1"]);
+    resolve(linuxSetupView("installing"));
+    await pending;
+    assert.equal(controller.store.get().linuxSetup?.installation.status, "cancelled");
+    assert.equal(controller.store.get().busy["linux-setup:check"], undefined);
+    assert.equal(controller.store.get().busy["linux-setup:cancel"], undefined);
+    stop();
+  });
+
+  it("retains a failed installation for retry even if its launcher is already on disk", async () => {
+    const client = new LinuxSetupClient();
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks();
+    client.installLinuxMuse = async () => ({ ...linuxSetupView("error"), museFound: true });
+    await controller.installLinuxMuse();
+    assert.equal(controller.store.get().env?.museFound, false);
+    assert.equal(controller.store.get().linuxSetup?.installation.status, "error");
+    assert.equal(client.probes, 1);
+    stop();
+  });
+
+  it("keeps the composer on its route and offers named-account storage recovery after a failed start", async () => {
+    const client = new LinuxSetupClient();
+    client.setup = linuxSetupView("installed");
+    client.projects[0] = { ...client.projects[0]!, defaultAccountId: "work" };
+    client.startSession = async () => { throw new AncillaError("Muse cannot use /home/person/.ancilla/accounts/work: the folder belongs to another account.", 409, "muse_storage_unavailable"); };
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks(50);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    const route = controller.store.get().route;
+    assert.equal(await controller.send("Keep this draft"), false);
+    await flushMicrotasks();
+    assert.deepEqual(controller.store.get().route, route);
+    assert.equal(controller.store.get().linuxSetupAccountId, "work");
+    assert.equal(client.setupAccounts.at(-1), "work");
+    const toast = controller.store.get().toasts.at(-1);
+    assert.equal(toast?.title, "Muse storage needs attention");
+    assert.match(toast?.detail ?? "", /Your draft is still here/);
+    assert.equal(toast?.action?.label, "Open Linux setup");
+    toast?.action?.run();
+    assert.equal(controller.store.get().route.kind, "settings");
+    await controller.repairLinuxStorage();
+    assert.deepEqual(client.repaired, ["work"]);
+    stop();
+  });
+
+  it("translates legacy Unsafe path errors into a recovery action", async () => {
+    const client = new LinuxSetupClient();
+    client.setup = linuxSetupView("installed");
+    client.startSession = async () => { throw new Error("session/start: read surviving deletion authority: deletion registry authority is unavailable: Unsafe path"); };
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks(50);
+    await controller.send("Keep this draft too");
+    const toast = controller.store.get().toasts.at(-1);
+    assert.equal(toast?.title, "Muse storage needs attention");
+    assert.match(toast?.detail ?? "", /fix its permissions/);
+    assert.doesNotMatch(toast?.detail ?? "", /Unsafe path|session\/start/);
+    stop();
+  });
+
+  it("reports setup endpoint failures without turning a reachable app into a boot error", async () => {
+    const client = new LinuxSetupClient();
+    client.setup = linuxSetupView("installed");
+    client.linuxSetup = async () => { throw new AncillaError("Not found", 404); };
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks(50);
+    assert.equal(controller.store.get().boot, "ready");
+    assert.match(controller.store.get().linuxSetupError ?? "", /server needs an update/);
+    stop();
+  });
+
+  it("honors the desktop-shortcut choice and ignores old status during installation", async () => {
+    const client = new LinuxSetupClient();
+    client.setup = linuxSetupView("installed");
+    const old: LinuxDesktopStatus = { kind: "appimage", menuInstalled: false, desktopShortcutInstalled: false, desktopShortcutSupported: true, canInstall: true, restartRequired: false, installedPath: null };
+    let resolve!: (status: LinuxDesktopStatus) => void;
+    const options: boolean[] = [];
+    const desktop: NonNullable<Platform["linuxDesktop"]> = {
+      status: async () => new Promise<LinuxDesktopStatus>((done) => { resolve = done; }),
+      install: async ({ desktopShortcut }) => { options.push(desktopShortcut); return { ...old, menuInstalled: true, desktopShortcutInstalled: desktopShortcut, restartRequired: true, installedPath: "/home/person/Applications/Ancilla.AppImage" }; },
+      relaunch: async () => { throw new Error("Could not launch the installed copy"); },
+    };
+    const { controller, stop } = linuxController(client, desktop);
+    await flushMicrotasks(50);
+    await controller.installLinuxDesktop(false);
+    resolve(old);
+    await flushMicrotasks();
+    assert.deepEqual(options, [false]);
+    assert.equal(controller.store.get().linuxDesktop?.menuInstalled, true);
+    assert.equal(controller.store.get().linuxDesktop?.desktopShortcutInstalled, false);
+    assert.equal(controller.store.get().linuxDesktop?.restartRequired, true);
+    await controller.relaunchLinuxDesktop();
+    assert.match(controller.store.get().linuxDesktopError ?? "", /Could not launch/);
+    stop();
+  });
+
+  it("stops installation polling when the UI is disposed", async () => {
+    const client = new LinuxSetupClient();
+    const { controller, stop, timers } = linuxController(client);
+    await flushMicrotasks();
+    await controller.installLinuxMuse();
+    assert.equal([...timers.values()].some((value) => value.ms === 1_500), true);
+    stop();
+    assert.equal([...timers.values()].some((value) => value.ms === 1_500), false);
+  });
+
+  it("keeps non-Linux setup on the existing installation path", async () => {
+    const client = new LinuxSetupClient();
+    client.probeEnvironment = async () => ({ platform: "darwin", wslAvailable: false, defaultDistro: null, museFound: true, musePath: "/usr/bin/muse", version: "0.20.3", persistent: true });
+    const { controller, stop } = linuxController(client);
+    await flushMicrotasks(50);
+    controller.navigate({ kind: "settings" });
+    await controller.installLinuxMuse();
+    assert.deepEqual(client.setupAccounts, []);
+    assert.equal(controller.store.get().linuxSetup, null);
+    stop();
   });
 });

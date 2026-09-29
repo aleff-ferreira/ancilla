@@ -16,8 +16,9 @@ It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windo
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.20.2:** guided Meta sign-in, report Save As dialogs, Crew monitoring for ordinary prompts and tools,
-> and task plans that follow running and completed work. [Read the release notes](docs/CHANGELOG.md#0202).
+> **New in 0.20.3:** Linux `.deb` and `.rpm` installers with application-menu icons, guided Muse installation inside
+> Ancilla, optional desktop shortcuts, and a fix for the Linux `UnsafePath` thread-start error.
+> [Read the release notes](docs/CHANGELOG.md#0203).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
@@ -122,8 +123,9 @@ Download the installer for your platform from the
 only runtime requirement is the `muse` CLI. Ancilla reuses a login you already have; there is no separate Ancilla account
 to create. Connect a new login directly from the app:
 
-1. **Install Muse if needed.** Ancilla's setup screen shows the command for your operating system and selected runtime.
-   Finish installation, then choose **Check installation**.
+1. **Install Muse if needed.** On Linux, choose **Install Muse Code** in Ancilla; the app downloads Meta's installer
+   and shows any browser approval it needs. On Windows and macOS, setup shows the command for your selected runtime;
+   finish installation, then choose **Check installation**.
 2. **Choose Sign in with Meta** on Home or in **Settings → Accounts**. Use the Meta account that owns your Muse Code plan.
 3. **Open Meta sign-in**, check or enter the displayed code, and approve access in the browser. Return to Ancilla for
    confirmation; **Check sign-in** checks immediately if needed.
@@ -146,12 +148,37 @@ WSL2? Ancilla uses it when native Muse is not installed; set `ANCILLA_MUSE_RUNTI
 Apple-notarized yet, so the first launch needs a right-click on the app, then **Open** (on recent macOS, **System
 Settings > Privacy & Security > Open Anyway**).
 
-**Linux:** download `Ancilla_<version>_amd64.AppImage` (x86_64). It runs on most distributions; some need FUSE
-(`libfuse2`). Make it executable and run it (`chmod +x Ancilla_*.AppImage`, then `./Ancilla_*.AppImage`), or allow
-executing it as a program in your file manager.
+### Linux: install, sign in, choose a folder
 
-The desktop app updates itself from this repository's releases, and Settings can pause that. To hear about new
-versions, use **Watch > Custom > Releases** at the top of this page.
+Choose the package for your **x86_64** computer:
+
+| Your Linux distribution | Download |
+| --- | --- |
+| Ubuntu, Debian, Linux Mint and compatible distributions | `Ancilla_<version>_amd64.deb` |
+| Fedora and compatible RPM distributions | `Ancilla-<version>-1.x86_64.rpm` |
+| Other distributions, or a portable copy | `Ancilla_<version>_amd64.AppImage` |
+
+1. **Open the `.deb` or `.rpm` with your software installer and choose Install.** It installs the dependencies and
+   adds Ancilla's icon to the application menu. Open **Ancilla** there; you can pin it to your dock or favorites.
+2. **Follow the setup screen.** Choose **Install Muse Code** if needed, approve Meta's browser request when shown,
+   then **Sign in with Meta** using the account that owns your Muse Code plan. An existing login is reused.
+3. **Choose a project folder** and describe your task. For an icon on the desktop itself, use
+   **Settings → Linux setup → Add desktop shortcut**. Some desktops require **Allow Launching** after right-clicking
+   the shortcut; desktop icons also need to be enabled in your desktop environment.
+
+If your distribution has no graphical package installer, use `sudo apt install ./Ancilla_*_amd64.deb` on
+Debian/Ubuntu or `sudo dnf install ./Ancilla-*.x86_64.rpm` on Fedora, from the download folder.
+
+**Portable AppImage:** allow executing the file as a program in your file manager, then open it. Choose
+**Install Ancilla for my account** in setup to keep it in a permanent location and add its menu icon and optional
+desktop shortcut, then relaunch when prompted. If FUSE is unavailable, start it with
+`./Ancilla_*.AppImage --appimage-extract-and-run`; launcher setup remembers that fallback. No separate Node.js install
+is needed for any format.
+
+Windows, macOS and AppImage installations receive signed automatic updates, which Settings can pause.
+For `.deb` and `.rpm` installations, download and open the new package to update; Settings links to it. Linux builds
+use Ubuntu 22.04 as their build baseline; your distribution must provide compatible GTK/WebKit system libraries.
+To hear about new versions, use **Watch > Custom > Releases** at the top of this page.
 
 ### Migrating from Helicon
 
