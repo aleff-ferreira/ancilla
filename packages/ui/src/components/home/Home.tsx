@@ -4,7 +4,7 @@ import { useApp, useController, useNow } from "../../app/context.js";
 import { relativeTime, shortenPath } from "../../model/format.js";
 import { planView } from "../../model/plan.js";
 import { projectForCwd } from "../../model/status.js";
-import type { AccountView, PlanUsage, PlanUsageByAccount, ProjectView } from "../../types.js";
+import type { AccountView, PlanAccountUsage, ProjectView } from "../../types.js";
 import { TopBar } from "../chrome.js";
 import { Composer, ComposerFooter } from "../composer/Composer.js";
 import { CopyButton } from "../ui/Markdown.js";
@@ -21,8 +21,7 @@ export function NewThread(props: { cwd: string | null }) {
   const projects = useApp((s) => s.projects);
   const sessions = useApp((s) => s.sessions);
   const accounts = useApp((s) => s.accounts);
-  const planUsage = useApp((s) => s.planUsage);
-  const planUsageByAccount = useApp((s) => s.planUsageByAccount);
+  const planUsageAccounts = useApp((s) => s.planUsageAccounts);
   const needsLogin = useApp((s) => s.defaultLogin?.hasLogin === false && !s.metaApiKeyInherited);
   const now = useNow(60_000);
   const project = projectForCwd(projects, props.cwd) ?? projects[0] ?? null;
@@ -39,8 +38,8 @@ export function NewThread(props: { cwd: string | null }) {
     [sessions, project],
   );
   const nearCap = useMemo(
-    () => (project ? nearCapHint(project, accounts, planUsage, planUsageByAccount, now) : null),
-    [project, accounts, planUsage, planUsageByAccount, now],
+    () => (project ? nearCapHint(project, accounts, planUsageAccounts, now) : null),
+    [project, accounts, planUsageAccounts, now],
   );
   if (!project) {
     return <Welcome />;
@@ -92,26 +91,20 @@ export function NewThread(props: { cwd: string | null }) {
  * least two accounts with usage (the default login counts as one), the project's default account (or the default login, when unset) at 80% or more,
  * and another account at least 25 points behind it.
  */
-function nearCapHint(
+export function nearCapHint(
   project: ProjectView,
   accounts: AccountView[] | null,
-  planUsage: PlanUsage | null,
-  planUsageByAccount: PlanUsageByAccount,
+  usageAccounts: PlanAccountUsage[],
   now: number,
 ): string | null {
   if (!accounts || accounts.length < 1) {
     return null;
   }
   const candidates: { id: string | null; name: string; percent: number }[] = [];
-  const loginPercent = planView(planUsage, now)?.rows[0]?.percent;
-  if (loginPercent !== undefined) {
-    candidates.push({ id: null, name: "Default login", percent: loginPercent });
-  }
-  for (const account of accounts) {
-    const percent = planView(planUsageByAccount[account.id], now)?.rows[0]?.percent;
-    if (percent !== undefined) {
-      candidates.push({ id: account.id, name: account.name, percent });
-    }
+  for (const account of [{ id: null, name: "Default login" }, ...accounts]) {
+    const reading = usageAccounts.find((entry) => entry.accountId === account.id);
+    const window = reading && planView(reading.usage, now, reading)?.rows[0];
+    if (window?.current) candidates.push({ id: account.id, name: account.name, percent: window.percent });
   }
   // The default login counts as a switchable account, so one named profile plus a busy default login is enough.
   if (candidates.length < 2) {
@@ -129,7 +122,7 @@ function nearCapHint(
   if (high.percent - low.percent < 25) {
     return null;
   }
-  return `${high.name} is at ${high.percent}%. ${low.name} has more room, at ${low.percent}%.`;
+  return `Last reported: ${high.name} at ${high.percent}%, ${low.name} at ${low.percent}%.`;
 }
 
 /**

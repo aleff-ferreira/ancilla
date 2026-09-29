@@ -336,6 +336,9 @@ export interface AppState {
   planUsageSavedAccounts: string[];
   planUsageStatus: import("../types.js").PlanUsageStatus;
   planUsageLoading: boolean;
+  planUsageAccounts: import("../types.js").PlanAccountUsage[];
+  /** The explicit Usage selection; runtime activity must never change it. */
+  planUsageSelectedAccountId: string | null;
   /** Every account Ancilla can run; null until the first load answers. */
   accounts: import("../types.js").AccountView[] | null;
   /** True when META_API_KEY in Ancilla's environment makes every account share one Meta login. */
@@ -414,6 +417,8 @@ export function initialState(prefs: Prefs): AppState {
     planUsageSavedAccounts: [],
     planUsageStatus: "unobserved",
     planUsageLoading: false,
+    planUsageAccounts: [],
+    planUsageSelectedAccountId: null,
     accounts: null,
     metaApiKeyInherited: false,
     accountLogin: null,

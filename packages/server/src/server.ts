@@ -76,6 +76,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
+import { MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
 import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
 export const ANCILLA_VERSION = "0.20.3";
@@ -174,6 +175,8 @@ export interface ServerOptions {
   loginSpawn?: LoginSpawn;
   /** The user-requested Linux installer, injectable without downloading or running Muse in tests. */
   linuxInstaller?: LinuxMuseInstaller;
+  /** Reads the Meta device-login quota without a model call; injectable for offline tests. */
+  subscriptionReader?: MuseSubscriptionReader;
   /** The DeepResearch engine; the daemon's `runResearch` by default, a fake in tests. */
   researchEngine?: ResearchEngine;
   /** Research workers running at once across every run. */
@@ -321,6 +324,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function str(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function sameSubscriptionUsage(a: SubscriptionUsage | null | undefined, b: SubscriptionUsage | null | undefined): boolean {
+  return !!a && !!b && a.observedAtMs === b.observedAtMs && a.tier === b.tier &&
+    (["window", "weekly"] as const).every((key) => a[key].usedPercent === b[key].usedPercent &&
+      a[key].resetsAtMs === b[key].resetsAtMs && a[key].windowDurationMins === b[key].windowDurationMins);
 }
 
 function num(value: unknown): number | undefined {
@@ -761,6 +770,9 @@ export class AncillaServer {
   private defaultPlanUsage: SubscriptionUsage | null = null;
   private planUsageAccountId: string | null = null;
   private readonly quotaScopes = new Map<string | null, string | null>();
+  private readonly directQuota = new Map<string | null, SubscriptionReading>();
+  private readonly subscriptionReader: MuseSubscriptionReader;
+  private readonly pendingHostQuotas = new WeakMap<ManagedHost, Promise<SubscriptionUsage | null>>();
   private readonly savedQuotaSources = new Set<string | null>();
   private readonly removedQuotaAccounts = new Set<string>();
   private readonly quotaAccountGenerations = new Map<string, number>();
@@ -804,6 +816,7 @@ export class AncillaServer {
       | "aonia"
       | "loginSpawn"
       | "linuxInstaller"
+      | "subscriptionReader"
       | "researchEngine"
       | "researchMaxWorkers"
     >
@@ -854,8 +867,11 @@ export class AncillaServer {
     this.store = new AncillaStore(
       this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
     );
-    this.aonia = options.aonia ?? createAonia(this.options.musePath ? { musePath: this.options.musePath } : {});
+    this.aonia = options.aonia ?? createAonia({ home: this.options.home,
+      platform: this.options.platform === "win32" ? "win32" : this.options.platform === "darwin" ? "darwin" : "linux",
+      ...(this.options.musePath ? { musePath: this.options.musePath } : {}) });
     this.linuxInstaller = options.linuxInstaller ?? new LinuxMuseInstaller({ platform: this.options.platform, home: this.options.home });
+    this.subscriptionReader = options.subscriptionReader ?? new MuseSubscriptionReader();
     this.researchJobs = new ResearchJobManager({
       store: this.store,
       engine: options.researchEngine ?? runResearch,
@@ -917,6 +933,7 @@ export class AncillaServer {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.subscriptionReader.close();
     await this.linuxInstaller.close();
     for (const child of this.loginChildren.values()) child.kill();
     this.loginChildren.clear();
@@ -4541,20 +4558,27 @@ export class AncillaServer {
     return false;
   }
 
-  /** Aonia exposes only the non-secret identity; no credentials enter the quota cache. */
+  /** Resolve only credentials belonging to this runtime. WSL and Keychain-only logins use MSP observations. */
+  private async quotaAuthPath(accountId: string | null): Promise<string | null> {
+    if (await this.museRuntime() === "wsl" || process.env["META_API_KEY"]) return null;
+    if (accountId) {
+      // A global auth override defeats Aonia's isolated account roots; do not assign it to every profile.
+      if (process.env["MUSE_AUTH_PATH"]) return null;
+      const profile = await this.aonia.getProfile(accountId);
+      return join(profile.roots.config, "muse", "auth.json");
+    }
+    return process.env["MUSE_AUTH_PATH"] || join(process.env["XDG_CONFIG_HOME"] || join(this.options.home, ".config"), "muse", "auth.json");
+  }
+
+  /** Only the non-secret identity scopes durable readings; no credentials enter the quota cache. */
   private async quotaCacheScope(accountId: string | null): Promise<string | null> {
-    const runtime = await this.museRuntime();
-    // A WSL login or an inherited API key cannot be verified through the local auth-file identity.
-    if (runtime === "wsl" || process.env["META_API_KEY"]) return null;
     try {
-      const profile = accountId ? await this.aonia.getProfile(accountId) : {
-        id: "default", name: "Default login", createdAt: "", lastUsedAt: null,
-        roots: { config: process.env["XDG_CONFIG_HOME"] || join(this.options.home, ".config"), data: "" },
-      };
-      const identity = await this.aonia.identityOf(profile);
-      if (!identity.hasLogin || !identity.email) return null;
+      const path = await this.quotaAuthPath(accountId);
+      if (!path) return null;
+      const email = await subscriptionIdentity(path);
+      if (!email) return null;
       return createHash("sha256").update(JSON.stringify([
-        this.options.platform, runtime, this.options.musePath ?? "muse", accountId, profile.roots.config, identity.email,
+        this.options.platform, await this.museRuntime(), this.options.musePath ?? "muse", accountId, path, email,
       ])).digest("hex");
     } catch { return null; }
   }
@@ -4562,15 +4586,19 @@ export class AncillaServer {
   /** A newer observation wins; cached readings keep their original timestamp and source account. */
   private observeUsage(usage: SubscriptionUsage | null, accountId: string | null = null, saved = false, scope: string | null = null): void {
     if (!usage || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+    const direct = this.directQuota.get(accountId);
+    if (direct?.status === "no-subscription" && direct.checkedAtMs >= usage.observedAtMs) return;
     const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
     if (prior && prior.observedAtMs > usage.observedAtMs) return;
-    const changed = !prior || prior.observedAtMs < usage.observedAtMs;
+    if (saved && prior?.observedAtMs === usage.observedAtMs) return;
+    const changed = !sameSubscriptionUsage(prior, usage);
     if (accountId) this.planUsageByAccount.set(accountId, usage);
     else this.defaultPlanUsage = usage;
     if (saved && changed) this.savedQuotaSources.add(accountId);
     else if (!saved) this.savedQuotaSources.delete(accountId);
     this.quotaScopes.set(accountId, scope);
-    if (!this.planUsage || this.planUsage.observedAtMs < usage.observedAtMs) {
+    if (!this.planUsage || this.planUsage.observedAtMs < usage.observedAtMs ||
+      (this.planUsageAccountId === accountId && this.planUsage.observedAtMs === usage.observedAtMs)) {
       this.planUsage = usage;
       this.planUsageAccountId = accountId;
     }
@@ -4585,6 +4613,7 @@ export class AncillaServer {
     else this.defaultPlanUsage = null;
     this.savedQuotaSources.delete(accountId);
     this.quotaScopes.delete(accountId);
+    this.directQuota.delete(accountId);
     const readings: [string | null, SubscriptionUsage][] = [...this.planUsageByAccount];
     if (this.defaultPlanUsage) readings.push([null, this.defaultPlanUsage]);
     readings.sort((a, b) => b[1].observedAtMs - a[1].observedAtMs);
@@ -4598,10 +4627,26 @@ export class AncillaServer {
         host.quotaAccountGeneration === (this.quotaAccountGenerations.get(host.accountId) ?? 0)));
   }
 
-  /** Reads running hosts and matching saved observations; never launches a session or model call. */
+  /** A wedged runtime must not block fresh Meta readings or accumulate another RPC on every page refresh. */
+  private async readHostQuota(host: ManagedHost): Promise<SubscriptionUsage | null> {
+    let pending = this.pendingHostQuotas.get(host);
+    if (!pending) {
+      pending = host.manager.readSubscriptionUsage().finally(() => { this.pendingHostQuotas.delete(host); });
+      this.pendingHostQuotas.set(host, pending);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Muse quota read timed out")), 2000);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
+  /** Reads Meta's subscription snapshot plus host observations; never launches a session or model call. */
   private async readPlanUsage(): Promise<{
     usage: SubscriptionUsage | null; byAccount: Record<string, SubscriptionUsage>; accountId: string | null;
     saved: boolean; savedAccountIds: string[]; status: "ready" | "no-host" | "unobserved" | "unavailable";
+    accounts: PlanAccountUsage[];
   }> {
     const revision = ++this.planUsageReadRevision;
     const profiles = await this.aonia.listProfiles().catch(() => []);
@@ -4615,27 +4660,73 @@ export class AncillaServer {
       this.quotaScopes.set(accountId, scope);
     }
     const hosts = [...this.hosts.values()];
+    const hostOutcomes = new Map<string | null, { attempted: number; succeeded: number; usageAtStart: SubscriptionUsage | null }>();
     let failed = 0;
-    await Promise.all(hosts.map(async (managed) => {
+    const hostReads = hosts.map(async (managed) => {
+      let outcome: { attempted: number; succeeded: number; usageAtStart: SubscriptionUsage | null } | undefined;
       try {
         // A host started under a different login must not overwrite the newly selected login's reading.
         if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
           managed.quotaCacheScope !== (scopes.get(managed.accountId) ?? null)) return;
-        const usage = await managed.manager.readSubscriptionUsage();
+        outcome = hostOutcomes.get(managed.accountId) ?? { attempted: 0, succeeded: 0,
+          usageAtStart: managed.accountId ? this.planUsageByAccount.get(managed.accountId) ?? null : this.defaultPlanUsage };
+        outcome.attempted += 1;
+        hostOutcomes.set(managed.accountId, outcome);
+        const usage = await this.readHostQuota(managed);
         // Identity checks happen asynchronously. A newer read, account removal, or host replacement can
         // invalidate this request while Muse is answering; only the still-current source may publish it.
         if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
           this.quotaScopes.get(managed.accountId) !== managed.quotaCacheScope) return;
+        outcome.succeeded += 1;
         this.observeUsage(usage, managed.accountId, false, managed.quotaCacheScope);
       } catch { failed += 1; }
-    }));
+    });
+    const directReads = [...sources].map(async (accountId) => {
+      try {
+        const path = await this.quotaAuthPath(accountId);
+        const reading = path ? await this.subscriptionReader.read(path) : null;
+        if (revision !== this.planUsageReadRevision || this.closed || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+        // Login can change while Meta answers, even if no other quota request has noticed it yet.
+        const scope = await this.quotaCacheScope(accountId);
+        if (revision !== this.planUsageReadRevision) return;
+        if (scope !== scopes.get(accountId)) { this.forgetQuota(accountId); this.quotaScopes.set(accountId, scope); return; }
+        if (!reading) { this.directQuota.delete(accountId); return; }
+        if (reading.status === "no-subscription") {
+          const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
+          if (!prior || prior.observedAtMs <= reading.checkedAtMs) this.forgetQuota(accountId);
+        }
+        this.directQuota.set(accountId, reading);
+        this.quotaScopes.set(accountId, scope);
+        this.observeUsage(reading.usage, accountId, false, scope);
+      } catch { /* A missing or inaccessible profile still has its runtime-only row below. */ }
+    });
+    await Promise.all([...hostReads, ...directReads]);
+    const accounts: PlanAccountUsage[] = [null, ...profiles.map((profile) => profile.id)]
+      .filter((id) => id === null || !this.removedQuotaAccounts.has(id))
+      .map((accountId) => {
+        const reading = this.directQuota.get(accountId);
+        const usage = accountId ? this.planUsageByAccount.get(accountId) ?? null : this.defaultPlanUsage;
+        const fromMeta = sameSubscriptionUsage(reading?.usage, usage);
+        const newerRuntime = usage !== null && reading !== undefined && usage.observedAtMs > reading.checkedAtMs;
+        const outcome = hostOutcomes.get(accountId);
+        const hostUnavailable = outcome && outcome.attempted > 0 && outcome.succeeded === 0 && usage === outcome.usageAtStart;
+        const status = newerRuntime ? "runtime-only" : reading?.status ?? (hostUnavailable ? "unavailable" : "runtime-only");
+        return {
+          accountId, usage: status === "no-subscription" ? null : usage,
+          planName: reading?.planName ?? null,
+          source: usage ? fromMeta ? "meta" : this.savedQuotaSources.has(accountId) ? "saved" : "runtime" : null,
+          status, checkedAtMs: reading?.checkedAtMs ?? null,
+        };
+      });
+    const metaAvailable = accounts.some((account) => account.status === "ready");
     return {
       usage: this.planUsage,
       byAccount: Object.fromEntries(this.planUsageByAccount),
       accountId: this.planUsageAccountId,
       saved: this.planUsage !== null && this.savedQuotaSources.has(this.planUsageAccountId),
       savedAccountIds: [...this.savedQuotaSources].filter((id): id is string => id !== null),
-      status: hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
+      status: metaAvailable ? "ready" : hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
+      accounts,
     };
   }
 

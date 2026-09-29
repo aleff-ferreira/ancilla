@@ -19,6 +19,11 @@ describe("AncillaStore", () => {
     store.setSubscriptionUsage("work", { ...reading, observedAtMs: 100 });
     assert.deepEqual(store.getSubscriptionUsage("work"), reading);
     assert.equal(store.getSubscriptionUsage("personal"), null);
+    const corrected = { ...reading, window: { ...reading.window, usedPercent: 128 } };
+    store.setSubscriptionUsage("work", corrected);
+    assert.deepEqual(store.getSubscriptionUsage("work"), corrected, "equal-stamp corrections survive restoring the cache");
+    store.setSubscriptionUsage("work", { ...reading, observedAtMs: 100 });
+    assert.deepEqual(store.getSubscriptionUsage("work"), corrected);
   });
 
   it("groups sessions under projects by directory", () => {

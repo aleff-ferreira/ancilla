@@ -21,6 +21,7 @@ import {
   type OpenTarget,
 } from "../src/server.js";
 import type { ExecFn, ServeTarget } from "@ancilla/daemon";
+import { MuseSubscriptionReader } from "../src/subscriptionQuota.js";
 
 interface Call {
   method: string;
@@ -1496,6 +1497,158 @@ describe("AncillaServer", () => {
     assert.equal(res.usage.window.usedPercent, 12, "usage holds the newest across accounts");
   });
 
+  it("refreshes default and named subscription limits directly without starting a host", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-direct-quota-"));
+    const aonia = createAonia({ home, platform: "linux", musePath: "muse" });
+    const profile = await aonia.createProfile("work");
+    const saveLogin = async (root: string, token: string) => {
+      const dir = join(root, "muse");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "auth.json"), JSON.stringify({ providers: { meta: {
+        mechanism: "oauth", access_token: token, user_email: "person@example.test",
+      } } }));
+    };
+    await saveLogin(join(home, ".config"), "dca:default");
+    await saveLogin(profile.roots.config, "dca:work");
+    let requests = 0;
+    const observed = Date.now();
+    const subscriptionReader = new MuseSubscriptionReader({ now: () => observed, fetch: async (_url, init) => {
+      requests++;
+      const work = new Headers(init?.headers).get("Authorization") === "Bearer dca:work";
+      return Response.json({ is_subs_active: true, subs_tier_name: "Muse Code Power Usage", api_key: "LLM|discard-me",
+        subs_usage: { tier: "123", window: { used_percent: work ? 84 : 12, resets_at: observed / 1000 + 3600, window_duration_mins: 300 },
+          weekly: { used_percent: work ? 55 : 25, resets_at: observed / 1000 + 86400 } } });
+    } });
+    const probe: FactoryProbe = { targets: [], exits: [] };
+    const connection = new FakeConnection();
+    const { base } = await start(connection, { home, aonia, subscriptionReader, hostFactory: fakeFactory(connection, probe) });
+    const response = await get(base, "/api/plan-usage");
+    assert.equal(response.accounts.length, 2);
+    const personal = response.accounts.find((account: { accountId: string | null }) => account.accountId === null);
+    const work = response.accounts.find((account: { accountId: string | null }) => account.accountId === "work");
+    assert.equal(personal.usage.window.usedPercent, 12);
+    assert.equal(work.usage.window.usedPercent, 84);
+    assert.equal(personal.usage.window.resetsAtMs, observed + 3_600_000);
+    assert.equal(work.planName, "Muse Code Power Usage");
+    assert.equal(work.source, "meta");
+    assert.equal(work.status, "ready");
+    assert.equal(response.status, "ready");
+    assert.equal(probe.targets.length, 0);
+    assert.equal(requests, 2);
+    assert.doesNotMatch(JSON.stringify(response), /dca:|LLM\||discard-me|access_token/);
+    await get(base, "/api/plan-usage");
+    assert.equal(requests, 2, "page and sidebar reads share one short account cache");
+  });
+
+  it("keeps a failed direct refresh distinct from an older runtime observation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-direct-unavailable-"));
+    const dir = join(home, ".config", "muse");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ providers: { meta: {
+      mechanism: "oauth", access_token: "dca:default", user_email: "person@example.test",
+    } } }));
+    let stamp = Date.now();
+    let active = true;
+    const subscriptionReader = new MuseSubscriptionReader({ now: () => stamp, cacheMs: 0, fetch: async () => active
+      ? new Response("private failure", { status: 503 }) : Response.json({ is_subs_active: false }) });
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const { base } = await start(connection, { home, subscriptionReader });
+    await send(base, "/api/sessions", { cwd: "/work" });
+    const observation = { tier: "high", observedAtMs: stamp - 1000,
+      window: { usedPercent: 92, resetsAtMs: stamp + 60000, windowDurationMins: 300 },
+      weekly: { usedPercent: 30, resetsAtMs: stamp + 86400000 } };
+    connection.replies.set("usage/read", { usage: observation });
+    const unavailable = (await get(base, "/api/plan-usage")).accounts[0];
+    assert.equal(unavailable.status, "unavailable");
+    assert.equal(unavailable.source, "runtime");
+    assert.equal(unavailable.usage.observedAtMs, observation.observedAtMs, "a failed request does not refresh quota age");
+    stamp += 1000;
+    active = false;
+    const cancelled = await get(base, "/api/plan-usage");
+    assert.equal(cancelled.accounts[0].status, "no-subscription");
+    assert.equal(cancelled.accounts[0].usage, null);
+    assert.equal(cancelled.usage, null);
+    connection.notify("usage/changed", observation);
+    assert.equal((await get(base, "/api/plan-usage")).usage, null, "older host observations cannot resurrect a cancelled plan");
+  });
+
+  it("adopts corrected quota data with an identical timestamp without broadcasting unchanged re-reads", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work" });
+    const reading = (percent: number) => ({ tier: "high", observedAtMs: 5000,
+      window: { usedPercent: percent, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 20, resetsAtMs: 10000 } });
+    connection.notify("usage/changed", reading(10));
+    connection.notify("usage/changed", reading(20));
+    assert.equal((await get(base, "/api/plan-usage")).usage.window.usedPercent, 20);
+  });
+
+  it("uses the explicit auth path and never treats an overriding API key as subscription login", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-quota-auth-path-"));
+    const path = join(home, "separate-login.json");
+    await writeFile(path, JSON.stringify({ providers: { meta: {
+      mechanism: "oauth", access_token: "dca:custom-path", user_email: "person@example.test",
+    } } }));
+    const previousPath = process.env["MUSE_AUTH_PATH"];
+    const previousKey = process.env["META_API_KEY"];
+    let calls = 0;
+    try {
+      process.env["MUSE_AUTH_PATH"] = path;
+      delete process.env["META_API_KEY"];
+      const subscriptionReader = new MuseSubscriptionReader({ cacheMs: 0, fetch: async () => {
+        calls++;
+        return Response.json({ is_subs_active: true, subs_usage: null, subs_tier_name: "Muse Code Power Usage" });
+      } });
+      const { base } = await start(new FakeConnection(), { home, subscriptionReader });
+      assert.equal((await get(base, "/api/plan-usage")).accounts[0].status, "not-reported");
+      assert.equal(calls, 1);
+      process.env["META_API_KEY"] = "test-api-key";
+      const report = await get(base, "/api/plan-usage");
+      assert.equal(report.accounts[0].status, "runtime-only");
+      assert.equal(report.accounts[0].usage, null);
+      assert.equal(calls, 1);
+    } finally {
+      if (previousPath === undefined) delete process.env["MUSE_AUTH_PATH"]; else process.env["MUSE_AUTH_PATH"] = previousPath;
+      if (previousKey === undefined) delete process.env["META_API_KEY"]; else process.env["META_API_KEY"] = previousKey;
+    }
+  });
+
+  it("keeps newer runtime readings when an earlier direct quota check finishes late", async () => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-quota-order-"));
+    const dir = join(home, ".config", "muse");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ providers: { meta: {
+      mechanism: "oauth", access_token: "dca:default", user_email: "person@example.test",
+    } } }));
+    let stamp = Date.now();
+    let finish: ((response: Response) => void) | null = null;
+    const subscriptionReader = new MuseSubscriptionReader({ now: () => stamp, cacheMs: 0,
+      fetch: async () => new Promise((resolve) => { finish = resolve; }) });
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const { base } = await start(connection, { home, subscriptionReader });
+    await send(base, "/api/sessions", { cwd: "/work" });
+    for (const response of [Response.json({ is_subs_active: false }), Response.json({ is_subs_active: true, subs_usage: null }), new Response(null, { status: 503 })]) {
+      finish = null;
+      const pending = get(base, "/api/plan-usage");
+      await waitFor(() => finish !== null, "direct quota request");
+      const reading = { tier: "high", observedAtMs: stamp + 1000,
+        window: { usedPercent: 37, resetsAtMs: stamp + 60000, windowDurationMins: 300 },
+        weekly: { usedPercent: 21, resetsAtMs: stamp + 86400000 } };
+      connection.notify("usage/changed", reading);
+      (finish as unknown as (response: Response) => void)(response);
+      const report = await pending;
+      assert.equal(report.accounts[0].usage.window.usedPercent, 37);
+      assert.equal(report.accounts[0].source, "runtime");
+      assert.equal(report.accounts[0].status, "runtime-only", "an earlier HTTP result cannot hide a newer runtime reading");
+      assert.equal(report.accounts[0].checkedAtMs, stamp, "checking time remains distinct from the newer observation");
+      stamp += 2000;
+    }
+  });
+
   it("restores subscription readings only for the same login and runtime without starting a host", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-cache-"));
     const aonia = createAonia({ home: join(dataDir, "accounts"), platform: "linux", musePath: "muse" });
@@ -1638,6 +1791,37 @@ describe("AncillaServer", () => {
     const unavailable = await get(base, "/api/plan-usage");
     assert.equal(unavailable.status, "unavailable");
     assert.equal(unavailable.usage, null);
+    assert.equal(unavailable.accounts[0].status, "unavailable");
+  });
+
+  it("bounds a stalled runtime quota read and shares its outstanding request", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    connection.replies.set("usage/read", () => new Promise(() => {}));
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work" });
+    const first = get(base, "/api/plan-usage");
+    await waitFor(() => connection.requests.some((request) => request.method === "usage/read"), "runtime quota read");
+    const second = get(base, "/api/plan-usage");
+    for (const report of await Promise.all([first, second])) assert.equal(report.status, "unavailable");
+    assert.equal(connection.requests.filter((request) => request.method === "usage/read").length, 1);
+  });
+
+  it("marks a failed account fallback unavailable while retaining its previous observation", async () => {
+    const connection = new FakeConnection();
+    connection.replies.set("session/start", { session: { sessionId: "s1" } });
+    const { base } = await start(connection);
+    await send(base, "/api/sessions", { cwd: "/work" });
+    const at = Date.now();
+    connection.notify("usage/changed", { tier: "high", observedAtMs: at,
+      window: { usedPercent: 72, resetsAtMs: at + 60000, windowDurationMins: 300 },
+      weekly: { usedPercent: 31, resetsAtMs: at + 86400000 } });
+    connection.replies.set("usage/read", new Error("runtime closed"));
+    const account = (await get(base, "/api/plan-usage")).accounts[0];
+    assert.equal(account.status, "unavailable");
+    assert.equal(account.source, "runtime");
+    assert.equal(account.usage.window.usedPercent, 72);
+    assert.equal(account.usage.observedAtMs, at);
   });
 
   it("does not re-broadcast plan-usage when a repeat GET re-reads the same window", async () => {

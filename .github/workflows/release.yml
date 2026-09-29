@@ -26,6 +26,7 @@ env:
     - Linux **.deb and .rpm installers** add Ancilla to your application menu and install its system dependencies. Node.js remains private to the app.
     - **Install Muse Code inside Ancilla**, follow any browser approval, sign in with your Meta subscription, then choose a project folder. Setup includes progress, cancellation and retry.
     - **Fix for the Linux UnsafePath thread-start error:** Ancilla safely prepares the selected account's Muse data-folder permissions before starting work, preserving login, history and deletion records.
+    - **Fresh subscription limits from Meta:** supported Muse browser logins refresh five-hour and weekly quota without a model call. Account selection stays fixed; missing or expired readings show as unknown.
     - Optional **desktop shortcuts**, plus one-click AppImage installation to a permanent location with an application-menu icon.
     - Muse is detected after installation even when the desktop PATH omits it. Package installations use package updates; AppImages retain signed automatic updates.
 

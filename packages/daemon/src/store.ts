@@ -451,7 +451,7 @@ export class AncillaStore {
   setSubscriptionUsage(scope: string, usage: SubscriptionUsage): void {
     this.db.prepare(`INSERT INTO subscription_usage (scope, observed_at_ms, usage) VALUES (?, ?, ?)
       ON CONFLICT(scope) DO UPDATE SET observed_at_ms = excluded.observed_at_ms, usage = excluded.usage
-      WHERE excluded.observed_at_ms > subscription_usage.observed_at_ms`).run(scope, usage.observedAtMs, JSON.stringify(usage));
+      WHERE excluded.observed_at_ms >= subscription_usage.observed_at_ms`).run(scope, usage.observedAtMs, JSON.stringify(usage));
     // Login changes can leave older scopes behind; retain only a small recent observation cache.
     this.db.prepare(`DELETE FROM subscription_usage WHERE scope NOT IN
       (SELECT scope FROM subscription_usage ORDER BY observed_at_ms DESC LIMIT 64)`).run();

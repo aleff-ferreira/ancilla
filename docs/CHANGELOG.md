@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- **Subscription Refresh fetches current limits from Meta.** Supported Muse browser logins now read the subscription snapshot directly without starting a thread or spending model tokens. The five-hour and weekly windows preserve Meta's exact percentages, including over-limit values, and convert reset timestamps correctly. Account selection stays fixed, the default login remains visible, and stale, expired or missing readings cannot appear as current allowance. Runtime and saved observations remain explicitly labelled when a fresh reading is unavailable.
 - **Linux threads recover from Muse's `UnsafePath` permission error.** Before starting a Muse host, signing in or running research, Ancilla checks the selected account's storage and removes group/other write permission from the owned outer Muse data folder when that is the problem. It also creates a missing data folder with private permissions. Login files, thread history and deletion records are preserved. Unsafe links, foreign ownership and incomplete deletion registries produce a specific explanation and a Settings action instead of resetting data.
 - **Muse installed from the desktop is found immediately.** Ancilla discovers `~/.local/bin/muse` even when the desktop's PATH omits it, checks that the CLI is usable without starting a hidden download or login, and advances setup without requiring an app restart. Cancelling installation stops its subprocesses before a retry begins.
 

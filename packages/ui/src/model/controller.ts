@@ -29,6 +29,7 @@ import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
 import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
 import { projectForCwd } from "./status.js";
+import { contextualPlanAccountId, legacyPlanAccounts, mergePlanAccounts, samePlanUsage } from "./plan.js";
 import {
   INIT_PROMPT,
   findModel,
@@ -1088,6 +1089,7 @@ export class AncillaController {
     this.update((s) => ({
       ...s,
       route,
+      planUsageSelectedAccountId: route.kind === "usage" && !wasOverlay ? contextualPlanAccountId(s) : s.planUsageSelectedAccountId,
       picker: moved && s.picker === "research" ? null : s.picker,
       // Research mode belongs to that composer as well: a question armed here must not fire elsewhere.
       researchMode: moved ? false : s.researchMode,
@@ -2537,7 +2539,11 @@ export class AncillaController {
 
   // ---------------------------------------------------------------- plan usage
 
-  /** The subscription window Muse last saw, from the server; it also arrives as an event whenever it moves. */
+  selectPlanUsageAccount(accountId: string | null): void {
+    this.update((s) => ({ ...s, planUsageSelectedAccountId: accountId }));
+  }
+
+  /** Refresh account quotas without starting a thread; runtime observations also arrive as events. */
   loadPlanUsage(): Promise<void> {
     if (this.planUsageLoad) return this.planUsageLoad;
     this.planUsageLoad = this.readPlanUsage().finally(() => { this.planUsageLoad = null; });
@@ -2548,9 +2554,11 @@ export class AncillaController {
     const eventRevision = this.planUsageEventRevision;
     const before = this.state.planUsage;
     const accountsBefore = this.state.planUsageByAccount;
+    const recordsBefore = this.state.planUsageAccounts;
     this.update((s) => ({ ...s, planUsageLoading: true }));
     try {
-      const { usage, byAccount, accountId: sourceAccount, saved, savedAccountIds, status } = await this.client.planUsage();
+      const report = await this.client.planUsage();
+      const { usage, byAccount, accountId: sourceAccount, saved, savedAccountIds, status } = report;
       if (status !== undefined) {
         // A full report can invalidate a saved login's reading. Events received while this read was in
         // flight still win, so a delayed response cannot erase newly reported quota data.
@@ -2580,9 +2588,16 @@ export class AncillaController {
         planUsageSaved: !s.planUsage ? false : s.planUsage === usage ? saved === true : s.planUsageSaved,
         planUsageSavedAccounts: Object.keys(s.planUsageByAccount).filter((id) =>
           s.planUsageByAccount[id] === byAccount[id] ? savedAccountIds?.includes(id) : s.planUsageSavedAccounts.includes(id)),
+        planUsageAccounts: mergePlanAccounts(s.planUsageAccounts, recordsBefore, report.accounts ?? legacyPlanAccounts({
+          ...report, usage: s.planUsage, accountId: s.planUsageAccountId, byAccount: s.planUsageByAccount,
+        }, recordsBefore)),
       }));
     } catch {
-      if (eventRevision === this.planUsageEventRevision) this.update((s) => ({ ...s, planUsageStatus: "unavailable" }));
+      this.update((s) => ({ ...s,
+        planUsageStatus: eventRevision === this.planUsageEventRevision ? "unavailable" : s.planUsageStatus,
+        planUsageAccounts: s.planUsageAccounts.map((account) => account === recordsBefore.find((entry) => entry.accountId === account.accountId)
+          ? { ...account, status: "unavailable" } : account),
+      }));
     } finally {
       this.update((s) => ({ ...s, planUsageLoading: false }));
     }
@@ -2591,10 +2606,13 @@ export class AncillaController {
   private takePlanUsage(usage: import("../types.js").PlanUsage, accountId: string | null = null, fromEvent = false): void {
     const current = this.state.planUsage;
     const currentForAccount = accountId ? this.state.planUsageByAccount[accountId] : undefined;
+    const accountRecord = this.state.planUsageAccounts.find((entry) => entry.accountId === accountId);
+    const alreadyVerified = accountRecord?.source === "meta" && samePlanUsage(accountRecord.usage, usage);
+    const takeRecord = fromEvent && !alreadyVerified && (!accountRecord || usage.observedAtMs >= Math.max(accountRecord.usage?.observedAtMs ?? -Infinity, accountRecord.checkedAtMs ?? -Infinity));
     const takeGlobal = !current || current.observedAtMs < usage.observedAtMs || (fromEvent && current.observedAtMs === usage.observedAtMs);
     const takeForAccount = accountId !== null && (!currentForAccount || currentForAccount.observedAtMs < usage.observedAtMs ||
       (fromEvent && currentForAccount.observedAtMs === usage.observedAtMs));
-    if (!takeGlobal && !takeForAccount) {
+    if (!takeGlobal && !takeForAccount && !takeRecord) {
       return;
     }
     if (fromEvent) this.planUsageEventRevision += 1;
@@ -2606,6 +2624,9 @@ export class AncillaController {
       planUsageSavedAccounts: fromEvent && takeForAccount ? s.planUsageSavedAccounts.filter((id) => id !== accountId) : s.planUsageSavedAccounts,
       planUsageStatus: "ready",
       planUsageByAccount: takeForAccount ? { ...s.planUsageByAccount, [accountId as string]: usage } : s.planUsageByAccount,
+      planUsageAccounts: takeRecord ? [...s.planUsageAccounts.filter((entry) => entry.accountId !== accountId), {
+        accountId, usage, planName: accountRecord?.planName ?? null, source: "runtime", status: "runtime-only", checkedAtMs: accountRecord?.checkedAtMs ?? null,
+      }] : s.planUsageAccounts,
     }));
   }
 

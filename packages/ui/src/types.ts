@@ -558,6 +558,17 @@ export type PlanUsageByAccount = Record<string, PlanUsage>;
 
 export type PlanUsageStatus = "ready" | "no-host" | "unobserved" | "unavailable";
 
+/** Account identity, observation provenance and refresh health travel with each quota reading. */
+export interface PlanAccountUsage {
+  accountId: string | null;
+  usage: PlanUsage | null;
+  planName: string | null;
+  source: "meta" | "runtime" | "saved" | null;
+  status: "ready" | "not-reported" | "no-subscription" | "login-required" | "unavailable" | "runtime-only";
+  /** The last direct account check; a runtime event must not advance this timestamp. */
+  checkedAtMs: number | null;
+}
+
 export interface PlanUsageReport {
   usage: PlanUsage | null;
   byAccount: PlanUsageByAccount;
@@ -567,6 +578,8 @@ export interface PlanUsageReport {
   saved?: boolean;
   savedAccountIds?: string[];
   status?: PlanUsageStatus;
+  /** Includes the default login as well as named profiles, even when no quota is available. */
+  accounts?: PlanAccountUsage[];
 }
 
 export interface AccountView {

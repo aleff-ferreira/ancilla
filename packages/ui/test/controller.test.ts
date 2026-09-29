@@ -343,7 +343,7 @@ class FakeClient implements AncillaClient {
   }
   plan: import("../src/types.js").PlanUsage | null = null;
   planByAccount: Record<string, import("../src/types.js").PlanUsage> = {};
-  planMetadata: Pick<import("../src/types.js").PlanUsageReport, "accountId" | "saved" | "savedAccountIds" | "status"> = {};
+  planMetadata: Pick<import("../src/types.js").PlanUsageReport, "accountId" | "saved" | "savedAccountIds" | "status" | "accounts"> = {};
   planError: Error | null = null;
   async planUsage(): Promise<import("../src/types.js").PlanUsageReport> {
     if (this.planError) throw this.planError;
@@ -1737,6 +1737,110 @@ describe("AncillaController", () => {
       77,
       "a stale byAccount snapshot from a boot GET does not replace a newer event-derived reading",
     );
+    assert.equal(controller.store.get().planUsageAccounts.find((entry) => entry.accountId === "work")?.usage?.window.usedPercent, 77);
+    stop();
+  });
+
+  it("keeps the default subscription separate from a newer named account and retains explicit selection", async () => {
+    const client = new FakeClient();
+    const reading = (percent: number, at: number) => ({ tier: "high", observedAtMs: at,
+      window: { usedPercent: percent, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: 9000, windowDurationMins: null } });
+    const login = reading(12, 100);
+    const work = reading(85, 200);
+    client.plan = work;
+    client.planByAccount = { work };
+    client.planMetadata = { accountId: "work", status: "ready", accounts: [
+      { accountId: null, usage: login, planName: "Muse Plus", source: "meta", status: "ready", checkedAtMs: 100 },
+      { accountId: "work", usage: work, planName: "Muse Plus", source: "meta", status: "ready", checkedAtMs: 200 },
+    ] };
+    const { controller, stop } = await started(client);
+    controller.selectPlanUsageAccount(null);
+    client.handler?.({ type: "plan-usage", usage: reading(18, 150), accountId: null });
+    client.handler?.({ type: "plan-usage", usage: reading(88, 250), accountId: "work" });
+    assert.equal(controller.store.get().planUsageSelectedAccountId, null);
+    const records = controller.store.get().planUsageAccounts;
+    assert.equal(records.find((entry) => entry.accountId === null)?.usage?.window.usedPercent, 18);
+    assert.equal(records.find((entry) => entry.accountId === "work")?.usage?.window.usedPercent, 88);
+    assert.equal(records.find((entry) => entry.accountId === null)?.checkedAtMs, 100, "runtime events do not advance the direct account check");
+    stop();
+  });
+
+  it("adopts Meta provenance after an equal-time observation arrives before the quota response", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const usage = { tier: "1234567", observedAtMs: 300,
+      window: { usedPercent: 23, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: 9000, windowDurationMins: null } };
+    let finish!: (report: import("../src/types.js").PlanUsageReport) => void;
+    client.planUsage = () => new Promise((resolve) => { finish = resolve; });
+    const refresh = controller.loadPlanUsage();
+    client.handler?.({ type: "plan-usage", usage, accountId: null });
+    finish({ usage, byAccount: {}, accountId: null, status: "ready", accounts: [
+      { accountId: null, usage, source: "meta", status: "ready", checkedAtMs: 300, planName: "Muse Plus" },
+    ] });
+    await refresh;
+    assert.equal(controller.store.get().planUsageAccounts[0]?.source, "meta");
+    assert.equal(controller.store.get().planUsageAccounts[0]?.planName, "Muse Plus");
+    client.handler?.({ type: "plan-usage", usage: { ...usage }, accountId: null });
+    assert.equal(controller.store.get().planUsageAccounts[0]?.source, "meta", "a delayed copy of the same observation does not erase verified provenance");
+    stop();
+  });
+
+  it("keeps a newer runtime observation when an older account response or network failure arrives", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const reading = (percent: number, at: number) => ({ tier: "high", observedAtMs: at,
+      window: { usedPercent: percent, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: 9000, windowDurationMins: null } });
+    let finish!: (report: import("../src/types.js").PlanUsageReport) => void;
+    client.planUsage = () => new Promise((resolve) => { finish = resolve; });
+    let refresh = controller.loadPlanUsage();
+    client.handler?.({ type: "plan-usage", usage: reading(45, 400), accountId: null });
+    finish({ usage: reading(20, 300), byAccount: {}, status: "unavailable", accounts: [
+      { accountId: null, usage: reading(20, 300), source: "saved", status: "unavailable", checkedAtMs: 300, planName: "Muse Plus" },
+    ] });
+    await refresh;
+    assert.equal(controller.store.get().planUsageAccounts[0]?.usage?.window.usedPercent, 45);
+    assert.equal(controller.store.get().planUsageAccounts[0]?.source, "runtime");
+    let reject!: (reason: Error) => void;
+    client.planUsage = () => new Promise((_, fail) => { reject = fail; });
+    refresh = controller.loadPlanUsage();
+    client.handler?.({ type: "plan-usage", usage: reading(50, 500), accountId: null });
+    reject(new Error("Offline"));
+    await refresh;
+    assert.equal(controller.store.get().planUsageAccounts[0]?.status, "runtime-only");
+    assert.equal(controller.store.get().planUsageAccounts[0]?.usage?.window.usedPercent, 50);
+    stop();
+  });
+
+  it("does not let an old runtime event revive a reading invalidated by a newer account check", async () => {
+    const client = new FakeClient();
+    const usage = { tier: "high", observedAtMs: 100,
+      window: { usedPercent: 23, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: 9000, windowDurationMins: null } };
+    client.planMetadata = { status: "unobserved", accounts: [
+      { accountId: null, usage, source: "saved", status: "not-reported", checkedAtMs: 300, planName: "Muse Plus" },
+    ] };
+    const { controller, stop } = await started(client);
+    client.handler?.({ type: "plan-usage", usage: { ...usage, observedAtMs: 200 }, accountId: null });
+    assert.equal(controller.store.get().planUsageAccounts[0]?.status, "not-reported");
+    assert.equal(controller.store.get().planUsageAccounts[0]?.usage?.observedAtMs, 100);
+    stop();
+  });
+
+  it("opens Usage on the thread account without switching after another account reports", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    controller.store.set((state) => ({ ...state, route: { kind: "thread", sessionId: "s1" }, sessions: { ...state.sessions, s1: { ...SESSION, accountId: "work" } } }));
+    controller.navigate({ kind: "usage" });
+    assert.equal(controller.store.get().planUsageSelectedAccountId, "work");
+    controller.selectPlanUsageAccount(null);
+    const usage = { tier: "high", observedAtMs: 100,
+      window: { usedPercent: 23, resetsAtMs: 9000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: 9000, windowDurationMins: null } };
+    client.handler?.({ type: "plan-usage", usage, accountId: "work" });
+    assert.equal(controller.store.get().planUsageSelectedAccountId, null);
     stop();
   });
 
