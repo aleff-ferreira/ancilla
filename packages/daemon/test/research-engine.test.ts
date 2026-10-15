@@ -146,7 +146,8 @@ describe("runResearch", () => {
   it("returns cancelled with no report on abort without the flag", async () => {
     const clock = new FakeClock();
     const model = new FakeModel({ brief: [briefText()], supervisor: [decision("CONTINUE_RESEARCH", ["A", "B"])], writer: ["unused"] });
-    model.onCall = () => clock.advanceMinutes(7);
+    // Past the salvage fraction (6 of 10 minutes) when the worker starts, but inside the window when the decision lands.
+    model.onCall = () => clock.advanceMinutes(3.5);
     const controller = new AbortController();
     const worker = new FakeWorker(verifiedWorkerScript());
     worker.onStart = () => controller.abort();

@@ -37,8 +37,13 @@ since the server would refuse to start on it.
 **Attachment files in your projects.** Helicon wrote non-image attachments to
 `<project>/.helicon/attachments`; Ancilla writes new ones to
 `<project>/.ancilla/attachments`. Old prompts keep pointing at `.helicon/...`, and
-those files stay where they are, so Muse can still open them. If you ignored
-`.helicon/` in git, ignore `.ancilla/` as well.
+those files stay where they are, so Muse can still open them. The first time
+Ancilla writes into `.ancilla/` it adds a `.gitignore` there containing a single `*`, so
+none of it is committed by accident. Edit that file if you want some of it tracked (add
+`!research/` and `!research/**` lines under the `*` to track research reports); Ancilla
+never replaces a file that is there. Deleting it does not opt out: Ancilla writes the
+single `*` again the next time it saves something into `.ancilla/`. If you ignored
+`.helicon/` in git, it stays ignored: Ancilla does not touch that folder.
 
 **The browser (web mode).** Opened in the same browser at the same address (the
 default is `http://127.0.0.1:3127`), Ancilla starts from Helicon's saved settings

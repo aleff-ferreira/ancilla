@@ -241,6 +241,12 @@ function Report(props: { run: ResearchRunView; sessionId: string; latest: boolea
           <span>Written from what the workers had found: {run.failure}</span>
         </p>
       ) : null}
+      {run.reportWriteError ? (
+        <p role="status" className="flex items-start gap-1.5 text-xs text-warn-text">
+          <WarningCircleIcon size={13} className="mt-px shrink-0" />
+          <span>The report is here, but it could not be saved as a file in the project. {run.reportWriteError}</span>
+        </p>
+      ) : null}
       {view === "report" && run.report ? (
         <div
           className={cn("relative", long && !expanded && "max-h-[300px] overflow-hidden")}

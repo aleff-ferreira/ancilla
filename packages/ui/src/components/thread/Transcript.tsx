@@ -122,7 +122,7 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
     return null;
   }, [timeline]);
   // A prompt already on its way makes the failure above it an earlier one.
-  const followed = echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started");
+  const followed = echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started" || echo.disposition === "unconfirmed");
 
   const attachmentsByTurn = useMemo(() => {
     const map: Record<string, AttachmentView[]> = {};
@@ -687,6 +687,7 @@ const ECHO_LABEL: Record<LocalEcho["disposition"], string> = {
   started: "Sent",
   queued: "Queued",
   steered: "Adding to the current turn",
+  unconfirmed: "No answer yet. Checking whether it was sent",
 };
 
 function PendingPrompt(props: { echo: LocalEcho }) {

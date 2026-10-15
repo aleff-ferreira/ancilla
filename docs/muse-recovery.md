@@ -106,7 +106,9 @@ The server reads an optional `runtime.json` from its data directory when it star
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
 
 Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `ANCILLA_MUSE_RUNTIME` overrides its
-`runtime`. For example, for Muse inside WSL:
+`runtime`. `ANCILLA_RESEARCH_STARTUP_MS` sets how long a research run waits for Muse to open a session (whole
+milliseconds, 1000 or more; the default is two minutes, three on Windows with Muse in WSL or not yet detected). For
+example, for Muse inside WSL:
 
 ```json
 {

@@ -52,6 +52,7 @@ import {
   type SubscriptionUsage,
   type TurnImage,
 } from "@ancilla/daemon";
+import { attachmentHeaders, normalizeMediaType } from "./attachments.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
 import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
@@ -59,13 +60,19 @@ import { wslSpawnEnv } from "./runtimeConfig.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { replayUsageAt, turnStartTimes } from "./usageTime.js";
 import { dayBucketer, usageWindow } from "./usageWindow.js";
+import { ATTACHMENT_DIR, RESEARCH_DIR, assertWritableFile, entryState, ownedProjectDir, writeAttachment, type AttachmentWriter } from "./workspaceWrite.js";
 import {
+  MAX_RESEARCH_QUESTION_CHARS,
+  MIN_RESEARCH_STARTUP_ENV_MS,
   MuseExecModelClient,
   MuseModelClient,
   MuseSessionModelClient,
   MuseSessionWorkerRunner,
   ResearchJobManager,
+  gaveUpOnTimeout,
   museExecArgs,
+  researchStartupAllowanceMs,
+  startupEnvMs,
   uuidv7,
   type MuseExecPlan,
   type ResearchEngine,
@@ -183,10 +190,17 @@ export interface ServerOptions {
   researchEngine?: ResearchEngine;
   /** Research workers running at once across every run. */
   researchMaxWorkers?: number;
+  /**
+   * How long a research session start may take before the run gives up on it, in milliseconds. Unset, the
+   * `ANCILLA_RESEARCH_STARTUP_MS` environment variable decides, else two minutes (three on Windows with Muse in WSL).
+   */
+  researchStartupMs?: number;
+  /**
+   * Puts a non-image attachment into the project at the folder this machine reaches it by, and answers the name it
+   * was saved under. The real one refuses links and never replaces a file; a test replaces it to see where it is aimed.
+   */
+  attachmentWriter?: AttachmentWriter;
 }
-
-/** Where a run's report and sources land inside the workspace, beside attachments. */
-const RESEARCH_DIR = [".ancilla", "research"];
 
 interface ManagedHost {
   quotaCacheScope: string | null;
@@ -299,6 +313,18 @@ type SseSink = (event: string, data: unknown) => void;
 const MAX_HISTORY_PAGES = 4;
 const HISTORY_PAGE_SIZE = 1000;
 const DISCOVER_LIMIT = 200;
+/**
+ * The most pages one discovery reads. A page is a hundred sessions, so this is room for two thousand: hidden
+ * research sessions are skipped without counting toward `DISCOVER_LIMIT`, and a busy project can hold many.
+ */
+const DISCOVER_MAX_PAGES = 20;
+/**
+ * Research session starts one host may have outstanding after their runs gave up on them because the startup
+ * allowance passed (a stop is not counted). A host that never answers `session/start` would otherwise be sent one
+ * more every round; past this count a further start waits, unsent, until the host answers one of them (or they fail,
+ * when the host goes away) or until its own allowance passes.
+ */
+const MAX_ABANDONED_RESEARCH_STARTS = 2;
 /** Echo-titled threads one discovery may hand to the titler. Each is a model call on the user's plan, so it is a
  * handful of recent threads rather than a whole history. */
 const TITLE_BACKFILL_LIMIT = 30;
@@ -478,12 +504,15 @@ function normalizeCwd(value: string): string {
 /** A name safe to write into a workspace: the base name only, and nothing that needs quoting. */
 export function safeFileName(raw: string | null): string {
   const base = (raw ?? "").split(/[\\/]/).pop() ?? "";
-  const clean = base
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^[-.]+|-+$/g, "")
-    .slice(0, 80);
+  const lead = base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "");
+  // Windows reads CON, NUL, COM1 and the like as devices, with or without an extension, and drops trailing dots and
+  // spaces: a file of that name could not be opened or deleted there, and Muse on Windows would read the device.
+  const named = WINDOWS_DEVICE_NAME.test(lead.split(".", 1)[0] ?? "") ? `_${lead}` : lead;
+  const clean = named.slice(0, 80).replace(/[-.]+$/, "");
   return clean.length > 0 ? clean : "file";
 }
+
+const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 export { deriveTitle };
 
@@ -741,10 +770,11 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 const MAX_BODY_BYTES = 96 * 1024 * 1024;
 /**
- * Where a non-image attachment lands inside the workspace, so Muse's own tools can open it. Prompts sent from Helicon
- * mention `.helicon/attachments` instead; nothing here parses either path, and those files are left where they are.
+ * A file written for a send that Muse then did not take stays this long as the one a retry of the same file uses,
+ * instead of leaving a second copy. The retry the controller makes after resuming a session comes within seconds.
  */
-const ATTACHMENT_DIR = [".ancilla", "attachments"];
+const PREPARED_REUSE_MS = 10 * 60_000;
+const PREPARED_REUSE_MAX = 64;
 
 interface PreparedAttachment {
   name: string;
@@ -846,6 +876,8 @@ export class AncillaServer {
       | "subscriptionReader"
       | "researchEngine"
       | "researchMaxWorkers"
+      | "researchStartupMs"
+      | "attachmentWriter"
     >
   > &
     Pick<ServerOptions, "staticDir" | "token" | "findNativeMuse"> & {
@@ -862,6 +894,18 @@ export class AncillaServer {
   /** Reserved before async setup, so a slow earlier POST cannot replace a newer account sign-in. */
   private readonly loginStartGenerations = new Map<string, number>();
   private readonly researchJobs: ResearchJobManager;
+  /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
+  private readonly researchStartupOverride: { option: number | undefined; env: string | undefined };
+  /** Session starts per host key that a research run gave up on and the host has not yet answered. */
+  private readonly abandonedStarts = new Map<string, number>();
+  /** Starts held back because their host key is at `MAX_ABANDONED_RESEARCH_STARTS`; each re-checks when woken. */
+  private readonly startWaiters = new Set<() => void>();
+  private readonly attachmentWriter: AttachmentWriter;
+  /**
+   * Files written for a send that is still open, by session, name and content, so the retry of a send Muse did not
+   * take finds its file instead of writing another. Forgotten once a send of the file is accepted.
+   */
+  private readonly preparedFiles = new Map<string, { root: string; name: string; size: number; at: number }>();
   /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
   private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
 
@@ -888,7 +932,15 @@ export class AncillaServer {
       shellRunner: options.shellRunner ?? ((command, args) => runCapture(command, args, undefined, SHELL_TIMEOUT_MS)),
       loginSpawn: options.loginSpawn ?? defaultLoginSpawn,
     };
+    const startupEnv = process.env["ANCILLA_RESEARCH_STARTUP_MS"];
+    this.researchStartupOverride = { option: options.researchStartupMs, env: startupEnv };
+    if (startupEnv !== undefined && startupEnv.trim() !== "" && startupEnvMs(startupEnv) === null) {
+      this.log(
+        `ignoring ANCILLA_RESEARCH_STARTUP_MS=${JSON.stringify(startupEnv)}: it takes whole milliseconds, ${MIN_RESEARCH_STARTUP_ENV_MS} or more (for example 180000).`,
+      );
+    }
     this.opener = options.opener ?? defaultOpener(this.options.platform);
+    this.attachmentWriter = options.attachmentWriter ?? writeAttachment;
     // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
     importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
     this.store = new AncillaStore(
@@ -916,12 +968,13 @@ export class AncillaServer {
           }),
           session: new MuseSessionModelClient({
             host: {
-              startControlSession: (modelId) => this.startResearchSession(thread, "Research control", modelId),
+              startControlSession: (modelId, giveUp) => this.startResearchSession(thread, "Research control", modelId, giveUp),
               subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
               log: (message) => this.log(message),
             },
             models: run.config.models,
             fallbackModelId: thread.modelId,
+            startupMs: () => this.researchStartupMs(),
           }),
           platform: this.options.platform,
           log: (message) => this.log(message),
@@ -929,13 +982,14 @@ export class AncillaServer {
       createWorkerRunner: (run, thread, onWorkerUpdate) =>
         new MuseSessionWorkerRunner({
           host: {
-            startWorkerSession: (task, modelId) => this.startResearchSession(thread, `Research worker A${task.agentId}`, modelId),
+            startWorkerSession: (task, modelId, giveUp) => this.startResearchSession(thread, `Research worker A${task.agentId}`, modelId, giveUp),
             subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
             onWorkerUpdate,
             log: (message) => this.log(message),
           },
           models: run.config.models,
           fallbackModelId: thread.modelId,
+          startupMs: () => this.researchStartupMs(),
         }),
       broadcast: (run) => this.emit("ancilla", { type: "research-run", sessionId: run.sessionId, run }),
       writeReport: (thread, run, report, state) => this.writeResearchReport(thread, run, report, state),
@@ -960,6 +1014,7 @@ export class AncillaServer {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.wakeStartWaiters();
     this.subscriptionReader.close();
     await this.linuxInstaller.close();
     for (const child of this.loginChildren.values()) child.kill();
@@ -1924,11 +1979,8 @@ export class AncillaServer {
       if (!found) {
         throw new HttpError(404, "No such attachment.");
       }
-      res.writeHead(200, {
-        "content-type": found.record.mediaType,
-        "content-length": String(found.bytes.length),
-        "cache-control": "private, max-age=86400",
-      });
+      // Whatever the row says it is, a stored file is shown as an image or downloaded, never run as a page.
+      res.writeHead(200, attachmentHeaders(found.record, found.bytes.length));
       res.end(Buffer.from(found.bytes));
       return true;
     }
@@ -1953,7 +2005,7 @@ export class AncillaServer {
       if (typeof effort === "string") {
         await this.applyEffort(manager, sessionId, effort);
       }
-      const prepared = await this.prepareAttachments(this.store.findSession(sessionId)?.cwd ?? "", files);
+      const prepared = await this.prepareAttachments(sessionId, this.store.findSession(sessionId)?.cwd ?? "", files);
       this.wake(sessionId);
       const live = this.liveFor(sessionId);
       const sentAtRevision = ++live.activityRevision;
@@ -1963,37 +2015,56 @@ export class AncillaServer {
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
       });
-      // A host that took the turn has the session loaded.
-      if (this.hosts.get(managed.key) === managed) {
-        this.sessionHosts.set(sessionId, managed.key);
-      }
-      if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
-        live.activityRevision += 1;
-        live.activeTurnId = ack.turnId;
-        live.turnStartedAt = nowIso();
-        live.turnHost = managed.key;
-        live.lastTerminal = null;
-        live.lastError = null;
-        this.emitStatus(sessionId);
+      // Muse has the prompt. From here nothing may fail the request: an error now would tell the client that a
+      // prompt Muse accepted was not sent, and sending it again would put it in the thread twice. What Ancilla
+      // keeps beside the turn is best effort, and a failure is logged.
+      prepared.accepted();
+      const saved: Record<string, unknown>[] = [];
+      try {
+        // A host that took the turn has the session loaded.
+        if (this.hosts.get(managed.key) === managed) {
+          this.sessionHosts.set(sessionId, managed.key);
+        }
+        if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
+          live.activityRevision += 1;
+          live.activeTurnId = ack.turnId;
+          live.turnStartedAt = nowIso();
+          live.turnHost = managed.key;
+          live.lastTerminal = null;
+          live.lastError = null;
+          this.emitStatus(sessionId);
+        }
+      } catch (error) {
+        this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but its live state could not be updated: ${errorInfo(error).message}`);
       }
       // The saved attachments go back with the ack: the open thread shows them without waiting for a reload.
-      const saved = prepared.files.map((file, index) =>
-        this.attachmentView(
-          this.store.addAttachment({
-            id: randomUUID(),
-            sessionId,
-            turnId: ack.turnId,
-            ord: index,
-            name: file.name,
-            mediaType: file.mediaType,
-            kind: file.kind,
-            width: file.width,
-            height: file.height,
-            bytes: file.bytes,
-          }),
-        ),
-      );
-      this.store.updateSession(sessionId, { activityAt: nowIso() });
+      prepared.files.forEach((file, index) => {
+        try {
+          saved.push(
+            this.attachmentView(
+              this.store.addAttachment({
+                id: randomUUID(),
+                sessionId,
+                turnId: ack.turnId,
+                ord: index,
+                name: file.name,
+                mediaType: file.mediaType,
+                kind: file.kind,
+                width: file.width,
+                height: file.height,
+                bytes: file.bytes,
+              }),
+            ),
+          );
+        } catch (error) {
+          this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but ${file.name} could not be kept with it: ${errorInfo(error).message}`);
+        }
+      });
+      try {
+        this.store.updateSession(sessionId, { activityAt: nowIso() });
+      } catch (error) {
+        this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but the thread's activity could not be saved: ${errorInfo(error).message}`);
+      }
       this.json(res, 200, { turnId: ack.turnId, status: ack.status, disposition: ack.disposition, attachments: saved });
       return true;
     }
@@ -2563,6 +2634,31 @@ export class AncillaServer {
     }
   }
 
+  /**
+   * `localRootFor` for what Ancilla writes into a project. On Windows a rooted Linux path is a path on the current
+   * drive, which is never the project: when the folder could not be placed (no distro to reach it through), writing
+   * would drop files on the wrong disk, so it is refused instead. A root that is not an absolute path at all would
+   * land relative to the daemon's own folder, so it is refused too.
+   */
+  private async workspaceRootFor(cwd: string): Promise<string> {
+    const root = await this.localRootFor(cwd);
+    if (this.options.platform === "win32" && root.startsWith("/")) {
+      throw new FileError(
+        409,
+        `Ancilla could not work out where ${cwd} is on this computer (it is a Linux folder and no WSL distribution is available to reach it), so it will not save into it. Start WSL and try again.`,
+        "workspaceWrite",
+      );
+    }
+    if (this.options.platform === "win32" && !win32.isAbsolute(root)) {
+      throw new FileError(
+        409,
+        `Ancilla could not work out where ${cwd} is on this computer (it is not a full path), so it will not save into it. Open the project from its full folder path and try again.`,
+        "workspaceWrite",
+      );
+    }
+    return root;
+  }
+
   /** A path the local OS can open: WSL `/mnt/x` roots become `X:\` on Windows. */
   private localPathFor(cwd: string): string {
     if (this.options.platform === "win32" && isWslAbs(cwd)) {
@@ -2914,22 +3010,25 @@ export class AncillaServer {
    * which is how Muse reaches a file. Every one is kept here too, so a reopened thread can show it.
    */
   private async prepareAttachments(
+    sessionId: string,
     cwd: string,
     raw: unknown[],
-  ): Promise<{ images: TurnImage[]; files: PreparedAttachment[]; prompt: (text: string) => string }> {
+  ): Promise<{ images: TurnImage[]; files: PreparedAttachment[]; prompt: (text: string) => string; accepted: () => void }> {
     const mentions: string[] = [];
     const images: TurnImage[] = [];
     const files: PreparedAttachment[] = [];
+    const written: string[] = [];
     if (raw.length > MAX_ATTACHMENTS) {
       throw new HttpError(400, `A message takes at most ${MAX_ATTACHMENTS} files.`);
     }
     for (const entry of raw) {
       const record = asRecord(entry);
       const base64 = record ? str(record["base64"]) : null;
-      const mediaType = record ? str(record["mediaType"]) : null;
-      if (!record || !base64 || !mediaType) {
+      if (!record || !base64 || !str(record["mediaType"])) {
         throw new HttpError(400, "Each attachment needs a name, a mediaType and base64 bytes.");
       }
+      // Stored and served as one clean type, whatever the client called it: it ends up in a header.
+      const mediaType = normalizeMediaType(record["mediaType"]);
       const name = safeFileName(str(record["name"]));
       const bytes = Buffer.from(base64, "base64");
       if (bytes.length === 0) {
@@ -2952,37 +3051,71 @@ export class AncillaServer {
       if (!cwd) {
         throw new HttpError(400, `${name} needs a workspace to land in.`);
       }
-      const written = await this.writeIntoWorkspace(cwd, name, bytes);
-      mentions.push(`@${[...ATTACHMENT_DIR, written].join("/")}`);
-      files.push({ name: written, mediaType, kind: "file", width, height, bytes });
+      const savedAs = await this.writeIntoWorkspace(sessionId, cwd, name, bytes, written);
+      written.push(savedAs.key);
+      mentions.push(`@${[...ATTACHMENT_DIR, savedAs.name].join("/")}`);
+      files.push({ name: savedAs.name, mediaType, kind: "file", width, height, bytes });
     }
     return {
       images,
       files,
       prompt: (text: string) => [text, ...mentions].filter((part) => part.length > 0).join("\n\n"),
+      // Muse took the send, so a later send of the same file is a new one and gets a file of its own.
+      accepted: () => {
+        for (const key of written) {
+          this.preparedFiles.delete(key);
+        }
+      },
     };
   }
 
-  /** Writes an attached file into the workspace, keeping its name unless one is already taken. */
-  private async writeIntoWorkspace(cwd: string, name: string, bytes: Buffer): Promise<string> {
-    const directory = join(cwd, ...ATTACHMENT_DIR);
-    await mkdir(directory, { recursive: true });
-    const dot = name.lastIndexOf(".");
-    const stem = dot > 0 ? name.slice(0, dot) : name;
-    const suffix = dot > 0 ? name.slice(dot) : "";
-    let candidate = name;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const taken = await stat(join(directory, candidate)).then(
-        () => true,
-        () => false,
-      );
-      if (!taken) {
+  /**
+   * Puts an attached file in the project, where this machine reaches it: the folder the file viewer and the research
+   * reports use, which for a Linux project folder on Windows is its `\\wsl.localhost\` share and not a path on the
+   * current drive. A file that an earlier try of this same send wrote, when Muse did not take that send, is the one
+   * used again, so a retry does not leave a copy behind.
+   */
+  private async writeIntoWorkspace(
+    sessionId: string,
+    cwd: string,
+    name: string,
+    bytes: Buffer,
+    alreadyKept: readonly string[],
+  ): Promise<{ name: string; key: string }> {
+    const root = await this.workspaceRootFor(cwd);
+    const base = [sessionId, name, createHash("sha256").update(bytes).digest("hex")].join("\n");
+    // The same file twice in one message is two files, each with its own place to come back to.
+    let key = base;
+    for (let copy = 1; alreadyKept.includes(key); copy += 1) {
+      key = `${base}\n${copy}`;
+    }
+    const earlier = this.preparedFiles.get(key);
+    if (earlier) {
+      const stillThere = earlier.root === root && Date.now() - earlier.at < PREPARED_REUSE_MS && (await this.isPreparedFile(root, earlier.name, earlier.size));
+      if (stillThere) {
+        return { name: earlier.name, key };
+      }
+      this.preparedFiles.delete(key);
+    }
+    const saved = await this.attachmentWriter(root, name, bytes);
+    this.preparedFiles.set(key, { root, name: saved, size: bytes.length, at: Date.now() });
+    while (this.preparedFiles.size > PREPARED_REUSE_MAX) {
+      const oldest = this.preparedFiles.keys().next().value;
+      if (oldest === undefined) {
         break;
       }
-      candidate = `${stem}-${attempt + 2}${suffix}`;
+      this.preparedFiles.delete(oldest);
     }
-    await writeFile(join(directory, candidate), bytes);
-    return candidate;
+    return { name: saved, key };
+  }
+
+  /** Whether the file a failed send wrote is still there, a plain file, and still the size it was written at. */
+  private async isPreparedFile(root: string, name: string, size: number): Promise<boolean> {
+    const path = join(root, ...ATTACHMENT_DIR, name);
+    if ((await entryState(path).catch(() => "missing")) !== "file") {
+      return false;
+    }
+    return (await stat(path).then((info) => info.size, () => -1)) === size;
   }
 
   /**
@@ -3527,19 +3660,40 @@ export class AncillaServer {
     };
   }
 
+  /** Whether a listed session is one of a research run's own, which discovery leaves out. */
+  private isHiddenResearchItem(item: unknown): boolean {
+    const record = asRecord(item);
+    const session = (record && asRecord(record["session"])) ?? record;
+    const sessionId = session ? str(session["sessionId"]) : null;
+    return sessionId !== null && this.isResearchSession(sessionId);
+  }
+
   private async discover(cwd?: string): Promise<Record<string, unknown>[]> {
     const host = await this.hostFor(cwd ?? "");
     const remote: unknown[] = [];
     let cursor: string | null = null;
-    do {
+    // Cursors already handed to the host: one it hands back again would be the same page forever.
+    const asked = new Set<string>();
+    for (let pages = 0; pages < DISCOVER_MAX_PAGES; pages += 1) {
       const page = await host.manager.listSessionsPage({
         workspaceRoot: cwd ? this.hostPathFor(cwd) : undefined,
         limit: 100,
         cursor,
       });
-      remote.push(...page.sessions);
+      // Research worker and control sessions are hidden and are not the user's threads: they are paged past, so a
+      // run's many sessions cannot use up the window the user's own sessions are looked for in.
+      for (const item of page.sessions) {
+        if (!this.isHiddenResearchItem(item)) {
+          remote.push(item);
+        }
+      }
       cursor = page.nextCursor;
-    } while (cursor && remote.length < DISCOVER_LIMIT);
+      // An empty page ends the listing even when a cursor comes with it, and so does a cursor already used.
+      if (!cursor || page.sessions.length === 0 || asked.has(cursor) || remote.length >= DISCOVER_LIMIT) {
+        break;
+      }
+      asked.add(cursor);
+    }
 
     const views: Record<string, unknown>[] = [];
     let backfill = 0;
@@ -3780,22 +3934,124 @@ export class AncillaServer {
   }
 
   /**
+   * How long a research session start may take now: the option, else `ANCILLA_RESEARCH_STARTUP_MS`, else two
+   * minutes, or three on Windows with Muse in WSL. Read at each start, because where Muse runs can be settled only
+   * after the first host came up.
+   */
+  private researchStartupMs(): number {
+    return researchStartupAllowanceMs({
+      platform: this.options.platform,
+      runtime: this.runtimeHint() ?? this.runtimeKnown,
+      option: this.researchStartupOverride.option,
+      env: this.researchStartupOverride.env,
+    });
+  }
+
+  /**
    * A session a research run uses, on the thread's own host so it shares the thread's folder and account: a
    * worker session for one delegated task, or the run's control session for the tool-less model calls that do
    * not fit a command line. Recorded archived under `research-worker`, so it never reaches the sidebar; its usage
    * still lands under the project. The approval mode is the host's default: the runner decides every request
    * itself, and `isResearchSession` keeps such requests out of the live state clients see.
    */
-  private async startResearchSession(thread: ResearchThread, title: string, modelId: string | null): Promise<WorkerSessionHandle & TurnSession> {
+  private async startResearchSession(thread: ResearchThread, title: string, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle & TurnSession> {
     if (this.closed) {
       throw new Error("Ancilla is shutting down.");
     }
-    const project = this.store.upsertProject(thread.cwd);
+    const key = this.hostKey(thread.cwd, thread.accountId);
+    // A host that has not answered the starts earlier runs gave up on is sent no more until it does; the wait is
+    // bounded by the same allowance as the start itself, which the caller's give-up signal ends.
+    await this.waitForStartSlot(key, giveUp);
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    if (giveUp?.aborted) {
+      // The caller stopped waiting while this start was released; nobody would read its answer, so it is not sent.
+      throw new Error("The research run stopped waiting for this session start.");
+    }
+    // A run that stops waiting for this start because the allowance passed counts it against the host until the
+    // host answers it, one way or the other. A stop does not: a host that is merely slow would otherwise refuse the
+    // next run for the time it takes to answer the starts the stopped one left behind.
+    let abandoned = false;
+    const onGiveUp = (): void => {
+      if (!abandoned && giveUp && gaveUpOnTimeout(giveUp)) {
+        abandoned = true;
+        this.abandonedStarts.set(key, (this.abandonedStarts.get(key) ?? 0) + 1);
+      }
+    };
+    giveUp?.addEventListener("abort", onGiveUp, { once: true });
+    try {
+      return await this.openResearchSession(thread, title, modelId, giveUp);
+    } finally {
+      giveUp?.removeEventListener("abort", onGiveUp);
+      if (abandoned) {
+        const left = (this.abandonedStarts.get(key) ?? 1) - 1;
+        if (left > 0) {
+          this.abandonedStarts.set(key, left);
+        } else {
+          this.abandonedStarts.delete(key);
+        }
+        this.wakeStartWaiters();
+      }
+    }
+  }
+
+  /**
+   * Returns once the host key has room for another session start: fewer than `MAX_ABANDONED_RESEARCH_STARTS` starts
+   * that a run gave up on and the host has not answered. A start that finds the host full waits, and is released
+   * when the host answers one of them or when its caller gives up (`giveUp`), whichever comes first; it is not sent
+   * meanwhile. Callers always pass the signal, so a call without one is refused instead of waiting without end.
+   */
+  private async waitForStartSlot(key: string, giveUp: AbortSignal | undefined): Promise<void> {
+    while ((this.abandonedStarts.get(key) ?? 0) >= MAX_ABANDONED_RESEARCH_STARTS) {
+      const outstanding = this.abandonedStarts.get(key) ?? 0;
+      if (this.closed) {
+        throw new Error("Ancilla is shutting down.");
+      }
+      if (!giveUp || giveUp.aborted) {
+        throw new Error(`Muse is still waiting on ${outstanding} earlier session starts on this host and has not answered them; not sending another.`);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const release = (): void => {
+          this.startWaiters.delete(release);
+          giveUp.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const onAbort = (): void => {
+          this.startWaiters.delete(release);
+          reject(new Error(`Muse is still waiting on ${outstanding} earlier session starts on this host and has not answered them; not sending another.`));
+        };
+        this.startWaiters.add(release);
+        giveUp.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  }
+
+  /** Lets every start waiting for a slot look again: the count dropped, or the server is closing. */
+  private wakeStartWaiters(): void {
+    for (const release of [...this.startWaiters]) {
+      release();
+    }
+  }
+
+  private async openResearchSession(thread: ResearchThread, title: string, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle & TurnSession> {
     const host = await this.hostFor(thread.cwd, thread.accountId);
+    // A start the host answers after the server began closing must not touch a store that is about to be closed.
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    if (giveUp?.aborted) {
+      // The caller stopped waiting while the host was still coming up (a cold distro); nobody would read the answer.
+      throw new Error("The research run stopped waiting for this session start.");
+    }
     const started = await host.manager.startSession({
       workspaceRoot: this.hostPathFor(thread.cwd),
       ...(modelId ? { modelId } : {}),
     });
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    const project = this.store.upsertProject(thread.cwd);
     const raw = asRecord(asRecord(started.raw)?.["session"]);
     this.store.recordSession({
       id: started.sessionId,
@@ -3820,8 +4076,11 @@ export class AncillaServer {
     if (!thread.cwd) {
       return null;
     }
-    const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
-    await mkdir(directory, { recursive: true });
+    // The run's folder is new, so a plain write is enough; a rename over a file a viewer has open fails on Windows.
+    const directory = await ownedProjectDir(await this.workspaceRootFor(thread.cwd), [...RESEARCH_DIR, run.id]);
+    // Both names are looked at before either is written: a link planted at one must not leave the other behind.
+    await assertWritableFile(directory, "report.md");
+    await assertWritableFile(directory, "sources.json");
     await writeFile(join(directory, "report.md"), report, "utf8");
     await writeFile(
       join(directory, "sources.json"),
@@ -3905,6 +4164,12 @@ export class AncillaServer {
       }
       if (!question) {
         throw new HttpError(400, "question is required.");
+      }
+      if (question.length > MAX_RESEARCH_QUESTION_CHARS) {
+        throw new HttpError(
+          400,
+          `The question is too long: ${question.length} characters, and the limit is ${MAX_RESEARCH_QUESTION_CHARS}. Shorten it, or put the material in a file in the project and point the question at it.`,
+        );
       }
       const overrides = body["config"] === undefined || body["config"] === null ? null : asRecord(body["config"]);
       if (body["config"] !== undefined && body["config"] !== null && !overrides) {
@@ -4008,8 +4273,8 @@ export class AncillaServer {
         throw new HttpError(409, "This thread has no project folder to save into.");
       }
       const fileName = exportFileName(format);
-      const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
-      await mkdir(directory, { recursive: true });
+      const directory = await ownedProjectDir(await this.workspaceRootFor(thread.cwd), [...RESEARCH_DIR, run.id]);
+      await assertWritableFile(directory, fileName);
       await writeFile(join(directory, fileName), file);
       const relative = [...RESEARCH_DIR, run.id, fileName].join("/");
       this.json(res, 200, { path: relative, name: fileName, size: file.length, url: `/api/research/${encodeURIComponent(run.id)}/export/${fileName}` });

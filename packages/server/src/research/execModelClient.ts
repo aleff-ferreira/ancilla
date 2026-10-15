@@ -10,6 +10,7 @@ import {
   type ResearchModelIds,
   type TokenUsage,
 } from "@ancilla/daemon";
+import { QUOTA_PATTERN, RATE_LIMIT_PATTERN } from "./turn.js";
 
 /**
  * The `muse exec` argument list for one tool-less completion, the same one thread titles use: JSON events on
@@ -182,11 +183,12 @@ export function classifyExecFailure(result: ExecResult): ResearchFailure {
   if (/\b(401|403)\b|unauthori[sz]ed|not logged in|login required|forbidden/i.test(text)) {
     return new ResearchFailure("auth", `muse exec refused: ${excerpt}`);
   }
-  if (/\b402\b|quota|insufficient/i.test(text)) {
-    return new ResearchFailure("quota", `muse exec refused: ${excerpt}`);
-  }
-  if (/\b429\b|rate[ -]?limit|too many requests/i.test(text)) {
+  // The same order and words as `failureKindOf`: a throttle before a quota, and "insufficient" only with what it lacks.
+  if (RATE_LIMIT_PATTERN.test(text)) {
     return new ResearchFailure("rate_limited", `muse exec was rate limited: ${excerpt}`);
+  }
+  if (QUOTA_PATTERN.test(text)) {
+    return new ResearchFailure("quota", `muse exec refused: ${excerpt}`);
   }
   return new ResearchFailure("unavailable", `muse exec failed (${excerpt}).`);
 }

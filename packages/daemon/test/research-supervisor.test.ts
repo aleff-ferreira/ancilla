@@ -58,10 +58,11 @@ describe("supervisor loop exits", () => {
     const clock = new FakeClock();
     const run = loop(testConfig({ windowMaxMinutes: 10, maxRounds: 50 }), busySupervisor(clock, 4), new FakeWorker(verifiedWorkerScript()), clock);
     const exit = await runSupervisorLoop(run.ctx);
-    // Decisions at 4, 8 and 12 minutes: the third round runs, then 12 >= 11 ends research.
-    assert.equal(run.state.rounds.length, 3);
+    // Decisions at 4, 8 and 12 minutes: the third decision comes back past 11 minutes, so it is not run.
+    assert.equal(run.state.rounds.length, 2);
+    assert.equal(run.harness.worker.tasks.length, 2);
     assert.ok(exit.kind === "write" && /window elapsed/.test(exit.reason));
-    assert.equal(run.state.rounds[2]?.exit, exit.kind === "write" ? exit.reason : null);
+    assert.equal(run.state.rounds[1]?.exit, exit.kind === "write" ? exit.reason : null);
   });
 
   it("needs two empty RESEARCH_COMPLETE rounds before windowMin", async () => {
@@ -254,7 +255,8 @@ describe("supervisor loop workers", () => {
   it("retries any non-fatal failure once, including an invalid_output, and gives a rate limit the second attempt", async () => {
     const clock = new FakeClock();
     const invalid = new FakeModel({ supervisor: [new ResearchFailure("invalid_output", "muse exec printed no answer."), decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])] });
-    invalid.onCall = () => clock.advanceMinutes(4);
+    // Two minutes a call: three calls end inside the window, so the decision that completes the research is accepted.
+    invalid.onCall = () => clock.advanceMinutes(2);
     const run = loop(testConfig(), invalid, new FakeWorker(verifiedWorkerScript()), clock);
     const exit = await runSupervisorLoop(run.ctx);
     assert.equal(invalid.counts.supervisor, 3, "an invalid_output gets the second attempt too");
@@ -263,7 +265,7 @@ describe("supervisor loop workers", () => {
 
     const clock2 = new FakeClock();
     const flaky = new FakeModel({ supervisor: [new ResearchFailure("rate_limited", "429"), decision("CONTINUE_RESEARCH", ["A"]), decision("RESEARCH_COMPLETE", [])] });
-    flaky.onCall = () => clock2.advanceMinutes(4);
+    flaky.onCall = () => clock2.advanceMinutes(2);
     const run2 = loop(testConfig(), flaky, new FakeWorker(verifiedWorkerScript()), clock2);
     const exit2 = await runSupervisorLoop(run2.ctx);
     assert.equal(flaky.counts.supervisor, 3, "a rate limit gets the second attempt");

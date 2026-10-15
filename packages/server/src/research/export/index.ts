@@ -3,9 +3,9 @@
  * served back as a download. The server routes (`POST /api/research/:runId/export`, `GET .../export/:name`) live in
  * server.ts and call in here; everything here is free of the store and the server so it can be tested on its own.
  */
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { pipeWholeFile } from "../../files.js";
 import { renderDocx } from "./docx.js";
 import { renderHtml } from "./html.js";
 import { type ReportMeta, parseReport } from "./markdown.js";
@@ -68,17 +68,27 @@ export async function renderReport(format: ExportFormat, markdown: string, meta:
 
 /** Sends a generated export as an attachment named after the question. */
 export async function serveExportFile(req: IncomingMessage, res: ServerResponse, abs: string, format: ExportFormat, fileName: string): Promise<void> {
-  const info = await stat(abs);
-  res.writeHead(200, {
-    "content-type": EXPORT_MEDIA_TYPES[format],
-    "content-length": String(info.size),
-    "content-disposition": `attachment; filename="${fileName}"`,
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-  });
-  if (req.method === "HEAD") {
-    res.end();
-    return;
+  // Opened before any header goes out, so a file that cannot be read is an error for this request.
+  const handle = await open(abs, "r");
+  let streaming = false;
+  try {
+    const info = await handle.stat();
+    res.writeHead(200, {
+      "content-type": EXPORT_MEDIA_TYPES[format],
+      "content-length": String(info.size),
+      "content-disposition": `attachment; filename="${fileName}"`,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+    streaming = true;
+    await pipeWholeFile(res, handle, info.size);
+  } finally {
+    if (!streaming) {
+      await handle.close().catch(() => undefined);
+    }
   }
-  createReadStream(abs).pipe(res);
 }

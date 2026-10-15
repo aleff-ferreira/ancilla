@@ -56,12 +56,18 @@ function lastRound(ctx: RunContext): SupervisorRound | null {
   return rounds.length > 0 ? (rounds[rounds.length - 1] as SupervisorRound) : null;
 }
 
+/** Why the research window is over, when it is: upstream's round-level rule, windowMax plus one minute. */
+function windowExit(ctx: RunContext): string | null {
+  const elapsed = ctx.elapsedMinutes();
+  return elapsed >= ctx.config.windowMaxMinutes + 1 ? `research window elapsed (${elapsed.toFixed(1)} of ${ctx.config.windowMaxMinutes} min)` : null;
+}
+
 /** The exits that are checked before a decision is asked for; they are attributed to the previous round. */
 function preDecisionExit(ctx: RunContext): string | null {
   const { state, config } = ctx;
   if (state.rounds.length >= config.maxRounds) return `round cap reached (${config.maxRounds})`;
-  const elapsed = ctx.elapsedMinutes();
-  if (elapsed >= config.windowMaxMinutes + 1) return `research window elapsed (${elapsed.toFixed(1)} of ${config.windowMaxMinutes} min)`;
+  const window = windowExit(ctx);
+  if (window) return window;
   if (config.tokenSoftCap !== null && state.usage.totalTokens >= config.tokenSoftCap) {
     return `token soft cap passed (${state.usage.totalTokens} of ${config.tokenSoftCap})`;
   }
@@ -326,6 +332,24 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
       delegations = toDelegations(ctx, previous.delegations.map((d) => ({ topic: d.topic, discovery: d.discovery, maxReads: d.maxReads })));
     } else {
       const decided = await decide(ctx, roundNumber, notice);
+      // A decision can take minutes (two attempts, each up to the supervisor's call timeout), and the window the
+      // loop checked before asking may be over by the time the answer is in: whatever it delegates is not run. The
+      // workers' own wall time is not clamped to the window, so a worker already running is left to finish.
+      // A window that passed during a decision that failed is no clean exit: with findings the run is salvaged and
+      // ends partial, without any there is nothing to write from, and default delegations are not run past the window.
+      const late = windowExit(ctx);
+      if (late && decided.ok && hasFindings(state)) {
+        const reason = `${late} while the supervisor was deciding`;
+        if (previous && previous.exit === null) previous.exit = reason;
+        ctx.log(`research ends: ${reason}`);
+        return { kind: "write", reason, salvage: false };
+      }
+      if (late && !hasFindings(state)) {
+        state.aborted = true;
+        state.abortReason = `${late} while the supervisor was deciding, with no findings to write from`;
+        ctx.log(`research ends: ${state.abortReason}`);
+        return { kind: "aborted", reason: state.abortReason };
+      }
       if (!decided.ok) {
         // Upstream ends research gracefully when the supervisor fails twice; writing from nothing is not graceful.
         // Only real findings count: failure notes and unverified sources are notes too, but not evidence.

@@ -1,4 +1,4 @@
-import { errorKind, errorMessage, type AncillaClient } from "../client.js";
+import { errorKind, errorMessage, noAnswer, type AncillaClient } from "../client.js";
 import type {
   ApprovalMode,
   ApprovalRequest,
@@ -72,6 +72,8 @@ import {
   applyEvents,
   emptyFold,
   foldFromLoad,
+  promptIds,
+  promptLanded,
   removeEcho,
   updateEcho,
   type EchoAttachment,
@@ -333,6 +335,12 @@ const STALE_RELOAD_LIMIT = 2;
 const STALE_BACKOFF_MS = 120_000;
 /** A retry Muse scheduled postpones the quiet-turn clock by its delay, up to this much: the wait is expected silence. */
 const RETRY_PAUSE_MAX_MS = 15 * 60_000;
+/**
+ * A send that got no answer is checked by reading the thread after each of these waits, and then settled one way or the
+ * other. About half a minute in all: long enough for a slow host to have taken the prompt and written it down, short
+ * enough that the composer is never left waiting on something that will not resolve.
+ */
+const UNCONFIRMED_CHECKS_MS = [1_500, 3_500, 8_000, 15_000] as const;
 /** A model list that failed to load at boot is asked for once more after this, by when a host still starting is up. */
 const MODELS_BOOT_RETRY_MS = 3_000;
 /**
@@ -588,6 +596,8 @@ export class AncillaController {
   private readonly inflightLoads = new Map<string, { run: Promise<void>; resume: boolean }>();
   /** Keys of prompt deliveries still waiting for the server, so a double-sent draft turns once. */
   private readonly inflightSends = new Set<string>();
+  /** The waits of the sends being checked after they got no answer, so closing the controller can cancel them. */
+  private readonly sendChecks = new Set<unknown>();
   private readonly disposers: (() => void)[] = [];
   private flushHandle: unknown = null;
   private refreshHandle: unknown = null;
@@ -807,6 +817,10 @@ export class AncillaController {
       this.platform.cancel(handle);
     }
     this.modelTimers.clear();
+    for (const handle of this.sendChecks) {
+      this.platform.cancel(handle);
+    }
+    this.sendChecks.clear();
     this.platform.savePrefs(this.state.prefs);
   }
 
@@ -1566,21 +1580,25 @@ export class AncillaController {
   /**
    * Loads a thread. By default a session that may still be working or waiting on the user is only read in place
    * (`mayBeBusy`), and any other is resumed, which is what brings back a session its host unloaded. `resume` asks
-   * for the attach outright, for a caller that knows nothing of the session runs on this host any more.
+   * for the attach outright, for a caller that knows nothing of the session runs on this host any more. `read` asks
+   * for the opposite: only ever read in place, for a caller that is checking on a thread. The read never asks to
+   * resume; the server may still load an idle session its host dropped, as opening the thread does, but it does not
+   * resume into a turn it knows to be running.
    */
-  loadThread(sessionId: string, options: { resume?: boolean } = {}): Promise<void> {
+  loadThread(sessionId: string, options: { resume?: boolean; read?: boolean } = {}): Promise<void> {
     // A second load while one is in flight would orphan the first load's buffer: every event that
     // streamed into it is dropped, and the thread never shows them (#32: a frozen view on a thread
     // whose backend kept working). Coalescing waits on the one buffer instead, so nothing is lost.
     const inflight = this.inflightLoads.get(sessionId);
     const resume = options.resume === true;
+    const read = options.read === true && !resume;
     if (inflight && (inflight.resume || !resume)) {
       return inflight.run;
     }
     // A read in flight cannot attach the session, so a resume queues behind it: still one request at a time.
     const started = inflight
-      ? inflight.run.catch(() => undefined).then(() => this.reloadThread(sessionId, resume))
-      : this.reloadThread(sessionId, resume);
+      ? inflight.run.catch(() => undefined).then(() => this.reloadThread(sessionId, resume, read))
+      : this.reloadThread(sessionId, resume, read);
     const run = started.finally(() => {
       if (this.inflightLoads.get(sessionId)?.run === run) {
         this.inflightLoads.delete(sessionId);
@@ -1610,12 +1628,13 @@ export class AncillaController {
     return crewBusy(fold);
   }
 
-  private async reloadThread(sessionId: string, resume = false): Promise<void> {
+  private async reloadThread(sessionId: string, resume = false, read = false): Promise<void> {
     const readStartedAt = this.platform.now();
     const existing = this.state.threads[sessionId];
-    // Reading never reattaches: a fresh browser has no fold yet, but the server may already own a running turn.
-    // What happened to recover the thread before says nothing about whether it is busy now.
-    const refresh = !resume && this.mayBeBusy(sessionId, existing);
+    // A read does not ask to resume: a fresh browser has no fold yet, but the server may already own a running turn,
+    // and a read never resumes into one. What happened to recover the thread before says nothing about whether it is
+    // busy now.
+    const refresh = !resume && (read || this.mayBeBusy(sessionId, existing));
     this.loading.set(sessionId, []);
     this.setThread(sessionId, { ...(existing ?? blankThread()), load: "loading", error: null });
     try {
@@ -2332,6 +2351,12 @@ export class AncillaController {
       return true;
     }
     this.inflightSends.add(key);
+    // The prompts already in the thread, so a check after a send with no answer knows which one is new.
+    const known = promptIds(thread.fold);
+    // Set when a send with no answer is being checked: the key then stays until the check settles it.
+    let checking = false;
+    // Set when the retry below takes the key over: the call it makes owns the key's release, not this one.
+    let delegated = false;
     // A caller that knows a turn is starting elsewhere can say so, before its `turn/started` reaches us.
     const running = thread.fold.activeTurnId !== null || options.queue === true;
     const echo: LocalEcho = {
@@ -2371,6 +2396,29 @@ export class AncillaController {
       }
       return true;
     } catch (error) {
+      if (noAnswer(error)) {
+        // No answer is not "not sent": the server may have handed the prompt to Muse and only the reply was lost.
+        // The echo stays, marked, while the thread is read to find out; the prompt is never sent again meanwhile,
+        // and the composer is free at once.
+        this.patchFold(sessionId, (f) => updateEcho(f, echo.localId, { disposition: "unconfirmed" }));
+        checking = true;
+        this.checkUnconfirmedSend({
+          sessionId,
+          key,
+          localId: echo.localId,
+          shown: echo.text,
+          known,
+          // Muse holds a prompt sent during a turn until that turn ends, so the saved thread cannot show it yet.
+          held: running,
+          cause: errorMessage(error),
+          draft: {
+            text: options.displayText ?? text,
+            ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+            ...(options.previews?.length ? { previews: options.previews } : {}),
+          },
+        });
+        return true;
+      }
       this.patchFold(sessionId, (f) => removeEcho(f, echo.localId));
       const kind = errorKind(error);
       if (!retried && (kind === "sessionNotLoaded" || kind === "sessionStreamMismatch")) {
@@ -2378,15 +2426,118 @@ export class AncillaController {
         // resume brings it back, where a read in place would leave it unloaded. Another client's lease still
         // comes back as read-only, with its reason, and the retry below then stops.
         await this.loadThread(sessionId, { resume: true });
-        // The retry re-sends under this key, so it must not trip over its own guard.
+        // The retry re-sends under this key, so it must not trip over its own guard; it then owns the key, and
+        // holds it while it checks a send with no answer.
         this.inflightSends.delete(key);
-        return this.sendToThread(sessionId, text, options, true);
+        delegated = true;
+        return await this.sendToThread(sessionId, text, options, true);
       }
       this.toast("error", "Message not sent", errorMessage(error));
       return false;
     } finally {
-      this.inflightSends.delete(key);
+      if (!checking && !delegated) {
+        this.inflightSends.delete(key);
+      }
     }
+  }
+
+  /**
+   * Finds out what became of a send that got no answer, by reading the thread after each wait in `UNCONFIRMED_CHECKS_MS`.
+   * The read only reads: it may load an idle session its host dropped, exactly as opening the thread does, but it
+   * never resends a prompt and never resumes into a running turn the server knows about. A prompt that shows up, or that the live stream delivered meanwhile, settles it as sent
+   * and nothing more is said. One that never shows up after a read that worked is not sent; one that could not be
+   * checked is said to be unconfirmed. Either way the text comes back to the composer, and nothing is ever sent again
+   * here: only the person can do that.
+   */
+  private checkUnconfirmedSend(send: {
+    sessionId: string;
+    key: string;
+    localId: string;
+    shown: string;
+    known: readonly string[];
+    /** The send was made while a turn ran (queued or steered): a prompt Muse holds is not in the saved thread yet. */
+    held: boolean;
+    /** What the send itself failed with, for a check that cannot say more. */
+    cause: string;
+    draft: { text: string; attachments?: OutgoingAttachment[]; previews?: EchoAttachment[] };
+  }): void {
+    const { sessionId, localId } = send;
+    let step = 0;
+    const pending = () => this.state.threads[sessionId]?.fold.echoes.some((echo) => echo.localId === localId) === true;
+    const release = (): void => {
+      this.inflightSends.delete(send.key);
+    };
+    const settle = (verdict: "sent" | "notSent" | "unknown", why?: string) => {
+      release();
+      this.patchFold(sessionId, (f) => removeEcho(f, localId));
+      if (verdict !== "sent") {
+        this.returnUnsent(sessionId, send.draft, verdict, send.held ? "held" : (why ?? send.cause));
+      }
+    };
+    const look = async () => {
+      if (this.disposed) {
+        return release();
+      }
+      // The live stream may have delivered the prompt since the last look, which is the answer.
+      if (!pending()) {
+        return release();
+      }
+      await this.loadThread(sessionId, { read: true });
+      if (this.disposed || !pending()) {
+        return release();
+      }
+      const thread = this.state.threads[sessionId];
+      const readable = thread !== undefined && thread.load === "ready" && thread.error === null;
+      if (thread && readable && promptLanded(thread.fold, send.known, send.shown)) {
+        return settle("sent");
+      }
+      step += 1;
+      if (step < UNCONFIRMED_CHECKS_MS.length) {
+        return wait();
+      }
+      // A prompt that was queued or steered may simply not have started yet, so its absence proves nothing.
+      settle(readable && !send.held ? "notSent" : "unknown", thread?.error ?? undefined);
+    };
+    const wait = () => {
+      let handle: unknown = null;
+      handle = this.platform.schedule(() => {
+        this.sendChecks.delete(handle);
+        void look().catch(() => settle("unknown"));
+      }, UNCONFIRMED_CHECKS_MS[step] as number);
+      this.sendChecks.add(handle);
+    };
+    wait();
+  }
+
+  /**
+   * Gives a send's text back after it turned out not to have gone, or could not be checked. The composer takes it at
+   * once when it is empty; one the person has already typed into is left alone, with a button to bring the text back.
+   */
+  private returnUnsent(
+    sessionId: string,
+    draft: { text: string; attachments?: OutgoingAttachment[]; previews?: EchoAttachment[] },
+    verdict: "notSent" | "unknown",
+    /** For an unknown verdict: "held" when the send was queued or steered, otherwise what went wrong with the check. */
+    detail: string,
+  ): void {
+    const files = {
+      ...(draft.attachments ? { attachments: draft.attachments } : {}),
+      ...(draft.previews ? { previews: draft.previews } : {}),
+    };
+    const title = verdict === "notSent" ? "Message not sent" : "Could not confirm the message";
+    const why =
+      verdict === "notSent"
+        ? "It never showed up in the thread, so nothing ran."
+        : detail === "held"
+          ? "It was sent while a turn was running, so Muse may still be holding it in its queue, where Ancilla cannot see it. Check the thread and its queue before sending it again."
+          : `Ancilla could not read the thread to check it (${detail}). Look there before sending it again.`;
+    const tone = verdict === "notSent" ? "error" : "info";
+    if (loadDraft(sessionId).trim() === "") {
+      this.prefillComposer(sessionId, draft.text, files);
+      this.toast(tone, title, `${why} Your text is back in the composer.`);
+      return;
+    }
+    this.toast(tone, title, why, { label: "Put it back", run: () => this.prefillComposer(sessionId, draft.text, files) });
   }
 
   /** What makes two prompt deliveries the same send: the thread, the text, and the files riding along. */

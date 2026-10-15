@@ -169,7 +169,9 @@ export type ResearchEventType =
   | "run_failed"
   | "run_cancelled"
   | "run_interrupted"
-  | "run_resumed";
+  | "run_resumed"
+  /** The finished report could not be saved as a file in the project; `payload.error` says why. */
+  | "report_write_failed";
 
 /** Content-free progress record, the same vocabulary as Deep Dog 2's product events. `seq` is per run, from 1. */
 export interface ResearchEvent {

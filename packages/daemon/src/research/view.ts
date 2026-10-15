@@ -41,5 +41,7 @@ export interface ResearchRunView {
   report: string | null;
   /** Where the report was written inside the workspace, relative to the project folder; null until written. */
   reportPath: string | null;
+  /** Why the report has no file, when the project would not take it; the report itself is still in Ancilla. */
+  reportWriteError?: string | null;
   config: ResearchConfig;
 }

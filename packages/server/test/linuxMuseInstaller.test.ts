@@ -17,6 +17,24 @@ async function fixture(t: TestContext, extra: Partial<LinuxMuseInstallerOptions>
   return { home, installer };
 }
 
+/** A deadline that fires when the test says so, instead of after a real delay. */
+function fakeDeadline() {
+  const state = { requestedMs: null as number | null, cancelled: false, callback: null as (() => void) | null };
+  return {
+    schedule(fire: () => void, ms: number) {
+      state.requestedMs = ms;
+      state.callback = fire;
+      return () => { state.cancelled = true; };
+    },
+    fire() {
+      assert.ok(state.callback, "the attempt should have scheduled its deadline");
+      state.callback();
+    },
+    get requestedMs() { return state.requestedMs; },
+    get cancelled() { return state.cancelled; },
+  };
+}
+
 async function installed(home: string) {
   await mkdir(join(home, ".local", "bin"), { recursive: true });
   await writeFile(join(home, ".local", "bin", "muse"), "#!/bin/sh\n", { mode: 0o755 });
@@ -166,12 +184,49 @@ describe("guided Linux Muse installation", () => {
 
   it("times out an approval wait and terminates its runner", async (t) => {
     let aborted = false;
-    const { installer } = await fixture(t, { timeoutMs: 20, run: async (_script, options) => new Promise<number>((resolve) => {
+    let runnerStarted!: () => void;
+    const started = new Promise<void>((resolve) => { runnerStarted = resolve; });
+    const deadline = fakeDeadline();
+    const { installer } = await fixture(t, { deadline: deadline.schedule, run: async (_script, options) => new Promise<number>((resolve) => {
       options.signal.addEventListener("abort", () => { aborted = true; resolve(143); }, { once: true });
+      runnerStarted();
     }) });
     await installer.start();
+    // The deadline fires only once the runner is waiting for approval, so no disk or process speed can reorder it.
+    await started;
+    assert.equal(aborted, false);
+    deadline.fire();
     assert.match((await finished(installer)).message, /timed out/);
     assert.equal(aborted, true);
+  });
+
+  it("times out while the installer is still downloading and never runs it", async (t) => {
+    let ran = false;
+    const deadline = fakeDeadline();
+    const { installer } = await fixture(t, {
+      deadline: deadline.schedule,
+      fetch: async () => { deadline.fire(); return new Response("#!/usr/bin/env bash\nexit 0\n"); },
+      run: async () => { ran = true; return 0; },
+    });
+    await installer.start();
+    const state = await finished(installer);
+    assert.equal(state.status, "error");
+    assert.match(state.message, /timed out/);
+    assert.equal(ran, false);
+  });
+
+  it("asks for the configured deadline, ten minutes by default, and cancels it once the attempt settles", async (t) => {
+    const first = fakeDeadline();
+    const { installer } = await fixture(t, { deadline: first.schedule });
+    await installer.start();
+    assert.equal((await finished(installer)).status, "installed");
+    assert.equal(first.requestedMs, 10 * 60_000);
+    assert.equal(first.cancelled, true);
+    const second = fakeDeadline();
+    const configured = await fixture(t, { deadline: second.schedule, timeoutMs: 1234 });
+    await configured.installer.start();
+    await finished(configured.installer);
+    assert.equal(second.requestedMs, 1234);
   });
 
   it("rejects non-Linux invocation and cannot restart after shutdown", async (t) => {

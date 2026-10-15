@@ -29,6 +29,15 @@ interface InstallerRunOptions {
 export type LinuxInstallerRunner = (script: string, options: InstallerRunOptions) => Promise<number | null>;
 type InstallerFetch = (url: string, options: { signal: AbortSignal; redirect: "error" }) => Promise<Response>;
 
+/** Calls `fire` once after `ms`; the returned function withdraws the call. */
+export type InstallerDeadline = (fire: () => void, ms: number) => () => void;
+
+const realDeadline: InstallerDeadline = (fire, ms) => {
+  const timer = setTimeout(fire, ms);
+  timer.unref();
+  return () => clearTimeout(timer);
+};
+
 export interface LinuxMuseInstallerOptions {
   platform: string;
   home: string;
@@ -36,6 +45,8 @@ export interface LinuxMuseInstallerOptions {
   fetch?: InstallerFetch;
   run?: LinuxInstallerRunner;
   timeoutMs?: number;
+  /** How the attempt's time limit is scheduled. Tests replace it to fire the limit at an exact point. */
+  deadline?: InstallerDeadline;
 }
 
 /** The installer and all curl/launcher children belong to this one cancellable process group. */
@@ -158,8 +169,10 @@ export class LinuxMuseInstaller {
     let directory: string | null = null;
     let output = "";
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; abort.abort(); }, this.options.timeoutMs ?? 10 * 60_000);
-    timeout.unref();
+    const cancelDeadline = (this.options.deadline ?? realDeadline)(
+      () => { timedOut = true; abort.abort(); },
+      this.options.timeoutMs ?? 10 * 60_000,
+    );
     const update = (changes: Partial<LinuxInstallState>) => {
       if (this.state.attemptId === id && this.state.status === "installing") this.state = { ...this.state, ...changes };
     };
@@ -219,7 +232,7 @@ export class LinuxMuseInstaller {
           : installFailure(output, error), loginUrl: null, loginCode: null });
       }
     } finally {
-      clearTimeout(timeout);
+      cancelDeadline();
       if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }

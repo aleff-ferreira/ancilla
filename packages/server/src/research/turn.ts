@@ -43,22 +43,33 @@ export function recordOf(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-/** The failure kind a message points at, for the `kind: ` prefix of a failed turn's error. */
+/** Text that means the provider is throttling: checked before quota, because a 429 may well mention a quota. */
+export const RATE_LIMIT_PATTERN = /\b429\b|rate[ -]?limit|too many requests/i;
+
+/**
+ * Text that means the plan or the credits ran out. Narrow on purpose: "insufficient" alone also begins
+ * "Insufficient context window", which is a prompt problem and not an empty account.
+ */
+export const QUOTA_PATTERN = /\b402\b|quota|payment required|insufficient[ _-]+(?:credits?|funds|balance)|out of credits/i;
+
+/**
+ * The failure kind a message points at, for the `kind: ` prefix of a failed turn's error. Never `cancelled`: a
+ * cancellation is the terminal itself saying so, or this run's own abort, and free text that merely contains
+ * "cancel" (a Go "context canceled", an "operation cancelled" from a transport) is a transport failure that a
+ * retry may get past, not an order to end the whole run.
+ */
 export function failureKindOf(message: string): ResearchFailureKind {
   if (/\b(401|403)\b|unauthori[sz]ed|not logged in|forbidden/i.test(message)) {
     return "auth";
   }
-  if (/\b402\b|quota|insufficient/i.test(message)) {
-    return "quota";
-  }
-  if (/\b429\b|rate[ -]?limit|too many requests/i.test(message)) {
+  if (RATE_LIMIT_PATTERN.test(message)) {
     return "rate_limited";
+  }
+  if (QUOTA_PATTERN.test(message)) {
+    return "quota";
   }
   if (/timed? ?out/i.test(message)) {
     return "timeout";
-  }
-  if (/cancel/i.test(message)) {
-    return "cancelled";
   }
   if (/unavailable|could not start|connection|ECONN|refused/i.test(message)) {
     return "unavailable";
@@ -231,6 +242,8 @@ export async function runTurn(session: TurnSession, text: string, options: RunTu
   let interruptSent = false;
   let cancelSent = false;
   let settled = false;
+  /** Whether the turn's own terminal was seen, so an acknowledgement that comes later has nothing left to cancel. */
+  let terminalSeen = false;
   const timers = new Set<unknown>();
   let pending: Promise<void> = Promise.resolve();
   let settle: () => void = () => undefined;
@@ -330,12 +343,37 @@ export async function runTurn(session: TurnSession, text: string, options: RunTu
     },
   };
 
+  /**
+   * A `turn/start` acknowledgement that came after the turn was given up on (the hard deadline, a stop that did
+   * not wait for the host, a shutdown) names a turn that is running in Muse with nobody reading it. It is ended by
+   * id: `turn/unqueue` when the host queued it, `turn/cancel` otherwise. Best effort and detached, so nothing here
+   * may throw or reject past the log line (an escaping rejection ends a Node 22 process), and no timer is armed.
+   */
+  const endOrphan = (id: string, disposition: unknown): void => {
+    const queued = disposition === "queued";
+    const verb = queued ? "unqueue" : "cancel";
+    log(`turn ${id} was acknowledged after the turn was given up on; ${queued ? "unqueuing" : "cancelling"} it.`);
+    try {
+      const call = queued ? manager.unqueueTurn(sessionId, id) : manager.cancelTurn(sessionId, id);
+      Promise.resolve(call).catch((error: unknown) => log(`${verb} failed: ${error instanceof Error ? error.message : String(error)}`));
+    } catch (error) {
+      log(`${verb} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const onNotification: SessionNotificationHandler = (method, params) => {
+    const forTurn = turnOfNotification(params);
+    // A terminal for another turn does not end this one's story; one for this turn, or for a turn not yet bound, does.
+    // While the turn id is still unbound a terminal cannot be told from a stranger's, so this can mark a turn as ended
+    // that is not. That is safe only because every control call and worker runs in a session of its own (nothing
+    // else delivers a terminal into it); a session that was ever reused would need the id check here as well.
+    if (method === "turn/completed" && !(turnId && forTurn && forTurn !== turnId)) {
+      terminalSeen = true;
+    }
     if (settled) {
       return;
     }
-    // A reused session may still deliver stragglers of an earlier turn; they are not this turn's.
-    const forTurn = turnOfNotification(params);
+    // A stray notification of another turn is not this turn's; once the turn id is known it is dropped.
     if (turnId && forTurn && forTurn !== turnId) {
       return;
     }
@@ -413,7 +451,11 @@ export async function runTurn(session: TurnSession, text: string, options: RunTu
     try {
       const ack = await manager.sendTurn(sessionId, text);
       if (settled) {
-        // The turn completed, or was given up on, before its acknowledgement settled: no timer is armed now.
+        // The turn completed, or was given up on, before its acknowledgement settled: no timer is armed now. One
+        // that was given up on while still running has nobody reading it, so it is ended by id.
+        if (!terminalSeen && ack.turnId) {
+          endOrphan(ack.turnId, ack.disposition);
+        }
         return;
       }
       turnId = ack.turnId;

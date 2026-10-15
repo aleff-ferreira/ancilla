@@ -500,6 +500,8 @@ export interface ResearchRunView {
   reportAvailable: boolean;
   report: string | null;
   reportPath: string | null;
+  /** Why the report has no file, when the project would not take it; the report itself is still in Ancilla. */
+  reportWriteError?: string | null;
   config: ResearchConfig;
 }
 

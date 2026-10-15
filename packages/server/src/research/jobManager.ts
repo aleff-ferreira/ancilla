@@ -28,6 +28,24 @@ export const DEFAULT_GLOBAL_WORKER_CAP = 4;
 /** How long shutdown waits for in-flight runs to persist their outcome after the abort. */
 export const CLOSE_TIMEOUT_MS = 5000;
 
+/**
+ * How long a finished run waits for its report file to be written. The report is in the store already and the file
+ * is a convenience for the Files panel, so a write that hangs (a folder on a share that went away, say) is let go
+ * of rather than holding the run's job, and with it the thread, open.
+ */
+export const REPORT_WRITE_TIMEOUT_MS = 30_000;
+
+/** The most runs whose report write note is remembered at once; the oldest is forgotten first and read back from the events. */
+export const MAX_REMEMBERED_REPORT_WRITE_NOTES = 512;
+
+/**
+ * The longest research question the route accepts, in characters. The question rides along verbatim in the
+ * supervisor's prompt on every round, so it shares the prompt with the notes and the rounds and must leave them
+ * room; twenty thousand characters is some three thousand words, far past any question and well inside what a
+ * model call carries. Longer material belongs in a file in the project that the question points at.
+ */
+export const MAX_RESEARCH_QUESTION_CHARS = 20_000;
+
 /** A UUIDv7: 48 bits of Unix milliseconds, then random bits, so run ids sort by creation time. */
 export function uuidv7(now: number = Date.now()): string {
   const bytes = randomBytes(16);
@@ -86,6 +104,8 @@ export interface ResearchJobManagerOptions {
   /** Writes report.md and sources.json into the workspace; resolves the report path relative to the project folder, or null. */
   writeReport(thread: ResearchThread, run: ResearchRunRecord, report: string, state: ResearchRunState): Promise<string | null>;
   globalWorkerCap?: number;
+  /** How long `writeReport` may take before the run lets go of it; `REPORT_WRITE_TIMEOUT_MS` unless given. */
+  reportWriteTimeoutMs?: number;
   now?(): number;
   log?(message: string): void;
 }
@@ -104,8 +124,12 @@ interface Job {
   lastSeq: number;
 }
 
-/** A counting semaphore: `acquire` resolves with the release function, or rejects when the signal fires first. */
-class Semaphore {
+/**
+ * A counting semaphore: `acquire` resolves with the release function, or rejects when the signal fires first. A
+ * release gives its slot back once, however often it is called, so a path that releases twice cannot admit more
+ * work than the limit.
+ */
+export class Semaphore {
   private inUse = 0;
   private readonly waiters: { grant: () => void; signal: AbortSignal; onAbort: () => void }[] = [];
 
@@ -117,7 +141,12 @@ class Semaphore {
 
   acquire(signal: AbortSignal): Promise<() => void> {
     return new Promise((resolve, reject) => {
+      let released = false;
       const release = (): void => {
+        if (released) {
+          return;
+        }
+        released = true;
         this.inUse -= 1;
         this.next();
       };
@@ -187,6 +216,8 @@ class CappedWorkerRunner implements WorkerRunner {
  */
 export class ResearchJobManager {
   private readonly jobs = new Map<string, Job>();
+  /** The note on each run whose report file could not be written, `null` for a run known to have none. */
+  private readonly reportWriteErrors = new Map<string, string | null>();
   private readonly slots: Semaphore;
   /** Set when `close()` begins: no new job starts. */
   private closing = false;
@@ -208,7 +239,55 @@ export class ResearchJobManager {
 
   /** The run's view, with the live phase and counters when the job is in flight. */
   view(record: ResearchRunRecord, withReport: boolean): ResearchRunView {
-    return runView(record, this.options.store.listResearchWorkers(record.id), { withReport, live: this.jobs.get(record.id)?.live ?? null });
+    return runView(record, this.options.store.listResearchWorkers(record.id), {
+      withReport,
+      live: this.jobs.get(record.id)?.live ?? null,
+      reportWriteError: this.reportWriteErrorOf(record),
+    });
+  }
+
+  /**
+   * Why a finished run's report has no file, when the project would not take it: noted at the moment it failed, and
+   * read back from the run's events for a run that ended before this process started. A run whose report was saved
+   * (or that has none to save) has nothing to say.
+   */
+  private reportWriteErrorOf(record: ResearchRunRecord): string | null {
+    if (record.reportPath !== null || !record.report) {
+      return null;
+    }
+    if (!this.reportWriteErrors.has(record.id)) {
+      this.rememberReportWriteError(record.id, this.lastReportWriteError(record.id));
+    }
+    return this.reportWriteErrors.get(record.id) ?? null;
+  }
+
+  /** Keeps the note on a run, forgetting the oldest one once there are too many; a forgotten note is read back from the events. */
+  private rememberReportWriteError(runId: string, note: string | null): void {
+    this.reportWriteErrors.delete(runId);
+    this.reportWriteErrors.set(runId, note);
+    while (this.reportWriteErrors.size > MAX_REMEMBERED_REPORT_WRITE_NOTES) {
+      const oldest = this.reportWriteErrors.keys().next();
+      if (oldest.done) break;
+      this.reportWriteErrors.delete(oldest.value);
+    }
+  }
+
+  private lastReportWriteError(runId: string): string | null {
+    // The event is written as the run ends, so it is among the last few: one read of the tail, however long the run.
+    const TAIL = 200;
+    let found: string | null = null;
+    try {
+      const after = Math.max(0, this.options.store.lastResearchEventSeq(runId) - TAIL);
+      for (const event of this.options.store.listResearchEvents(runId, after, TAIL)) {
+        if (event.type === "report_write_failed") {
+          const message = event.payload["error"];
+          found = typeof message === "string" ? message : null;
+        }
+      }
+    } catch {
+      /* the events are a convenience; a run that cannot read them simply has no note */
+    }
+    return found;
   }
 
   /**
@@ -451,13 +530,26 @@ export class ResearchJobManager {
         const current = store.getResearchRun(job.runId);
         if (current) {
           try {
-            const reportPath = await this.options.writeReport(job.thread, current, outcome.report, outcome.state);
+            const reportPath = await this.writeReportBounded(job, current, outcome.report, outcome.state);
             if (reportPath) {
               this.persist(job, "store its report path", () => store.updateResearchRun(job.runId, { reportPath }));
             }
           } catch (error) {
-            // The report is in the store either way; the file is a convenience for the Files panel.
-            this.options.log?.(`research: run ${job.runId} could not write its report file: ${error instanceof Error ? error.message : String(error)}`);
+            // The report is in the store either way, so nothing is lost; but the person asked for a file, so the
+            // run says why there is none: in its events, and on its view for the run's row to show.
+            const message = error instanceof Error ? error.message : String(error);
+            this.options.log?.(`research: run ${job.runId} could not write its report file: ${message}`);
+            this.rememberReportWriteError(job.runId, message);
+            this.onEvent(job, {
+              type: "report_write_failed",
+              runId: job.runId,
+              seq: job.lastSeq + 1,
+              at: this.nowIso(),
+              phase: "done",
+              round: job.live.round,
+              agentId: null,
+              payload: { error: message },
+            });
           }
         }
       }
@@ -472,6 +564,47 @@ export class ResearchJobManager {
       }
       this.broadcastNow(job);
     }
+  }
+
+  /**
+   * `writeReport`, but not for longer than `reportWriteTimeoutMs`: the report is in the store already, and a file
+   * write that hangs must not hold the job (and so the thread) open. A write that gives up is let go of, and its
+   * path is still stored if it lands later while the store is open, and the run's note then clears. A write that was let
+   * go of throws, so the caller records `report_write_failed` and the run's view says why there is no file.
+   */
+  private async writeReportBounded(job: Job, run: ResearchRunRecord, report: string, state: ResearchRunState): Promise<string | null> {
+    const limit = this.options.reportWriteTimeoutMs ?? REPORT_WRITE_TIMEOUT_MS;
+    // A synchronous throw from the adapter becomes a rejection like any other.
+    const write = Promise.resolve().then(() => this.options.writeReport(job.thread, run, report, state));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const letGo = Symbol("write let go");
+    const deadline = new Promise<typeof letGo>((resolve) => {
+      timer = setTimeout(() => resolve(letGo), limit);
+      timer.unref?.();
+    });
+    try {
+      const first = await Promise.race([write, deadline]);
+      if (first !== letGo) {
+        return first;
+      }
+    } finally {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+    write.then(
+      (reportPath) => {
+        if (reportPath && !this.closed) {
+          this.persist(job, "store its report path", () => this.options.store.updateResearchRun(job.runId, { reportPath }));
+          this.reportWriteErrors.delete(job.runId);
+          this.broadcastNow(job);
+        }
+      },
+      (error) => {
+        this.options.log?.(`research: run ${job.runId} report file write failed after it was let go of: ${error instanceof Error ? error.message : String(error)}`);
+      },
+    );
+    throw new Error(`the report file could not be written: the project gave no answer within ${limit} ms. The report stays in Ancilla.`);
   }
 
   private onEvent(job: Job, event: ResearchEvent): void {
@@ -532,7 +665,13 @@ export class ResearchJobManager {
       return;
     }
     try {
-      this.options.broadcast(runView(record, this.options.store.listResearchWorkers(job.runId), { withReport: false, live: job.live }));
+      this.options.broadcast(
+        runView(record, this.options.store.listResearchWorkers(job.runId), {
+          withReport: false,
+          live: job.live,
+          reportWriteError: this.reportWriteErrorOf(record),
+        }),
+      );
     } catch (error) {
       this.options.log?.(`research: run ${job.runId} broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -20,6 +20,8 @@ export interface LiveRunOverlay {
 export interface RunViewOptions {
   withReport: boolean;
   live?: LiveRunOverlay | null;
+  /** Why the report has no file; the view carries the field only when there is something to say. */
+  reportWriteError?: string | null;
 }
 
 /**
@@ -100,6 +102,7 @@ export function runView(record: ResearchRunRecord, rows: ResearchWorkerRecord[],
     reportAvailable: record.report !== null && record.report.length > 0,
     report: options.withReport && record.report ? modernizeCitations(record.report) : null,
     reportPath: record.reportPath,
+    ...(options.reportWriteError ? { reportWriteError: options.reportWriteError } : {}),
     config: record.config,
   };
 }

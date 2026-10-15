@@ -43,6 +43,15 @@ export function errorKind(error: unknown): string | null {
   return error instanceof AncillaError ? error.kind : null;
 }
 
+/**
+ * The call got no answer at all: it timed out or the connection broke, which a client reports as status 0. Unlike
+ * an error the server sent, this says nothing about whether the server did the work, so a send is never simply
+ * called "not sent" on it.
+ */
+export function noAnswer(error: unknown): boolean {
+  return error instanceof AncillaError && error.status === 0;
+}
+
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;

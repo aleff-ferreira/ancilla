@@ -1239,7 +1239,7 @@ function answering(connection: FakeConnection, text: string | ((sessionId: strin
 const modelRequest = (role: "brief" | "draft" | "supervisor" | "writer", prompt = "Decide.", signal = new AbortController().signal, timeoutMs = 240_000) => ({ role, prompt, maxOutputTokens: 100, timeoutMs, signal });
 
 describe("MuseSessionModelClient", () => {
-  it("answers a prompt as one turn in a lazily started control session, reused across calls", async () => {
+  it("answers a prompt as one turn in a control session started for that call, and never reuses one", async () => {
     const { connection, client, starts } = controlRig();
     answering(connection, "```json\n{\"verdict\": \"RESEARCH_COMPLETE\"}\n```");
     assert.equal(connection.of("session/start").length, 0, "nothing starts before the first call");
@@ -1249,20 +1249,20 @@ describe("MuseSessionModelClient", () => {
     assert.equal(first.modelId, "m-sup");
     const second = await client.complete(modelRequest("brief", "short"));
     assert.equal(second.text, first.text);
-    assert.deepEqual(starts, ["m-sup"], "one control session serves every call of the same model");
-    assert.equal(connection.of("session/start").length, 1);
+    assert.deepEqual(starts, ["m-sup", "m-sup"], "every call opens a session of its own, so no call can read another's output");
+    assert.equal(connection.of("session/start").length, 2);
     assert.equal(connection.of("session/start")[0]?.params?.["modelId"], "m-sup");
     const turns = connection.of("turn/start");
     assert.equal(turns.length, 2);
     assert.equal(turns[0]?.params?.["sessionId"], "ctl-1");
-    assert.equal(turns[1]?.params?.["sessionId"], "ctl-1");
+    assert.equal(turns[1]?.params?.["sessionId"], "ctl-2");
     const input = (turns[0]?.params?.["input"] as { text: string }[])[0]?.text ?? "";
     assert.ok(input.startsWith("x".repeat(40_000)));
     assert.ok(input.endsWith(`\n\n${CONTROL_TURN_INSTRUCTION}`), "the prompt ends with the no-tools instruction");
-    // The writer's model gets its own session.
+    // The writer's model gets a session of its own too.
     await client.complete(modelRequest("writer", "write"));
-    assert.deepEqual(starts, ["m-sup", "m-writer"]);
-    assert.equal(connection.of("turn/start")[2]?.params?.["sessionId"], "ctl-2");
+    assert.deepEqual(starts, ["m-sup", "m-sup", "m-writer"]);
+    assert.equal(connection.of("turn/start")[2]?.params?.["sessionId"], "ctl-3");
   });
 
   it("denies approvals, declines prompts as invalid output, and maps a silent host to a timeout", async () => {
@@ -1291,7 +1291,7 @@ describe("MuseSessionModelClient", () => {
     assert.deepEqual(connection.of("approval/decide").map((c) => [c.params?.["approvalId"], c.params?.["choiceId"], c.params?.["feedback"]]), [["ca-1", "no", "Answer directly from the material in the prompt; tools are not available for this call."]]);
 
     await assert.rejects(client.complete(modelRequest("supervisor")), (error: ResearchFailure) => error.kind === "invalid_output" && /asked for user input/.test(error.message));
-    assert.deepEqual(connection.of("userInput/cancel").map((c) => c.params), [{ sessionId: "ctl-1", userInputId: "cu-1", reason: CONTROL_INPUT_DECLINED }]);
+    assert.deepEqual(connection.of("userInput/cancel").map((c) => c.params), [{ sessionId: "ctl-2", userInputId: "cu-1", reason: CONTROL_INPUT_DECLINED }]);
 
     const pending = client.complete(modelRequest("supervisor", "slow", new AbortController().signal, 240_000));
     await waitFor(() => connection.of("turn/start").length === 3, "third turn");
@@ -1299,7 +1299,7 @@ describe("MuseSessionModelClient", () => {
     clock.advance(240_000);
     await assert.rejects(pending, (error: ResearchFailure) => error.kind === "timeout" && /240 s wall time/.test(error.message));
     assert.equal(connection.of("turn/interrupt").length, 2, "the prompt and the timeout each interrupted a turn");
-    assert.equal(connection.of("session/start").length, 1, "the session is kept through failures");
+    assert.equal(connection.of("session/start").length, 3, "each call opened its own session, failures included");
   });
 
   it("comes back cancelled on the run's signal and unavailable when the control session cannot start", async () => {

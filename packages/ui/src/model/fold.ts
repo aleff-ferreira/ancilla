@@ -55,7 +55,11 @@ export interface LocalEcho {
   localId: string;
   text: string;
   turnId: string | null;
-  disposition: "sending" | "started" | "queued" | "steered";
+  /**
+   * `unconfirmed`: the send got no answer at all, so the prompt may or may not have reached Muse. The thread is
+   * being read to find out; it is never sent again meanwhile.
+   */
+  disposition: "sending" | "started" | "queued" | "steered" | "unconfirmed";
   createdAt: number;
   attachments?: EchoAttachment[];
   /**
@@ -1536,6 +1540,26 @@ export function updateEcho(fold: ThreadFold, localId: string, patch: Partial<Loc
   const echoes = [...fold.echoes];
   echoes[index] = echo;
   return { ...fold, echoes };
+}
+
+/** The ids of the prompts a thread holds, so a later read can tell which ones arrived since. */
+export function promptIds(fold: ThreadFold): string[] {
+  return fold.order.filter((id) => fold.items[id]?.kind === "userMessage");
+}
+
+/**
+ * Whether a prompt that is not among `known` has landed in the thread and reads as `text`. A send with files and no
+ * words has no text to match, so any new prompt counts for it.
+ */
+export function promptLanded(fold: ThreadFold, known: readonly string[], text: string): boolean {
+  const wanted = normalizeText(text);
+  return fold.order.some((id) => {
+    const item = fold.items[id];
+    if (item?.kind !== "userMessage" || known.includes(id)) {
+      return false;
+    }
+    return wanted === "" || promptTexts(item).has(wanted);
+  });
 }
 
 export function removeEcho(fold: ThreadFold, localId: string): ThreadFold {

@@ -12,6 +12,7 @@ import {
   type WorkerTask,
   parseFindings as parseEngineFindings,
 } from "@ancilla/daemon";
+import { DEFAULT_RESEARCH_STARTUP_MS, describeMs, raceStartup } from "./startup.js";
 import {
   TURN_CANCEL_GRACE_MS,
   approvalSubjectOf,
@@ -51,8 +52,12 @@ export interface WorkerUpdate {
 
 /** What the runner needs from the server: a session on the thread's host, its notifications, and a log. */
 export interface WorkerRunnerHost {
-  /** Starts a worker session on the thread's host and records it archived; rejects when Muse cannot. */
-  startWorkerSession(task: WorkerTask, modelId: string | null): Promise<WorkerSessionHandle>;
+  /**
+   * Starts a worker session on the thread's host and records it archived; rejects when Muse cannot. `giveUp` is
+   * aborted when the runner stopped waiting for the start (the run was stopped, or the startup allowance passed),
+   * so the host side knows the session it is still opening has no one behind it.
+   */
+  startWorkerSession(task: WorkerTask, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle>;
   /** Delivers that session's host notifications until the returned function is called. */
   subscribe(sessionId: string, handler: SessionNotificationHandler): () => void;
   onWorkerUpdate?(update: WorkerUpdate): void;
@@ -78,6 +83,8 @@ export interface MuseSessionWorkerRunnerOptions {
   fallbackModelId: string | null;
   clock?: WorkerClock;
   cancelGraceMs?: number;
+  /** How long a session start may take, in milliseconds or as a function read at each start; two minutes unless given. */
+  startupMs?: number | (() => number);
 }
 
 /** Muse's tool names are not pinned, so kinds are read off the name; unknown web-ish names count as `other`. */
@@ -325,6 +332,12 @@ interface SeenCall {
 export class MuseSessionWorkerRunner implements WorkerRunner {
   constructor(private readonly options: MuseSessionWorkerRunnerOptions) {}
 
+  private startupMs(): number {
+    const configured = this.options.startupMs;
+    const value = typeof configured === "function" ? configured() : configured;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_RESEARCH_STARTUP_MS;
+  }
+
   async run(task: WorkerTask, budgets: WorkerBudgets, signal: AbortSignal, sink: WorkerSink): Promise<WorkerResult> {
     const observed: ObservedToolCall[] = [];
     const failed = (kind: ResearchFailureKind, message: string, status: WorkerStatus = "failed"): WorkerResult => ({
@@ -340,16 +353,32 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
     }
     const modelId = this.options.models.worker ?? this.options.fallbackModelId;
     const log = (message: string): void => this.options.host.log?.(`research: worker A${task.agentId} ${message}`);
-    let handle: WorkerSessionHandle;
-    try {
-      handle = await this.options.host.startWorkerSession(task, modelId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log(`could not start: ${message}`);
-      return failed(failureKindOf(message) === "other" ? "unavailable" : failureKindOf(message), `could not start a worker session: ${message}`);
-    }
-    const { sessionId, manager } = handle;
     const clock = this.options.clock;
+    const allowance = this.startupMs();
+    // The start is raced against the run's stop and the startup allowance: a Muse that never opens the session
+    // must not hold this worker (or a worker slot, or Stop) for as long as it stays silent.
+    const opened = await raceStartup((giveUp) => this.options.host.startWorkerSession(task, modelId, giveUp), {
+      signal,
+      ...(clock ? { clock } : {}),
+      timeoutMs: allowance,
+      onLate: (late) => log(`session ${late.sessionId} opened after the worker gave up on it; it stays idle.`),
+    });
+    if (opened.kind === "aborted") {
+      log("was stopped while its session was starting.");
+      return failed("cancelled", "The run was stopped while the worker session was starting.", "cancelled");
+    }
+    if (opened.kind === "timed_out") {
+      log(`session did not open within ${describeMs(allowance)}; giving up on it.`);
+      return failed("unavailable", `could not start a worker session: Muse did not open it within ${describeMs(allowance)}.`);
+    }
+    if (opened.kind === "failed") {
+      const message = opened.error instanceof Error ? opened.error.message : String(opened.error);
+      log(`could not start: ${message}`);
+      const kind = failureKindOf(message);
+      return failed(kind === "other" ? "unavailable" : kind, `could not start a worker session: ${message}`);
+    }
+    const handle: WorkerSessionHandle = opened.value;
+    const { sessionId, manager } = handle;
     const now = (): number => clock?.now() ?? Date.now();
     const startedAt = new Date(now()).toISOString();
     const counts = { toolCalls: 0, searches: 0, reads: 0 };
@@ -533,6 +562,11 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
     );
     const endedAt = new Date(now()).toISOString();
     if (turn.startFailed) {
+      // A turn that never started because the run was stopped is a cancelled worker, not a failed one.
+      if (turn.status === "cancelled") {
+        report("cancelled", 0, endedAt);
+        return { ...failed("cancelled", "the worker turn did not start", "cancelled"), error: turn.error };
+      }
       report("failed", 0, endedAt);
       return { ...failed("unavailable", "the worker turn did not start"), error: turn.error };
     }
