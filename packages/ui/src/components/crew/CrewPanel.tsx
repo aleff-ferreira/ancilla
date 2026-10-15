@@ -89,7 +89,7 @@ export function CrewPanel(props: { sessionId: string }) {
   const now = useNow(15_000, busy && !stale);
   const sessionModel = session?.modelId ?? null;
   const view = useMemo(
-    () => (fold ? crewView(fold, session, now, { stale, partialHistory: thread?.truncated === true, pending, skipped, models, sessionModel, researchRuns }) : null),
+    () => (fold ? crewView(fold, session, now, { stale, partialHistory: thread?.truncated === true, pending, skipped, models, researchRuns }) : null),
     // The view moves with the agent items, the trace, the requests, the research runs and the clock; a text delta elsewhere leaves it alone.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [fold?.agentItems, fold?.crew, fold?.approvals, fold?.userInputs, fold?.order, fold?.meta.modelId, fold?.meta.calls, crewTurnKey(fold), session?.sessionId, sessionModel, now, stale, thread?.truncated, pending, skipped, models, researchRuns],

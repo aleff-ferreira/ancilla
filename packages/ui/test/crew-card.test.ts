@@ -155,7 +155,7 @@ describe("the expanded card", () => {
     assert.match(markup, /class="crew-tile"[^>]*><span[^>]*class="spin-ring/);
     assert.match(markup, /class="nm">offline-sync-research-design</);
     const sub = headSub(run).text;
-    assert.match(sub, /^Workflow · started [^·]+ · 9 agents · 1 planned · 1\.3M tokens · ~\$[\d.]+ est\.$/);
+    assert.match(sub, /^Workflow · started [^·]+ · 9 agents · 1 planned · 1\.2M tokens so far \(8 of 9 reported\) · ~\$[\d.]+ est\.$/);
     assert.match(markup, /<span class="opt">~\$/, "the cost leaves the sub line in a narrow card");
     assert.match(markup, /class="sub short">Workflow · /);
     assert.match(markup, /aria-label="Collapse"/);
@@ -211,11 +211,11 @@ describe("the expanded card", () => {
   });
 
   it("opens one phase's rows under the attention list and says who is listed above", () => {
-    assert.equal(phaseHeadText(run, "Judge"), "2 agents · 0 done · 1 listed above · 148k");
-    assert.equal(phaseHeadText(run, "Design"), "3 agents · 2 done · 1 failed · 1 listed above · 12m 40s · 468k");
+    assert.equal(phaseHeadText(run, "Judge"), "2 agents · 0 done · 1 listed above · 138k");
+    assert.equal(phaseHeadText(run, "Design"), "3 agents · 2 done · 1 failed · 1 listed above · 12m 40s · 445k");
     const markup = render({ run, expanded: true, openPhase: "Design" });
     const rows = [...flatten(markup).matchAll(/class="crew-ag"[^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
-    assert.deepEqual(rows, ["design:crdt-ledger, Done, 236k tokens, 12m 40s", "design:op-log, Done, 168k tokens, 9m 12s"]);
+    assert.deepEqual(rows, ["design:crdt-ledger, Done, 226k tokens, 12m 40s", "design:op-log, Done, 160k tokens, 9m 12s"]);
     assert.match(markup, /class="crew-share" aria-hidden="true"><span class="" style="width:100%">/, "the longest agent fills its bar");
     assert.match(markup, />Hide </);
     const judge = render({ run, expanded: true, openPhase: "Judge" });

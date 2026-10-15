@@ -42,9 +42,10 @@ describe("non-authoritative history recovery", () => {
     assert.deepEqual(recovered.turns.old, previous.turns.old);
     assert.equal(recovered.activeTurnId, "active");
     assert.deepEqual(recovered.meta.tokenTotals, previous.meta.tokenTotals);
-    assert.deepEqual(Object.keys(recovered.meta.calls).sort(), ["usage-new", "usage-old"]);
+    // A call with running totals is keyed by them (turn, cumulative prompt, output and total, duration, prompt), not by its cursor.
+    assert.deepEqual(Object.keys(recovered.meta.calls).sort(), ["active:200:20:220::100", "old:100:10:110::100"]);
     assert.deepEqual(foldFromLoad(load, recovered).meta.calls, recovered.meta.calls, "repeated reads do not count usage twice");
-    assert.deepEqual(Object.keys(previous.meta.calls), ["usage-new"], "the live fold stays immutable");
+    assert.deepEqual(Object.keys(previous.meta.calls), ["active:200:20:220::100"], "the live fold stays immutable");
     const advanced = foldFromLoad(partial([{ method: "session/tokenUsage", params: { viewCursor: "usage-later", cumulative: { promptTokens: 300, outputTokens: 30, totalTokens: 330 } } }]), recovered);
     assert.equal(advanced.meta.tokenTotals?.totalTokens, 330);
   });

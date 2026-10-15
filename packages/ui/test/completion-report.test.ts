@@ -49,13 +49,13 @@ describe("CompletionReport", () => {
     assert.equal((markup.match(/class="crew-strip rail finale"/g) ?? []).length, 4);
     assert.doesNotMatch(markup, /crew-sheen/, "no sheen unless asked for");
     const stats = [...markup.matchAll(/class="v">([^<]*)<\/div><div class="k">([^<]*)</g)].map((m) => [m[1], m[2]]);
-    assert.deepEqual(stats.map((s) => s[1]), ["agents", "wall clock", "tokens, reported by Muse", "estimate at list price"]);
-    assert.deepEqual(stats.slice(0, 3).map((s) => s[0]), ["10", "45m 06s", "1.5M"]);
+    assert.deepEqual(stats.map((s) => s[1]), ["agents", "wall clock", "tokens, reported by Muse · latest attempt of each agent", "estimate at list price"]);
+    assert.deepEqual(stats.slice(0, 3).map((s) => s[0]), ["10", "45m 06s", "1.4M"]);
     assert.match(stats[3]?.[0] as string, /^~\$/);
     const rows = [...flatten(markup).matchAll(/<li>(?:<svg[\s\S]*?<\/svg>)?<span>([\s\S]*?)<\/span>(?:<span class="r">([^<]*)<\/span>)?<\/li>/g)].map((m) => [text(m[1] as string), m[2] ?? null]);
     assert.deepEqual(rows.slice(0, 4), [
       ["Longest agent judge:perf · 18m 36s", null],
-      ["Most tokens research:field-notes · 288k", "20% of the run"],
+      ["Most tokens research:field-notes · 270k", "20% of the run"],
       ["Retried design:conflict-ledger · landed on attempt 3", "after 2 failed attempts"],
       ["Waited on you 1m 40s", null],
     ]);

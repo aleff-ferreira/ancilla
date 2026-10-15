@@ -57,6 +57,8 @@ import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { wslSpawnEnv } from "./runtimeConfig.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
+import { replayUsageAt, turnStartTimes } from "./usageTime.js";
+import { dayBucketer, usageWindow } from "./usageWindow.js";
 import {
   MuseExecModelClient,
   MuseModelClient,
@@ -322,6 +324,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return null;
 }
 
+/** The prompt tokens a session says it has used so far, from a read's session or a snapshot's state; null when it names none. */
+function runningPromptTotal(source: Record<string, unknown> | null): number | null {
+  const usage = asRecord(source?.["tokenUsage"]);
+  return num(asRecord(usage?.["cumulative"])?.["promptTokens"] ?? usage?.["promptTokens"]) ?? null;
+}
+
 function str(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -331,6 +339,12 @@ function sameSubscriptionUsage(a: SubscriptionUsage | null | undefined, b: Subsc
     (["window", "weekly"] as const).every((key) => a[key].usedPercent === b[key].usedPercent &&
       a[key].resetsAtMs === b[key].resetsAtMs && a[key].windowDurationMins === b[key].windowDurationMins);
 }
+
+/** How far ahead of this clock a host's observation stamp may be before it stops being believed. */
+const QUOTA_CLOCK_SKEW_MS = 5 * 60_000;
+
+/** What a saved row with a stamp from the future is taken to be: a reading of unknown age, old enough never to look current. */
+const QUOTA_RESTORED_AGE_MS = 30 * 60_000;
 
 function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -754,6 +768,14 @@ export class AncillaServer {
   private readonly sinks = new Set<SseSink>();
   private readonly live = new Map<string, LiveState>();
   private readonly sessionHosts = new Map<string, string>();
+  /**
+   * The model id each session was last switched to by hand although its catalog does not list it, to the id. Muse
+   * keeps such an id for the session only, so the `modelChanged` that follows it is not a pick to restore on resume.
+   * Dropped when the session closes or its host is forgotten.
+   */
+  private readonly modelTrials = new Map<string, string>();
+  /** Compactions and forks in flight: they hold a host without any turn showing it, so a restart must not cut them off. */
+  private hostWork = 0;
   private readonly opener: Opener;
   private readonly titleQueue: string[] = [];
   private titleWorker: Promise<void> | null = null;
@@ -773,7 +795,12 @@ export class AncillaServer {
   private readonly directQuota = new Map<string | null, SubscriptionReading>();
   private readonly subscriptionReader: MuseSubscriptionReader;
   private readonly pendingHostQuotas = new WeakMap<ManagedHost, Promise<SubscriptionUsage | null>>();
-  private readonly savedQuotaSources = new Set<string | null>();
+  /** Where each account's current reading came from, recorded when it was observed rather than guessed later. */
+  private readonly usageSources = new Map<string | null, "meta" | "runtime" | "saved">();
+  /** The last plan name Meta reported per account, kept so one failed check does not blank it. */
+  private readonly lastPlanNames = new Map<string | null, string>();
+  /** A future stamp and the moment it first arrived, so reading the same observation again does not make it look new. */
+  private readonly clampedStamps = new Map<string | null, { from: number; to: number }>();
   private readonly removedQuotaAccounts = new Set<string>();
   private readonly quotaAccountGenerations = new Map<string, number>();
   private planUsageReadRevision = 0;
@@ -1517,17 +1544,48 @@ export class AncillaServer {
           if (!("model" in body)) {
             throw new HttpError(400, "model is required.");
           }
-          await manager.setSessionModel(sessionId, await this.modelSelection(manager, sessionId, body["model"]));
+          const { selection, listed, source } = await this.resolveModelSelection(manager, sessionId, body["model"]);
           const modelId = str(asRecord(body["model"])?.["modelId"]);
+          // An id the catalog does not list is tried on this thread only: Muse keeps it for the session, and a typo
+          // is not found out until the next turn. The mark is set first, because the `modelChanged` that answers the
+          // switch can arrive before this request does. A list that is only Muse's built-in one (`source` is not
+          // `providerCatalog`) proves nothing about the plan, but it cannot tell a typo from a model either, so an id
+          // missing from it is a trial just the same.
+          const trial = modelId !== null && listed === false;
+          const marked = this.modelTrials.get(sessionId);
+          if (modelId && trial) {
+            this.modelTrials.set(sessionId, modelId);
+          } else {
+            this.modelTrials.delete(sessionId);
+          }
+          try {
+            await manager.setSessionModel(sessionId, selection);
+          } catch (error) {
+            // A rejected switch stores nothing and leaves the mark as it was.
+            if (marked === undefined) {
+              this.modelTrials.delete(sessionId);
+            } else {
+              this.modelTrials.set(sessionId, marked);
+            }
+            throw error;
+          }
           if (modelId) {
             // The user's pick, kept apart from what Muse reports: a resume that comes back on another model restores it.
-            this.store.updateSession(sessionId, { modelId, chosenModelId: modelId });
+            // A trial is no pick, and it must not leave an older one standing either (a pin the thread started with,
+            // say): that would be put back over it on the next resume. Cleared, the host's own model wins.
+            this.store.updateSession(sessionId, trial ? { modelId, chosenModelId: null } : { modelId, chosenModelId: modelId });
+            if (trial) {
+              // The id comes off the wire: quoted, so a line break in it cannot split the record.
+              this.log(
+                `${sessionId} tries ${JSON.stringify(modelId)}, which ${source ? `Muse's ${source} list` : "Muse's list"} does not name; kept for this session only`,
+              );
+            }
           }
           this.json(res, 200, { ok: true });
           return true;
         }
         if (action === "compact") {
-          this.json(res, 200, { result: await manager.compactSession(sessionId) });
+          this.json(res, 200, { result: await this.holdingHost(() => manager.compactSession(sessionId)) });
           return true;
         }
         if (action === "shell") {
@@ -1542,7 +1600,7 @@ export class AncillaServer {
           return true;
         }
         if (action === "fork") {
-          this.json(res, 200, { session: await this.forkSession(sessionId, manager) });
+          this.json(res, 200, { session: await this.holdingHost(() => this.forkSession(sessionId, manager)) });
           return true;
         }
         if (action === "effort") {
@@ -1717,6 +1775,33 @@ export class AncillaServer {
       this.json(res, 200, next);
       return true;
     }
+    if (method === "POST" && path === "/api/hosts/restart") {
+      // Closing a host ends the turns running on it, so this goes ahead only while Muse is idle. A newer Muse
+      // build or a changed plan shows in the model list once the hosts start again.
+      // A host that is starting counts, whatever it starts for: a thread, or only a model list (GET /api/models).
+      const busy = "A turn, approval, research run, compaction, fork or Muse host start is still open. Let it finish or stop it, then restart Muse.";
+      if (this.anythingRunning()) {
+        throw new HttpError(409, busy);
+      }
+      // Queued like a settings flip's restart, so a session started meanwhile never lands on a retiring host. The
+      // queue can be a while in coming round (a flip's restart may be mid-close ahead of this one), and a prompt can
+      // start meanwhile, so the answer is asked for again when this restart's turn comes.
+      let refused = false;
+      const run = this.restartChain.then(async () => {
+        if (this.anythingRunning()) {
+          refused = true;
+          return;
+        }
+        await this.restartHosts("The Muse host restarted to read a fresh model list.");
+      });
+      this.restartChain = run.catch(() => undefined);
+      await run;
+      if (refused) {
+        throw new HttpError(409, busy);
+      }
+      this.json(res, 200, { ok: true });
+      return true;
+    }
     if (method === "GET" && path === "/api/accounts") {
       this.json(res, 200, { accounts: await this.accountList() });
       return true;
@@ -1791,6 +1876,8 @@ export class AncillaServer {
       const id = decodeURIComponent(path.slice("/api/accounts/".length));
       try {
         await this.aonia.removeProfile(id);
+        // A project must not keep naming an account that is gone: a new thread there would fail on it.
+        this.store.clearDefaultAccount(id);
         this.removedQuotaAccounts.add(id);
         this.quotaAccountGenerations.set(id, (this.quotaAccountGenerations.get(id) ?? 0) + 1);
         this.planUsageReadRevision += 1;
@@ -1827,7 +1914,8 @@ export class AncillaServer {
     if (method === "GET" && path === "/api/usage") {
       const requested = Number.parseInt(url.searchParams.get("days") ?? "30", 10);
       const days = Number.isFinite(requested) ? Math.min(365, Math.max(1, requested)) : 30;
-      this.json(res, 200, this.usageReport(days));
+      // The viewer's IANA zone, so a day is their day; without one (or with one Intl does not know) days are UTC.
+      this.json(res, 200, this.usageReport(days, url.searchParams.get("tz")));
       return true;
     }
     const attachmentMatch = path.match(/^\/api\/attachments\/([A-Za-z0-9-]{1,64})$/);
@@ -1965,8 +2053,16 @@ export class AncillaServer {
 
     if (method === "GET" && path === "/api/models") {
       const sessionId = url.searchParams.get("sessionId") ?? undefined;
-      const manager = sessionId ? await this.managerForSession(sessionId) : (await this.hostFor("")).manager;
-      this.json(res, 200, { models: await manager.listModels(sessionId) });
+      // A thread's own host answers for it, whatever account its record names. Without one, the account's host,
+      // which is the default login's when no account is given; an unknown account is the 400 hostFor raises. A
+      // named account's list comes from a host of that account that is already running (its threads' hosts are
+      // keyed by folder, so a listing host of its own would be one more resident process), and only a login with
+      // none running starts one.
+      const accountId = url.searchParams.get("accountId") || null;
+      const host = sessionId
+        ? await this.hostForSession(sessionId)
+        : ((accountId ? await this.runningHostOf(accountId) : null) ?? (await this.hostFor("", accountId)));
+      this.json(res, 200, { models: await host.manager.listModels(sessionId), hostVersion: host.serverVersion });
       return true;
     }
 
@@ -2252,6 +2348,30 @@ export class AncillaServer {
   private isBusy(sessionId: string): boolean {
     const live = this.live.get(sessionId);
     return Boolean(live && (live.activeTurnId || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0));
+  }
+
+  /**
+   * Whether closing the hosts now would cut something off: a thread with a turn, approval or question open, a
+   * research run in flight, a host still starting (for a thread about to be created on it, or only to read a model
+   * list) or a compaction or fork that holds one.
+   */
+  private anythingRunning(): boolean {
+    return (
+      [...this.live.keys()].some((sessionId) => this.isBusy(sessionId)) ||
+      this.store.listRunningResearchRuns().some((run) => this.researchJobs.isActive(run.id)) ||
+      this.starting.size > 0 ||
+      this.hostWork > 0
+    );
+  }
+
+  /** Runs `work` while counting it in `anythingRunning`: a compaction or fork shows no turn, yet closing its host ends it. */
+  private async holdingHost<T>(work: () => Promise<T>): Promise<T> {
+    this.hostWork += 1;
+    try {
+      return await work();
+    } finally {
+      this.hostWork -= 1;
+    }
   }
 
   /** New activity wakes a settled thread, and lifts a manual "keep active" so auto-settle can apply again. */
@@ -2660,6 +2780,8 @@ export class AncillaServer {
       createdAt: normalizeIso(raw?.["createdAt"]),
       // A fork branches its source session, so it inherits the source's posture.
       sandboxDisabled: found.session.sandboxDisabled,
+      // And its account: the host it resumes on, the models it offers and the plan it counts against.
+      accountId: found.session.accountId,
     });
     const hostKey = this.sessionHosts.get(sessionId);
     if (hostKey) {
@@ -2674,29 +2796,55 @@ export class AncillaServer {
    * The selection `session/setModel` gets for a model id: the catalog's own entry for it, provider and profile
    * included, the way a picker in Muse's client would send it. A bare id is what the UI knows; whether Muse keeps a
    * selection that names no provider across a restart is not something to rely on. The catalog is a request away,
-   * so the id alone still goes out when the catalog cannot be read or does not list it.
+   * so the id alone still goes out when the catalog cannot be read.
    */
   private async modelSelection(manager: SessionManager, sessionId: string, model: unknown): Promise<unknown> {
+    return (await this.resolveModelSelection(manager, sessionId, model)).selection;
+  }
+
+  /**
+   * `modelSelection`, and whether the catalog lists the id: `false` for an id it lacks, `null` when it could not be
+   * read or lists nothing at all, which says nothing about the id. An id the catalog lacks goes out with the
+   * provider and profile of the catalog itself, else of the session's active row: Muse 1.4.5 switches to an unlisted
+   * id on the same provider, and a selection that names none is not something to rely on. `source` is where the
+   * catalog says it came from (`providerCatalog`, or a built-in list such as `bundledCatalog`), for the log: the
+   * verdict is the same, because a built-in list cannot say a model is wrong and cannot say it is right.
+   */
+  private async resolveModelSelection(
+    manager: SessionManager,
+    sessionId: string,
+    model: unknown,
+  ): Promise<{ selection: unknown; listed: boolean | null; source: string | null }> {
     const given = asRecord(model);
     const modelId = str(given?.["modelId"]);
     if (!given || !modelId || (given["providerId"] !== undefined && given["profileId"] !== undefined)) {
-      return model;
+      return { selection: model, listed: null, source: null };
     }
     try {
-      const list = asRecord(await manager.listModels(sessionId))?.["models"];
-      const entry = Array.isArray(list) ? list.map(asRecord).find((m) => m && str(m["modelId"]) === modelId) : null;
-      if (!entry) {
-        return model;
+      const result = asRecord(await manager.listModels(sessionId));
+      const source = str(result?.["source"]);
+      const rows = (Array.isArray(result?.["models"]) ? result["models"] : []).map(asRecord);
+      if (rows.length === 0) {
+        return { selection: model, listed: null, source };
       }
+      const entry = rows.find((m) => str(m?.["modelId"]) === modelId) ?? null;
       const selection: Record<string, unknown> = { ...given };
-      for (const key of ["providerId", "profileId", "displayLabel"]) {
-        if (selection[key] === undefined && (typeof entry[key] === "string" || entry[key] === null)) {
-          selection[key] = entry[key];
+      const copy = (from: Record<string, unknown> | null, keys: string[]) => {
+        for (const key of keys) {
+          if (from && selection[key] === undefined && (typeof from[key] === "string" || from[key] === null)) {
+            selection[key] = from[key];
+          }
         }
+      };
+      if (entry) {
+        copy(entry, ["providerId", "profileId", "displayLabel"]);
+      } else {
+        copy(result, ["providerId", "profileId"]);
+        copy(rows.find((m) => m?.["isActive"] === true) ?? null, ["providerId", "profileId"]);
       }
-      return selection;
+      return { selection, listed: entry !== null, source };
     } catch {
-      return model;
+      return { selection: model, listed: null, source: null };
     }
   }
 
@@ -2839,9 +2987,16 @@ export class AncillaServer {
 
   /**
    * One model call's tokens, kept so the usage page can look across every thread rather than only the ones
-   * open in the UI. The view cursor is the key, so replaying a thread's history never counts a call twice.
+   * open in the UI. The view cursor is the key, so replaying a thread's history never counts a call twice, and
+   * the store also recognises a call it already holds under the other cursor a history page gives it. A live
+   * notification is dated by its arrival, which is when the call ran; a call read back from history is dated by
+   * `replayed`, taken from its turn, because "now" would put old spend on the day the thread was opened.
    */
-  private recordUsage(sessionId: string, params: Record<string, unknown>): void {
+  private recordUsage(
+    sessionId: string,
+    params: Record<string, unknown>,
+    replayed?: { at: string; source: "replay" | "estimate" },
+  ): void {
     const usage = asRecord(params["usage"]) ?? {};
     const promptTokens = num(params["promptTokens"]) ?? num(usage["inputTokens"]) ?? 0;
     const outputTokens = num(usage["outputTokens"]) ?? Math.max(0, (num(params["totalTokens"]) ?? 0) - promptTokens);
@@ -2861,18 +3016,72 @@ export class AncillaServer {
       cacheWriteTokens: num(usage["cacheWriteTokens"]) ?? 0,
       reasoningTokens: num(usage["reasoningTokens"]) ?? 0,
       durationMs: num(params["durationMs"]) ?? null,
-      at: normalizeIso(params["at"]) ?? nowIso(),
+      at: replayed?.at ?? normalizeIso(params["at"]) ?? nowIso(),
+      atSource: replayed?.source ?? "live",
     });
   }
 
-  /** Tokens per day and model, plus a row per thread, for the usage page to price. */
-  private usageReport(days: number): Record<string, unknown> {
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const rows = this.store.listUsage(since);
+  /**
+   * Records the calls a thread's history holds, each dated from its own turn, and whether that was all of them.
+   * History is paged only so far back, so a long thread's oldest calls can be missing; the session's own running
+   * prompt total (from its read, or the newest call's `cumulative`) says what a complete read would have found,
+   * and a thread whose recorded calls fall short of it is marked partly counted. Without such a total, a read that
+   * hit the page limit is what marks it. `read` is null when no history could be paged at all, which says nothing
+   * either way and leaves an earlier verdict alone.
+   *
+   * A call's date is its turn's start, so a turn that runs past UTC midnight books its later calls on the earlier day.
+   */
+  private backfillUsage(
+    sessionId: string,
+    events: { method: string; params: Record<string, unknown> }[],
+    stored: SessionRecord | null,
+    read: { runningPrompt: number | null; truncated: boolean } | null,
+  ): void {
+    const turnStarts = turnStartTimes(events);
+    let newestTotal: number | null = null;
+    for (const event of events) {
+      if (event.method !== "session/tokenUsage") {
+        continue;
+      }
+      const turnId = str(event.params["turnId"]);
+      const when = replayUsageAt({
+        turnId,
+        itemAt: turnId ? turnStarts.get(turnId) : null,
+        activityAt: stored?.activityAt,
+        createdAt: stored?.createdAt,
+      });
+      // Only a date taken from the turn itself may move a row stored earlier; the thread's own dates only seed one.
+      this.recordUsage(sessionId, event.params, { at: when.at, source: when.verified ? "replay" : "estimate" });
+      // A call that names no running total says nothing about it, which is not the same as a total of zero.
+      const total = num(asRecord(event.params["cumulative"])?.["promptTokens"]);
+      if (total !== undefined) {
+        newestTotal = Math.max(newestTotal ?? 0, total);
+      }
+    }
+    if (read) {
+      const expected = read.runningPrompt === null && newestTotal === null ? null : Math.max(read.runningPrompt ?? 0, newestTotal ?? 0);
+      // When the session names its own total, what is recorded reaching it settles the question, even for a history
+      // longer than the pages read (calls seen live are already in). Only with no total does a cut-short read mean
+      // calls may be missing.
+      this.store.setUsageCoverage(sessionId, expected === null ? !read.truncated : this.store.sumUsagePrompt(sessionId) >= expected);
+    }
+  }
+
+  /**
+   * Tokens per local day and model, plus a row per thread, for the usage page to price. The window is the last
+   * `days` calendar days in the viewer's zone, today included, so `7` is today and the six days before it and `1` is
+   * today alone; without a known zone the days are UTC. DeepResearch worker sessions are not threads anyone opens,
+   * so each project's (and account's) workers fold into one row of their own. The coverage block says how much the
+   * totals do not cover: threads whose history could not be read back in full, and threads never read at all.
+   */
+  private usageReport(days: number, tz: string | null = null): Record<string, unknown> {
+    const window = usageWindow(days, tz);
+    const dayOf = dayBucketer(window.tz);
+    const rows = this.store.listUsage(window.since);
     const buckets = new Map<string, Record<string, unknown>>();
     const threads = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
-      const day = row.at.slice(0, 10);
+      const day = dayOf(row.at);
       const modelId = row.modelId ?? "unknown";
       const cached = Math.min(row.promptTokens, row.cacheReadTokens || row.cachedTokens);
       const bucketKey = `${day}|${modelId}`;
@@ -2898,10 +3107,18 @@ export class AncillaServer {
       bucket["durationMs"] = (bucket["durationMs"] as number) + (row.durationMs ?? 0);
       buckets.set(bucketKey, bucket);
 
-      const thread = threads.get(row.sessionId) ?? {
-        sessionId: row.sessionId,
-        title: row.sessionTitle,
+      // A project's research workers share one row (per account), under an id no thread can have.
+      const research = row.origin === "research-worker";
+      const threadKey = research
+        ? `research-workers:${row.projectCwd ?? ""}${row.accountId ? `:${row.accountId}` : ""}`
+        : row.sessionId;
+      const thread = threads.get(threadKey) ?? {
+        sessionId: threadKey,
+        title: research ? "DeepResearch workers" : row.sessionTitle,
         cwd: row.projectCwd,
+        ...(research ? { kind: "research" } : {}),
+        // The login the thread runs under; null is the default one.
+        accountId: row.accountId,
         calls: 0,
         promptTokens: 0,
         outputTokens: 0,
@@ -2936,13 +3153,15 @@ export class AncillaServer {
         });
       }
       thread["lastAt"] = row.at;
-      threads.set(row.sessionId, thread);
+      threads.set(threadKey, thread);
     }
     return {
-      since,
+      since: window.since,
       days,
+      tz: window.tz,
       buckets: [...buckets.values()],
       threads: [...threads.values()].sort((a, b) => ((a["lastAt"] as string) < (b["lastAt"] as string) ? 1 : -1)),
+      coverage: this.store.usageCoverage(window.since),
     };
   }
 
@@ -3074,12 +3293,21 @@ export class AncillaServer {
       }
     }
 
+    // What the session says it has used so far, taken before paging so a call that lands meanwhile cannot make a
+    // complete page look short.
+    const runningPrompt = [
+      runningPromptTotal(msp),
+      runningPromptTotal(asRecord(asRecord(asRecord(read?.["history"])?.["snapshot"])?.["state"])),
+    ].reduce<number | null>((most, total) => (total === null ? most : Math.max(most ?? 0, total)), null);
     let events: { method: string; params: Record<string, unknown> }[] = [];
     let truncated = false;
+    // Whether view/page was read at all: a session another client holds, or that is not loaded, gives it nothing.
+    let pagedHistory = false;
     try {
       const paged = await this.pageTranscript(manager, sessionId);
       events = paged.events;
       truncated = paged.truncated;
+      pagedHistory = true;
     } catch (error) {
       const kind = errorInfo(error).kind;
       // view/page needs a loaded session; another host's lease leaves this host with nothing to page.
@@ -3231,11 +3459,7 @@ export class AncillaServer {
       }
     }
     // Opening a thread backfills the usage page with the calls it made before this server ever ran.
-    for (const event of events) {
-      if (event.method === "session/tokenUsage") {
-        this.recordUsage(sessionId, event.params);
-      }
-    }
+    this.backfillUsage(sessionId, events, found?.session ?? null, pagedHistory ? { runningPrompt, truncated } : null);
     // The history's last goal change is the goal as of now, unless a live one arrived while this load ran, or the
     // history is a stale prefix whose goal is not newer than the one held.
     for (let index = events.length - 1; live.goalSeq === goalSeqAtStart && index >= 0; index -= 1) {
@@ -3811,6 +4035,27 @@ export class AncillaServer {
     return (await this.hostForSession(sessionId)).manager;
   }
 
+  /**
+   * A host of the named account that is up now, the listing host (no folder) first, else null. A removed account is
+   * still the 400 it is everywhere else, even while a host of its is not yet closed. Like `hostFor`, it waits out a
+   * restart in progress, so it never answers from a host that is being closed.
+   */
+  private async runningHostOf(accountId: string): Promise<ManagedHost | null> {
+    await this.restartChain;
+    const running = () => [...this.hosts.values()].filter((host) => host.accountId === accountId);
+    if (running().length === 0) {
+      return null;
+    }
+    try {
+      await this.aonia.getProfile(accountId);
+    } catch (error) {
+      throw this.accountError(error);
+    }
+    // Looked at again: a host can have gone while the profile was read.
+    const up = running();
+    return up.find((host) => host.key === this.hostKey("", accountId)) ?? up[0] ?? null;
+  }
+
   /** The host that has the session loaded, else the one its workspace and account start. */
   private async hostForSession(sessionId: string): Promise<ManagedHost> {
     const key = this.sessionHosts.get(sessionId);
@@ -3937,6 +4182,8 @@ export class AncillaServer {
       }
       this.sessionHosts.delete(sessionId);
       this.effortApplied.delete(sessionId);
+      // What was tried on the retired host is over with it: the next resume reads the model from the new one.
+      this.modelTrials.delete(sessionId);
       affected.add(sessionId);
     }
     // A turn this host was seen running is over too, even when the session's binding had already moved or lapsed.
@@ -3974,9 +4221,9 @@ export class AncillaServer {
    * the same way. The respawn only fixes new sessions: Muse commits each session's
    * filesystem/network posture at creation (a `yolo` cause carries fs=unrestricted,
    * net=enabled), so only new threads pick a flipped posture up. The approval side of YOLO
-   * mode flips over MSP instead.
+   * mode flips over MSP instead. `message` is what each host's `restarted` event tells the user.
    */
-  private async restartHosts(): Promise<void> {
+  private async restartHosts(message = "The Muse host restarted to apply a settings change."): Promise<void> {
     for (const pending of this.starting.values()) {
       await pending.catch(() => undefined);
     }
@@ -3986,7 +4233,6 @@ export class AncillaServer {
       } catch {
         /* best effort */
       }
-      const message = "The Muse host restarted to apply a settings change.";
       this.forgetHost(managed, message);
       this.emit("ancilla", { type: "host", key: managed.key, state: "restarted", message });
     }
@@ -4231,7 +4477,7 @@ export class AncillaServer {
         if (!host || !this.isCurrentQuotaHost(host)) return;
         const accountId = host.accountId;
         if (!this.quotaScopes.has(accountId) || this.quotaScopes.get(accountId) === host.quotaCacheScope) {
-          this.observeUsage(usage, accountId, false, host.quotaCacheScope);
+          this.observeUsage(usage, accountId, "runtime", host.quotaCacheScope);
         }
         return;
       }
@@ -4406,13 +4652,22 @@ export class AncillaServer {
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         this.sessionHosts.delete(sessionId);
+        this.modelTrials.delete(sessionId);
         break;
       }
       case "session/modelChanged": {
         const modelId = str(params["modelId"]);
         if (modelId) {
           // A change the user made, here or in another Muse client, is their pick; a default or a policy is not.
-          this.store.updateSession(sessionId, params["source"] === "user" ? { modelId, chosenModelId: modelId } : { modelId });
+          // Neither is an id tried here that the catalog does not list: Muse keeps that one for the session only,
+          // and an older pick must not outlive it, so it is cleared (the set-model route does the same once Muse
+          // accepts the switch).
+          const byUser = params["source"] === "user";
+          const trial = byUser && this.modelTrials.get(sessionId) === modelId;
+          this.store.updateSession(
+            sessionId,
+            trial ? { modelId, chosenModelId: null } : byUser ? { modelId, chosenModelId: modelId } : { modelId },
+          );
         }
         break;
       }
@@ -4583,35 +4838,59 @@ export class AncillaServer {
     } catch { return null; }
   }
 
+  /**
+   * A stamp well ahead of this clock would outrank every honest reading until real time caught up, and its saved
+   * row would outrank them after a restart. A frame counts as arriving when it first did, and the same observation
+   * read again keeps that moment, so a runtime that stops reporting still goes stale. A saved row did not arrive
+   * just now and nothing says when it was observed, so it is restored as an old reading: it neither claims to be
+   * fresh nor outranks a reading Muse made since.
+   */
+  private settleStamp(usage: SubscriptionUsage, accountId: string | null, origin: "meta" | "runtime" | "saved"): SubscriptionUsage {
+    const now = Date.now();
+    if (usage.observedAtMs <= now + QUOTA_CLOCK_SKEW_MS) return usage;
+    if (origin === "saved") return { ...usage, observedAtMs: now - QUOTA_RESTORED_AGE_MS };
+    const seen = this.clampedStamps.get(accountId);
+    const to = seen?.from === usage.observedAtMs ? seen.to : now;
+    this.clampedStamps.set(accountId, { from: usage.observedAtMs, to });
+    return { ...usage, observedAtMs: to };
+  }
+
   /** A newer observation wins; cached readings keep their original timestamp and source account. */
-  private observeUsage(usage: SubscriptionUsage | null, accountId: string | null = null, saved = false, scope: string | null = null): void {
-    if (!usage || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+  private observeUsage(reported: SubscriptionUsage | null, accountId: string | null = null,
+    origin: "meta" | "runtime" | "saved" = "runtime", scope: string | null = null): void {
+    if (!reported || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+    const usage = this.settleStamp(reported, accountId, origin);
     const direct = this.directQuota.get(accountId);
     if (direct?.status === "no-subscription" && direct.checkedAtMs >= usage.observedAtMs) return;
     const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
     if (prior && prior.observedAtMs > usage.observedAtMs) return;
-    if (saved && prior?.observedAtMs === usage.observedAtMs) return;
+    if (origin === "saved" && prior?.observedAtMs === usage.observedAtMs) return;
     const changed = !sameSubscriptionUsage(prior, usage);
     if (accountId) this.planUsageByAccount.set(accountId, usage);
     else this.defaultPlanUsage = usage;
-    if (saved && changed) this.savedQuotaSources.add(accountId);
-    else if (!saved) this.savedQuotaSources.delete(accountId);
+    // When Meta and the runtime report the very same observation, the account's own reading is the better label.
+    if (changed || origin !== "runtime" || this.usageSources.get(accountId) !== "meta") this.usageSources.set(accountId, origin);
     this.quotaScopes.set(accountId, scope);
     if (!this.planUsage || this.planUsage.observedAtMs < usage.observedAtMs ||
       (this.planUsageAccountId === accountId && this.planUsage.observedAtMs === usage.observedAtMs)) {
       this.planUsage = usage;
       this.planUsageAccountId = accountId;
     }
-    if (changed && !saved) {
+    if (changed && origin !== "saved") {
       if (scope) this.store.setSubscriptionUsage(scope, usage);
       this.emit("ancilla", { type: "plan-usage", usage, accountId });
+    } else if (origin === "saved" && usage !== reported && scope) {
+      // Heal a saved row that was stamped in the future, so the next start reads it as an ordinary old reading.
+      this.store.setSubscriptionUsage(scope, usage);
     }
   }
 
   private forgetQuota(accountId: string | null): void {
     if (accountId) this.planUsageByAccount.delete(accountId);
     else this.defaultPlanUsage = null;
-    this.savedQuotaSources.delete(accountId);
+    this.usageSources.delete(accountId);
+    this.lastPlanNames.delete(accountId);
+    this.clampedStamps.delete(accountId);
     this.quotaScopes.delete(accountId);
     this.directQuota.delete(accountId);
     const readings: [string | null, SubscriptionUsage][] = [...this.planUsageByAccount];
@@ -4656,7 +4935,7 @@ export class AncillaServer {
     for (const [accountId, scope] of scopes) {
       if (revision !== this.planUsageReadRevision || (accountId && this.removedQuotaAccounts.has(accountId))) continue;
       if (this.quotaScopes.has(accountId) && this.quotaScopes.get(accountId) !== scope) this.forgetQuota(accountId);
-      if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, true, scope);
+      if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, "saved", scope);
       this.quotaScopes.set(accountId, scope);
     }
     const hosts = [...this.hosts.values()];
@@ -4678,7 +4957,7 @@ export class AncillaServer {
         if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
           this.quotaScopes.get(managed.accountId) !== managed.quotaCacheScope) return;
         outcome.succeeded += 1;
-        this.observeUsage(usage, managed.accountId, false, managed.quotaCacheScope);
+        this.observeUsage(usage, managed.accountId, "runtime", managed.quotaCacheScope);
       } catch { failed += 1; }
     });
     const directReads = [...sources].map(async (accountId) => {
@@ -4692,12 +4971,14 @@ export class AncillaServer {
         if (scope !== scopes.get(accountId)) { this.forgetQuota(accountId); this.quotaScopes.set(accountId, scope); return; }
         if (!reading) { this.directQuota.delete(accountId); return; }
         if (reading.status === "no-subscription") {
+          // A plan that ended is not the plan to show after the next failed check.
+          this.lastPlanNames.delete(accountId);
           const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
           if (!prior || prior.observedAtMs <= reading.checkedAtMs) this.forgetQuota(accountId);
-        }
+        } else if (reading.planName) this.lastPlanNames.set(accountId, reading.planName);
         this.directQuota.set(accountId, reading);
         this.quotaScopes.set(accountId, scope);
-        this.observeUsage(reading.usage, accountId, false, scope);
+        this.observeUsage(reading.usage, accountId, "meta", scope);
       } catch { /* A missing or inaccessible profile still has its runtime-only row below. */ }
     });
     await Promise.all([...hostReads, ...directReads]);
@@ -4706,15 +4987,19 @@ export class AncillaServer {
       .map((accountId) => {
         const reading = this.directQuota.get(accountId);
         const usage = accountId ? this.planUsageByAccount.get(accountId) ?? null : this.defaultPlanUsage;
-        const fromMeta = sameSubscriptionUsage(reading?.usage, usage);
         const newerRuntime = usage !== null && reading !== undefined && usage.observedAtMs > reading.checkedAtMs;
         const outcome = hostOutcomes.get(accountId);
         const hostUnavailable = outcome && outcome.attempted > 0 && outcome.succeeded === 0 && usage === outcome.usageAtStart;
         const status = newerRuntime ? "runtime-only" : reading?.status ?? (hostUnavailable ? "unavailable" : "runtime-only");
+        // Only Meta names the plan, and only when it answers. A failed check, a login it rejected and a login that no
+        // longer holds a token (so no check ran) keep the name it gave before; a changed login, an ended plan and a
+        // removed account have already cleared it.
+        const unanswered = !reading || reading.status === "unavailable" || reading.status === "login-required";
+        const kept = unanswered ? this.lastPlanNames.get(accountId) : undefined;
         return {
           accountId, usage: status === "no-subscription" ? null : usage,
-          planName: reading?.planName ?? null,
-          source: usage ? fromMeta ? "meta" : this.savedQuotaSources.has(accountId) ? "saved" : "runtime" : null,
+          planName: reading?.planName ?? kept ?? null,
+          source: usage ? this.usageSources.get(accountId) ?? "runtime" : null,
           status, checkedAtMs: reading?.checkedAtMs ?? null,
         };
       });
@@ -4723,8 +5008,8 @@ export class AncillaServer {
       usage: this.planUsage,
       byAccount: Object.fromEntries(this.planUsageByAccount),
       accountId: this.planUsageAccountId,
-      saved: this.planUsage !== null && this.savedQuotaSources.has(this.planUsageAccountId),
-      savedAccountIds: [...this.savedQuotaSources].filter((id): id is string => id !== null),
+      saved: this.planUsage !== null && this.usageSources.get(this.planUsageAccountId) === "saved",
+      savedAccountIds: [...this.usageSources].flatMap(([id, source]) => id !== null && source === "saved" ? [id] : []),
       status: metaAvailable ? "ready" : hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
       accounts,
     };

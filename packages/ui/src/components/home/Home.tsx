@@ -2,7 +2,7 @@ import { ArrowsClockwiseIcon, CaretDownIcon, CheckIcon, FolderIcon, FolderPlusIc
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { relativeTime, shortenPath } from "../../model/format.js";
-import { planView } from "../../model/plan.js";
+import { bindingRow, planView } from "../../model/plan.js";
 import { projectForCwd } from "../../model/status.js";
 import type { AccountView, PlanAccountUsage, ProjectView } from "../../types.js";
 import { TopBar } from "../chrome.js";
@@ -87,9 +87,11 @@ export function NewThread(props: { cwd: string | null }) {
 
 /**
  * The manual version of "switch accounts before this one caps out": one line that says which account is close to
- * its rolling-window cap and which has more room, so the choice stays with the person, never automatic. Needs at
- * least two accounts with usage (the default login counts as one), the project's default account (or the default login, when unset) at 80% or more,
- * and another account at least 25 points behind it.
+ * a cap and which has more room, so the choice stays with the person, never automatic. An account's figure is the
+ * limit that binds, the same one the sidebar pill shows: the short window or the weekly cap, whichever is higher, and
+ * the line says so when it is the weekly one. Needs at least two accounts with usage (the default login counts as
+ * one), the project's default account (or the default login, when unset) at 80% or more, and another account at
+ * least 25 points behind it.
  */
 export function nearCapHint(
   project: ProjectView,
@@ -100,11 +102,12 @@ export function nearCapHint(
   if (!accounts || accounts.length < 1) {
     return null;
   }
-  const candidates: { id: string | null; name: string; percent: number }[] = [];
+  const candidates: { id: string | null; name: string; percent: number; weekly: boolean }[] = [];
   for (const account of [{ id: null, name: "Default login" }, ...accounts]) {
     const reading = usageAccounts.find((entry) => entry.accountId === account.id);
-    const window = reading && planView(reading.usage, now, reading)?.rows[0];
-    if (window?.current) candidates.push({ id: account.id, name: account.name, percent: window.percent });
+    const view = reading && planView(reading.usage, now, reading);
+    const binding = view && bindingRow(view);
+    if (binding) candidates.push({ id: account.id, name: account.name, percent: binding.percent, weekly: binding.key === "weekly" });
   }
   // The default login counts as a switchable account, so one named profile plus a busy default login is enough.
   if (candidates.length < 2) {
@@ -122,7 +125,8 @@ export function nearCapHint(
   if (high.percent - low.percent < 25) {
     return null;
   }
-  return `Last reported: ${high.name} at ${high.percent}%, ${low.name} at ${low.percent}%.`;
+  const figure = (c: { percent: number; weekly: boolean }) => `${c.percent}%${c.weekly ? " weekly" : ""}`;
+  return `Last reported: ${high.name} at ${figure(high)}, ${low.name} at ${figure(low)}.`;
 }
 
 /**

@@ -318,6 +318,37 @@ export interface ModelOption {
   cost: { input: number; output: number; cached: number; currency: string | null } | null;
   /** Contributor-tier models may use prompts and outputs for product improvement. */
   contributor: boolean;
+  /**
+   * The reasoning levels Muse lists for this model, in the UI's order. Null or absent when the host lists none
+   * (an older host, or `unknown`), which means every level, as before.
+   */
+  efforts?: ReasoningEffort[] | null;
+}
+
+/** What a `model/list` answer says about itself, apart from its rows. */
+export interface ModelCatalogInfo {
+  /** Where Muse got the list: `providerCatalog` is the live one; a bundled or config catalog is Muse's own built-in copy. */
+  source: string | null;
+  providerId: string | null;
+  profileId: string | null;
+  /** The Muse version of the host that answered; null when it did not say. */
+  hostVersion: string | null;
+}
+
+/** A model list with what Muse says about it. */
+export interface ModelCatalog extends ModelCatalogInfo {
+  models: ModelOption[];
+}
+
+/** Where one catalog scope's load stands. The scope keys are `modelsKey`'s. */
+export interface ModelsStatus {
+  status: "idle" | "loading" | "ready" | "error";
+  /** Why the last load failed; null otherwise. */
+  error: string | null;
+  /** When the last load answered, in platform time; null until one has. */
+  loadedAt: number | null;
+  /** What the last good answer said about its list; kept through a failed refresh. */
+  catalog: ModelCatalogInfo | null;
 }
 
 /** Server-owned thread-title generation: the switch, and the model when one is chosen. */
@@ -474,6 +505,7 @@ export interface ResearchRunView {
 
 /** One day's tokens for one model, as the server aggregates them for the usage page. */
 export interface UsageBucket {
+  /** `YYYY-MM-DD`: a calendar day in the report's `tz` (UTC when it names none). */
   day: string;
   modelId: string;
   calls: number;
@@ -498,14 +530,32 @@ export interface UsageThread {
   /** Tokens split by model, so a thread that switched models is priced at each model's own rate. */
   models?: { modelId: string; calls: number; promptTokens: number; outputTokens: number; cachedTokens: number }[];
   lastAt: string;
+  /** `research` for the one row that folds a project's DeepResearch workers; it is no thread and has no page to open. */
+  kind?: "research";
+  /** The login the thread runs under; null is the default one. Older servers leave it out. */
+  accountId?: string | null;
+}
+
+/** What the usage totals leave out, so the page can say so. */
+export interface UsageCoverage {
+  /** Threads (DeepResearch workers aside) with at least one call in the window. */
+  countedThreads: number;
+  /** Of those, the threads whose history could not be read back in full. */
+  partialThreads: number;
+  /** Threads active in the window with no call recorded at all: nothing here has read them yet. */
+  uncountedThreads: number;
 }
 
 /** Every model call Ancilla has seen, bucketed; the UI puts prices on it. */
 export interface UsageReport {
+  /** The start of the first local day in the window (an ISO instant). */
   since: string;
   days: number;
+  /** The IANA zone the days are in (`UTC` when none was asked for); older servers leave it out and days are UTC. */
+  tz?: string;
   buckets: UsageBucket[];
   threads: UsageThread[];
+  coverage?: UsageCoverage;
 }
 
 /** A view notification, live or paged from history. `at` is the emission time when known. */

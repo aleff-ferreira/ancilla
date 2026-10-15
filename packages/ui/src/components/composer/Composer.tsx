@@ -1,4 +1,4 @@
-import { ArrowUpIcon, ArrowsInIcon, BinocularsIcon, BrainIcon, CaretDownIcon, CpuIcon, FolderIcon, GitBranchIcon, LightningIcon, LockIcon, QuestionIcon, ShieldChevronIcon, ShieldIcon, ShieldWarningIcon, SquareIcon, TerminalWindowIcon, UserIcon } from "../ui/icons.js";
+import { ArrowClockwiseIcon, ArrowUpIcon, ArrowsClockwiseIcon, ArrowsInIcon, BinocularsIcon, BrainIcon, CaretDownIcon, CpuIcon, FolderIcon, GitBranchIcon, LightningIcon, LockIcon, PencilSimpleLineIcon, QuestionIcon, ShieldChevronIcon, ShieldIcon, ShieldWarningIcon, SignInIcon, SquareIcon, TerminalWindowIcon, UserIcon } from "../ui/icons.js";
 import {
   forwardRef,
   useCallback,
@@ -18,13 +18,39 @@ import { Popover, Slider, Switch } from "radix-ui";
 import { shallowEqual, useApp, useController } from "../../app/context.js";
 import { useSampled } from "../../app/sampled.js";
 import { loadDraft, saveDraft } from "../../model/controller.js";
-import { basename, formatDuration, formatSpeed, formatTokens, modelDisplayName } from "../../model/format.js";
+import { basename, formatDuration, formatSpeed, formatTokens } from "../../model/format.js";
+import {
+  MODEL_COPY,
+  activeModel,
+  anyWorkRunning,
+  applyModelChoice,
+  choiceDetail,
+  choiceValue,
+  effortLabel,
+  effortNote,
+  effortView,
+  modelButtonLabel,
+  modelCompletions,
+  modelIdError,
+  modelMenu,
+  modelsStanding,
+  restartAction,
+  selectedValue,
+  tryTypedModel,
+  type ModelChoice,
+  type ModelCompletion,
+  type ModelMenu,
+  type ModelsScope,
+  type ModelsState,
+} from "../../model/models.js";
+import { planAccount } from "../../model/plan.js";
+import { publishedModelIds } from "../../model/pricing.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
 import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, researchLive, type ResearchRange, type ResearchTyped } from "../../model/research.js";
 import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
-import type { ApprovalMode, ReasoningEffort } from "../../types.js";
+import type { ApprovalMode, ModelOption, ReasoningEffort } from "../../types.js";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Modal, Tip, FLOATING } from "../ui/overlays.js";
 import { Button, IconButton, MOD, Spinner, Toggle, cn } from "../ui/primitives.js";
 import { PixelFlow } from "../ui/PixelFlow.js";
@@ -54,9 +80,18 @@ type SlashMenuView = SlashMenuState & { prefix: string };
 
 /**
  * What the menu shows for the draft and caret. While the caret is in the first word it lists matching
- * commands; `/skill <name>` lists skills; after that it only appears to flag a command Muse does not know.
+ * commands; `/skill <name>` lists skills and `/model <text>` the models the text fits; after that it only appears to
+ * flag a command Muse does not know. `limited` says the models are only Muse's built-in list, so the ones Meta
+ * publishes complete after them.
  */
-function slashMenuFor(text: string, caret: number, commands: SlashCommand[], skills: SkillsState | undefined): SlashMenuView | null {
+export function slashMenuFor(
+  text: string,
+  caret: number,
+  commands: SlashCommand[],
+  skills: SkillsState | undefined,
+  models: readonly ModelOption[] = [],
+  limited = false,
+): SlashMenuView | null {
   const first = /^\/(\S*)/.exec(text);
   if (!first) {
     return null;
@@ -82,6 +117,15 @@ function slashMenuFor(text: string, caret: number, commands: SlashCommand[], ski
       return { kind: "list", items, loading, error, prefix: "/skill " };
     }
   }
+  // The text after `/model ` finds a model by any part of its name; with nothing typed yet it lists them all.
+  const choosing = /^\/models?\s+([^\n]*)$/i.exec(text);
+  if (choosing && caret === text.length) {
+    const query = (choosing[1] as string).trim();
+    const items = modelCompletions(models, query, undefined, limited);
+    if (items.length > 0) {
+      return { kind: "models", items, query, prefix: "/model " };
+    }
+  }
   const parsed = parseSlash(text);
   if (!parsed || resolveSlash(parsed, commands, skills?.skills ?? []).kind !== "unknown") {
     return null;
@@ -89,8 +133,51 @@ function slashMenuFor(text: string, caret: number, commands: SlashCommand[], ski
   return loading ? { kind: "loading", prefix: "/" } : { kind: "unknown", name: parsed.name, prefix: "/" };
 }
 
+/**
+ * The slash menu for a draft over the model catalog of the composer's scope: `/model <text>` completes against the rows
+ * the model picker shows for it, and while those are only Muse's built-in list, against the models Meta publishes too.
+ * The one place the rows and that verdict are read together.
+ */
+export function slashMenuOver(
+  text: string,
+  caret: number,
+  commands: SlashCommand[],
+  skills: SkillsState | undefined,
+  source: Pick<ModelsState, "models" | "accountModels" | "modelsStatus">,
+  scope: ModelsScope,
+): SlashMenuView | null {
+  const { models, limited } = modelsStanding(source, scope);
+  return slashMenuFor(text, caret, commands, skills, models, limited);
+}
+
 /** As many files per message as the server takes. */
 const MAX_FILES = 10;
+
+/**
+ * The catalog the composer on screen picks models from, as the controller reads it: an open thread's own host, else
+ * the account the project's new threads run on. `accountId` is the login that host runs as, null for the default one.
+ */
+function useModelsScope(sessionId: string | null, cwd: string | null): { scope: ModelsScope; accountId: string | null } {
+  const accountId = useApp((s) =>
+    sessionId ? (s.sessions[sessionId]?.accountId ?? null) : (projectForCwd(s.projects, cwd)?.defaultAccountId ?? null),
+  );
+  const scope = useMemo<ModelsScope>(() => (sessionId ? { sessionId } : { accountId }), [sessionId, accountId]);
+  return { scope, accountId };
+}
+
+/** The lists and loads the model menus read, held together so they re-render only when one changes. */
+function useModelSource() {
+  const models = useApp((s) => s.models);
+  const accountModels = useApp((s) => s.accountModels);
+  const modelsStatus = useApp((s) => s.modelsStatus);
+  const accounts = useApp((s) => s.accounts);
+  return useMemo(() => ({ models, accountModels, modelsStatus, accounts }), [models, accountModels, modelsStatus, accounts]);
+}
+
+/** The model an open thread runs on, from its own record first. */
+function useThreadModel(sessionId: string | null): string | null {
+  return useApp((s) => (sessionId ? (s.threads[sessionId]?.fold.meta.modelId ?? s.sessions[sessionId]?.modelId ?? null) : null));
+}
 
 export interface ComposerProps {
   sessionId: string | null;
@@ -175,18 +262,29 @@ export function Composer(props: ComposerProps) {
     () => slashCommands(skills?.skills ?? [], { inThread: Boolean(props.sessionId) }),
     [skills?.skills, props.sessionId],
   );
+  // `/model <text>` completes against the same list the model picker shows, read again first if it is stale.
+  const { scope: modelScope } = useModelsScope(props.sessionId, props.cwd);
+  const modelSource = useModelSource();
+  const choosingModel = slashing && /^\/models?\s/i.test(text);
+  useEffect(() => {
+    if (choosingModel) {
+      void controller.refreshModels(modelScope);
+    }
+  }, [choosingModel, modelScope, controller]);
   const word = /^\/\S*/.exec(text)?.[0] ?? null;
   /** The menu for a caret position. Keys read the caret live: a restored draft moves it without a select event. */
   const menuAt = (at: number): SlashMenuView | null => {
-    const view = slashing ? slashMenuFor(text, at, commands, skills) : null;
+    // A built-in list names few models: while it is the one on show, the models Meta publishes complete as well.
+    const view = slashing ? slashMenuOver(text, at, commands, skills, modelSource, modelScope) : null;
     return view && dismissed !== word ? view : null;
   };
   const menu = menuAt(caret);
-  const rows = menu?.kind === "list" ? menu.items.length : menu ? 1 : 0;
+  const rows = menu?.kind === "list" || menu?.kind === "models" ? menu.items.length : menu ? 1 : 0;
   const activeRow = Math.max(0, Math.min(active, rows - 1));
+  const typedModel = menu?.kind === "models" ? menu.query : null;
   useEffect(() => {
     setActive(0);
-  }, [word, menu?.kind, menu?.prefix]);
+  }, [word, menu?.kind, menu?.prefix, typedModel]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -259,8 +357,7 @@ export function Composer(props: ComposerProps) {
     }
   };
 
-  const fill = (prefix: string, command: SlashCommand) => {
-    const next = `${prefix}${command.name} `;
+  const fillText = (next: string) => {
     setText(next);
     setCaret(next.length);
     requestAnimationFrame(() => {
@@ -270,6 +367,8 @@ export function Composer(props: ComposerProps) {
     });
   };
 
+  const fill = (prefix: string, command: SlashCommand) => fillText(`${prefix}${command.name} `);
+
   const pick = (view: SlashMenuView, command: SlashCommand) => {
     if (view.prefix === "/" && command.kind === "action" && command.runsBare) {
       void runNow(`/${command.name}`, false);
@@ -278,13 +377,16 @@ export function Composer(props: ComposerProps) {
     }
   };
 
+  /** A model picked from the `/model` completions switches to it, as typing its id would. */
+  const pickModel = (model: ModelCompletion) => void runNow(`/model ${model.id}`, false);
+
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.nativeEvent.isComposing) {
       return;
     }
     const live = menuAt(event.currentTarget.selectionStart);
     if (live) {
-      const list = live.kind === "list" ? live.items : [];
+      const list = live.kind === "list" || live.kind === "models" ? live.items : [];
       const row = Math.max(0, Math.min(active, list.length - 1));
       if ((event.key === "ArrowDown" || event.key === "ArrowUp") && list.length > 0) {
         event.preventDefault();
@@ -299,7 +401,11 @@ export function Composer(props: ComposerProps) {
       }
       if (event.key === "Tab" && !event.shiftKey && list[row]) {
         event.preventDefault();
-        fill(live.prefix, list[row] as SlashCommand);
+        if (live.kind === "models") {
+          fillText(`${live.prefix}${(live.items[row] as ModelCompletion).id}`);
+        } else {
+          fill(live.prefix, list[row] as SlashCommand);
+        }
         return;
       }
       if (event.key === "Enter" && !event.shiftKey) {
@@ -308,7 +414,9 @@ export function Composer(props: ComposerProps) {
         if (event.repeat) {
           return;
         }
-        if (live.kind === "list" && list[row]) {
+        if (live.kind === "models" && list[row]) {
+          pickModel(live.items[row] as ModelCompletion);
+        } else if (live.kind === "list" && list[row]) {
           pick(live, list[row] as SlashCommand);
         } else if (live.kind === "unknown") {
           void runNow(text, true);
@@ -384,6 +492,7 @@ export function Composer(props: ComposerProps) {
           active={activeRow}
           onActive={setActive}
           onPick={(command) => pick(menu, command)}
+          onPickModel={pickModel}
           onSendRaw={() => void runNow(text, true)}
         />
       ) : null}
@@ -431,9 +540,9 @@ export function Composer(props: ComposerProps) {
       <div className="flex min-w-0 flex-wrap items-center gap-0.5 px-2 pb-2">
         {/* The new-thread composer sits high, so its menus open downward; they still flip when there is no room. */}
         <AttachButton onFiles={(picked) => addFiles(Array.from(picked))} disabled={props.readOnly || files.length >= MAX_FILES} />
-        <ModelPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
+        <ModelPicker sessionId={props.sessionId} cwd={props.cwd} side={props.variant === "home" ? "bottom" : "top"} />
         <ResearchTrigger sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} disabled={props.readOnly || starting} />
-        <EffortPicker side={props.variant === "home" ? "bottom" : "top"} />
+        <EffortPicker sessionId={props.sessionId} cwd={props.cwd} side={props.variant === "home" ? "bottom" : "top"} />
         <AccessPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
         <AccountPicker sessionId={props.sessionId} cwd={props.cwd} variant={props.variant} />
         <span className="min-w-2 flex-1" />
@@ -507,60 +616,255 @@ function ContributorBadge(props: { tip?: boolean }) {
 /** Which way a composer menu opens: away from the screen edge the composer sits against. */
 type PickerSide = "top" | "bottom";
 
-function ModelPicker(props: { sessionId: string | null; side: PickerSide }) {
+/** Marks the catalog's default row, the one "Muse default" follows. */
+function DefaultBadge() {
+  return <span className="shrink-0 rounded-[5px] bg-active px-1 py-px text-2xs font-medium text-muted">Default</span>;
+}
+
+/** One row of the model menu: its name and tags, and a line under it about what the row is. */
+function ModelRow(props: { choice: ModelChoice }) {
+  const { choice } = props;
+  return (
+    <MenuOption
+      value={choiceValue(choice)}
+      label={
+        <>
+          {choice.label}
+          {choice.displayLabel ? <span className="ml-2 font-normal text-muted">{choice.displayLabel}</span> : null}
+        </>
+      }
+      badge={
+        <>
+          {choice.isDefault ? <DefaultBadge /> : null}
+          {choice.kind !== "default" && choice.contributor ? <ContributorBadge /> : null}
+          {choice.note ? (
+            <span className="shrink-0 rounded-[5px] bg-warn-soft px-1 py-px text-2xs font-medium text-warn-text">
+              {choice.note === "unavailable" ? "Unavailable" : "Not offered"}
+            </span>
+          ) : null}
+        </>
+      }
+      description={choiceDetail(choice) ?? undefined}
+    />
+  );
+}
+
+/** A text field for a model id Muse did not list, shared by the picker's dialog and Settings. */
+export function ModelIdForm(props: {
+  onUse: (modelId: string) => Promise<boolean>;
+  onDone?: () => void;
+  onCancel?: () => void;
+  label?: string;
+}) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const id = useId();
+  const typed = text.trim();
+  const problem = typed ? modelIdError(typed) : null;
+  const submit = async () => {
+    if (busy || !typed || problem) {
+      return;
+    }
+    setBusy(true);
+    try {
+      if (await props.onUse(typed)) {
+        setText("");
+        props.onDone?.();
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <form
+      className="flex min-w-0 flex-col gap-1.5"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit();
+      }}
+    >
+      <label htmlFor={id} className="text-xs font-medium text-muted">
+        {props.label ?? "Model id"}
+      </label>
+      <div className="flex items-center gap-2">
+        <input
+          id={id}
+          type="text"
+          value={text}
+          onChange={(event) => setText(event.currentTarget.value)}
+          placeholder={publishedModelIds()[0] ?? "model-id"}
+          spellCheck={false}
+          autoComplete="off"
+          aria-invalid={problem !== null}
+          className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-sunken px-3 font-mono text-xs text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus"
+        />
+        {props.onCancel ? (
+          <Button size="sm" variant="ghost" onClick={props.onCancel}>
+            Cancel
+          </Button>
+        ) : null}
+        <Button size="sm" variant="primary" type="submit" disabled={!typed || problem !== null} loading={busy}>
+          Use model
+        </Button>
+      </div>
+      {problem ? (
+        <p role="alert" className="text-xs text-warn-text">
+          {problem}
+        </p>
+      ) : null}
+    </form>
+  );
+}
+
+/** What the model menu says and offers besides its rows: the load, the notes, and the actions that read the list again. */
+function ModelMenuBody(props: { menu: ModelMenu; scope: ModelsScope; onOther: () => void }) {
+  const controller = useController();
+  const { menu } = props;
+  // Closing Muse's hosts also ends what outlives a turn (a workflow, a subagent, a background task, a research run).
+  const running = useApp(anyWorkRunning);
+  const restarting = useApp((s) => Boolean(s.busy["models:restart"]));
+  const restart = restartAction(running, restarting);
+  const value = selectedValue(menu.rows);
+  const choose = (next: string) => {
+    if (next !== value) {
+      applyModelChoice(controller, next);
+    }
+  };
+  const read = () => void controller.refreshModels({ ...props.scope, force: true });
+  return (
+    <>
+      <MenuLabel>Model</MenuLabel>
+      {menu.message ? (
+        menu.mode === "loading" ? (
+          <div role="status" className="flex items-center gap-2 px-2 pt-1 pb-2 text-xs text-muted">
+            <Spinner size={12} />
+            {menu.message}
+          </div>
+        ) : (
+          <p role={menu.mode === "error" ? "alert" : undefined} className="px-2 pb-1.5 text-xs text-muted [overflow-wrap:anywhere]">
+            {menu.message}
+          </p>
+        )
+      ) : null}
+      {menu.mode === "error" ? (
+        <MenuItem icon={<ArrowsClockwiseIcon size={14} />} keepOpen onSelect={read}>
+          {MODEL_COPY.retry}
+        </MenuItem>
+      ) : null}
+      {menu.signIn ? (
+        <MenuItem icon={<SignInIcon size={14} />} onSelect={() => void controller.beginLogin(menu.signIn?.id ?? null)}>
+          {MODEL_COPY.signInAction}
+        </MenuItem>
+      ) : null}
+      {menu.notes.map((note) => (
+        <p key={note} className="px-2 pb-1.5 text-xs text-subtle [overflow-wrap:anywhere]">
+          {note}
+        </p>
+      ))}
+      {menu.showRows ? (
+        <MenuRadioGroup value={value} onValueChange={choose}>
+          {menu.rows.map((choice) => (
+            <ModelRow key={`${choice.kind}:${choice.id ?? ""}`} choice={choice} />
+          ))}
+          {menu.published.length > 0 ? <MenuLabel>{MODEL_COPY.published}</MenuLabel> : null}
+          {menu.published.map((published) => (
+            <MenuOption key={published.id} value={published.id} label={published.label} description={MODEL_COPY.notListed} />
+          ))}
+        </MenuRadioGroup>
+      ) : null}
+      <MenuSeparator />
+      <MenuItem icon={<PencilSimpleLineIcon size={14} />} onSelect={props.onOther}>
+        {MODEL_COPY.other}
+      </MenuItem>
+      {menu.mode !== "error" && menu.mode !== "signin" ? (
+        <MenuItem
+          icon={<ArrowsClockwiseIcon size={14} />}
+          keepOpen
+          disabled={menu.refreshing}
+          hint={menu.refreshing ? MODEL_COPY.refreshing : undefined}
+          onSelect={read}
+        >
+          {MODEL_COPY.refresh}
+        </MenuItem>
+      ) : null}
+      {controller.client.restartHosts ? (
+        <MenuItem icon={<ArrowClockwiseIcon size={14} />} keepOpen disabled={restart.disabled} hint={restart.hint ?? undefined} onSelect={() => void controller.restartMuse()}>
+          {MODEL_COPY.restart}
+        </MenuItem>
+      ) : null}
+      {menu.footer.line || menu.footer.builtIn || menu.footer.hint ? (
+        <div className="mt-1 flex flex-col gap-1 border-t border-line px-2 pt-2 pb-1.5 text-xs text-subtle">
+          {menu.footer.line ? <p>{menu.footer.line}</p> : null}
+          {menu.footer.builtIn ? <p>{menu.footer.builtIn}</p> : null}
+          {menu.footer.hint ? <p>{menu.footer.hint}</p> : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+export function ModelPicker(props: { sessionId: string | null; cwd: string | null; side: PickerSide }) {
   const controller = useController();
   const open = useApp((s) => s.picker === "model");
-  const models = useApp((s) => s.models);
-  const sessionModel = useApp((s) =>
-    props.sessionId ? (s.threads[props.sessionId]?.fold.meta.modelId ?? s.sessions[props.sessionId]?.modelId ?? null) : null,
-  );
+  const { scope, accountId } = useModelsScope(props.sessionId, props.cwd);
+  const source = useModelSource();
+  const current = useThreadModel(props.sessionId);
   const preferred = useApp((s) => s.prefs.defaultModelId);
-  const current = props.sessionId ? sessionModel : (preferred ?? models.find((m) => m.isDefault)?.modelId ?? null);
-  const model = models.find((m) => m.modelId === current);
-  const contributor = model?.contributor ?? /contributor/i.test(current ?? "");
+  const tried = useApp((s) => s.prefs.defaultModelTried);
+  const plan = useApp((s) => planAccount(s, accountId).planName);
+  const [typing, setTyping] = useState(false);
+  // A thread whose model Muse has not said yet runs on Muse's default, whatever the saved default is. A saved default
+  // the user tried by its id is kept: it is shown as not in Muse's list, never as unavailable.
+  const menu = modelMenu(source, { scope, accountId, current, pref: props.sessionId && !current ? null : preferred, plan, tried });
+  const { trigger } = menu;
   return (
-    <Menu open={open} onOpenChange={(next) => (next ? controller.setPicker("model") : controller.closePicker("model"))}>
-      <MenuTrigger asChild>
-        <ToolbarTrigger
-          aria-label={`Model: ${modelDisplayName(current)}`}
-          icon={<CpuIcon size={13} />}
-          label={
-            <>
-              <span className="truncate">{modelDisplayName(current)}</span>
-              {contributor ? (
-                <span className="ml-1.5">
-                  <ContributorBadge tip />
-                </span>
-              ) : null}
-            </>
+    <>
+      <Menu
+        open={open}
+        onOpenChange={(next) => {
+          if (next) {
+            controller.setPicker("model");
+            // The picker's own list, whichever scope the controller thinks is on screen; a fresh one is left be.
+            void controller.refreshModels(scope);
+          } else {
+            controller.closePicker("model");
           }
-        />
-      </MenuTrigger>
-      <MenuContent side={props.side} className="w-[330px]">
-        <MenuLabel>Model</MenuLabel>
-        {models.length === 0 ? (
-          <p className="px-2 pb-2 text-xs text-muted">The model list loads once Muse is running.</p>
-        ) : (
-          <MenuRadioGroup value={current ?? ""} onValueChange={(value) => void controller.setModel(value)}>
-            {models.map((m) => (
-              <MenuOption
-                key={m.modelId}
-                value={m.modelId}
-                label={modelDisplayName(m.modelId)}
-                badge={m.contributor ? <ContributorBadge /> : null}
-                description={
-                  m.contributor
-                    ? "Prompts and outputs may be used to improve Meta's products."
-                    : m.contextLimit
-                      ? `${formatTokens(m.contextLimit)} token context`
-                      : undefined
-                }
-              />
-            ))}
-          </MenuRadioGroup>
-        )}
-      </MenuContent>
-    </Menu>
+        }}
+      >
+        <MenuTrigger asChild>
+          <ToolbarTrigger
+            aria-label={modelButtonLabel(trigger)}
+            icon={<CpuIcon size={13} />}
+            tone={trigger.note ? "warn" : undefined}
+            label={
+              <>
+                <span className="truncate">{trigger.name}</span>
+                {/* A long name gives way before the reason the model cannot be chosen again does. */}
+                {trigger.note ? <span className="ml-1 shrink-0">({trigger.note})</span> : null}
+                {trigger.contributor ? (
+                  <span className="ml-1.5">
+                    <ContributorBadge tip />
+                  </span>
+                ) : null}
+              </>
+            }
+          />
+        </MenuTrigger>
+        <MenuContent side={props.side} className="w-[330px]">
+          <ModelMenuBody menu={menu} scope={scope} onOther={() => setTyping(true)} />
+        </MenuContent>
+      </Menu>
+      <Modal
+        open={typing}
+        onOpenChange={setTyping}
+        title="Use another model"
+        description="Type the id of a model Muse did not list. Muse checks access when you send a prompt."
+      >
+        <div className="mt-4">
+          <ModelIdForm onUse={(modelId) => tryTypedModel(controller, modelId)} onDone={() => setTyping(false)} onCancel={() => setTyping(false)} />
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -789,27 +1093,35 @@ export const LEVELS: { value: ReasoningEffort; label: string; description: strin
   // No Ultra: Muse Code 1.3.0 sends "ultra" to the model as "max", and the CLI stopped offering it.
   { value: "max", label: "Max", description: "The slowest and most thorough" },
 ];
-const TOP = LEVELS.length - 1;
 // Where the slider rests while Auto is on and nothing was picked yet: Medium.
-const RESTING = 3;
+const RESTING: ReasoningEffort = "medium";
 
-/** Reasoning effort as a stepped slider in a popover, after the Claude desktop effort control. */
-function EffortPicker(props: { side: PickerSide }) {
+/**
+ * Reasoning effort as a stepped slider in a popover. The stops are the levels the plan's list gives the model, so
+ * Off and Max appear only where Muse offers them (a built-in list never narrows them); a level the model lacks is
+ * shown as the nearest one it has, and the choice itself is kept for the next model.
+ */
+export function EffortPicker(props: { sessionId: string | null; cwd: string | null; side: PickerSide }) {
   const controller = useController();
   const open = useApp((s) => s.picker === "effort");
   const effort = useApp((s) => s.prefs.effort);
-  const [resting, setResting] = useState(RESTING);
+  const { scope } = useModelsScope(props.sessionId, props.cwd);
+  const source = useModelSource();
+  const current = useThreadModel(props.sessionId);
+  const preferred = useApp((s) => s.prefs.defaultModelId);
+  const model = activeModel(source, scope, current, props.sessionId && !current ? null : preferred);
+  const [resting, setResting] = useState<ReasoningEffort>(RESTING);
   const thumb = useRef<HTMLSpanElement>(null);
   const switchId = useId();
-  const picked = LEVELS.findIndex((l) => l.value === effort);
-  const auto = picked < 0;
-  const position = auto ? resting : picked;
-  const label = auto ? "Auto" : (LEVELS[picked]?.label ?? "Auto");
-  const ultra = !auto && picked === TOP;
+  const { levels, auto, shown, position } = effortView(model, effort, LEVELS, resting);
+  const top = Math.max(levels.length - 1, 1);
+  const label = shown ? effortLabel(shown) : "Auto";
+  const ultra = shown === "max";
+  const note = effortNote(effort, shown);
   const choose = (index: number) => {
-    const level = LEVELS[index];
+    const level = levels[index];
     if (level) {
-      setResting(index);
+      setResting(level.value);
       controller.setEffort(level.value);
     }
   };
@@ -832,7 +1144,7 @@ function EffortPicker(props: { side: PickerSide }) {
         >
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted">Effort</span>
-            <span className={cn("text-sm font-semibold", !auto && picked === TOP ? "text-accent-text" : "text-fg")}>{label}</span>
+            <span className={cn("text-sm font-semibold", ultra ? "text-accent-text" : "text-fg")}>{label}</span>
             <span className="flex-1" />
             <Tip label="Higher effort thinks longer for more thorough answers, but each turn takes more time.">
               <button
@@ -850,9 +1162,10 @@ function EffortPicker(props: { side: PickerSide }) {
           </div>
           <Slider.Root
             min={0}
-            max={TOP}
+            max={top}
             step={1}
             value={[position]}
+            disabled={levels.length < 2}
             onValueChange={([index]) => {
               if (index !== undefined) {
                 choose(index);
@@ -868,11 +1181,11 @@ function EffortPicker(props: { side: PickerSide }) {
               {/* One dot per level, inset by half the thumb so each sits exactly where the thumb stops. */}
               {ultra ? null : (
                 <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-[9px] left-[9px]">
-                  {LEVELS.map((level, index) => (
+                  {levels.map((level, index) => (
                     <span
                       key={level.value}
                       className="absolute top-1/2 size-[3px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-fg/30"
-                      style={{ left: `${(index / TOP) * 100}%` }}
+                      style={{ left: `${(index / top) * 100}%` }}
                     />
                   ))}
                 </span>
@@ -880,13 +1193,14 @@ function EffortPicker(props: { side: PickerSide }) {
             </Slider.Track>
             <Slider.Thumb
               ref={thumb}
-              aria-valuetext={LEVELS[position]?.label}
+              aria-valuetext={levels[position]?.label}
               className="block h-6 w-[18px] rounded-md bg-white shadow-[0_0_0_1px_oklch(0_0_0/0.08),0_1px_3px_oklch(0_0_0/0.3)] outline-none transition-transform duration-100 ease-out focus-visible:ring-2 focus-visible:ring-focus active:scale-95"
             />
           </Slider.Root>
           <p className={cn("mt-2 text-xs", auto ? "text-subtle" : "text-muted")}>
-            {auto ? "Muse picks the effort for each turn" : LEVELS[position]?.description}
+            {auto ? "Muse picks the effort for each turn" : levels[position]?.description}
           </p>
+          {note ? <p className="mt-1 text-xs text-subtle">{note}</p> : null}
           <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
             <label htmlFor={switchId} className="min-w-0 flex-1 cursor-default text-sm text-fg">
               Let Muse decide
@@ -894,7 +1208,7 @@ function EffortPicker(props: { side: PickerSide }) {
             <Switch.Root
               id={switchId}
               checked={auto}
-              onCheckedChange={(on) => controller.setEffort(on ? null : (LEVELS[position]?.value ?? "medium"))}
+              onCheckedChange={(on) => controller.setEffort(on ? null : (levels[position]?.value ?? "medium"))}
               className="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-line-strong outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-focus data-[state=checked]:bg-accent"
             >
               <Switch.Thumb className="block size-3.5 translate-x-0.5 rounded-full bg-white shadow-[0_1px_2px_oklch(0_0_0/0.3)] transition-transform duration-150 ease-out data-[state=checked]:translate-x-4" />

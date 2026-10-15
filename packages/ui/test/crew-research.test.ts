@@ -126,9 +126,10 @@ describe("crewView with a research run", () => {
     assert.ok((run.cost?.usd ?? 0) > 0);
     assert.deepEqual(run.slots, { used: 1, max: 3 });
     const base = runningResearch();
-    const unpriced = runOf(runningResearch({ config: { ...base.config, models: { supervisor: null, worker: null, writer: null } } }));
-    assert.equal(unpriced.cost, null, "no model named in the config, no estimate");
-    assert.equal(unpriced.tokens?.total, 91_420);
+    const unnamed = runOf(runningResearch({ config: { ...base.config, models: { supervisor: null, worker: null, writer: null } } }));
+    assert.equal(unnamed.cost?.model, "muse-spark-1.3", "no role named in the config: the server runs them on the thread's model, and so does the estimate");
+    assert.ok((unnamed.cost?.usd ?? 0) > 0);
+    assert.equal(unnamed.tokens?.total, 91_420);
     assert.equal(runOf(runningResearch({ usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 } })).tokens, null);
     assert.deepEqual(summaryLine(run), {
       progress: "Researching, round 2 of 12 · 1 done · 1 working",
@@ -258,7 +259,7 @@ describe("crewView with a research run", () => {
     ]);
     assert.deepEqual(activity.finishedToday.map((item) => [item.kind, item.itemId, item.state, item.endedAt]), [["run", "research:run-0", "done", rs(-20, 0)]]);
     assert.deepEqual(activity.stopAll, { runs: 1, tasks: 0 }, "Stop everything reaches the live research run");
-    assert.match(activity.foot, /^1 running in 1 thread · [\d.]+k tokens today$/);
+    assert.match(activity.foot, /^1 running in 1 thread · [\d.]+k tokens in current runs$/);
     assert.equal(activity.note, null);
   });
 

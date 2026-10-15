@@ -7,6 +7,7 @@ import {
   completionView,
   durationText,
   pendingKey,
+  reportCoverage,
   runLive,
   sinceYouLeft,
   summaryLine,
@@ -95,7 +96,11 @@ export function focusCrewCard(controller: AncillaController, sessionId: string):
   });
 }
 
-/** The head's sub line: `Workflow · started 14:02 · 9 agents · 1 planned · 1.1M tokens · ~$4.18 est.` */
+/**
+ * The head's sub line: `Workflow · started 14:02 · 9 agents · 1 planned · 1.2M tokens so far (8 of 9 reported) · ~$1.94 est.`
+ * While the run goes the total says so far, and while some agents have sent no usage it says how many have: the
+ * estimate beside it is built from the same agents.
+ */
 export function headSub(run: RunVM): { long: ReactNode; text: string } {
   const scheduled = run.counts.total - run.counts.planned;
   const parts: ReactNode[] = [runKindWord(run)];
@@ -109,7 +114,8 @@ export function headSub(run: RunVM): { long: ReactNode; text: string } {
   parts.push(agents);
   texts.push(agents);
   if (run.tokens) {
-    const tokens = `${formatTokens(run.tokens.total)} tokens`;
+    const coverage = reportCoverage(run);
+    const tokens = `${formatTokens(run.tokens.total)} tokens${runLive(run) ? " so far" : ""}${coverage ? ` (${coverage})` : ""}`;
     parts.push(tokens);
     texts.push(tokens);
   }

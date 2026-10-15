@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { applyEvents, emptyFold, type ThreadFold } from "../src/model/fold.js";
 import { formatCompactTokens, formatDuration, formatExactTokens, formatTokensPerSecond } from "../src/model/format.js";
-import { sessionTelemetry, timePillLabel, usagePillLabel } from "../src/model/usage.js";
+import { countedTurns, sessionTelemetry, sessionUsage, timePillLabel, turnSpeed, usagePillLabel } from "../src/model/usage.js";
+import { SPEED_TIP } from "../src/model/usage-labels.js";
 import type { ViewEvent } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 
@@ -197,6 +198,131 @@ describe("telemetry pill labels", () => {
 
     const uncached = sessionTelemetry(foldWith(calls([{ usage: { outputTokens: 18_400 } }])));
     assert.equal(usagePillLabel(uncached), "18.4K tok");
+  });
+});
+
+describe("telemetry and the context panel agree", () => {
+  const mixed = () =>
+    foldWith(calls([
+      { promptTokens: 1000, usage: { outputTokens: 100, cacheReadTokens: 900, cachedTokens: 100 } },
+      { promptTokens: 100, usage: { outputTokens: 10, cachedTokens: 500 } },
+    ]));
+  const folds = () => [mixed(), foldWith(historyEvents), foldWith(historyEvents.slice(-12)), emptyFold()];
+
+  it("reads the cache from the same per-call sums", () => {
+    for (const fold of folds()) {
+      const t = sessionTelemetry(fold);
+      const u = sessionUsage(fold, []);
+      assert.equal(t.cachedTokens, u.cachedReadTokens);
+      assert.equal(t.uncachedTokens, u.freshTokens);
+    }
+    assert.equal(sessionUsage(mixed(), []).cachedReadTokens, 1000, "the existing mixed fixture");
+  });
+
+  it("calls a load partial under the same rule, truncated or not", () => {
+    for (const fold of folds()) {
+      for (const truncated of [false, true]) {
+        assert.equal(sessionTelemetry(fold, truncated).partial, sessionUsage(fold, [], truncated).partial);
+      }
+    }
+    assert.equal(sessionTelemetry(foldWith(historyEvents)).partial, false);
+    assert.equal(sessionTelemetry(foldWith(historyEvents.slice(-12))).partial, true);
+  });
+});
+
+describe("session speed", () => {
+  it("leaves a call with no measured time out of the speed, and out of the timed count", () => {
+    const t = sessionTelemetry(foldWith(calls([
+      { turnId: "t1", durationMs: 3000, usage: { outputTokens: 300 } },
+      { turnId: "t1", durationMs: 0, usage: { outputTokens: 500 } },
+    ])));
+    assert.ok(Math.abs((t.tokensPerSecond ?? 0) - 100) < 1e-9);
+    assert.equal(t.timedCalls, 1);
+    assert.equal(t.durationMs, 3000, "model time still sums every call that reported one");
+    assert.equal(t.steps, 2);
+  });
+
+  it("leaves a tiny call out of the speed but keeps its time", () => {
+    const t = sessionTelemetry(foldWith(calls([
+      { turnId: "t1", durationMs: 3000, usage: { outputTokens: 300 } },
+      { turnId: "t1", durationMs: 1000, usage: { outputTokens: 5 } },
+    ])));
+    assert.ok(Math.abs((t.tokensPerSecond ?? 0) - 100) < 1e-9);
+    assert.equal(t.timedCalls, 2);
+    assert.equal(t.durationMs, 4000);
+  });
+
+  it("reports no speed for a lone call timed at zero", () => {
+    const t = sessionTelemetry(foldWith(calls([{ turnId: "t1", durationMs: 0, usage: { outputTokens: 500 } }])));
+    assert.equal(t.tokensPerSecond, null);
+    assert.equal(t.timedCalls, 0);
+  });
+
+  it("is the same figure the turn footer shows for a single-turn thread", () => {
+    const fold = foldWith([
+      started("t1"),
+      ...calls([
+        { turnId: "t1", durationMs: 3000, usage: { outputTokens: 300 } },
+        { turnId: "t1", durationMs: 2000, usage: { outputTokens: 5 } },
+        { turnId: "t1", durationMs: 0, usage: { outputTokens: 400 } },
+        { turnId: "t1", durationMs: 1500, usage: { outputTokens: 150 } },
+      ]),
+    ]);
+    const turn = turnSpeed(fold, "t1");
+    assert.ok(turn);
+    assert.equal(sessionTelemetry(fold).tokensPerSecond, turn.tokensPerSecond);
+    assert.ok(Math.abs(turn.tokensPerSecond - (450 / 4500) * 1000) < 1e-9);
+  });
+
+  it("says what the speed divides", () => {
+    assert.match(SPEED_TIP, /^Output tokens including reasoning over model call time/);
+  });
+});
+
+describe("turn counts", () => {
+  const completed = (turnId: string, terminal = "completed"): ViewEvent => ({ method: "turn/completed", params: { turnId, terminal } });
+  const retracted = (turnId: string): ViewEvent => ({ method: "turn/retracted", params: { turnId } });
+  const unqueued = (turnId: string): ViewEvent => ({ method: "turn/unqueued", params: { turnId } });
+  const counts = (events: ViewEvent[]) => {
+    const fold = foldWith(events);
+    return { pill: sessionTelemetry(fold).turns, panel: sessionUsage(fold, []).turns };
+  };
+
+  it("counts neither a prompt that left the queue unrun nor one that was pulled back", () => {
+    assert.deepEqual(counts([started("t1"), completed("t1"), unqueued("t2"), started("t3"), retracted("t3")]), { pill: 1, panel: 1 });
+  });
+
+  it("counts a retracted turn once even when its interrupt ended it as cancelled", () => {
+    assert.deepEqual(counts([started("t1"), completed("t1"), started("t3"), retracted("t3"), completed("t3", "cancelled")]), { pill: 1, panel: 1 });
+  });
+
+  it("takes time worked and first-token time from the counted turns only", () => {
+    const ended = (turnId: string, terminal: string, durationMs: number, timeToFirstTokenMs: number): ViewEvent => ({
+      method: "turn/completed",
+      params: { turnId, terminal, durationMs, timeToFirstTokenMs },
+    });
+    const fold = foldWith([
+      started("t1"),
+      ended("t1", "completed", 1000, 100),
+      started("t2"),
+      ended("t2", "completed", 3000, 300),
+      // A prompt that left the queue unrun, and one pulled back and then ended as cancelled, still carry times.
+      started("t3"),
+      ended("t3", "completed", 5000, 900),
+      unqueued("t3"),
+      started("t4"),
+      retracted("t4"),
+      ended("t4", "cancelled", 7000, 700),
+    ]);
+    const usage = sessionUsage(fold, []);
+    assert.equal(usage.turns, 2);
+    assert.equal(usage.workedMs, 4000);
+    assert.equal(usage.firstTokenMs, 200, "the mean over t1 and t2");
+  });
+
+  it("lets the pill hold the turn still running and the panel only finished turns", () => {
+    assert.deepEqual(counts([started("t1"), completed("t1"), started("t2")]), { pill: 2, panel: 1 });
+    assert.deepEqual(countedTurns(foldWith([started("t1"), completed("t1"), started("t2")])).map((turn) => turn.turnId), ["t1", "t2"]);
   });
 });
 

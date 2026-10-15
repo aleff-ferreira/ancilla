@@ -93,7 +93,7 @@ export interface ThreadMeta {
   branch: string | null;
   contextUsage: ContextUsage | null;
   tokenTotals: TokenTotals | null;
-  /** Every model call's usage, keyed by view cursor so a reloaded history never counts one twice. */
+  /** Every model call's usage, keyed by the call's own totals (its view cursor when it has none) so live, history and reload never count one twice. */
   calls: Record<string, CallUsage>;
   modelId: string | null;
   approvalMode: ApprovalMode | null;
@@ -1001,7 +1001,14 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       }
       const usage = asRecord(params["usage"]) ?? {};
       const promptTokens = numberOr(params["promptTokens"]) ?? numberOr(usage["inputTokens"]) ?? 0;
-      const key = str(params["viewCursor"]) ?? `${str(params["turnId"]) ?? "turn"}:${Object.keys(d.meta.calls).length}`;
+      // One call, one entry, however it reached us. The live stream and a history page number the same call with
+      // different cursors (the page drops the deltas between them), so a call that carries Muse's running totals is
+      // keyed by those: every call moves them, and a replay or a merge of the same call lands on the same key. The
+      // cursor is only the key for an event without totals.
+      const totals = cumulative ? [numberOr(cumulative["promptTokens"]), numberOr(cumulative["outputTokens"]), numberOr(cumulative["totalTokens"])] : [];
+      const key = totals.some((value) => value !== undefined)
+        ? [str(params["turnId"]) ?? "", ...totals.map((value) => value ?? ""), numberOr(params["durationMs"]) ?? "", promptTokens].join(":")
+        : str(params["viewCursor"]) ?? `${str(params["turnId"]) ?? "turn"}:${Object.keys(d.meta.calls).length}`;
       draft.putCall(key, {
         turnId: str(params["turnId"]),
         modelId: str(params["modelId"]),

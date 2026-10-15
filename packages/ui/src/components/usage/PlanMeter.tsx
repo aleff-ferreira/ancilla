@@ -1,8 +1,7 @@
 import { GaugeIcon } from "../ui/icons.js";
 import { useEffect } from "react";
 import { shallowEqual, useApp, useController, useNow } from "../../app/context.js";
-import { relativeTime } from "../../model/format.js";
-import { contextualPlanAccountId, planAccount, planAccountChoices, planView, type PlanTone, type PlanView } from "../../model/plan.js";
+import { bindingRow, contextualPlanAccountId, planAccount, planAccountChoices, planView, startPlanPolling, type PlanTone, type PlanView } from "../../model/plan.js";
 import type { PlanAccountUsage } from "../../types.js";
 import { Tip } from "../ui/overlays.js";
 import { Button, cn } from "../ui/primitives.js";
@@ -19,14 +18,8 @@ export function PlanMeter() {
   const account = useApp((s) => planAccount(s, accountId), shallowEqual);
   const now = useNow(60_000);
   const loading = useApp((s) => s.planUsageLoading);
-  useEffect(() => {
-    void controller.loadPlanUsage();
-    const refresh = () => { if (document.visibilityState === "visible") void controller.loadPlanUsage(); };
-    // This checks the account without creating a thread or making a model call.
-    const timer = window.setInterval(refresh, 60_000);
-    document.addEventListener("visibilitychange", refresh);
-    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
-  }, [controller]);
+  // The first read shows the Refresh spinner and "Checking subscription…"; the quiet ones after it leave them alone.
+  useEffect(() => startPlanPolling(controller, document), [controller]);
   const title = choices.find((choice) => choice.id === accountId)?.name ?? "Default login";
   return (
     <section aria-label="Muse subscription" className="rounded-xl bg-raised px-4 py-3.5 shadow-panel">
@@ -63,7 +56,10 @@ export function quotaAvailabilityLabel(account: PlanAccountUsage): string {
       ? "The Muse runtime has not reported subscription limits for this login. Current allowance is unknown."
       : account.source === "saved"
         ? "This is a saved reading. A current account check is unavailable, so the allowance may have changed."
-        : "Last reported by the Muse runtime. Activity in other clients may have changed this account’s allowance.";
+        : account.source === "meta"
+          // Meta's own reading, kept after the login lost the token that could check it again.
+          ? "Last reported by Meta. A current account check is unavailable, so the allowance may have changed."
+          : "Last reported by the Muse runtime. Activity in other clients may have changed this account’s allowance.";
     case "ready": return account.source === "meta"
       ? "Account-wide limits reported by Meta, including activity outside Ancilla. Refresh checks the account without using model allowance."
       : "Last reported by Muse. Activity in other clients may change this account’s allowance before the next reading.";
@@ -74,7 +70,7 @@ function AccountDetails(props: { account: PlanAccountUsage; title: string; now: 
   const { account, title, now, loading } = props;
   const view = planView(account.usage, now, account);
   return <>
-    {view ? <MeterDetails view={view} title={title} now={now} account={account} /> : <>
+    {view ? <MeterDetails view={view} title={title} account={account} /> : <>
       <div className="mt-2 flex flex-wrap items-baseline gap-2 text-xs">
         <h3 className="font-medium text-muted">{title}</h3>
         {account.planName ? <span className="text-subtle">{account.planName}</span> : null}
@@ -103,8 +99,8 @@ function MissingQuota(props: { loading?: boolean; status: PlanAccountUsage["stat
 }
 
 /** Pure quota view, retaining past readings without presenting them as the current allowance. */
-export function MeterDetails(props: { view: PlanView; title: string; now: number; saved?: boolean; account?: PlanAccountUsage }) {
-  const { view, title, now, account } = props;
+export function MeterDetails(props: { view: PlanView; title: string; saved?: boolean; account?: PlanAccountUsage }) {
+  const { view, title, account } = props;
   const saved = props.saved || account?.source === "saved";
   const planName = account?.planName ?? view.tier;
   const source = saved ? "Saved reading" : account?.source === "meta" ? "Meta account" : "Muse runtime";
@@ -115,7 +111,7 @@ export function MeterDetails(props: { view: PlanView; title: string; now: number
         {planName ? <span className="rounded-md bg-active px-1.5 py-px text-2xs text-muted">{planName}</span> : null}
         <span className="flex-1" />
         <time dateTime={new Date(view.observedAtMs).toISOString()} title={new Date(view.observedAtMs).toLocaleString()} className={cn("text-2xs", view.stale || saved ? "text-warn-text" : "text-subtle")}>
-          {source} · {updatedLabel(view, now)}
+          {source} · {updatedLabel(view)}
         </time>
       </div>
       <div className="mt-3 grid gap-3 @min-[520px]:grid-cols-2">
@@ -142,7 +138,9 @@ export function MeterDetails(props: { view: PlanView; title: string; now: number
           </div>;
         })}
       </div>
-      {view.stale ? <p className="mt-2 text-2xs text-warn-text">A reading is out of date. Current allowance is unknown for that window until it is refreshed.</p> : null}
+      {view.stale ? <p className="mt-2 text-2xs text-warn-text">{view.refreshable
+        ? "A reading is out of date. Current allowance is unknown for that window until it is refreshed."
+        : "A reading is out of date. Current allowance is unknown for that window. Muse reports this again when it next sends usage. Refresh cannot update it."}</p> : null}
     </div>
   );
 }
@@ -165,12 +163,12 @@ export function AccountMeters() {
   );
 }
 
-function updatedLabel(view: PlanView, now: number): string {
-  const age = relativeTime(new Date(view.observedAtMs).toISOString(), now);
-  return age === "now" ? "Reported just now" : `Reported ${age} ago`;
+/** The reading's age in the short form the sidebar pill uses, so both surfaces describe the same reading alike. */
+function updatedLabel(view: PlanView): string {
+  return view.age === "just now" ? "Reported just now" : `Reported ${view.age} ago`;
 }
 
-/** The current thread/project's account, with an unknown marker instead of an old percentage. */
+/** The current thread/project's account, led by the limit that binds, with an unknown marker instead of an old percentage. */
 export function PlanPill() {
   const controller = useController();
   const accountId = useApp(contextualPlanAccountId);
@@ -178,16 +176,18 @@ export function PlanPill() {
   const name = useApp((s) => accountId === null ? "Default login" : s.accounts?.find((entry) => entry.id === accountId)?.name ?? accountId);
   const now = useNow(60_000, account.usage !== null);
   const view = planView(account.usage, now, account);
-  const first = view?.rows[0];
-  if (!view || !first) return null;
-  const label = `${name}. ` + view.rows.map((row) => row.current
-    ? `${row.label}: ${row.percent}% used, ${row.resets.toLowerCase()}`
-    : `${row.label}: current usage unknown; previous reading ${row.percent}% used`).join(". ");
+  if (!view) return null;
+  // The percentage that matters is the one closest to the cap, not whichever window happens to come first.
+  const binding = bindingRow(view);
+  const label = `${name}. ` + (binding?.key === "weekly" ? "The pill shows the weekly limit, the highest of the limits with a current reading. " : "") +
+    view.rows.map((row) => row.current
+      ? `${row.label}: ${row.percent}% used, ${row.resets.toLowerCase()}`
+      : `${row.label}: current usage unknown; previous reading ${row.percent}% used`).join(". ");
   return (
-    <Tip label={`${label}. ${view.age === "just now" ? "Reported just now" : `Reported ${view.age} ago`}.`} side="top">
+    <Tip label={`${label}. ${updatedLabel(view)}.`} side="top">
       <button type="button" aria-label={`Plan usage. ${label}`} onClick={() => controller.navigate({ kind: "usage" })}
-        className={cn("inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-2xs font-medium tabular-nums transition-colors duration-100 hover:bg-hover", first.current ? TEXT[first.tone] : "text-subtle")}>
-        <GaugeIcon size={12} />{first.current ? `${first.percent}%` : "—"}
+        className={cn("inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-2xs font-medium tabular-nums transition-colors duration-100 hover:bg-hover", binding ? TEXT[binding.tone] : "text-subtle")}>
+        <GaugeIcon size={12} />{binding ? `${binding.percent}%${binding.key === "weekly" ? " wk" : ""}` : "—"}
       </button>
     </Tip>
   );

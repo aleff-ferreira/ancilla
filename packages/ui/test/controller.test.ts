@@ -4,10 +4,12 @@ import { AncillaError, type EventHandler, type AncillaClient } from "../src/clie
 import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
-import { crewView } from "../src/model/crew.js";
-import type { AncillaEvent, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
+import { crewBusy, crewView } from "../src/model/crew.js";
+import { modelIdError, modelMenu, modelsShown, offeredByAnother, tryTypedModel } from "../src/model/models.js";
+import type { AncillaEvent, ModelCatalog, ModelOption, ProjectView, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
+import { LIVE_1_4_0, LIVE_1_4_7, answer } from "./fixtures/picker-catalogs.js";
 import type { LinuxSetupView, LinuxDesktopStatus } from "../src/types.js";
 
 const SESSION: SessionSummary = {
@@ -41,6 +43,8 @@ function load(overrides: Partial<TranscriptLoad> = {}): TranscriptLoad {
     ...overrides,
   };
 }
+
+type ModelAnswer = ModelOption[] | Error | { models: ModelOption[]; source: string | null };
 
 class FakeClient implements AncillaClient {
   handler: EventHandler | null = null;
@@ -123,11 +127,14 @@ class FakeClient implements AncillaClient {
   async updateSession() {
     return SESSION;
   }
+  /** The reasoning effort each turn was sent with, in order; undefined when it carried none. */
+  turnEfforts: (string | undefined)[] = [];
   async sendTurn(
     sessionId: string,
     text: string,
-    options?: { ifBusy?: string; displayText?: string; attachments?: { name: string; mediaType: string; base64: string }[] },
+    options?: { ifBusy?: string; displayText?: string; reasoningEffort?: string; attachments?: { name: string; mediaType: string; base64: string }[] },
   ) {
+    this.turnEfforts.push(options?.reasoningEffort);
     this.sent.push({
       sessionId,
       text,
@@ -146,8 +153,39 @@ class FakeClient implements AncillaClient {
   async answerUserInput() {}
   async cancelUserInput() {}
   async clarifyUserInput() {}
-  async listModels() {
-    return [];
+  /** What `listModels` answers once `modelQueue` has run dry, with the source it says the rows came from. */
+  models: ModelOption[] = [];
+  modelSource: string | null = "providerCatalog";
+  /** The next answers, in order: rows, an error to throw, rows with a source, or a function that holds the answer back. */
+  modelQueue: (ModelAnswer | (() => Promise<ModelAnswer>))[] = [];
+  /** Every ask for models, with the thread and account it was for. */
+  modelCalls: { sessionId?: string; accountId?: string | null }[] = [];
+  private async nextModels(sessionId?: string, accountId?: string | null): Promise<{ models: ModelOption[]; source: string | null }> {
+    this.modelCalls.push({ sessionId, accountId });
+    const next = this.modelQueue.shift();
+    const answer = typeof next === "function" ? await next() : next;
+    if (answer instanceof Error) {
+      throw answer;
+    }
+    if (Array.isArray(answer)) {
+      return { models: answer, source: this.modelSource };
+    }
+    return answer ?? { models: this.models, source: this.modelSource };
+  }
+  async listModels(sessionId?: string, accountId?: string | null) {
+    return (await this.nextModels(sessionId, accountId)).models;
+  }
+  async listModelCatalog(sessionId?: string, accountId?: string | null): Promise<ModelCatalog> {
+    const { models, source } = await this.nextModels(sessionId, accountId);
+    return { models, source, providerId: "meta", profileId: "default", hostVersion: "1.4.7" };
+  }
+  restarts = 0;
+  restartError: Error | null = null;
+  async restartHosts() {
+    this.restarts += 1;
+    if (this.restartError) {
+      throw this.restartError;
+    }
   }
   titleSettings = { enabled: true, modelId: null as string | null };
   titleError: Error | null = null;
@@ -210,7 +248,22 @@ class FakeClient implements AncillaClient {
     this.yoloSettings = { enabled: patch.enabled ?? this.yoloSettings.enabled };
     return { ...this.yoloSettings };
   }
-  async setSessionModel() {}
+  modelSwitches: { sessionId: string; modelId: string }[] = [];
+  setModelError: Error | null = null;
+  /** One entry per switch, in order: a promise the switch waits on before Muse answers it, failing if that rejects. */
+  modelGates: Promise<void>[] = [];
+  async setSessionModel(sessionId: string, modelId: string) {
+    this.modelSwitches.push({ sessionId, modelId });
+    const gate = this.modelGates.shift();
+    if (gate) {
+      await gate;
+    }
+    if (this.setModelError) {
+      const error = this.setModelError;
+      this.setModelError = null;
+      throw error;
+    }
+  }
   approvalModes: { sessionId: string; mode: string }[] = [];
   approvalModeFailFor: Set<string> = new Set();
   async setApprovalMode(sessionId: string, mode: string) {
@@ -1844,6 +1897,137 @@ describe("AncillaController", () => {
     stop();
   });
 
+  describe("plan usage upkeep", () => {
+    type Report = import("../src/types.js").PlanUsageReport;
+    const reading = (percent: number, at: number) => ({ tier: "high", observedAtMs: at,
+      window: { usedPercent: percent, resetsAtMs: at + 5000, windowDurationMins: 300 },
+      weekly: { usedPercent: 3, resetsAtMs: at + 9000, windowDurationMins: null } });
+    const quiet: Report = { usage: null, byAccount: {}, status: "unobserved" };
+    const workAccount = { id: "work", name: "Work", hasLogin: true, email: "work@example.test", lastUsedAt: null };
+    const defaultRecord = { accountId: null, usage: null, planName: null, source: null, status: "not-reported", checkedAtMs: 100 } as const;
+    const workRecord = (usage: ReturnType<typeof reading>) => ({ accountId: "work", usage, planName: "Muse Plus", source: "meta", status: "ready", checkedAtMs: 300 }) as const;
+
+    it("never raises the loading flag for a background read, and a click shows it until the shared read ends", async () => {
+      const client = new FakeClient();
+      const { controller, stop } = await started(client);
+      const flag = [controller.store.get().planUsageLoading];
+      const unsubscribe = controller.store.subscribe(() => {
+        const loading = controller.store.get().planUsageLoading;
+        if (flag.at(-1) !== loading) flag.push(loading);
+      });
+      let reads = 0;
+      let finish!: (report: Report) => void;
+      client.planUsage = () => { reads += 1; return new Promise((resolve) => { finish = resolve; }); };
+
+      try {
+        const background = controller.loadPlanUsage({ background: true });
+        assert.equal(controller.store.get().planUsageLoading, false, "Refresh does not spin by itself");
+        finish(quiet);
+        await background;
+        assert.deepEqual(flag, [false], "the flag was never raised");
+
+        const running = controller.loadPlanUsage({ background: true });
+        const click = controller.loadPlanUsage();
+        assert.equal(click, running, "a click joins the read in flight");
+        assert.equal(controller.store.get().planUsageLoading, true, "and shows it");
+        void controller.loadPlanUsage({ background: true });
+        assert.equal(controller.store.get().planUsageLoading, true, "a later background caller does not hide it");
+        assert.equal(reads, 2);
+        finish(quiet);
+        await click;
+        assert.equal(controller.store.get().planUsageLoading, false);
+        assert.deepEqual(flag, [false, true, false], "raised once and cleared once when the shared read ended");
+
+        const plain = controller.loadPlanUsage();
+        assert.equal(controller.store.get().planUsageLoading, true, "a plain call still sets it");
+        finish(quiet);
+        await plain;
+        assert.equal(controller.store.get().planUsageLoading, false);
+
+        client.planUsage = () => Promise.reject(new Error("offline"));
+        await controller.loadPlanUsage();
+        assert.equal(controller.store.get().planUsageLoading, false, "a failed read clears it too");
+      } finally {
+        unsubscribe();
+        stop();
+      }
+    });
+
+    it("forgets a removed account's readings, selection and project default, then reads the meter again", async () => {
+      const client = new FakeClient();
+      client.accounts = [workAccount];
+      client.projects = client.projects.map((project) => ({ ...project, defaultAccountId: "work" }));
+      const work = reading(60, 300);
+      client.plan = work;
+      client.planByAccount = { work };
+      client.planMetadata = { accountId: "work", saved: true, savedAccountIds: ["work"], status: "ready", accounts: [defaultRecord, workRecord(work)] };
+      const { controller, stop } = await started(client);
+      try {
+        controller.selectPlanUsageAccount("work");
+        const before = controller.store.get();
+        assert.equal(before.planUsageAccountId, "work");
+        assert.ok(before.planUsageAccounts.some((account) => account.accountId === "work"));
+        assert.ok(before.planUsageByAccount["work"]);
+        assert.deepEqual(before.planUsageSavedAccounts, ["work"]);
+        assert.equal(before.projects[0]?.defaultAccountId, "work");
+
+        let reads = 0;
+        let finish!: (report: Report) => void;
+        client.planUsage = () => { reads += 1; return new Promise((resolve) => { finish = resolve; }); };
+        assert.equal(await controller.removeAccount("work"), true);
+        await settle();
+        // The new read is still open, so everything below is the pruning, not a fresh answer.
+        const state = controller.store.get();
+        assert.equal(reads, 1, "the meter is read again");
+        assert.deepEqual(state.planUsageAccounts.map((account) => account.accountId), [null]);
+        assert.deepEqual(state.planUsageByAccount, {});
+        assert.deepEqual(state.planUsageSavedAccounts, []);
+        assert.equal(state.planUsageSelectedAccountId, null);
+        assert.equal(state.planUsageAccountId, null);
+        assert.equal(state.planUsage, null);
+        assert.ok(state.projects.length > 0 && state.projects.every((project) => project.defaultAccountId === null));
+        const { planAccount, planAccountChoices } = await import("../src/model/plan.js");
+        assert.deepEqual(planAccountChoices(state), [{ id: null, name: "Default login" }]);
+        assert.equal(planAccount(state, "work").usage, null);
+
+        finish({ usage: null, byAccount: {}, status: "unobserved", accounts: [defaultRecord] });
+        await settle();
+        assert.deepEqual(controller.store.get().planUsageAccounts.map((account) => account.accountId), [null]);
+        assert.equal(reads, 1);
+      } finally {
+        stop();
+      }
+    });
+
+    it("keeps a removed account out of the meter when a read already in flight still listed it", async () => {
+      const client = new FakeClient();
+      client.accounts = [workAccount];
+      const work = reading(60, 300);
+      const { controller, stop } = await started(client);
+      try {
+        let reads = 0;
+        let finish!: (report: Report) => void;
+        client.planUsage = () => { reads += 1; return new Promise((resolve) => { finish = resolve; }); };
+        const inFlight = controller.loadPlanUsage({ background: true });
+        assert.equal(await controller.removeAccount("work"), true);
+        assert.equal(reads, 1, "nothing new can start while the old read is open");
+        // The server answered that read before the account went.
+        finish({ usage: work, byAccount: { work }, accountId: "work", status: "ready", accounts: [defaultRecord, workRecord(work)] });
+        await inFlight;
+        await settle();
+        assert.equal(reads, 2, "so the meter is read once more when it ends");
+        finish({ usage: null, byAccount: {}, status: "unobserved", accounts: [defaultRecord] });
+        await settle();
+        const state = controller.store.get();
+        assert.deepEqual(state.planUsageAccounts.map((account) => account.accountId), [null]);
+        assert.deepEqual(state.planUsageByAccount, {});
+        assert.equal(state.planUsage, null);
+      } finally {
+        stop();
+      }
+    });
+  });
+
   it("loads the account list and creates an account", async () => {
     const client = new FakeClient();
     const controller = new AncillaController(client, platform());
@@ -2928,6 +3112,1851 @@ describe("AncillaController", () => {
     await controller.archive("s1");
     controller.goBack();
     assert.deepEqual(controller.store.get().route, { kind: "home" });
+    stop();
+  });
+});
+
+// ---------------------------------------------------------------- the model catalog and the model choice
+
+function model(modelId: string, extra: Partial<ModelOption> = {}): ModelOption {
+  return {
+    modelId,
+    displayLabel: modelId,
+    description: null,
+    isDefault: false,
+    isActive: false,
+    contextLimit: null,
+    outputLimit: null,
+    cost: null,
+    contributor: /contributor/i.test(modelId),
+    efforts: null,
+    ...extra,
+  };
+}
+
+const SPARK = model("muse-spark-1.3", { efforts: ["minimal", "low", "medium", "high", "xhigh", "max"] });
+const SPARK_12 = model("muse-spark-1.2", { efforts: ["minimal", "low", "medium", "high", "xhigh"] });
+const SPARK_CONTRIBUTOR = model("muse-spark-1.3-contributor", {
+  isDefault: true,
+  description: "Your content may be used for product improvement.",
+  efforts: ["minimal", "low", "medium", "high", "xhigh", "max"],
+});
+const WONDER = model("muse-wonder-1.0", { efforts: ["minimal", "low", "medium", "high", "xhigh", "max"] });
+const WONDER_FULL = model("muse-wonder-full-1.0");
+
+/**
+ * A fake platform whose clock the test moves, and whose longest timers (the model list's retries) wait for `fire`
+ * instead of running: every other delay still collapses to a tick, as in `platform()`.
+ */
+function heldPlatform(hash = "", hold: number[] = [2_000, 3_000, 10_000, 30_000]) {
+  const base = platform(hash);
+  const clock = { now: Date.now() };
+  const held: { fn: () => void; ms: number; live: boolean }[] = [];
+  base.now = () => clock.now;
+  base.schedule = (fn, ms) => {
+    if (!hold.includes(ms)) {
+      return setTimeout(fn, 0);
+    }
+    const entry = { fn, ms, live: true };
+    held.push(entry);
+    return entry;
+  };
+  base.cancel = (handle) => {
+    if (handle && typeof handle === "object" && "live" in handle) {
+      (handle as { live: boolean }).live = false;
+    } else {
+      clearTimeout(handle as ReturnType<typeof setTimeout>);
+    }
+  };
+  return Object.assign(base, {
+    clock,
+    /** The delays of the timers still waiting. */
+    waiting: () => held.filter((entry) => entry.live).map((entry) => entry.ms),
+    /** Runs every waiting timer of that delay. */
+    fire: (ms: number) => {
+      for (const entry of held.filter((candidate) => candidate.live && candidate.ms === ms)) {
+        entry.live = false;
+        entry.fn();
+      }
+    },
+  });
+}
+
+/** Boots a controller on a held platform, recording every toast it raises, whether or not it is still showing. */
+async function startedWith(client: FakeClient, hash = "") {
+  const held = heldPlatform(hash);
+  const controller = new AncillaController(client, held);
+  const toasts: { title: string; detail?: string }[] = [];
+  const seen = new Set<number>();
+  controller.store.subscribe(() => {
+    for (const toast of controller.store.get().toasts) {
+      if (!seen.has(toast.id)) {
+        seen.add(toast.id);
+        toasts.push({ title: toast.title, detail: toast.detail });
+      }
+    }
+  });
+  const stop = controller.start();
+  await settle();
+  await settle();
+  return { controller, stop, held, toasts };
+}
+
+const NEW_THREAD = "#/new/%2Fwork%2Fapp";
+
+describe("model lists", () => {
+  it("loads the default login's list at boot and files it with what Muse says about it", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, WONDER];
+    const { controller, stop } = await startedWith(client);
+    const state = controller.store.get();
+    assert.deepEqual(state.accountModels["default"], [SPARK, WONDER]);
+    assert.deepEqual(state.models, [SPARK, WONDER]);
+    assert.equal(state.modelsStatus["default"]?.status, "ready");
+    assert.equal(state.modelsStatus["default"]?.error, null);
+    assert.equal(state.modelsStatus["default"]?.catalog?.source, "providerCatalog");
+    assert.equal(state.modelsStatus["default"]?.catalog?.hostVersion, "1.4.7");
+    assert.equal(typeof state.modelsStatus["default"]?.loadedAt, "number");
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }]);
+    stop();
+  });
+
+  it("takes the rows alone from a transport that cannot say where its list came from", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    (client as { listModelCatalog?: unknown }).listModelCatalog = undefined;
+    const { controller, stop } = await startedWith(client);
+    const state = controller.store.get();
+    assert.deepEqual(state.models, [SPARK]);
+    assert.equal(state.modelsStatus["default"]?.status, "ready");
+    assert.equal(state.modelsStatus["default"]?.catalog?.source, null);
+    stop();
+  });
+
+  it("says why a failed first load failed and tries once more shortly", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("Could not start Muse")];
+    client.models = [WONDER];
+    const { controller, stop, held } = await startedWith(client);
+    let state = controller.store.get();
+    assert.equal(state.modelsStatus["default"]?.status, "error");
+    assert.equal(state.modelsStatus["default"]?.error, "Could not start Muse");
+    assert.deepEqual(state.models, []);
+    assert.deepEqual(held.waiting(), [3_000], "one retry is waiting");
+    held.fire(3_000);
+    await settle();
+    state = controller.store.get();
+    assert.equal(state.modelsStatus["default"]?.status, "ready");
+    assert.equal(state.modelsStatus["default"]?.error, null);
+    assert.deepEqual(state.models, [WONDER]);
+    assert.equal(client.modelCalls.length, 2);
+    stop();
+  });
+
+  it("gives up after the one retry and leaves the picker to ask again", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("first"), new Error("second")];
+    client.models = [WONDER];
+    const { controller, stop, held } = await startedWith(client);
+    held.fire(3_000);
+    await settle();
+    assert.equal(controller.store.get().modelsStatus["default"]?.error, "second");
+    assert.deepEqual(held.waiting(), [], "no third try on its own");
+    assert.equal(client.modelCalls.length, 2);
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "opening the picker is the way to ask again");
+    assert.deepEqual(controller.store.get().models, [WONDER]);
+    stop();
+  });
+
+  it("reads a stale list again when the picker opens, once, and leaves a fresh one be", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("offline")];
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "exactly one extra ask");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "ready");
+    assert.equal(controller.store.get().models.length, 1);
+    controller.setPicker(null);
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "a list younger than ten minutes is left be");
+    held.clock.now += 11 * 60_000;
+    controller.setPicker(null);
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "an older one is read again");
+    stop();
+  });
+
+  it("keeps the last good list when a refresh fails, and says why", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    const before = controller.store.get().modelsStatus["default"];
+    client.modelQueue = [new Error("Muse is not answering")];
+    await controller.refreshModels({ force: true });
+    const state = controller.store.get();
+    assert.equal(state.modelsStatus["default"]?.status, "error");
+    assert.equal(state.modelsStatus["default"]?.error, "Muse is not answering");
+    assert.deepEqual(state.accountModels["default"], [SPARK]);
+    assert.deepEqual(state.models, [SPARK]);
+    assert.equal(state.modelsStatus["default"]?.loadedAt, before?.loadedAt, "the time of the last good answer is kept");
+    assert.deepEqual(state.modelsStatus["default"]?.catalog, before?.catalog);
+    stop();
+  });
+
+  it("keeps the newer answer when two asks overlap", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.modelQueue = [
+      async () => {
+        await gate;
+        return [SPARK];
+      },
+      [WONDER],
+    ];
+    const older = controller.refreshModels({ force: true });
+    const newer = controller.refreshModels({ force: true });
+    await newer;
+    assert.deepEqual(controller.store.get().models, [WONDER]);
+    release();
+    await older;
+    assert.deepEqual(controller.store.get().models, [WONDER], "the older answer is dropped");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "ready");
+    stop();
+  });
+
+  it("does not ask again for a list it is already asking for", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    held.clock.now += 11 * 60_000;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.modelQueue = [
+      async () => {
+        await gate;
+        return [WONDER];
+      },
+    ];
+    const first = controller.refreshModels({});
+    const second = controller.refreshModels({});
+    assert.equal(client.modelCalls.length, 2, "one ask in flight, not two");
+    release();
+    await Promise.all([first, second]);
+    assert.deepEqual(controller.store.get().models, [WONDER]);
+    stop();
+  });
+
+  it("reads a thread's account catalog when its host has not loaded the thread", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    client.modelQueue = [new AncillaError("Session is not loaded.", 409, "sessionNotLoaded"), [SPARK, WONDER]];
+    await controller.refreshModels({ sessionId: "s1" });
+    assert.deepEqual(client.modelCalls.slice(1), [
+      { sessionId: "s1", accountId: undefined },
+      { sessionId: undefined, accountId: undefined },
+    ]);
+    assert.deepEqual(controller.store.get().accountModels["thread:s1"], [SPARK, WONDER]);
+    assert.equal(controller.store.get().modelsStatus["thread:s1"]?.status, "ready");
+    stop();
+  });
+
+  it("keeps each catalog under its own key and merges them for lookups", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    client.modelQueue = [[WONDER, SPARK]];
+    await controller.refreshModels({ accountId: "work" });
+    client.modelQueue = [[WONDER_FULL]];
+    await controller.refreshModels({ sessionId: "s1" });
+    const state = controller.store.get();
+    assert.deepEqual(state.accountModels["default"], [SPARK]);
+    assert.deepEqual(state.accountModels["acct:work"], [WONDER, SPARK]);
+    assert.deepEqual(state.accountModels["thread:s1"], [WONDER_FULL]);
+    assert.deepEqual(state.models.map((m) => m.modelId), ["muse-spark-1.3", "muse-wonder-1.0", "muse-wonder-full-1.0"], "the default login's first, each model once");
+    assert.deepEqual(client.modelCalls, [
+      { sessionId: undefined, accountId: undefined },
+      { sessionId: undefined, accountId: "work" },
+      { sessionId: "s1", accountId: undefined },
+    ]);
+    stop();
+  });
+
+  it("holds at most eight threads' lists, letting the one asked for longest ago go", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await startedWith(client);
+    for (let i = 0; i < 10; i += 1) {
+      client.modelQueue = [[model(`only-in-${i}`)]];
+      await controller.refreshModels({ sessionId: `t${i}` });
+    }
+    const state = controller.store.get();
+    const threadKeys = Object.keys(state.accountModels).filter((key) => key.startsWith("thread:"));
+    assert.equal(threadKeys.length, 8);
+    assert.ok(!threadKeys.includes("thread:t0") && !threadKeys.includes("thread:t1"));
+    assert.ok(threadKeys.includes("thread:t9"));
+    assert.equal(state.modelsStatus["thread:t0"], undefined);
+    assert.ok(!state.models.some((m) => m.modelId === "only-in-0"), "what only a dropped list offered is gone from the lookup too");
+    assert.ok(state.models.some((m) => m.modelId === "only-in-9"));
+    stop();
+  });
+
+  it("reads the open thread's own list when its load finishes, and the project's account list on the new-thread screen", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.deepEqual(client.modelCalls, [
+      { sessionId: undefined, accountId: undefined },
+      { sessionId: "s1", accountId: undefined },
+    ]);
+    assert.equal(controller.store.get().modelsStatus["thread:s1"]?.status, "ready");
+    assert.deepEqual(controller.modelsScope(), { sessionId: "s1" });
+    controller.setProjectDefaultAccount("/work/app", "work").catch(() => undefined);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    assert.deepEqual(controller.modelsScope(), { accountId: "work" });
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: undefined, accountId: "work" });
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.status, "ready");
+    stop();
+  });
+
+  it("reads the account's own list when a project's default account changes", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(client.modelCalls.length, 1, "the project is on the default login, whose list boot read");
+    client.modelQueue = [[SPARK, WONDER]];
+    await controller.setProjectDefaultAccount("/work/app", "work");
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: undefined, accountId: "work" });
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK, WONDER]);
+    assert.deepEqual(controller.modelsScope(), { accountId: "work" });
+    stop();
+  });
+
+  it("shows the default list for an account whose load failed, but only for display", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    client.modelQueue = [new Error("Sign in to read this account's models")];
+    await controller.refreshModels({ accountId: "work" });
+    const state = controller.store.get();
+    assert.equal(state.modelsStatus["acct:work"]?.status, "error");
+    assert.deepEqual(state.accountModels["acct:work"], []);
+    assert.deepEqual(state.accountModels["default"], [SPARK], "the default login's own list is untouched");
+    const shown = modelsShown(state, { accountId: "work" });
+    assert.deepEqual(shown.models, [SPARK]);
+    assert.equal(shown.fallback, true);
+    stop();
+  });
+
+  it("never asks an account that has no login, until it has one", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    client.accounts = [{ id: "work", name: "Work", hasLogin: false, email: null, lastUsedAt: null }];
+    const { controller, stop } = await startedWith(client);
+    await controller.loadAccounts();
+    await controller.refreshModels({ accountId: "work" });
+    await controller.refreshModels({ accountId: "work", force: true });
+    assert.ok(!client.modelCalls.some((call) => call.accountId === "work"), "no ask for an account that cannot answer");
+    assert.equal(controller.store.get().modelsStatus["acct:work"], undefined);
+    client.loginAccountResult = { url: "https://auth.meta.com/?code=C", code: "C", loginId: "attempt" };
+    client.accountLoginProgress = async () => ({ status: "done" });
+    const account = client.accounts[0];
+    assert.ok(account);
+    account.hasLogin = true;
+    await controller.beginLogin("work");
+    await controller.checkLogin();
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: undefined, accountId: "work" }, "a finished sign-in reads the account's list");
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.status, "ready");
+    controller.cancelLogin();
+    stop();
+  });
+
+  it("reads the project's account list on the home screen too, since its composer is the new-thread one", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.modelQueue = [[SPARK], [SPARK, WONDER]];
+    const { controller, stop, toasts } = await startedWith(client);
+    assert.deepEqual(controller.store.get().route, { kind: "home" });
+    assert.deepEqual(controller.modelsScope(), { accountId: "work" });
+    assert.deepEqual(client.modelCalls, [
+      { sessionId: undefined, accountId: undefined },
+      { sessionId: undefined, accountId: "work" },
+    ]);
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK, WONDER]);
+    // A model only the account lists is a pick from its list, not a model Muse did not list.
+    assert.equal(await controller.setModel("muse-wonder-1.0"), true);
+    assert.ok(!toasts.some((t) => /did not list/.test(t.title)));
+    // Part of its name finds it there, instead of being saved as it was typed.
+    controller.clearModelPref();
+    assert.equal(await controller.send("/model wonder"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(client.modelCalls.length, 2, "no read for a list that already had it");
+    // A last project that is no project's falls to the default login, as a thread started there would.
+    controller.setPrefs({ lastProject: "/gone" });
+    assert.deepEqual(controller.modelsScope(), { accountId: null });
+    stop();
+  });
+
+  it("reads a stale list when the new-thread screen or Settings opens, and when threads are refreshed by hand", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("offline")];
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client, "#/t/s1");
+    assert.equal(client.modelCalls.length, 2, "the failed boot read, and the open thread's");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "error");
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "a list that failed a moment ago is not asked for again by moving around");
+    held.clock.now += 61_000;
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "the new-thread screen reads the list that failed, once a minute has passed");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "ready");
+    held.clock.now += 11 * 60_000;
+    controller.navigate({ kind: "settings" });
+    await settle();
+    assert.equal(client.modelCalls.length, 4, "Settings reads a list that went stale");
+    held.clock.now += 11 * 60_000;
+    await controller.discoverAll(true);
+    await settle();
+    assert.equal(client.modelCalls.length, 4, "the quiet refresh at boot leaves the lists be");
+    await controller.discoverAll();
+    await settle();
+    assert.equal(client.modelCalls.length, 5, "refreshing threads by hand looks at the models again");
+    stop();
+  });
+
+  it("does not ask for a read-only thread's own list, which cannot switch models", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    client.transcript = async () => load({ readOnly: true, readOnlyReason: "Another Muse session has it open." });
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(controller.store.get().threads["s1"]?.readOnly, true);
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }]);
+    assert.equal(controller.store.get().modelsStatus["thread:s1"], undefined);
+    stop();
+  });
+
+  it("reads the lists in use again when a host restarts, and marks the others old", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    await controller.refreshModels({ accountId: "work" });
+    assert.equal(client.modelCalls.length, 3);
+    client.handler?.({ type: "host", key: "k", state: "restarted", message: "The Muse host restarted." });
+    await settle();
+    assert.equal(client.modelCalls.length, 5, "the default login's list and the open thread's");
+    assert.deepEqual(client.modelCalls.slice(3).map((call) => call.sessionId), [undefined, "s1"]);
+    const work = controller.store.get().modelsStatus["acct:work"];
+    assert.equal(work?.status, "idle", "another account's list waits until it is wanted");
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK], "and is kept meanwhile");
+    client.handler?.({ type: "host", key: "k", state: "failed", message: "boom" });
+    await settle();
+    assert.equal(client.modelCalls.length, 5, "a host that could not start has no list to read");
+    stop();
+  });
+
+  it("reads once for a restart that reports once per host, and again for the next restart", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    const before = client.modelCalls.length;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    client.modelQueue = [
+      async () => {
+        await gate;
+        return [SPARK, WONDER];
+      },
+    ];
+    client.handler?.({ type: "host", key: "default", state: "restarted", message: "The Muse host restarted." });
+    client.handler?.({ type: "host", key: "work", state: "restarted", message: "The Muse host restarted." });
+    assert.equal(await controller.restartMuse(), true);
+    release();
+    await settle();
+    assert.equal(client.modelCalls.length, before + 1, "the read under way is the one that sees the new hosts");
+    assert.deepEqual(controller.store.get().models, [SPARK, WONDER]);
+    client.handler?.({ type: "host", key: "default", state: "restarted", message: "The Muse host restarted." });
+    await settle();
+    assert.equal(client.modelCalls.length, before + 2, "a finished read does not stand in for the next restart's");
+    stop();
+  });
+
+  it("asks nothing of a host that exited, and reads again only when a list is wanted", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(client.modelCalls.length, 2);
+    // A host that dies as it starts would be started again by each read: an exit must not cause one.
+    for (let i = 0; i < 3; i += 1) {
+      client.handler?.({ type: "host", key: "k", state: "exited", message: "The Muse host exited." });
+      await settle();
+    }
+    assert.equal(client.modelCalls.length, 2, "no read, however often the host exits");
+    for (const key of ["default", "thread:s1"]) {
+      assert.equal(controller.store.get().modelsStatus[key]?.status, "idle", `${key} is marked old`);
+      assert.deepEqual(controller.store.get().accountModels[key], [SPARK], `${key} keeps showing what it had`);
+    }
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "opening the picker reads the open thread's list");
+    assert.equal(client.modelCalls.at(-1)?.sessionId, "s1");
+    assert.equal(controller.store.get().modelsStatus["thread:s1"]?.status, "ready");
+    stop();
+  });
+
+  it("restarts Muse and reads the list again, but not while a turn runs", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client);
+    assert.equal(await controller.restartMuse(), true);
+    await settle();
+    assert.equal(client.restarts, 1);
+    assert.equal(client.modelCalls.length, 2, "the list is read from the host that starts next");
+    client.restartError = new AncillaError("A turn is still open.", 409);
+    assert.equal(await controller.restartMuse(), false);
+    assert.equal(toasts.at(-1)?.title, "Could not restart Muse");
+    assert.equal(toasts.at(-1)?.detail, "A turn is still open.");
+    assert.equal(controller.store.get().busy["models:restart"], undefined);
+    stop();
+  });
+
+  it("does not ask the server to restart Muse while it can see a turn running", async () => {
+    const client = new FakeClient();
+    const running: SessionSummary = {
+      ...SESSION,
+      live: { activeTurnId: "t1", turnStartedAt: null, pendingApprovals: 0, pendingInputs: 0, lastTerminal: null, lastError: null },
+    };
+    client.listSessions = async () => [running];
+    const { controller, stop, toasts } = await startedWith(client);
+    assert.equal(await controller.restartMuse(), false);
+    assert.equal(client.restarts, 0);
+    assert.equal(toasts.at(-1)?.title, "Work is still running");
+    stop();
+  });
+});
+
+describe("a model list that is only Muse's built-in one", () => {
+  it("is asked for again on the schedule, until the plan's own list arrives", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [
+      { models: [SPARK], source: "bundledCatalog" },
+      { models: [SPARK], source: "bundledCatalog" },
+      { models: [SPARK, WONDER], source: "providerCatalog" },
+    ];
+    const { controller, stop, held } = await startedWith(client);
+    assert.equal(controller.store.get().modelsStatus["default"]?.catalog?.source, "bundledCatalog");
+    assert.deepEqual(held.waiting(), [2_000]);
+    held.fire(2_000);
+    await settle();
+    assert.equal(controller.store.get().modelsStatus["default"]?.catalog?.source, "bundledCatalog");
+    assert.deepEqual(held.waiting(), [10_000]);
+    held.fire(10_000);
+    await settle();
+    assert.equal(controller.store.get().modelsStatus["default"]?.catalog?.source, "providerCatalog");
+    assert.deepEqual(controller.store.get().models, [SPARK, WONDER]);
+    assert.deepEqual(held.waiting(), [], "the plan's list ends the asking");
+    assert.equal(client.modelCalls.length, 3);
+    stop();
+  });
+
+  it("is asked for three more times at most", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    for (const wait of [2_000, 10_000, 30_000]) {
+      assert.deepEqual(held.waiting(), [wait]);
+      held.fire(wait);
+      await settle();
+    }
+    assert.deepEqual(held.waiting(), []);
+    assert.equal(client.modelCalls.length, 4);
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "ready");
+    stop();
+  });
+
+  it("is never fresh enough to leave be when the picker opens", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    assert.equal(client.modelCalls.length, 1);
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 2);
+    stop();
+  });
+
+  it("starts the asking over when a host restarts, and lets the older chain end", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    client.handler?.({ type: "host", key: "k", state: "restarted", message: "The Muse host restarted." });
+    await settle();
+    assert.equal(client.modelCalls.length, 2);
+    assert.deepEqual(held.waiting(), [2_000, 2_000], "the old chain's timer and the new one's");
+    held.fire(2_000);
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "only the newer chain asks");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "ready");
+    stop();
+  });
+
+  it("stops asking when the host it was waiting on exits", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    assert.deepEqual(held.waiting(), [2_000]);
+    client.handler?.({ type: "host", key: "k", state: "exited", message: "The Muse host exited." });
+    await settle();
+    held.fire(2_000);
+    await settle();
+    assert.equal(client.modelCalls.length, 1, "a host that went away is not started again to be asked");
+    assert.deepEqual(held.waiting(), []);
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "idle");
+    stop();
+  });
+
+  it("keeps asking after a sign-in until the account's own list arrives", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    client.accounts = [{ id: "work", name: "Work", hasLogin: false, email: null, lastUsedAt: null }];
+    const { controller, stop, held } = await startedWith(client);
+    await controller.loadAccounts();
+    client.loginAccountResult = { url: "https://auth.meta.com/?code=C", code: "C", loginId: "attempt" };
+    client.accountLoginProgress = async () => ({ status: "done" });
+    const account = client.accounts[0];
+    assert.ok(account);
+    account.hasLogin = true;
+    client.modelQueue = [{ models: [SPARK], source: "bundledCatalog" }];
+    await controller.beginLogin("work");
+    await controller.checkLogin();
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: undefined, accountId: "work" });
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.catalog?.source, "bundledCatalog");
+    assert.deepEqual(held.waiting(), [2_000], "Muse answers with its built-in list for a moment after a sign-in");
+    client.modelQueue = [{ models: [SPARK, WONDER], source: "providerCatalog" }];
+    held.fire(2_000);
+    await settle();
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK, WONDER]);
+    assert.deepEqual(held.waiting(), []);
+    controller.cancelLogin();
+    stop();
+  });
+});
+
+describe("choosing a model", () => {
+  it("leaves the default alone when Muse refuses the switch, and writes it once Muse takes it", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, WONDER];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    controller.setPrefs({ defaultModelId: "muse-spark-1.3" });
+    const before = controller.store.get().threads["s1"]?.fold.meta.modelId;
+    assert.ok(before);
+    client.setModelError = new Error("Your plan does not include this model");
+    assert.equal(await controller.setModel("muse-wonder-1.0"), false);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.3", "the refused model is not what new threads start on");
+    assert.equal(controller.store.get().threads["s1"]?.fold.meta.modelId, before, "the thread is put back");
+    assert.deepEqual(toasts.filter((t) => t.title === "Could not switch models"), [{ title: "Could not switch models", detail: "Your plan does not include this model" }]);
+    assert.equal(await controller.setModel("muse-wonder-1.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(controller.store.get().threads["s1"]?.fold.meta.modelId, "muse-wonder-1.0");
+    assert.deepEqual(client.modelSwitches.map((s) => s.modelId), ["muse-wonder-1.0", "muse-wonder-1.0"]);
+    stop();
+  });
+
+  it("shows the Contributor notice once, after the switch has taken, and leaves it unspent when the switch is refused", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_CONTRIBUTOR];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const notices = () => toasts.filter((t) => t.title === "Contributor model selected").length;
+    client.setModelError = new Error("no");
+    assert.equal(await controller.setModel("muse-spark-1.3-contributor"), false);
+    assert.equal(notices(), 0, "a refused switch said nothing about a model the thread never moved to");
+    assert.equal(controller.store.get().prefs.contributorAck, false, "and spent nothing");
+    assert.equal(await controller.setModel("muse-spark-1.3-contributor"), true);
+    assert.equal(notices(), 1);
+    assert.equal(controller.store.get().prefs.contributorAck, true);
+    await controller.setModel("muse-spark-1.3-contributor");
+    assert.equal(notices(), 1);
+    stop();
+  });
+
+  it("sets Muse default without switching the thread, and says once when that is a Contributor model", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK_CONTRIBUTOR, SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    controller.setPrefs({ defaultModelId: "muse-spark-1.3" });
+    controller.clearModelPref();
+    assert.equal(controller.store.get().prefs.defaultModelId, null);
+    assert.deepEqual(client.modelSwitches, [], "no model is switched");
+    const notice = toasts.find((t) => t.title.startsWith("Muse's default is"));
+    assert.equal(notice?.title, "Muse's default is muse-spark-1.3, a Contributor model");
+    assert.match(notice?.detail ?? "", /product improvement/);
+    assert.equal(controller.store.get().prefs.contributorAck, true);
+    controller.clearModelPref();
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 1, "said once");
+    assert.ok(!toasts.some((t) => t.title === "New threads will use Muse's default"), "new threads already follow Muse: nothing changed, nothing said");
+    // Once a model is saved again, choosing Muse default on the thread says that only new threads follow it.
+    controller.setPrefs({ defaultModelId: "muse-spark-1.3" });
+    controller.clearModelPref();
+    assert.deepEqual(toasts.filter((t) => t.title === "New threads will use Muse's default"), [
+      { title: "New threads will use Muse's default", detail: "This thread stays on muse-spark-1.3." },
+    ]);
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 1, "the Contributor notice stays once");
+    stop();
+  });
+
+  it("lets only the latest of two overlapping switches put the thread back or write the default", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12, WONDER];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const modelOf = () => controller.store.get().threads["s1"]?.fold.meta.modelId;
+    // The first switch is held while a second is made and taken; then Muse refuses the first.
+    let refuse!: (error: Error) => void;
+    client.modelGates = [
+      new Promise<void>((_, reject) => {
+        refuse = reject;
+      }),
+    ];
+    const first = controller.setModel("muse-wonder-1.0");
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    refuse(new Error("Your plan does not include this model"));
+    assert.equal(await first, false);
+    assert.equal(modelOf(), "muse-spark-1.2", "the older refusal does not put the thread back on the model before it");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.2");
+    assert.ok(toasts.some((t) => t.title === "Could not switch models"), "the refusal is still told");
+    // The other way round: the first goes through after Muse refused the second, and only the newest writes the default.
+    controller.setPrefs({ defaultModelId: null });
+    let accept!: () => void;
+    client.modelGates = [
+      new Promise<void>((resolve) => {
+        accept = resolve;
+      }),
+    ];
+    const older = controller.setModel("muse-wonder-1.0");
+    client.setModelError = new Error("no");
+    assert.equal(await controller.setModel("muse-spark-1.3"), false);
+    accept();
+    assert.equal(await older, true);
+    assert.equal(modelOf(), "muse-wonder-1.0", "the thread is on the model Muse took last");
+    assert.equal(controller.store.get().prefs.defaultModelId, null, "an older switch does not write the default over a newer one");
+    stop();
+  });
+
+  it("takes a model id on trust while Muse's list is empty, since an empty list says nothing about it", async () => {
+    const client = new FakeClient();
+    client.models = [];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.setModel("muse-wonder-1.0"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-1.0" }]);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0", "it is a pick, not a try");
+    assert.ok(!toasts.some((t) => /did not list/.test(t.title)));
+    stop();
+  });
+
+  it("judges a saved model by the list of the account the thread will run on, not the default login's", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.modelQueue = [[SPARK, WONDER], [SPARK]];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    assert.equal(await controller.send("hello"), true);
+    assert.equal(client.startCalls.at(-1)?.accountId, "work");
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined, "the default login offers it, the account does not");
+    assert.deepEqual(
+      toasts.filter((t) => /not offered on this account/.test(t.title)).map((t) => t.title),
+      ["muse-wonder-1.0 is not offered on this account; using Muse's default"],
+    );
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    stop();
+  });
+
+  it("starts a new thread on Muse's default, saying so once, when the account's list lacks the saved model", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, WONDER];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "retired-x" });
+    assert.equal(await controller.send("hello"), true);
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.equal(controller.store.get().prefs.defaultModelId, "retired-x", "the saved choice is kept: it may be right for another account");
+    const notes = () => toasts.filter((t) => /not offered on this account/.test(t.title));
+    assert.deepEqual(notes().map((t) => t.title), ["retired-x is not offered on this account; using Muse's default"]);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    assert.equal(await controller.send("again"), true);
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.equal(notes().length, 1, "the note is not repeated for every thread");
+    stop();
+  });
+
+  it("starts on the saved model when the list offers it", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, WONDER];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-1.0");
+    assert.ok(!toasts.some((t) => /not offered/.test(t.title)));
+    stop();
+  });
+
+  it("leaves a saved model alone when the list is only Muse's built-in one, or still unread", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-1.0", "a built-in list proves nothing about the plan");
+    assert.ok(!toasts.some((t) => /not offered/.test(t.title)));
+    stop();
+    const unread = new FakeClient();
+    unread.modelQueue = [new Error("offline")];
+    const second = await startedWith(unread, NEW_THREAD);
+    second.controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    await second.controller.send("hello");
+    assert.equal(unread.startCalls.at(-1)?.modelId, "muse-wonder-1.0", "no list, no verdict");
+    second.stop();
+  });
+
+  it("lets an id tried by hand through a plan list that does not offer it", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.equal(await controller.setModel("muse-wonder-1.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.deepEqual(client.modelSwitches, [], "there is no thread to switch");
+    assert.deepEqual(toasts.filter((t) => /did not list/.test(t.title)), [
+      { title: "Using muse-wonder-1.0, which your Muse did not list", detail: "Muse checks access when you send a prompt." },
+    ]);
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-1.0", "the pin check leaves a model the user asked for by id");
+    stop();
+  });
+
+  it("refuses text that is not shaped like a model id", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.equal(await controller.setModel("not a model!"), false);
+    assert.equal(controller.store.get().prefs.defaultModelId, null);
+    assert.equal(toasts.at(-1)?.title, "That is not a model id");
+    assert.equal(toasts.at(-1)?.detail, modelIdError("not a model!"), "the toast and the field say the same thing");
+    assert.match(toasts.at(-1)?.detail ?? "", /starts with a letter or digit/);
+    stop();
+  });
+
+  it("notes once that Muse's default is a Contributor model when nothing is saved", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK_CONTRIBUTOR, SPARK];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 1);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await controller.send("again");
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 1);
+    stop();
+  });
+});
+
+describe("/model", () => {
+  it("picks the regular model over its Contributor twin, and finds a model by part of its name", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK_CONTRIBUTOR, SPARK, WONDER];
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model muse-spark-1.3"), true);
+    assert.equal(client.modelSwitches.at(-1)?.modelId, "muse-spark-1.3");
+    assert.equal(await controller.send("/model muse-spark-1.3-contributor"), true);
+    assert.equal(client.modelSwitches.at(-1)?.modelId, "muse-spark-1.3-contributor");
+    assert.equal(await controller.send("/model wonder"), true);
+    assert.equal(client.modelSwitches.at(-1)?.modelId, "muse-wonder-1.0");
+    assert.equal(await controller.send("/model muse wonder 1.0"), true);
+    assert.equal(client.modelSwitches.at(-1)?.modelId, "muse-wonder-1.0");
+    stop();
+  });
+
+  it("reads the list again once on a miss and then finds the model", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const asked = client.modelCalls.length;
+    client.modelQueue = [[SPARK, WONDER]];
+    assert.equal(await controller.send("/model muse-wonder-1.0"), true);
+    assert.equal(client.modelCalls.length, asked + 1, "one more ask, for the open thread");
+    assert.equal(client.modelCalls.at(-1)?.sessionId, "s1");
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-1.0" }]);
+    assert.ok(!toasts.some((t) => /No model named/.test(t.title)));
+    assert.ok(!toasts.some((t) => /did not list/.test(t.title)), "it is a listed model by then");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    stop();
+  });
+
+  it("tries a model still missing from the list on the open thread alone", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model muse-wonder-2.0"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-2.0" }], "the bare id goes to Muse");
+    assert.equal(controller.store.get().prefs.defaultModelId, null, "new threads do not follow it");
+    assert.equal(controller.store.get().threads["s1"]?.fold.meta.modelId, "muse-wonder-2.0");
+    assert.ok(toasts.some((t) => t.title === "Using muse-wonder-2.0, which your Muse did not list"));
+    stop();
+  });
+
+  it("rolls a refused try back and keeps it out of the defaults", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const before = controller.store.get().threads["s1"]?.fold.meta.modelId;
+    client.setModelError = new Error("Muse does not serve that model");
+    assert.equal(await controller.send("/model muse-wonder-2.0"), false);
+    assert.equal(controller.store.get().threads["s1"]?.fold.meta.modelId, before);
+    assert.equal(controller.store.get().prefs.defaultModelId, null);
+    assert.deepEqual(toasts.at(-1), { title: "Could not switch models", detail: "Muse does not serve that model" });
+    stop();
+  });
+
+  it("sets the default on the new-thread screen for a model still missing, without switching anything", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.equal(await controller.send("/model muse-wonder-2.0"), true);
+    assert.deepEqual(client.modelSwitches, []);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-2.0");
+    assert.ok(toasts.some((t) => /did not list/.test(t.title)));
+    stop();
+  });
+
+  it("says no model is named that when the text cannot be an id", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model not a model"), false);
+    assert.deepEqual(client.modelSwitches, []);
+    assert.equal(toasts.at(-1)?.title, "No model named not a model");
+    stop();
+  });
+
+  it("opens the picker when the name fits models of different families", async () => {
+    const client = new FakeClient();
+    client.models = [WONDER, WONDER_FULL];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model wonder"), true);
+    assert.equal(controller.store.get().picker, "model");
+    assert.deepEqual(client.modelSwitches, [], "nothing is guessed");
+    assert.ok(toasts.some((t) => t.title === "More than one model fits wonder"));
+    stop();
+  });
+});
+
+describe("reasoning effort and the model", () => {
+  it("keeps the level asked for and runs turns at what the model offers", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12, model("muse-plain")];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const effortToasts = () => toasts.filter((t) => / is not available on /.test(t.title));
+    controller.setEffort("max");
+    assert.equal(effortToasts().length, 0, "the open thread's model has Max");
+    assert.deepEqual(client.efforts, ["s1:max"]);
+    await controller.setModel("muse-spark-1.2");
+    assert.equal(controller.store.get().prefs.effort, "max", "the saved level is never rewritten");
+    assert.deepEqual(effortToasts(), [
+      { title: "Max is not available on muse-spark-1.2", detail: "Using Extra high. Your choice is kept for other models." },
+    ]);
+    await controller.send("go");
+    assert.equal(client.turnEfforts.at(-1), "xhigh");
+    await controller.setModel("muse-spark-1.3");
+    await controller.send("again");
+    assert.equal(client.turnEfforts.at(-1), "max", "another model gives the wish back");
+    await controller.setModel("muse-plain");
+    await controller.send("and again");
+    assert.equal(client.turnEfforts.at(-1), "max", "a model that lists no levels takes any");
+    assert.equal(effortToasts().length, 1);
+    stop();
+  });
+
+  it("says a level does not fit once for each time the model is chosen, not for every turn", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    controller.setEffort("max");
+    const notes = () => toasts.filter((t) => t.title === "Max is not available on muse-spark-1.2");
+    await controller.setModel("muse-spark-1.2");
+    assert.equal(notes().length, 1);
+    await controller.send("go");
+    assert.equal(notes().length, 1, "a turn on the model says nothing more");
+    await controller.setModel("muse-spark-1.3");
+    assert.equal(notes().length, 1);
+    await controller.setModel("muse-spark-1.2");
+    assert.equal(notes().length, 2, "back on it, the level it lacks is worth saying again");
+    stop();
+  });
+
+  it("does not hold turns to the levels of Muse's built-in list, which can list fewer than the plan's", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    // Muse 1.4.7's built-in row for this model: no Max, though the plan's own list has it.
+    client.models = [model("muse-spark-1.3", { efforts: ["minimal", "low", "medium", "high", "xhigh"] })];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    controller.setEffort("max");
+    assert.deepEqual(client.efforts, ["s1:max"], "the thread is told the level that was asked for");
+    await controller.send("go");
+    assert.equal(client.turnEfforts.at(-1), "max");
+    controller.setEffort("none");
+    assert.equal(client.efforts.at(-1), "s1:none");
+    await controller.setModel("muse-spark-1.3");
+    await controller.send("again");
+    assert.equal(client.turnEfforts.at(-1), "none");
+    assert.ok(!toasts.some((t) => / is not available on /.test(t.title)));
+    assert.equal(controller.store.get().prefs.effort, "none");
+    // The new-thread screen reads the same way.
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    controller.setPrefs({ defaultModelId: "muse-spark-1.3" });
+    controller.setEffort("max");
+    assert.ok(!toasts.some((t) => / is not available on /.test(t.title)));
+    // The same row from the plan's own list is believed.
+    client.modelSource = "providerCatalog";
+    controller.navigate({ kind: "thread", sessionId: "s1" });
+    await controller.refreshModels({ sessionId: "s1", force: true });
+    controller.setEffort("max");
+    assert.equal(client.efforts.at(-1), "s1:xhigh");
+    assert.ok(toasts.some((t) => t.title === "Max is not available on muse-spark-1.3"));
+    stop();
+  });
+
+  it("clamps /effort to the model, once, and keeps what was typed", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    await controller.setModel("muse-spark-1.2");
+    assert.equal(await controller.send("/effort max"), true);
+    assert.equal(controller.store.get().prefs.effort, "max");
+    assert.equal(client.efforts.at(-1), "s1:xhigh", "the thread is told what its model can run");
+    assert.equal(toasts.filter((t) => t.title === "Max is not available on muse-spark-1.2").length, 1);
+    assert.equal(await controller.send("/effort max"), true);
+    assert.equal(toasts.filter((t) => t.title === "Max is not available on muse-spark-1.2").length, 1, "said once");
+    assert.equal(await controller.send("/effort off"), true);
+    assert.equal(controller.store.get().prefs.effort, "none");
+    assert.equal(client.efforts.at(-1), "s1:minimal", "a model without Off starts at its lowest");
+    assert.ok(toasts.some((t) => t.title === "Off is not available on muse-spark-1.2" && t.detail === "Using Minimal. Your choice is kept for other models."));
+    stop();
+  });
+
+  it("leaves the level alone on a model that lists none, and with Auto", async () => {
+    const client = new FakeClient();
+    client.models = [model("muse-plain")];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    await controller.setModel("muse-plain");
+    controller.setEffort("max");
+    await controller.send("go");
+    assert.equal(client.turnEfforts.at(-1), "max");
+    controller.setEffort(null);
+    await controller.send("again");
+    assert.equal(client.turnEfforts.at(-1), undefined, "Auto sends no level");
+    assert.ok(!toasts.some((t) => / is not available on /.test(t.title)));
+    stop();
+  });
+
+  it("clamps on the new-thread screen against the model new threads start on", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK_12];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-spark-1.2" });
+    controller.setEffort("max");
+    assert.equal(controller.store.get().prefs.effort, "max");
+    assert.deepEqual(client.efforts, [], "there is no thread to tell");
+    assert.ok(toasts.some((t) => t.title === "Max is not available on muse-spark-1.2"));
+    stop();
+  });
+});
+
+describe("a thread whose model Muse cannot serve", () => {
+  it("tells the user to pick one the plan offers, and opens the picker on that thread", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const asked = client.modelCalls.length;
+    const params = { commandId: "c1", installedProviderId: "other", modelId: "muse-wonder-1.0", sessionId: "s1" };
+    const event: AncillaEvent = { type: "msp", sessionId: "s1", method: "session/modelRouteUnserved", params, at: 1 };
+    client.handler?.(event);
+    await settle();
+    const notes = () => toasts.filter((t) => t.title === "Pick a model your plan offers");
+    assert.equal(notes().length, 1);
+    assert.match(notes()[0]?.detail ?? "", /muse-wonder-1\.0/);
+    assert.equal(controller.store.get().picker, "model");
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: "s1", accountId: undefined });
+    assert.equal(client.modelCalls.length, asked + 1, "the thread's list is read again, once");
+    client.handler?.(event);
+    await settle();
+    assert.equal(notes().length, 1, "the same command is not announced twice");
+    controller.setPicker(null);
+    client.handler?.({ ...event, sessionId: "elsewhere", params: { ...params, commandId: "c2", sessionId: "elsewhere" } });
+    await settle();
+    assert.equal(notes().length, 2);
+    assert.equal(controller.store.get().picker, null, "another thread's picker is not the one on screen");
+    stop();
+  });
+});
+
+// ---------------------------------------------------------------- the picker's client logic, after the merged-tree review
+
+const WORK: import("../src/types.js").AccountView = { id: "work", name: "Work", hasLogin: true, email: null, lastUsedAt: null };
+
+/** A held platform whose saved prefs a second controller can start from, as the next launch of the app does. */
+function persistedPlatform(store: { saved: unknown }, hash = "") {
+  const held = heldPlatform(hash);
+  held.loadPrefs = () => store.saved;
+  held.savePrefs = (prefs) => {
+    store.saved = JSON.parse(JSON.stringify(prefs));
+  };
+  return held;
+}
+
+/** `startedWith` on a platform the test made, recording every toast. */
+async function startedOn(client: FakeClient, held: ReturnType<typeof heldPlatform>) {
+  const controller = new AncillaController(client, held);
+  const toasts: { title: string; detail?: string }[] = [];
+  const seen = new Set<number>();
+  controller.store.subscribe(() => {
+    for (const toast of controller.store.get().toasts) {
+      if (!seen.has(toast.id)) {
+        seen.add(toast.id);
+        toasts.push({ title: toast.title, detail: toast.detail });
+      }
+    }
+  });
+  const stop = controller.start();
+  await settle();
+  await settle();
+  return { controller, stop, held, toasts };
+}
+
+describe("/model with a name that is not an id", () => {
+  async function onBuiltIn(hash: string) {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_7.models;
+    client.modelSource = "bundledCatalog";
+    return { client, ...(await startedWith(client, hash)) };
+  }
+
+  it("finds Wonder among the models Meta publishes while the list is Muse's built-in one, and tries that, never the word", async () => {
+    const { client, controller, stop, toasts } = await onBuiltIn(NEW_THREAD);
+    assert.equal(controller.store.get().modelsStatus["default"]?.catalog?.source, "bundledCatalog");
+    assert.equal(await controller.send("/model wonder"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true, "a published id the list lacks is only tried");
+    assert.deepEqual(toasts.filter((t) => /did not list/.test(t.title)).map((t) => t.title), ["Using muse-wonder-1.0, which your Muse did not list"]);
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-1.0");
+    stop();
+  });
+
+  it("tries it on the open thread alone, whatever case it is typed in, and finds another published model by its version", async () => {
+    const { client, controller, stop } = await onBuiltIn("#/t/s1");
+    assert.equal(await controller.send("/model WONDER"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-1.0" }]);
+    assert.equal(await controller.send("/model MUSE-WONDER-1.0"), true);
+    assert.deepEqual(client.modelSwitches.at(-1), { sessionId: "s1", modelId: "muse-wonder-1.0" }, "an id typed in capitals is sent in its own spelling");
+    assert.equal(await controller.send("/model 1.2"), true);
+    assert.deepEqual(client.modelSwitches.at(-1), { sessionId: "s1", modelId: "muse-spark-1.2" });
+    assert.equal(controller.store.get().prefs.defaultModelId, null, "new threads do not follow a try");
+    assert.ok(!client.modelSwitches.some((s) => s.modelId === "wonder"));
+    stop();
+  });
+
+  it("prefers the list's own row to a published one for the same family", async () => {
+    const { client, controller, stop } = await onBuiltIn("#/t/s1");
+    assert.equal(await controller.send("/model spark"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-spark-1.3" }]);
+    stop();
+  });
+
+  it("opens the picker when published models of different families answer, and changes nothing", async () => {
+    const client = new FakeClient();
+    client.models = [model("vendor-x-1")];
+    client.modelSource = "bundledCatalog";
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model muse"), true);
+    assert.equal(controller.store.get().picker, "model");
+    assert.deepEqual(client.modelSwitches, []);
+    assert.ok(toasts.some((t) => t.title === "More than one model fits muse"));
+    stop();
+  });
+
+  it("says no model has that name and opens the picker, when a bare word fits nothing on the plan's own list", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    for (const word of ["wonder", "wond", "Wonder"]) {
+      controller.setPicker(null);
+      assert.equal(await controller.send(`/model ${word}`), false, word);
+      assert.equal(controller.store.get().picker, "model", word);
+      assert.equal(controller.store.get().prefs.defaultModelId, null, `${word} is not saved as a model`);
+      assert.equal(toasts.at(-1)?.title, `No model named ${word}`);
+    }
+    assert.deepEqual(client.modelSwitches, []);
+    stop();
+  });
+
+  it("does the same on an open thread: no switch is made to a word", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model wonder"), false);
+    assert.deepEqual(client.modelSwitches, []);
+    assert.equal(controller.store.get().picker, "model");
+    stop();
+  });
+
+  it("still tries what plainly is an id, in its own spelling, though the plan's list does not offer it", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(await controller.send("/model MUSE-WONDER-1.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true);
+    assert.equal(await controller.send("/model muse-wonder-2.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-2.0");
+    stop();
+  });
+
+  it("writes no default from text while the list is empty or failed, unless the text is plainly an id, and then says so", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("a"), new Error("b"), new Error("c"), new Error("d"), new Error("e"), new Error("f")];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "error");
+    for (const word of ["spark", "sparkk"]) {
+      assert.equal(await controller.send(`/model ${word}`), false, word);
+      assert.equal(controller.store.get().prefs.defaultModelId, null, `${word} is not saved`);
+      assert.equal(toasts.at(-1)?.title, `No model named ${word}`);
+    }
+    assert.equal(await controller.send("/model muse-wonder-2.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-2.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true);
+    assert.ok(toasts.some((t) => t.title === "Using muse-wonder-2.0, which your Muse did not list"));
+    stop();
+  });
+
+  it("tries a plain id on the open thread alone while the list is empty, and writes no default", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("a"), new Error("b"), new Error("c"), new Error("d"), new Error("e"), new Error("f")];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.send("/model sparkk"), false);
+    assert.deepEqual(client.modelSwitches, []);
+    assert.equal(await controller.send("/model muse-wonder-2.0"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-2.0" }]);
+    assert.equal(controller.store.get().prefs.defaultModelId, null, "a try on a thread is that thread's alone");
+    assert.ok(toasts.some((t) => /did not list/.test(t.title)));
+    stop();
+  });
+});
+
+describe("a model tried by its id survives a restart", () => {
+  it("is passed on at thread start by a controller that starts from the saved prefs", async () => {
+    const store = { saved: null as unknown };
+    const first = new FakeClient();
+    first.models = LIVE_1_4_0.models;
+    const a = await startedOn(first, persistedPlatform(store, NEW_THREAD));
+    assert.equal(await a.controller.setModel("muse-wonder-1.0"), true);
+    assert.equal(a.controller.store.get().prefs.defaultModelTried, true);
+    await settle();
+    a.stop();
+    assert.equal((store.saved as { defaultModelTried?: boolean }).defaultModelTried, true, "the mark is saved with the pin");
+    const second = new FakeClient();
+    second.models = LIVE_1_4_0.models;
+    const b = await startedOn(second, persistedPlatform(store, NEW_THREAD));
+    const state = b.controller.store.get();
+    assert.equal(state.prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(state.prefs.defaultModelTried, true);
+    const menu = modelMenu(
+      { models: state.models, accountModels: state.accountModels, modelsStatus: state.modelsStatus, accounts: state.accounts },
+      { scope: {}, accountId: null, current: null, pref: state.prefs.defaultModelId, plan: null, tried: state.prefs.defaultModelTried },
+    );
+    assert.equal(menu.trigger.text, "muse-wonder-1.0", "the button does not call it unavailable");
+    assert.equal(menu.rows.find((row) => row.kind === "pin")?.unlisted, "tried");
+    assert.equal(await b.controller.send("hello"), true);
+    assert.equal(second.startCalls.at(-1)?.modelId, "muse-wonder-1.0", "the plan's list lacks it, and the thread still starts on it");
+    assert.ok(!b.toasts.some((t) => /not offered/.test(t.title)));
+    b.stop();
+  });
+
+  it("still drops a saved model that was once listed, and is not a try, when the plan's list no longer has it", async () => {
+    const store = { saved: { defaultModelId: "muse-spark-1.1", defaultModelTried: false } as unknown };
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop, toasts } = await startedOn(client, persistedPlatform(store, NEW_THREAD));
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.ok(toasts.some((t) => /muse-spark-1.1 is not offered on this account/.test(t.title)));
+    stop();
+  });
+
+  it("ends when a listed model is picked, when Muse default is chosen, and when the pin changes by any other way", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    const tried = () => controller.store.get().prefs.defaultModelTried;
+    await controller.setModel("muse-wonder-1.0");
+    assert.equal(tried(), true);
+    await controller.setModel("muse-spark-1.2");
+    assert.equal(tried(), false, "a listed pick");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.2");
+    await controller.setModel("muse-wonder-1.0");
+    assert.equal(tried(), true);
+    controller.clearModelPref();
+    assert.equal(tried(), false, "Muse default");
+    assert.equal(controller.store.get().prefs.defaultModelId, null);
+    await controller.setModel("muse-wonder-1.0");
+    controller.setPrefs({ defaultModelId: "muse-spark-1.3" });
+    assert.equal(tried(), false, "a pin that changes without saying it was tried is not one");
+    stop();
+  });
+
+  it("is left alone by a try on a thread, and ended by a listed pick there", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    await controller.setModel("muse-wonder-2.0");
+    controller.navigate({ kind: "thread", sessionId: "s1" });
+    await settle();
+    assert.equal(await controller.setModel("muse-wonder-3.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-2.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true);
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.2");
+    assert.equal(controller.store.get().prefs.defaultModelTried, false);
+    stop();
+  });
+
+  it("is remembered as tried for an id typed into the Other model id field while no list has loaded", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("Muse could not start")];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.deepEqual(controller.store.get().accountModels["default"], [], "the boot read failed: there is no list to vouch for anything");
+    assert.equal(await tryTypedModel(controller, "muse-wonder-2.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-2.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true, "typed by hand, so not taken for a listed model");
+    assert.deepEqual(
+      toasts.filter((t) => /did not list/.test(t.title)).map((t) => t.title),
+      ["Using muse-wonder-2.0, which your Muse did not list"],
+    );
+    // The plan's list comes later and lacks it: the id is still what new threads start on, as the user typed it.
+    client.modelQueue = [answer(LIVE_1_4_0)];
+    await controller.refreshModels({ force: true });
+    assert.equal(controller.store.get().modelsStatus["default"]?.catalog?.source, "providerCatalog");
+    assert.equal(await controller.send("hello"), true);
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-2.0");
+    assert.ok(!toasts.some((t) => /not offered/.test(t.title)), "it is not silently swapped for Muse's default");
+    stop();
+  });
+
+  it("takes the same menu pick on trust while no list has loaded, which is a pick and not a try", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("Muse could not start")];
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(await controller.setModel("muse-wonder-1.0"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.equal(controller.store.get().prefs.defaultModelTried, false);
+    stop();
+  });
+
+  it("keeps an id typed on an open thread to that thread when no list has loaded, never making it the default", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("Muse could not start"), new Error("Muse could not start")];
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.deepEqual(controller.store.get().accountModels["thread:s1"], []);
+    assert.equal(await tryTypedModel(controller, "muse-wonder-typo"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-wonder-typo" }]);
+    assert.equal(controller.store.get().prefs.defaultModelId, null, "a typo is not what new threads start on");
+    assert.equal(controller.store.get().prefs.defaultModelTried, false);
+    stop();
+  });
+});
+
+describe("the model union and the accounts behind it", () => {
+  it("keeps the plan's window and levels for a model a built-in list also names, and leads with the plan's list", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [answer(LIVE_1_4_7)];
+    const { controller, stop } = await startedWith(client);
+    assert.equal(controller.store.get().models.find((m) => m.modelId === "muse-spark-1.3")?.contextLimit, null);
+    client.modelQueue = [answer(LIVE_1_4_0)];
+    await controller.refreshModels({ accountId: "work" });
+    const { models, accountModels } = controller.store.get();
+    const spark = models.find((m) => m.modelId === "muse-spark-1.3");
+    assert.equal(spark?.contextLimit, 1007997, "the built-in row has no window; the plan's does");
+    assert.ok(spark?.efforts?.includes("max"));
+    assert.deepEqual(models.map((m) => m.modelId), accountModels["acct:work"]?.map((m) => m.modelId), "the plan's list leads");
+    stop();
+  });
+
+  it("lets the plan's row stand for a model both lists name, not the built-in one the default login read first", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [{ models: [model("same", { description: "built-in row" })], source: "bundledCatalog" }];
+    const { controller, stop } = await startedWith(client);
+    client.modelQueue = [[model("same", { description: "plan row", contextLimit: 5 })]];
+    await controller.refreshModels({ accountId: "work" });
+    const row = controller.store.get().models.find((m) => m.modelId === "same");
+    assert.equal(row?.description, "plan row");
+    assert.equal(row?.contextLimit, 5);
+    stop();
+  });
+
+  it("lets Settings tell a saved model another account offers from one nobody lists", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_0.models;
+    const { controller, stop } = await startedWith(client);
+    client.modelQueue = [[SPARK, WONDER]];
+    await controller.refreshModels({ accountId: "work" });
+    const state = controller.store.get();
+    const defaults = modelsShown(state, {}).models;
+    assert.equal(offeredByAnother(state, defaults, "muse-wonder-1.0"), true);
+    assert.equal(offeredByAnother(state, defaults, "retired-x"), false);
+    assert.equal(offeredByAnother(state, defaults, "muse-spark-1.3"), false);
+    stop();
+  });
+
+  it("forgets a removed account's lists, status and pending re-list, and the lists of its threads", async () => {
+    const client = new FakeClient();
+    client.accounts = [WORK];
+    client.listSessions = async () => [{ ...SESSION, accountId: "work" }];
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    await controller.loadAccounts();
+    client.modelQueue = [{ models: [WONDER], source: "bundledCatalog" }];
+    await controller.refreshModels({ accountId: "work", watch: true });
+    client.modelQueue = [[WONDER_FULL]];
+    await controller.refreshModels({ sessionId: "s1" });
+    let state = controller.store.get();
+    assert.deepEqual(state.models.map((m) => m.modelId).sort(), ["muse-spark-1.3", "muse-wonder-1.0", "muse-wonder-full-1.0"]);
+    assert.deepEqual(held.waiting(), [2_000], "the built-in list is waiting to be asked for again");
+    assert.equal(await controller.removeAccount("work"), true);
+    state = controller.store.get();
+    for (const key of ["acct:work", "thread:s1"]) {
+      assert.equal(state.accountModels[key], undefined, key);
+      assert.equal(state.modelsStatus[key], undefined, key);
+    }
+    assert.deepEqual(state.models.map((m) => m.modelId), ["muse-spark-1.3"], "what only that account offered is gone from every lookup");
+    // An account of the same id comes back and is read, with Muse's built-in list again, before the old chain's timer fires.
+    client.accounts.push(WORK);
+    await controller.loadAccounts();
+    client.modelQueue = [{ models: [WONDER], source: "bundledCatalog" }];
+    await controller.refreshModels({ accountId: "work" });
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.catalog?.source, "bundledCatalog");
+    const asked = client.modelCalls.length;
+    held.fire(2_000);
+    await settle();
+    assert.equal(client.modelCalls.length, asked, "the pending re-list of the account that was removed asks nothing, though a list of that name is back");
+    stop();
+  });
+
+  it("does not show a removed account's list as fresh when an account of the same id comes back", async () => {
+    const client = new FakeClient();
+    client.accounts = [WORK];
+    client.models = [SPARK];
+    const { controller, stop } = await startedWith(client);
+    await controller.loadAccounts();
+    client.modelQueue = [[SPARK, WONDER]];
+    await controller.refreshModels({ accountId: "work" });
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.status, "ready");
+    await controller.removeAccount("work");
+    client.accounts.push(WORK);
+    await controller.loadAccounts();
+    client.modelQueue = [[SPARK_12]];
+    await controller.refreshModels({ accountId: "work" });
+    assert.deepEqual(controller.store.get().accountModels["acct:work"]?.map((m) => m.modelId), ["muse-spark-1.2"], "asked afresh, not read from the old one");
+    stop();
+  });
+
+  it("says a saved model is not offered again to an account that was removed and has come back", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.accounts = [WORK];
+    client.modelQueue = [[SPARK, WONDER], [SPARK]];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    const notes = () => toasts.filter((t) => /not offered on this account/.test(t.title)).length;
+    assert.equal(await controller.send("hello"), true);
+    assert.equal(client.startCalls.at(-1)?.accountId, "work");
+    assert.equal(notes(), 1, "the new account's list lacks the saved model, and says so");
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    assert.equal(await controller.send("again"), true);
+    assert.equal(notes(), 1, "once for the account, not for every thread");
+    // Another account of the same id: a new login, a new list, and the note is owed to it as to any account.
+    assert.equal(await controller.removeAccount("work"), true);
+    client.accounts.push(WORK);
+    await controller.loadAccounts();
+    client.modelQueue = [[SPARK]];
+    await controller.setProjectDefaultAccount("/work/app", "work");
+    await settle();
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK]);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    assert.equal(await controller.send("once more"), true);
+    assert.equal(client.startCalls.at(-1)?.accountId, "work");
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.equal(notes(), 2, "removing the account let go of what was said about it");
+    stop();
+  });
+});
+
+describe("the boot order of the account lists", () => {
+  function gated(client: FakeClient) {
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    client.listAccounts = async () => {
+      await gate;
+      return [...client.accounts];
+    };
+    return open;
+  }
+
+  it("does not ask an account that has no login for models, before the accounts have loaded or after", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.accounts = [{ ...WORK, hasLogin: false }];
+    client.models = [SPARK];
+    const open = gated(client);
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(controller.store.get().accounts, null, "the accounts are still being read");
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }], "only the default login was asked");
+    open();
+    await settle();
+    assert.equal(controller.store.get().accounts?.length, 1);
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }], "and the account that cannot answer still is not");
+    assert.equal(controller.store.get().modelsStatus["acct:work"], undefined);
+    stop();
+  });
+
+  it("asks an account that has a login as soon as the accounts have loaded", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.accounts = [WORK];
+    client.modelQueue = [[SPARK], [SPARK, WONDER]];
+    const open = gated(client);
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(client.modelCalls.length, 1);
+    open();
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: undefined, accountId: "work" });
+    assert.deepEqual(controller.store.get().accountModels["acct:work"], [SPARK, WONDER]);
+    stop();
+  });
+
+  it("asks anyway when the accounts could not be read, so the picker is not left waiting", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.models = [SPARK];
+    client.listAccounts = async () => {
+      throw new Error("no accounts route");
+    };
+    const { controller, stop } = await startedWith(client, NEW_THREAD);
+    assert.equal(controller.store.get().accounts, null);
+    assert.ok(client.modelCalls.some((call) => call.accountId === "work"), "an account scope is read once the accounts have been tried");
+    stop();
+  });
+
+  it("waits for the accounts before asking for the list of a thread of a named account, too", async () => {
+    const onWork: SessionSummary = { ...SESSION, accountId: "work" };
+    const client = new FakeClient();
+    client.listSessions = async () => [onWork];
+    client.transcript = async () => load({ session: onWork });
+    client.accounts = [WORK];
+    client.models = [SPARK];
+    const open = gated(client);
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(controller.store.get().threads["s1"]?.load, "ready", "the thread is open");
+    assert.equal(controller.store.get().accounts, null, "and the accounts are still being read");
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }], "only the default login was asked: whether the thread's account has a login is not known yet");
+    open();
+    await settle();
+    assert.deepEqual(client.modelCalls.at(-1), { sessionId: "s1", accountId: undefined }, "the thread's own host is asked once the accounts are in");
+    assert.equal(controller.store.get().modelsStatus["thread:s1"]?.status, "ready");
+    stop();
+  });
+
+  it("never asks for the list of a thread of an account that has no login, before the accounts have loaded or after", async () => {
+    const onWork: SessionSummary = { ...SESSION, accountId: "work" };
+    const client = new FakeClient();
+    client.listSessions = async () => [onWork];
+    client.transcript = async () => load({ session: onWork });
+    client.accounts = [{ ...WORK, hasLogin: false }];
+    client.models = [SPARK];
+    const open = gated(client);
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }]);
+    open();
+    await settle();
+    assert.equal(controller.store.get().accounts?.length, 1);
+    assert.deepEqual(client.modelCalls, [{ sessionId: undefined, accountId: undefined }], "and the host that cannot answer still is not");
+    assert.equal(controller.store.get().modelsStatus["thread:s1"], undefined);
+    stop();
+  });
+});
+
+describe("small fixes to choosing a model", () => {
+  it("says a Contributor model Muse started a thread on when nobody picked it and the list names no default", async () => {
+    const client = new FakeClient();
+    client.models = LIVE_1_4_7.models;
+    client.modelSource = "bundledCatalog";
+    client.startSession = async (cwd, options) => {
+      client.startCalls.push({ cwd, modelId: options?.modelId, accountId: options?.accountId ?? null });
+      return { ...SESSION, modelId: "muse-spark-1.3-contributor" };
+    };
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    const notices = () => toasts.filter((t) => t.title.startsWith("Muse's default is"));
+    assert.equal(await controller.send("hello"), true);
+    assert.deepEqual(notices().map((t) => t.title), ["Muse's default is muse-spark-1.3, a Contributor model"]);
+    assert.equal(controller.store.get().prefs.contributorAck, true);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await controller.send("again");
+    assert.equal(notices().length, 1, "said once");
+    stop();
+  });
+
+  it("says it when a saved model was dropped and Muse's own pick is a Contributor model, and not when a model was asked for by name", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, WONDER];
+    client.startSession = async (cwd, options) => {
+      client.startCalls.push({ cwd, modelId: options?.modelId, accountId: options?.accountId ?? null });
+      return { ...SESSION, modelId: "muse-spark-1.3-contributor" };
+    };
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    controller.setPrefs({ defaultModelId: "muse-wonder-1.0" });
+    // Asked for by name: whatever Muse then answers, nobody left the choice to Muse.
+    assert.equal(await controller.send("by name"), true);
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-wonder-1.0");
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 0);
+    controller.setPrefs({ defaultModelId: "retired-x" });
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await controller.send("dropped");
+    assert.equal(client.startCalls.at(-1)?.modelId, undefined);
+    assert.equal(toasts.filter((t) => t.title.startsWith("Muse's default is")).length, 1);
+    stop();
+  });
+
+  it("puts a refused switch back on its own thread though another thread was switched meanwhile", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12, WONDER];
+    const other: SessionSummary = { ...SESSION, sessionId: "s2", title: "Other" };
+    client.listSessions = async () => [SESSION, other];
+    client.loadTranscript = async (sessionId: string) => load({ session: sessionId === "s1" ? SESSION : other });
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    const modelOf = (id: string) => controller.store.get().threads[id]?.fold.meta.modelId;
+    const before = modelOf("s1");
+    assert.ok(before);
+    let refuse!: (error: Error) => void;
+    client.modelGates = [
+      new Promise<void>((_, reject) => {
+        refuse = reject;
+      }),
+    ];
+    const first = controller.setModel("muse-wonder-1.0");
+    assert.equal(modelOf("s1"), "muse-wonder-1.0", "the switch shows at once");
+    controller.openThread("s2");
+    await settle();
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    refuse(new Error("Your plan does not include this model"));
+    assert.equal(await first, false);
+    assert.equal(modelOf("s1"), before, "the refused switch is put back on its thread");
+    assert.equal(modelOf("s2"), "muse-spark-1.2", "the other thread's switch stays");
+    stop();
+  });
+
+  it("lets the newest pick, on whichever thread, write the default new threads start on", async () => {
+    const client = new FakeClient();
+    client.models = [SPARK, SPARK_12, WONDER];
+    const other: SessionSummary = { ...SESSION, sessionId: "s2", title: "Other" };
+    client.listSessions = async () => [SESSION, other];
+    client.loadTranscript = async (sessionId: string) => load({ session: sessionId === "s1" ? SESSION : other });
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    let accept!: () => void;
+    client.modelGates = [
+      new Promise<void>((resolve) => {
+        accept = resolve;
+      }),
+    ];
+    const older = controller.setModel("muse-wonder-1.0");
+    controller.openThread("s2");
+    await settle();
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    accept();
+    assert.equal(await older, true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.2", "an older switch finishing later does not take the default back");
+    stop();
+  });
+
+  it("treats a pick from a stand-in list as a try that the account has not confirmed", async () => {
+    const client = new FakeClient();
+    client.projects = [{ ...(client.projects[0] as ProjectView), defaultAccountId: "work" }];
+    client.accounts = [WORK];
+    client.modelQueue = [[SPARK, SPARK_12], new Error("Muse could not start")];
+    const { controller, stop, toasts } = await startedWith(client, NEW_THREAD);
+    assert.equal(controller.store.get().modelsStatus["acct:work"]?.status, "error");
+    assert.equal(modelsShown(controller.store.get(), { accountId: "work" }).fallback, true);
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-spark-1.2");
+    assert.equal(controller.store.get().prefs.defaultModelTried, true, "it is not pretended to be listed");
+    assert.deepEqual(toasts.filter((t) => /has not confirmed it/.test(t.title)), [
+      { title: "Using muse-spark-1.2; Work has not confirmed it", detail: "Its model list did not load. Muse checks access when you send a prompt." },
+    ]);
+    assert.ok(!toasts.some((t) => /did not list/.test(t.title)));
+    assert.equal(await controller.send("/model spark 1.3"), true);
+    assert.equal(controller.store.get().prefs.defaultModelTried, true);
+    assert.equal(toasts.filter((t) => /has not confirmed it/.test(t.title)).length, 2, "a name from the stand-in list is a try too");
+    await controller.send("hello");
+    assert.equal(client.startCalls.at(-1)?.modelId, "muse-spark-1.3");
+    assert.equal(client.startCalls.at(-1)?.accountId, "work");
+    stop();
+  });
+
+  it("takes a pick from the default login's list as listed on a thread of that login whose own list did not load", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [[SPARK, SPARK_12], new Error("Muse could not start")];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const state = () => controller.store.get();
+    assert.equal(state().modelsStatus["thread:s1"]?.status, "error");
+    assert.equal(modelsShown(state(), { sessionId: "s1" }).fallback, true, "the default login's list stands in for the thread's");
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    assert.deepEqual(client.modelSwitches, [{ sessionId: "s1", modelId: "muse-spark-1.2" }]);
+    assert.equal(state().prefs.defaultModelId, "muse-spark-1.2", "the login's own list vouches for it, so it is what new threads start on");
+    assert.equal(state().prefs.defaultModelTried, false);
+    assert.deepEqual(toasts.filter((t) => /has not confirmed it|did not list/.test(t.title)), [], "nobody is named as not having confirmed what it listed");
+    // What that list lacks is a try as ever, and this thread's alone.
+    assert.equal(await controller.setModel("muse-wonder-2.0"), true);
+    assert.equal(state().prefs.defaultModelId, "muse-spark-1.2");
+    assert.deepEqual(
+      toasts.filter((t) => /did not list/.test(t.title)).map((t) => t.title),
+      ["Using muse-wonder-2.0, which your Muse did not list"],
+    );
+    stop();
+  });
+
+  it("says the account has not confirmed a pick from the stand-in list on a thread of a named account", async () => {
+    const onWork: SessionSummary = { ...SESSION, accountId: "work" };
+    const client = new FakeClient();
+    client.accounts = [WORK];
+    client.listSessions = async () => [onWork];
+    client.transcript = async () => load({ session: onWork });
+    client.modelQueue = [[SPARK, SPARK_12], new Error("Muse could not start")];
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const state = () => controller.store.get();
+    assert.equal(state().modelsStatus["thread:s1"]?.status, "error");
+    assert.equal(await controller.setModel("muse-spark-1.2"), true);
+    assert.deepEqual(toasts.filter((t) => /has not confirmed it/.test(t.title)).map((t) => t.title), ["Using muse-spark-1.2; Work has not confirmed it"]);
+    assert.equal(state().prefs.defaultModelId, null, "a try on a thread is that thread's alone");
+    stop();
+  });
+});
+
+describe("restarting Muse waits for background work", () => {
+  const workflow = (status: string): ViewEvent => ({
+    method: "item/updated",
+    params: { item: { itemId: "wf-1", kind: "workflow", revision: status === "inProgress" ? 1 : 2, status, turnId: "t1", workflowRunId: "run-1", children: [{ childId: "c1", attempt: 1, label: "bg", status: status === "inProgress" ? "started" : "terminal", terminal: status === "inProgress" ? undefined : "completed" }] } },
+  });
+  const afterTheTurn = (status: string): ViewEvent[] => [
+    { method: "turn/started", params: { turnId: "t1" } },
+    workflow(status),
+    { method: "turn/completed", params: { turnId: "t1", terminal: "completed" } },
+  ];
+
+  it("refuses while a workflow run goes on after the lead turn ended, and says so", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => load({ events: afterTheTurn("inProgress") });
+    const { controller, stop, toasts } = await startedWith(client, "#/t/s1");
+    const thread = controller.store.get().threads["s1"];
+    assert.ok(thread);
+    assert.equal(thread.fold.activeTurnId, null, "no turn is running");
+    assert.equal(crewBusy(thread.fold, thread.researchRuns), true, "but the run is");
+    assert.equal(Object.values(controller.store.get().sessions).some((s) => s.live?.activeTurnId), false);
+    assert.equal(await controller.restartMuse(), false);
+    assert.equal(client.restarts, 0);
+    assert.equal(toasts.at(-1)?.title, "Work is still running");
+    stop();
+  });
+
+  it("restarts once the run has ended", async () => {
+    const client = new FakeClient();
+    client.transcript = async () => load({ events: afterTheTurn("completed") });
+    const { controller, stop } = await startedWith(client, "#/t/s1");
+    assert.equal(await controller.restartMuse(), true);
+    assert.equal(client.restarts, 1);
+    stop();
+  });
+});
+
+describe("moving around does not hammer Muse for the model lists", () => {
+  it("leaves a built-in list be for ten minutes of navigation, where the picker and a refresh by hand ask again", async () => {
+    const client = new FakeClient();
+    client.modelSource = "bundledCatalog";
+    client.models = LIVE_1_4_7.models;
+    const { controller, stop, held } = await startedWith(client);
+    assert.equal(client.modelCalls.length, 1);
+    for (const route of [{ kind: "new", cwd: "/work/app" }, { kind: "home" }, { kind: "settings" }, { kind: "new", cwd: "/work/app" }] as const) {
+      controller.navigate(route);
+      await settle();
+    }
+    assert.equal(client.modelCalls.length, 1, "four route changes ask for nothing");
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "the picker always asks again of a built-in list");
+    controller.setPicker(null);
+    await controller.discoverAll();
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "so does refreshing threads by hand");
+    held.clock.now += 11 * 60_000;
+    controller.navigate({ kind: "home" });
+    await settle();
+    assert.equal(client.modelCalls.length, 4, "and a navigation does once the list is ten minutes old");
+    stop();
+  });
+
+  it("leaves a failed list be for a minute of navigation, but not Retry, the picker or a later minute", async () => {
+    const client = new FakeClient();
+    client.modelQueue = [new Error("a"), new Error("b"), new Error("c"), new Error("d")];
+    client.models = [SPARK];
+    const { controller, stop, held } = await startedWith(client);
+    assert.equal(client.modelCalls.length, 1);
+    for (const route of [{ kind: "new", cwd: "/work/app" }, { kind: "home" }, { kind: "settings" }] as const) {
+      controller.navigate(route);
+      await settle();
+    }
+    assert.equal(client.modelCalls.length, 1, "no retry on every navigation");
+    assert.equal(controller.store.get().modelsStatus["default"]?.status, "error");
+    controller.setPicker("model");
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "the picker asks");
+    controller.setPicker(null);
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await settle();
+    assert.equal(client.modelCalls.length, 2, "and the failure it saw is a new one");
+    held.clock.now += 61_000;
+    controller.navigate({ kind: "new", cwd: "/work/app" });
+    await settle();
+    assert.equal(client.modelCalls.length, 3, "a minute later a navigation asks again");
+    await controller.refreshModels({ force: true });
+    assert.equal(client.modelCalls.length, 4, "Retry always goes through");
     stop();
   });
 });

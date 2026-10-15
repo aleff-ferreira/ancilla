@@ -169,7 +169,7 @@ describe("crewView over the scenarios", () => {
     assert.equal(replay.attempt, 2);
     assert.deepEqual(replay.attempts.map((attempt) => attempt.outcome), ["failed", "failed"]);
     assert.equal(replay.failure?.text, null, "no reason until the run ends");
-    assert.equal(usageTotal(replay.tokens), 64_200);
+    assert.equal(usageTotal(replay.tokens), 58_500, "52,100 in and 6,400 out: its 5,700 reasoning tokens are part of the output");
     const compat = agent(run, "judge:compat");
     assert.deepEqual(compat.quiet, { thresholdMs: 760_000, longestFinishedMs: 760_000 }, "quiet past the longest finished sibling, verify:sdk-examples at 12m 40s");
     assert.equal(compat.silenceMs, 16 * MIN + 2_000);
@@ -402,6 +402,38 @@ describe("the demo client", () => {
     assert.equal(after.state, "done");
     assert.deepEqual(after.attempts.map((attempt) => attempt.outcome), ["failed", "failed", "done"]);
     assert.equal(usageTotal(after.tokens), 118_000);
+  });
+
+  it("lists Wonder at the published price, each model with the reasoning levels it offers", async () => {
+    const { client } = clientFor("running");
+    const models = await client.listModels();
+    const wonder = models.find((m) => m.modelId === "muse-wonder-1.0");
+    assert.deepEqual(wonder?.cost, { input: 4, output: 20, cached: 0.2, currency: "USD" }, "the catalog lists no price, so the table's shows");
+    assert.equal(wonder?.contextLimit, 1_048_576);
+    assert.equal(wonder?.efforts?.at(-1), "max");
+    assert.ok(!wonder?.efforts?.includes("none"));
+    const efforts = (id: string) => models.find((m) => m.modelId === id)?.efforts;
+    assert.deepEqual(efforts("muse-spark-1.2"), ["minimal", "low", "medium", "high", "xhigh"]);
+    assert.equal(efforts("muse-spark-1.3")?.at(-1), "max");
+    assert.deepEqual(models.filter((m) => m.isDefault).map((m) => m.modelId), ["muse-spark-1.3"]);
+    assert.equal(models[0]?.modelId, "muse-wonder-1.0", "newest first, as Muse sends it");
+  });
+
+  it("says where its model list came from, like a live host does", async () => {
+    const { client } = clientFor("running");
+    const catalog = await client.listModelCatalog();
+    assert.equal(catalog.source, "providerCatalog");
+    assert.ok(catalog.hostVersion);
+    assert.deepEqual(catalog.models.map((m) => m.modelId), (await client.listModels()).map((m) => m.modelId));
+  });
+
+  it("puts Wonder in its usage, so the page prices a second model", async () => {
+    const { client } = clientFor("running");
+    const report = await client.usage(30);
+    const wonder = report.buckets.filter((b) => b.modelId === "muse-wonder-1.0");
+    assert.ok(wonder.length > 0 && wonder.length <= 14);
+    assert.ok(wonder.every((b) => b.calls > 0 && b.promptTokens > 0));
+    assert.ok(report.buckets.some((b) => b.modelId !== "muse-wonder-1.0"), "the other models are still there");
   });
 
   it("refuses a control that names an attempt the agent moved past, as Muse does", async () => {

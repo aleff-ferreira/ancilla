@@ -1,7 +1,7 @@
 import {
   AncillaError,
   parseAccounts,
-  parseModelList,
+  parseModelCatalog,
   parseSandboxSettings,
   parseTitleSettings,
   parseYoloSettings,
@@ -27,6 +27,7 @@ import {
   type GoalAction,
   type AncillaClient,
   type AncillaEvent,
+  type ModelCatalog,
   type ModelOption,
   type OutputRange,
   type ProjectView,
@@ -165,6 +166,16 @@ async function call<T>(method: string, path: string, body?: unknown, timeoutMs =
 
 const enc = encodeURIComponent;
 
+/** `tz=<IANA zone>` for this browser, or nothing when the platform cannot say. */
+function timeZoneParam(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone ? `tz=${enc(zone)}` : "";
+  } catch {
+    return "";
+  }
+}
+
 /** The Ancilla client over the local server's REST API and server-sent events. */
 export class WebAncillaClient implements AncillaClient {
   private readonly handlers = new Set<EventHandler>();
@@ -240,7 +251,9 @@ export class WebAncillaClient implements AncillaClient {
   }
 
   usage(days?: number): Promise<UsageReport> {
-    return call<UsageReport>("GET", `/api/usage${days ? `?days=${days}` : ""}`);
+    // The server buckets by calendar day in this zone; without one (an older server, or no Intl) it uses UTC.
+    const query = [days ? `days=${days}` : "", timeZoneParam()].filter(Boolean).join("&");
+    return call<UsageReport>("GET", `/api/usage${query ? `?${query}` : ""}`);
   }
 
   // ---------------------------------------------------------------- deep research
@@ -370,9 +383,17 @@ export class WebAncillaClient implements AncillaClient {
     await call("POST", "/api/user-input/clarify", { sessionId, userInputId, content });
   }
 
-  async listModels(sessionId?: string): Promise<ModelOption[]> {
-    const result = await call<{ models: unknown }>("GET", `/api/models${sessionId ? `?sessionId=${enc(sessionId)}` : ""}`);
-    return parseModelList(result.models);
+  async listModels(sessionId?: string, accountId?: string | null): Promise<ModelOption[]> {
+    return (await this.listModelCatalog(sessionId, accountId)).models;
+  }
+
+  async listModelCatalog(sessionId?: string, accountId?: string | null): Promise<ModelCatalog> {
+    const query = [sessionId ? `sessionId=${enc(sessionId)}` : "", accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
+    return parseModelCatalog(await call<unknown>("GET", `/api/models${query ? `?${query}` : ""}`));
+  }
+
+  async restartHosts(): Promise<void> {
+    await call("POST", "/api/hosts/restart", {});
   }
 
   async getTitleSettings(): Promise<TitleSettings> {

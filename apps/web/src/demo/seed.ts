@@ -194,12 +194,12 @@ function into(minutes: number, seconds = 0): number {
   return Math.round((minutes * 60 + seconds) * 1000);
 }
 
-/** A token count split the way Muse reports an agent's usage: mostly prompt, part of that cached. */
+/** A token count split the way Muse reports an agent's usage: mostly prompt, part of that cached, the rest output with its reasoning inside it. */
 export function tokensOf(total: number): TokenUsage {
   const inputTokens = Math.round(total * 0.81);
-  const outputTokens = Math.round(total * 0.12);
+  const outputTokens = total - inputTokens;
   const cached = Math.round(inputTokens * 0.6);
-  return { inputTokens, outputTokens, reasoningTokens: total - inputTokens - outputTokens, cachedTokens: cached, cacheReadTokens: cached, cacheWriteTokens: 0 };
+  return { inputTokens, outputTokens, reasoningTokens: Math.round(total * 0.07), cachedTokens: cached, cacheReadTokens: cached, cacheWriteTokens: 0 };
 }
 
 /** A workflow agent's id: a UUIDv7 whose first 48 bits carry its scheduling time, as Muse's child ids do. */

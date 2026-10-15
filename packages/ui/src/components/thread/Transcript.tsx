@@ -16,7 +16,7 @@ import {
   toolKind,
 } from "../../model/format.js";
 import { streamingSpeed, turnCosts, turnSpeeds, type TurnCost, type TurnSpeed } from "../../model/usage.js";
-import { formatCost } from "../../model/pricing.js";
+import { turnCostLabel, turnCostTip } from "../../model/usage-labels.js";
 import { stuckThread } from "../../model/errors.js";
 import type { ThreadState } from "../../model/store.js";
 import type { AttachmentView, MspItem, OutgoingAttachment, ShellRun, UserInputAnswer } from "../../types.js";
@@ -593,12 +593,10 @@ function TurnFooter(props: { turn: TurnView; speed: TurnSpeed | null; cost: Turn
       {props.cost && props.cost.cost > 0 ? (
         <>
           {completed !== null || props.speed || (duration !== null && !hasWork) ? dot : null}
-          <Tip
-            label={`At API rates: ${formatTokens(props.cost.promptTokens)} in (${formatTokens(props.cost.cachedTokens)} cached), ${formatTokens(props.cost.outputTokens)} out${props.cost.complete ? "" : "; a call here has no published price"}`}
-          >
+          {/* A turn's "+" reads "plus unpriced" and stays; a thread's floor is "≥ $x" (see turnCostLabel). */}
+          <Tip label={turnCostTip(props.cost)}>
             <span tabIndex={0} className="tabular-nums">
-              {formatCost(props.cost.cost, props.cost.currency ?? undefined)}
-              {props.cost.complete ? "" : "+"}
+              {turnCostLabel(props.cost)}
             </span>
           </Tip>
         </>

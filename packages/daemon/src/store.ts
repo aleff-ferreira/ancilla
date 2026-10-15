@@ -214,6 +214,11 @@ CREATE TABLE IF NOT EXISTS usage (
   duration_ms INTEGER,
   at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage_coverage (
+  session_id TEXT PRIMARY KEY,
+  complete INTEGER NOT NULL,
+  checked_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -237,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_shell_runs_session ON shell_runs(session_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_at ON usage(at);
 CREATE INDEX IF NOT EXISTS idx_usage_session ON usage(session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_twin ON usage(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_research_runs_session ON research_runs(session_id);
@@ -268,6 +274,8 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "projects", column: "parent_id", ddl: "ALTER TABLE projects ADD COLUMN parent_id INTEGER REFERENCES projects(id)" },
   // Where a research report was written inside the workspace, relative to the project folder; NULL until it was.
   { table: "research_runs", column: "report_path", ddl: "ALTER TABLE research_runs ADD COLUMN report_path TEXT" },
+  // NULL for calls stored before dates were tracked; `live` and `replay` say where a row's `at` came from.
+  { table: "usage", column: "at_source", ddl: "ALTER TABLE usage ADD COLUMN at_source TEXT" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -311,6 +319,14 @@ export interface ShellRunRecord {
   at: string;
 }
 
+/**
+ * Where a call's date came from when it is recorded. `live`: the moment its notification arrived, which is when
+ * the call ran. `replay`: read back from a thread's history and dated from the turn itself (an item's own time, or
+ * the turn id's), which is a lower bound for a long turn. `estimate`: read back from history with only the
+ * session's own dates to go on; it dates a new row but never moves a stored one, and is stored as `replay`.
+ */
+export type UsageAtSource = "live" | "replay" | "estimate";
+
 /** One model call's tokens, as the store keeps them for the usage page. */
 export interface UsageCall {
   key: string;
@@ -326,12 +342,37 @@ export interface UsageCall {
   reasoningTokens: number;
   durationMs: number | null;
   at: string;
+  /** Left out, the row has no source, like one stored before sources were tracked. */
+  atSource?: UsageAtSource;
 }
 
-export interface UsageRow extends UsageCall {
+export interface UsageRow extends Omit<UsageCall, "atSource"> {
+  /** `live` or `replay` as stored; null for rows from before sources were tracked. */
+  atSource: "live" | "replay" | null;
   sessionTitle: string | null;
   projectCwd: string | null;
+  /** Who made the thread: `research-worker` for a DeepResearch session. Null when the session row is gone. */
+  origin: string | null;
+  archived: boolean;
+  /** The aonia profile the thread runs under; null for the default login. */
+  accountId: string | null;
 }
+
+/** What the usage totals leave out, over one window. */
+export interface UsageCoverage {
+  /** Threads (research workers aside) with at least one call in the window. */
+  countedThreads: number;
+  /** Of those, the threads whose history could not be read back in full. */
+  partialThreads: number;
+  /** Threads active in the window that have no call recorded at all, because nothing here has read them yet. */
+  uncountedThreads: number;
+}
+
+/** A stored date this much later than a replay's own is taken for the moment the thread was opened, not a call's. */
+const LEGACY_REPAIR_DAYS = 6 / 24;
+
+/** How long an unchanged coverage verdict is trusted before its check date is written again. */
+const USAGE_COVERAGE_RECHECK_MS = 60_000;
 
 /** One DeepResearch run on a thread. `config` and `state` are kept as JSON text and parsed on the way out. */
 export interface ResearchRunRecord {
@@ -439,6 +480,10 @@ export class AncillaStore {
         this.db.exec(migration.ddl);
       }
     }
+    // A thread from before `activity_at` has none, and `updated_at` cannot stand in for it: every sync bumps that one.
+    // `created_at` is the one date a sync leaves alone; the next sync that sees newer activity moves it forward.
+    // Idempotent: once no row is NULL, this changes nothing.
+    this.db.exec("UPDATE sessions SET activity_at = created_at WHERE activity_at IS NULL");
   }
 
   /** Cached quota observations are keyed by the runtime and login fingerprint supplied by the server. */
@@ -448,10 +493,15 @@ export class AncillaStore {
     try { return parseSubscriptionUsage(JSON.parse(String(row["usage"]))); } catch { return null; }
   }
 
-  setSubscriptionUsage(scope: string, usage: SubscriptionUsage): void {
+  /**
+   * An older stamp never replaces a newer one, except a row stamped more than five minutes after `now`: no honest
+   * reading carries that, and keeping it would block every later reading from being saved.
+   */
+  setSubscriptionUsage(scope: string, usage: SubscriptionUsage, now: number = Date.now()): void {
     this.db.prepare(`INSERT INTO subscription_usage (scope, observed_at_ms, usage) VALUES (?, ?, ?)
       ON CONFLICT(scope) DO UPDATE SET observed_at_ms = excluded.observed_at_ms, usage = excluded.usage
-      WHERE excluded.observed_at_ms >= subscription_usage.observed_at_ms`).run(scope, usage.observedAtMs, JSON.stringify(usage));
+      WHERE excluded.observed_at_ms >= subscription_usage.observed_at_ms
+        OR subscription_usage.observed_at_ms > ? + 300000`).run(scope, usage.observedAtMs, JSON.stringify(usage), now);
     // Login changes can leave older scopes behind; retain only a small recent observation cache.
     this.db.prepare(`DELETE FROM subscription_usage WHERE scope NOT IN
       (SELECT scope FROM subscription_usage ORDER BY observed_at_ms DESC LIMIT 64)`).run();
@@ -868,14 +918,45 @@ export class AncillaStore {
 
   /**
    * One model call's tokens. Keyed by the view cursor that carried it, so replaying a thread's history
-   * never counts a call twice.
+   * never counts a call twice. A history page numbers the same call differently from the live stream (the
+   * streamed deltas use cursors the page leaves out), so a call also counts once when a row of the same thread
+   * and turn already holds its exact tokens and duration, whichever cursor that row was stored under. That guards
+   * calls recorded from now on; a call an older install stored under both cursors keeps both rows.
+   *
+   * A verified `replay` date repairs a stored one only by moving it earlier, and never a `live` one: a call seen as
+   * it ran is dated as it ran. A row stored before sources were tracked is moved only when its date is more than
+   * six hours later than the replay's own, which is what opening a thread days after its calls looks like; a call
+   * that merely ran long after its turn began is left where it is.
    */
   recordUsage(call: UsageCall): void {
+    const stored = this.db.prepare(`SELECT key FROM usage WHERE key = ?`).get(call.key) as Row | undefined;
+    const twin = stored
+      ? undefined
+      : (this.db
+          .prepare(
+            `SELECT key FROM usage
+             WHERE session_id = ? AND turn_id IS ? AND prompt_tokens = ? AND output_tokens = ? AND duration_ms IS ?
+             LIMIT 1`,
+          )
+          .get(call.sessionId, call.turnId ?? null, call.promptTokens, call.outputTokens, call.durationMs ?? null) as Row | undefined);
+    const existing = stored ?? twin;
+    if (existing) {
+      if (call.atSource === "replay") {
+        this.db
+          .prepare(
+            `UPDATE usage SET at = ?, at_source = 'replay'
+             WHERE key = ? AND at_source IS NOT 'live' AND at > ?
+               AND (at_source = 'replay' OR julianday(at) - julianday(?) > ?)`,
+          )
+          .run(call.at, String(existing["key"]), call.at, call.at, LEGACY_REPAIR_DAYS);
+      }
+      return;
+    }
     this.db
       .prepare(
         `INSERT INTO usage (key, session_id, turn_id, model_id, prompt_tokens, output_tokens, input_tokens,
-           cached_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, duration_ms, at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           cached_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, duration_ms, at, at_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO NOTHING`,
       )
       .run(
@@ -892,14 +973,84 @@ export class AncillaStore {
         call.reasoningTokens,
         call.durationMs ?? null,
         call.at,
+        call.atSource === undefined ? null : call.atSource === "estimate" ? "replay" : call.atSource,
       );
+  }
+
+  /**
+   * Whether everything the thread's history holds was read back into the usage table the last time it was read.
+   * Opening a thread reads it each time, so a verdict that has not changed and was checked less than a minute ago is
+   * left as it is: a write per thread open would be a commit for no news.
+   */
+  setUsageCoverage(sessionId: string, complete: boolean, checkedAt: string = nowIso()): void {
+    const stored = this.getUsageCoverage(sessionId);
+    if (stored && stored.complete === complete && Date.parse(checkedAt) - Date.parse(stored.checkedAt) < USAGE_COVERAGE_RECHECK_MS) {
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO usage_coverage (session_id, complete, checked_at) VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET complete = excluded.complete, checked_at = excluded.checked_at`,
+      )
+      .run(sessionId, complete ? 1 : 0, checkedAt);
+  }
+
+  getUsageCoverage(sessionId: string): { complete: boolean; checkedAt: string } | null {
+    const row = this.db.prepare(`SELECT complete, checked_at FROM usage_coverage WHERE session_id = ?`).get(sessionId) as Row | undefined;
+    return row ? { complete: Number(row["complete"]) === 1, checkedAt: String(row["checked_at"]) } : null;
+  }
+
+  /**
+   * The prompt tokens recorded for one thread so far, across all time. A call stored twice under two cursors (an
+   * install from before the twin rule has some) counts once, so rows that are the same call cannot make a thread
+   * that was only partly read look complete.
+   */
+  sumUsagePrompt(sessionId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(u.prompt_tokens), 0) AS total FROM usage u
+         WHERE u.session_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM usage v
+             WHERE v.session_id = u.session_id AND v.turn_id IS u.turn_id AND v.prompt_tokens = u.prompt_tokens
+               AND v.output_tokens = u.output_tokens AND v.duration_ms IS u.duration_ms AND v.rowid < u.rowid)`,
+      )
+      .get(sessionId) as Row;
+    return Number(row["total"] ?? 0);
+  }
+
+  /**
+   * What the totals since `since` leave out. DeepResearch worker sessions are not threads the user opens, so they
+   * are in neither count. A thread is uncounted when it was active in the window, ran at least one turn, is not
+   * archived and has no recorded call at all, which is what a thread run in Muse itself and never read here is.
+   * One whose history was read in full and held no calls is not: there was nothing to count.
+   */
+  usageCoverage(since: string): UsageCoverage {
+    const count = (sql: string): number => Number((this.db.prepare(sql).get(since) as Row)["n"] ?? 0);
+    const counted = `FROM usage u LEFT JOIN sessions s ON s.id = u.session_id
+      WHERE u.at >= ? AND COALESCE(s.origin, 'ancilla') <> 'research-worker'`;
+    return {
+      countedThreads: count(`SELECT COUNT(DISTINCT u.session_id) AS n ${counted}`),
+      partialThreads: count(
+        `SELECT COUNT(DISTINCT u.session_id) AS n ${counted}
+           AND EXISTS (SELECT 1 FROM usage_coverage c WHERE c.session_id = u.session_id AND c.complete = 0)`,
+      ),
+      uncountedThreads: count(
+        `SELECT COUNT(*) AS n FROM sessions s
+         WHERE s.archived = 0 AND s.turn_count > 0 AND s.origin <> 'research-worker'
+           AND COALESCE(s.activity_at, s.created_at) >= ?
+           AND NOT EXISTS (SELECT 1 FROM usage u WHERE u.session_id = s.id)
+           AND NOT EXISTS (SELECT 1 FROM usage_coverage c WHERE c.session_id = s.id AND c.complete = 1)`,
+      ),
+    };
   }
 
   /** Every recorded call since `since`, newest last, with the thread and the project (not the folder) it belongs to. */
   listUsage(since?: string): UsageRow[] {
     const rows = this.db
       .prepare(
-        `SELECT u.*, s.title AS session_title, COALESCE(owner.cwd, p.cwd) AS project_cwd
+        `SELECT u.*, s.title AS session_title, s.origin AS session_origin, s.archived AS session_archived,
+           s.account_id AS session_account_id, COALESCE(owner.cwd, p.cwd) AS project_cwd
          FROM usage u
          LEFT JOIN sessions s ON s.id = u.session_id
          LEFT JOIN projects p ON p.id = s.project_id
@@ -922,8 +1073,12 @@ export class AncillaStore {
       reasoningTokens: Number(row["reasoning_tokens"] ?? 0),
       durationMs: row["duration_ms"] === null ? null : Number(row["duration_ms"]),
       at: String(row["at"]),
+      atSource: row["at_source"] === "live" || row["at_source"] === "replay" ? row["at_source"] : null,
       sessionTitle: row["session_title"] === null || row["session_title"] === undefined ? null : String(row["session_title"]),
       projectCwd: row["project_cwd"] === null || row["project_cwd"] === undefined ? null : String(row["project_cwd"]),
+      origin: row["session_origin"] === null || row["session_origin"] === undefined ? null : String(row["session_origin"]),
+      archived: Number(row["session_archived"] ?? 0) === 1,
+      accountId: row["session_account_id"] === null || row["session_account_id"] === undefined ? null : String(row["session_account_id"]),
     }));
   }
 
@@ -956,6 +1111,11 @@ export class AncillaStore {
     this.db
       .prepare(`UPDATE projects SET default_account_id = ?, updated_at = ? WHERE cwd = ?`)
       .run(accountId, nowIso(), cwd);
+  }
+
+  /** An account that was removed is no project's default any more; each project that named it is back on the default login. */
+  clearDefaultAccount(accountId: string): void {
+    this.db.prepare(`UPDATE projects SET default_account_id = NULL WHERE default_account_id = ?`).run(accountId);
   }
 
   /**
@@ -1055,7 +1215,12 @@ export class AncillaStore {
     if (input.turnCount !== undefined && input.turnCount > existing.turnCount) {
       patch.turnCount = input.turnCount;
     }
-    if (input.activityAt !== undefined && input.activityAt > existing.activityAt) {
+    // The stored column itself, not the record's: for a row with none, `existing.activityAt` is `updated_at`, which
+    // every sync bumps, so a comparison against it never lets Muse's own date in.
+    const stored = (this.db.prepare(`SELECT activity_at FROM sessions WHERE id = ?`).get(input.id) as Row | undefined)?.["activity_at"];
+    if (stored === null || stored === undefined) {
+      patch.activityAt = input.activityAt ?? existing.createdAt;
+    } else if (input.activityAt !== undefined && input.activityAt > existing.activityAt) {
       patch.activityAt = input.activityAt;
     }
     if (existing.projectId !== input.projectId) {

@@ -3,7 +3,7 @@
  * back what `muse serve` would stream, so the real Ancilla UI renders and responds exactly as it does
  * against a live server. Nothing leaves the browser: no server, no Muse, no model calls.
  */
-import { AncillaError, parseModelList, researchLive } from "@ancilla/ui";
+import { AncillaError, parseModelCatalog, researchLive } from "@ancilla/ui";
 import type {
   AccountView,
   AncillaClient,
@@ -20,6 +20,7 @@ import type {
   FileListing,
   GoalAction,
   LiveView,
+  ModelCatalog,
   ModelOption,
   MspItem,
   OutputRange,
@@ -1094,20 +1095,43 @@ export class DemoAncillaClient implements AncillaClient {
   // ------------------------------------------------------------------------------------ session controls
 
   async listModels(): Promise<ModelOption[]> {
-    return parseModelList({
-      models: [
-        { modelId: MODEL, displayLabel: "Muse Spark 1.3", description: "Muse's current coding model.", isDefault: true, isActive: true, contextLimit: 1_000_000, outputLimit: 64_000 },
-        {
-          modelId: `${MODEL}-contributor`,
-          displayLabel: "Muse Spark 1.3",
-          description: "The same model at a lower rate; prompts and outputs may be used for product improvement.",
-          isDefault: false,
-          isActive: false,
-          contextLimit: 1_000_000,
-          outputLimit: 64_000,
-        },
-        { modelId: "muse-spark-1.2", displayLabel: "Muse Spark 1.2", description: "The previous release.", isDefault: false, isActive: false, contextLimit: 1_000_000, outputLimit: 64_000 },
-      ],
+    return (await this.listModelCatalog()).models;
+  }
+
+  /** Newest first, as Muse sends it. Wonder carries no catalog price, so the published table's shows; 1.2 has no Max. */
+  async listModelCatalog(): Promise<ModelCatalog> {
+    return parseModelCatalog({
+      models: {
+        source: "providerCatalog",
+        providerId: "meta",
+        profileId: "tbh",
+        models: [
+          {
+            modelId: "muse-wonder-1.0",
+            displayLabel: "Muse Wonder",
+            description: "Muse's largest model, for hard problems.",
+            isDefault: false,
+            isActive: false,
+            contextLimit: 1_048_576,
+            outputLimit: 128_000,
+            cost: null,
+            variants: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
+          { modelId: MODEL, displayLabel: "Muse Spark 1.3", description: "Muse's current coding model.", isDefault: true, isActive: true, contextLimit: 1_000_000, outputLimit: 64_000, variants: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+          {
+            modelId: `${MODEL}-contributor`,
+            displayLabel: "Muse Spark 1.3",
+            description: "The same model at a lower rate; prompts and outputs may be used for product improvement.",
+            isDefault: false,
+            isActive: false,
+            contextLimit: 1_000_000,
+            outputLimit: 64_000,
+            variants: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          },
+          { modelId: "muse-spark-1.2", displayLabel: "Muse Spark 1.2", description: "The previous release.", isDefault: false, isActive: false, contextLimit: 1_000_000, outputLimit: 64_000, variants: ["minimal", "low", "medium", "high", "xhigh"] },
+        ],
+      },
+      hostVersion: "1.4.6",
     });
   }
 
@@ -1633,6 +1657,22 @@ export class DemoAncillaClient implements AncillaClient {
         reasoningTokens: 0,
         durationMs: titles * 700,
       });
+      // The last fortnight also gave Wonder the harder problems, so the page prices a second model by its table rate.
+      if (d < 14) {
+        const hard = Math.max(1, Math.round(calls / 7));
+        buckets.push({
+          day,
+          modelId: "muse-wonder-1.0",
+          calls: hard,
+          promptTokens: hard * 31_000,
+          outputTokens: hard * 1_650,
+          cachedTokens: hard * 22_000,
+          cacheReadTokens: hard * 22_000,
+          cacheWriteTokens: hard * 1_400,
+          reasoningTokens: hard * 600,
+          durationMs: hard * 11_000,
+        });
+      }
     }
     const since = now - (window - 1) * DAY;
     const weights = [46, 18, 12, 31, 14, 9, 11, 6];

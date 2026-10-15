@@ -188,7 +188,8 @@ function tokensFact(agent: AgentVM, live: boolean): Fact {
     const parts = [formatTokens(usageTotal(agent.tokens))];
     if (agent.tokens.inputTokens !== undefined) parts.push(`in ${formatTokens(agent.tokens.inputTokens)}`);
     if (agent.tokens.outputTokens !== undefined) parts.push(`out ${formatTokens(agent.tokens.outputTokens)}`);
-    if (agent.tokens.reasoningTokens !== undefined && agent.tokens.reasoningTokens > 0) parts.push(`reasoning ${formatTokens(agent.tokens.reasoningTokens)}`);
+    // Reasoning is part of the output, so the total above already holds it: this says how much of it that was.
+    if (agent.tokens.reasoningTokens !== undefined && agent.tokens.reasoningTokens > 0) parts.push(`incl. reasoning ${formatTokens(agent.tokens.reasoningTokens)}`);
     return { key: "tokens", label: "Tokens", value: parts.join(" · ") };
   }
   if (agent.kind === "task") return { key: "tokens", label: "Tokens", value: agent.taskInfo?.background === false ? "Not reported for individual tools" : "Not reported for background tasks", nr: true };

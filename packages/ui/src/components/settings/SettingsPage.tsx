@@ -4,10 +4,11 @@ import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
 import type { AncillaController } from "../../model/controller.js";
+import { MODEL_COPY, activeModel, applyModelChoice, choiceDetail, choiceName, effortNote, effortView, modelMenu, modelPickLine, tryTypedModel } from "../../model/models.js";
 import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber } from "../../model/research.js";
 import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
 import type { AccountView, ApprovalMode, ReasoningEffort, ResearchConfig, ResearchModelIds } from "../../types.js";
-import { LEVELS, MODES } from "../composer/Composer.js";
+import { LEVELS, MODES, ModelIdForm } from "../composer/Composer.js";
 import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
 import { Modal } from "../ui/overlays.js";
 import { TopBar } from "../chrome.js";
@@ -41,6 +42,85 @@ function Pick<T extends string | number | null>(props: {
           {option.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/**
+ * A model control: the rows of the composer's picker, with Muse default first, and the same words when the list is
+ * loading, failed or empty. `full` is the new-thread default, which also says what the list is, takes a model id Muse
+ * did not list, and reads the list again on request; the title and research models keep to the rows and a retry.
+ */
+function ModelPick(props: { value: string | null; onChange: (modelId: string | null) => void; full?: boolean }) {
+  const controller = useController();
+  const models = useApp((s) => s.models);
+  const accountModels = useApp((s) => s.accountModels);
+  const modelsStatus = useApp((s) => s.modelsStatus);
+  const accounts = useApp((s) => s.accounts);
+  const tried = useApp((s) => s.prefs.defaultModelTried);
+  // A saved model is global and this control shows one list, the default login's: an id another loaded list offers is
+  // not called unavailable (it says whose it is), and the default tried by its id is kept and said to be tried.
+  const menu = modelMenu(
+    { models, accountModels, modelsStatus, accounts },
+    { scope: {}, accountId: null, current: null, pref: props.value, plan: null, tried: props.full === true && tried, elsewhere: true },
+  );
+  // Said in words under the rows: what Muse default follows (it can be a Contributor model), or why a saved model is not among them.
+  const line = modelPickLine(menu, { museDefault: props.full === true });
+  const selected = menu.rows.find((row) => row.selected);
+  const picked = selected ? selected.id : "";
+  const options = [
+    ...menu.rows.map((row) => ({
+      value: row.id,
+      // The contributor variants share a display name, so each says so: without it the list offers the same word twice.
+      label: row.kind !== "default" && row.contributor ? `${choiceName(row)} · Contributor` : choiceName(row),
+      hint: [row.isDefault ? "Muse's default" : null, choiceDetail(row)].filter(Boolean).join(". ") || undefined,
+    })),
+    // A list Muse built in leaves out models it may still serve: the ones Meta publishes are a click away.
+    ...(props.full ? menu.published.map((model) => ({ value: model.id as string | null, label: model.label, hint: MODEL_COPY.notListed })) : []),
+  ];
+  const retry = menu.mode === "error" || menu.mode === "empty" || props.full === true;
+  // What the list is, and the likeliest reason a model is missing from it.
+  const footer = [menu.footer.line, menu.footer.builtIn ?? menu.footer.hint].filter(Boolean).join(". ");
+  return (
+    <div className="flex min-w-0 w-full flex-col items-end gap-1.5 @min-[520px]:w-auto">
+      {menu.message ? (
+        <p role={menu.mode === "error" ? "alert" : undefined} className="text-xs text-subtle [overflow-wrap:anywhere]">
+          {menu.message}
+        </p>
+      ) : null}
+      {menu.showRows ? (
+        <Pick<string | null>
+          value={picked}
+          options={options}
+          onChange={(value) => {
+            if (value !== picked) {
+              props.onChange(value);
+            }
+          }}
+        />
+      ) : null}
+      {line ? <p className="text-xs text-muted [overflow-wrap:anywhere]">{line}</p> : null}
+      {props.full
+        ? menu.notes.map((note) => (
+            <p key={note} className="text-xs text-subtle [overflow-wrap:anywhere]">
+              {note}
+            </p>
+          ))
+        : null}
+      {retry ? (
+        <Button size="sm" variant="secondary" disabled={menu.refreshing} onClick={() => void controller.refreshModels({ force: true })}>
+          <ArrowsClockwiseIcon size={13} className={cn(menu.refreshing && "animate-spin")} />
+          {menu.mode === "error" ? MODEL_COPY.retry : MODEL_COPY.refresh}
+        </Button>
+      ) : null}
+      {props.full ? (
+        <>
+          {footer ? <p className="text-xs text-subtle [overflow-wrap:anywhere]">{footer}</p> : null}
+          <div className="w-full @min-[520px]:w-72">
+            <ModelIdForm label="Other model id" onUse={(modelId) => tryTypedModel(controller, modelId)} />
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -113,28 +193,13 @@ function Num(props: { value: number; min: number; max: number; step?: number; un
  * The research defaults a run starts from; the composer popover can change the window and the workers per run.
  * Every field takes the daemon's own limits, so whatever the server holds renders and whatever is typed stays.
  */
-function ResearchRows(props: { config: ResearchConfig; models: { modelId: string; contributor?: boolean }[]; controller: AncillaController }) {
+function ResearchRows(props: { config: ResearchConfig; controller: AncillaController }) {
   const { config, controller } = props;
   const patch = (part: Partial<ResearchConfig>) => void controller.setResearchSettings({ config: part });
   const limits = RESEARCH_LIMITS;
   const modelRow = (role: keyof ResearchModelIds, label: string, description: string) => (
     <Row label={label} description={description}>
-      {props.models.length === 0 ? (
-        <p className="text-xs text-subtle">No models loaded</p>
-      ) : (
-        <Pick<string | null>
-          value={config.models[role]}
-          options={[
-            { value: null, label: "Muse default" },
-            ...props.models.map((model) => ({
-              value: model.modelId as string | null,
-              label: model.contributor ? `${modelDisplayName(model.modelId)} · Contributor` : modelDisplayName(model.modelId),
-              hint: model.contributor ? "Contributor tier: prompts and outputs may be used for product improvement." : undefined,
-            })),
-          ]}
-          onChange={(value) => patch({ models: { ...config.models, [role]: value } })}
-        />
-      )}
+      <ModelPick value={config.models[role]} onChange={(value) => patch({ models: { ...config.models, [role]: value } })} />
     </Row>
   );
   return (
@@ -348,6 +413,8 @@ export function SettingsPage() {
   const controller = useController();
   const prefs = useApp((s) => s.prefs);
   const models = useApp((s) => s.models);
+  const accountModels = useApp((s) => s.accountModels);
+  const modelsStatus = useApp((s) => s.modelsStatus);
   const accounts = useApp((s) => s.accounts);
   const titleSettings = useApp((s) => s.titleSettings);
   const researchSettings = useApp((s) => s.researchSettings);
@@ -364,6 +431,10 @@ export function SettingsPage() {
   const [renaming, setRenaming] = useState<AccountView | null>(null);
   const [removing, setRemoving] = useState<AccountView | null>(null);
   const now = useNow(60_000);
+  // The levels offered are the ones the model new threads start on has: the saved default, else Muse's own.
+  const startModel = activeModel({ models, accountModels, modelsStatus }, {}, null, prefs.defaultModelId);
+  const effort = effortView(startModel, prefs.effort, LEVELS);
+  const effortHint = effortNote(prefs.effort, effort.shown, startModel ? modelDisplayName(startModel.modelId) : undefined);
   const busy = updates?.status === "checking" || updates?.status === "downloading" || updates?.status === "installing";
   const drag = useOverlayDragProps();
   const collapsed = useApp((s) => s.prefs.sidebarCollapsed);
@@ -437,22 +508,12 @@ export function SettingsPage() {
         </Section>
 
         <Section title="New threads">
-          <Row label="Model" description="What a new thread starts on. Changing it here leaves running threads alone.">
-            {models.length === 0 ? (
-              <p className="text-xs text-subtle">No models loaded</p>
-            ) : (
-              <Pick
-                value={prefs.defaultModelId}
-                options={models.map((model) => ({
-                  value: model.modelId,
-                  // The contributor variants share a display name, so without this the list offers the same
-                  // word twice and there is no way to tell which button is which.
-                  label: model.contributor ? `${modelDisplayName(model.modelId)} · Contributor` : modelDisplayName(model.modelId),
-                  hint: model.contributor ? "Contributor tier: prompts and outputs may be used for product improvement." : undefined,
-                }))}
-                onChange={(value) => void controller.setModel(value as string)}
-              />
-            )}
+          <Row label="Model" description="What a new thread starts on. Muse default follows whatever Muse picks. Changing it here leaves running threads alone.">
+            <ModelPick
+              full
+              value={prefs.defaultModelId}
+              onChange={(value) => applyModelChoice(controller, value)}
+            />
           </Row>
           <Row label="Permissions" description="What Muse may do before it asks you.">
             <div className="flex min-w-0 w-full flex-col items-end gap-1 @min-[520px]:w-auto">
@@ -468,14 +529,17 @@ export function SettingsPage() {
             </div>
           </Row>
           <Row label="Reasoning effort" description="How long the model thinks before answering. Auto lets Muse choose per turn.">
-            <Pick<ReasoningEffort | null>
-              value={prefs.effort}
-              options={[
-                { value: null, label: "Auto", hint: "Muse picks the effort for each turn" },
-                ...LEVELS.map((level) => ({ value: level.value, label: level.label, hint: level.description })),
-              ]}
-              onChange={(value) => controller.setEffort(value)}
-            />
+            <div className="flex min-w-0 w-full flex-col items-end gap-1 @min-[520px]:w-auto">
+              <Pick<ReasoningEffort | null>
+                value={effort.shown}
+                options={[
+                  { value: null, label: "Auto", hint: "Muse picks the effort for each turn" },
+                  ...effort.levels.map((level) => ({ value: level.value, label: level.label, hint: level.description })),
+                ]}
+                onChange={(value) => controller.setEffort(value)}
+              />
+              {effortHint ? <p className="text-xs text-subtle">{effortHint}</p> : null}
+            </div>
           </Row>
         </Section>
 
@@ -532,22 +596,7 @@ export function SettingsPage() {
           </Row>
           {titleSettings?.enabled ? (
             <Row label="Title model" description="Which model writes the titles. Muse default lets the CLI choose.">
-              {models.length === 0 ? (
-                <p className="text-xs text-subtle">No models loaded</p>
-              ) : (
-                <Pick<string | null>
-                  value={titleSettings.modelId}
-                  options={[
-                    { value: null, label: "Muse default" },
-                    ...models.map((model) => ({
-                      value: model.modelId as string | null,
-                      label: model.contributor ? `${modelDisplayName(model.modelId)} · Contributor` : modelDisplayName(model.modelId),
-                      hint: model.contributor ? "Contributor tier: prompts and outputs may be used for product improvement." : undefined,
-                    })),
-                  ]}
-                  onChange={(value) => void controller.setTitleModel(value)}
-                />
-              )}
+              <ModelPick value={titleSettings.modelId} onChange={(value) => void controller.setTitleModel(value)} />
             </Row>
           ) : null}
         </Section>
@@ -563,7 +612,7 @@ export function SettingsPage() {
               <p className="text-xs text-subtle">Loading…</p>
             )}
           </Row>
-          {researchSettings?.enabled ? <ResearchRows config={researchSettings.config} models={models} controller={controller} /> : null}
+          {researchSettings?.enabled ? <ResearchRows config={researchSettings.config} controller={controller} /> : null}
         </Section>
 
         <Section title="Approvals">
