@@ -19,8 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux is pinned: ubuntu-latest moves to a newer image on GitHub's schedule and would change the gate unannounced.
-        os: [windows-latest, macos-latest, ubuntu-24.04]
+        # All three are pinned: a -latest label moves to a newer image on GitHub's schedule and would change the gate
+        # unannounced. These are the images the labels resolved to on 2026-09-29 (run 36532628149), the ones the release
+        # builds on; moving to a newer image is a change made on purpose.
+        os: [windows-2025-vs2026, macos-26, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -74,7 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         # Pinned for the same reason as the node job above.
-        os: [windows-latest, macos-latest, ubuntu-24.04]
+        os: [windows-2025-vs2026, macos-26, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:

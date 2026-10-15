@@ -50,7 +50,7 @@ describe("the workflow files", () => {
     }
     const ci = workflow("ci.yml");
     for (const job of Object.values(ci.jobs)) {
-      assert.ok(!job.strategy.matrix.os.includes("ubuntu-latest"), "CI's Linux leg is pinned");
+      assert.ok(job.strategy.matrix.os.every((os) => !/-latest/.test(os)), "every leg of CI's matrix is pinned");
     }
   });
 
