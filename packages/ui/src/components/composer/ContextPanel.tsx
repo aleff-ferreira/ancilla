@@ -3,6 +3,7 @@ import { Popover } from "radix-ui";
 import { useMemo, useState, type ReactNode } from "react";
 import { shallowEqual, useApp, useController } from "../../app/context.js";
 import { formatDuration, formatTokens, modelDisplayName } from "../../model/format.js";
+import { formatCost } from "../../model/pricing.js";
 import {
   contextBreakdown,
   contextUsageOf,
@@ -11,6 +12,20 @@ import {
   type SessionUsage,
   type SliceKey,
 } from "../../model/usage.js";
+import {
+  breakdownNote,
+  contextCostValue,
+  contextMeterView,
+  contextTokenRows,
+  costTitle,
+  LOADED_ONLY,
+  pressureNote,
+  segmentBarLabel,
+  share,
+  SUBAGENT_CAPTION,
+  unpricedWhy,
+  type ContextTone,
+} from "../../model/usage-labels.js";
 import { Tip, FLOATING } from "../ui/overlays.js";
 import { cn } from "../ui/primitives.js";
 import { Collapse } from "../ui/sourced.js";
@@ -24,22 +39,15 @@ const SLICE_COLOR: Record<SliceKey, string> = {
   system: "bg-chart-5",
 };
 
-function share(part: number, whole: number | null): string {
-  if (!whole) {
-    return "";
-  }
-  const value = (part / whole) * 100;
-  return value > 0 && value < 0.1 ? "<0.1%" : `${value.toFixed(1)}%`;
-}
-
-function money(value: number, currency: string | null): string {
-  const prefix = !currency || currency === "USD" ? "$" : `${currency} `;
-  return `${prefix}${value > 0 && value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
-}
-
 function duration(ms: number): string {
   return ms > 0 ? formatDuration(ms) || "0s" : "0s";
 }
+
+const RING_TONE: Record<ContextTone, string> = {
+  normal: "text-accent-text",
+  warn: "text-warn",
+  danger: "text-danger",
+};
 
 /** The composer's context ring. Opens the context window and session usage panel. */
 export function ContextMeter(props: { sessionId: string }) {
@@ -47,21 +55,21 @@ export function ContextMeter(props: { sessionId: string }) {
     const fold = s.threads[props.sessionId]?.fold;
     return fold ? contextUsageOf(fold, s.models) : null;
   }, shallowEqual);
-  if (!usage || !usage.windowTokens) {
+  if (!usage) {
     return null;
   }
-  const fill = Math.min(1, usage.usedTokens / usage.windowTokens);
-  const percent = fill < 0.01 ? "<1%" : `${Math.round(fill * 100)}%`;
-  const tone = usage.pressure === "blocked" ? "text-danger" : usage.pressure === "warning" ? "text-warn" : "text-accent-text";
+  // Without a window size the ring stays, empty and with the tokens in context, so the panel and Compact stay reachable.
+  const view = contextMeterView(usage);
+  const fill = view.fill ?? 0;
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
   return (
     <Popover.Root>
-      <Tip label={`${formatTokens(usage.usedTokens)} of ${formatTokens(usage.windowTokens)} tokens in context`}>
+      <Tip label={view.tip}>
         <Popover.Trigger asChild>
           <button
             type="button"
-            aria-label={`Context window ${percent} used`}
+            aria-label={view.aria}
             className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-1.5 text-2xs text-subtle tabular-nums transition-colors hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" className="-rotate-90">
@@ -75,10 +83,10 @@ export function ContextMeter(props: { sessionId: string }) {
                 strokeWidth="2"
                 strokeLinecap="round"
                 strokeDasharray={`${Math.max(circumference * fill, fill > 0 ? 1.2 : 0)} ${circumference}`}
-                className={tone}
+                className={RING_TONE[view.tone]}
               />
             </svg>
-            {percent}
+            {view.text}
           </button>
         </Popover.Trigger>
       </Tip>
@@ -98,14 +106,15 @@ export function ContextMeter(props: { sessionId: string }) {
 }
 
 /** Mounted only while the popover is open, so a streaming thread does not recompute it. */
-function ContextPanel(props: { sessionId: string }) {
+export function ContextPanel(props: { sessionId: string }) {
   const controller = useController();
   const fold = useApp((s) => s.threads[props.sessionId]?.fold ?? null);
   const readOnly = useApp((s) => Boolean(s.threads[props.sessionId]?.readOnly));
   const models = useApp((s) => s.models);
+  const truncated = useApp((s) => s.threads[props.sessionId]?.truncated ?? false);
   const [expanded, setExpanded] = useState(false);
   const breakdown = useMemo(() => (fold ? contextBreakdown(fold, models) : null), [fold, models]);
-  const usage = useMemo(() => (fold ? sessionUsage(fold, models) : null), [fold, models]);
+  const usage = useMemo(() => (fold ? sessionUsage(fold, models, truncated) : null), [fold, models, truncated]);
   if (!breakdown || !usage) {
     return null;
   }
@@ -121,7 +130,9 @@ function ContextPanel(props: { sessionId: string }) {
           <span className="text-sm text-muted">Context window</span>
           <span className="flex-1" />
           <span className="text-xs text-muted tabular-nums">
-            {formatTokens(breakdown.used)} / {formatTokens(breakdown.window)} ({share(breakdown.used, breakdown.window)})
+            {breakdown.window === null
+              ? `${formatTokens(breakdown.used)} tokens`
+              : `${formatTokens(breakdown.used)} / ${formatTokens(breakdown.window)} (${share(breakdown.used, breakdown.window)})`}
           </span>
           <CaretDownIcon size={14} className={cn("shrink-0 text-subtle transition-transform duration-150 ease-out", expanded && "rotate-180")} />
         </button>
@@ -158,7 +169,7 @@ function SegmentBar(props: { breakdown: ContextBreakdown }) {
   return (
     <div
       role="img"
-      aria-label={`${share(used, window)} of the context window used`}
+      aria-label={segmentBarLabel(used, window)}
       className="mt-2 flex h-1.5 w-full gap-px overflow-hidden rounded-full bg-active"
     >
       {slices.map((slice) => (
@@ -199,14 +210,13 @@ function Breakdown(props: { breakdown: ContextBreakdown; usage: SessionUsage }) 
       {usage.subagents.length > 0 ? (
         <Group
           label="Subagents"
+          caption={SUBAGENT_CAPTION}
           total={formatTokens(subagentTokens)}
           count={`${usage.subagents.length}`}
           rows={usage.subagents.map((agent) => ({ key: agent.itemId, label: agent.label, value: formatTokens(agent.tokens) }))}
         />
       ) : null}
-      <p className="mt-2.5 text-2xs leading-4 text-subtle">
-        Muse reports the total. The split marked ≈ is estimated from this thread&apos;s text.
-      </p>
+      <p className="mt-2.5 text-2xs leading-4 text-subtle">{breakdownNote(breakdown.pressure)}</p>
     </div>
   );
 }
@@ -222,7 +232,7 @@ function Row(props: { swatch: string; label: string; value: string; share: strin
   );
 }
 
-function Group(props: { label: string; total: string; count: string; rows: { key: string; label: string; value: string; aside?: string }[] }) {
+function Group(props: { label: string; caption?: string; total: string; count: string; rows: { key: string; label: string; value: string; aside?: string }[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-2">
@@ -237,6 +247,7 @@ function Group(props: { label: string; total: string; count: string; rows: { key
         <span className="w-16 shrink-0 text-right text-muted tabular-nums">{props.total}</span>
         <span className="w-12 shrink-0 text-right text-muted tabular-nums">{props.count}</span>
       </button>
+      {props.caption ? <p className="pl-[18px] text-2xs leading-4 text-subtle">{props.caption}</p> : null}
       <Collapse open={open}>
         <ul className="mt-1 flex max-h-44 flex-col gap-1 overflow-y-auto pl-[18px]">
           {props.rows.map((row) => (
@@ -255,13 +266,14 @@ function Group(props: { label: string; total: string; count: string; rows: { key
 }
 
 function Pressure(props: { pressure: string }) {
-  if (props.pressure === "blocked") {
-    return <span className="font-medium text-danger-text">Full. Compact the session to continue.</span>;
+  const note = pressureNote(props.pressure);
+  if (note.tone === "danger") {
+    return <span className="font-medium text-danger-text">{note.text}</span>;
   }
-  if (props.pressure === "warning") {
-    return <span className="font-medium text-warn-text">Filling up</span>;
+  if (note.tone === "warn") {
+    return <span className="font-medium text-warn-text">{note.text}</span>;
   }
-  return <span className="text-muted">Plenty of room</span>;
+  return <span className="text-muted">{note.text}</span>;
 }
 
 function Divider() {
@@ -280,17 +292,17 @@ function Heading(props: { children: ReactNode; aside?: ReactNode }) {
 
 function ThisSession(props: { usage: SessionUsage }) {
   const { usage } = props;
+  const value = contextCostValue(usage);
   const cost =
-    usage.cost === null ? (
-      <Tip label="Muse's catalog lists no price for the models used here">
+    value === null ? (
+      <Tip label={unpricedWhy(usage)}>
         <span className="cursor-default text-fg" tabIndex={0}>
           Not listed
         </span>
       </Tip>
     ) : (
-      <span className="text-fg tabular-nums" title={usage.costComplete ? "Estimated from catalog prices" : "Some calls used a model without a price"}>
-        {usage.costComplete ? "≈" : "≥"}
-        {money(usage.cost, usage.currency)}
+      <span className="whitespace-nowrap text-fg tabular-nums" title={costTitle(usage)}>
+        {value}
       </span>
     );
   return (
@@ -318,17 +330,16 @@ function ThisSession(props: { usage: SessionUsage }) {
 function Tokens(props: { usage: SessionUsage }) {
   const { usage } = props;
   const modelLabel = usage.models.length === 1 ? modelDisplayName(usage.models[0]?.modelId) : usage.models.length > 1 ? `${usage.models.length} models` : null;
+  const { rows, note } = contextTokenRows(usage);
   return (
     <section className="px-3.5 py-3">
       <Heading aside={modelLabel}>Tokens</Heading>
       <dl className="mt-1 divide-y divide-line text-xs">
-        <Line label="Input" hint="Prompt tokens, each counted once" value={formatTokens(usage.promptTokens)} />
-        <Line label="Output" value={formatTokens(usage.outputTokens)} />
-        {usage.reasoningTokens > 0 ? <Line label="Reasoning" hint="Part of the output" value={formatTokens(usage.reasoningTokens)} /> : null}
-        <Line label="Cache read" value={formatTokens(usage.cacheReadTokens || usage.cachedTokens)} />
-        <Line label="Cache write" value={formatTokens(usage.cacheWriteTokens)} />
-        <Line label="Total" value={formatTokens(usage.totalTokens)} strong />
+        {rows.map((row) => (
+          <Line key={row.id} label={row.label} hint={row.hint} value={row.value} strong={row.strong} />
+        ))}
       </dl>
+      {note ? <p className="mt-1.5 text-2xs leading-4 text-subtle">{note}</p> : null}
       {usage.models.length > 1 ? (
         <ul className="mt-2 flex flex-col gap-1 text-xs">
           {usage.models.map((model) => (
@@ -336,7 +347,7 @@ function Tokens(props: { usage: SessionUsage }) {
               <span className="min-w-0 flex-1 truncate">{modelDisplayName(model.modelId)}</span>
               <span className="tabular-nums">{model.calls} calls</span>
               <span className="w-14 text-right tabular-nums">{formatTokens(model.promptTokens + model.outputTokens)}</span>
-              <span className="w-14 text-right tabular-nums">{model.cost === null ? "" : money(model.cost, usage.currency)}</span>
+              <span className="w-14 text-right tabular-nums">{model.cost === null ? "" : formatCost(model.cost, usage.currency ?? undefined)}</span>
             </li>
           ))}
         </ul>
@@ -362,7 +373,7 @@ function Activity(props: { usage: SessionUsage }) {
   const { usage } = props;
   return (
     <section className="px-3.5 pt-3 pb-3.5">
-      <Heading>Activity</Heading>
+      <Heading aside={usage.partial ? LOADED_ONLY : null}>Activity</Heading>
       <dl className="mt-1.5 grid grid-cols-2 gap-x-5 gap-y-1 text-xs">
         <Pair label="Turns" value={`${usage.turns}`} />
         <Pair label="Model calls" value={`${usage.calls}`} />

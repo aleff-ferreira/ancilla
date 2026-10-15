@@ -1,4 +1,4 @@
-import type { ResearchRunView, ResearchWorkerView } from "../../src/types.js";
+import type { ResearchRunView, ResearchSourceCounts, ResearchWorkerView } from "../../src/types.js";
 
 /** The research scenario's run started at 14:02:00; `rs` counts minutes and seconds into it. */
 export const R0 = Date.UTC(2026, 8, 26, 14, 2, 0);
@@ -40,6 +40,38 @@ export function runningResearch(over: Partial<ResearchRunView> = {}): ResearchRu
     config: { ...base.config, models: { supervisor: null, worker: "muse-spark-1.3", writer: null } },
     ...over,
   });
+}
+
+/** One registry entry as the server holds it: whether it can be cited, and how the worker reached it (absent on a legacy row). */
+export interface FakeSource {
+  verified: boolean;
+  provenance?: "retrieved" | "attempted" | "search_only" | "unobserved";
+}
+
+const FAKE_PROVENANCE_RANK = { retrieved: 3, attempted: 2, search_only: 1, unobserved: 0 } as const;
+
+/**
+ * The strength of an entry's evidence, as the daemon's `evidenceRank` computes it. The real function and the
+ * server's `sourceCounts` are checked by packages/server/test/research-sources-live.test.ts; nothing ties this copy
+ * to them, so a change to the ranks there is a change here.
+ */
+export function fakeEvidenceRank(source: FakeSource): number {
+  return (source.verified ? 10 : 0) + FAKE_PROVENANCE_RANK[source.provenance ?? "unobserved"];
+}
+
+/** The source counts the server derives from a registry, kept in step with `sourceCounts` in the server by hand. */
+export function fakeSourceCounts(registry: readonly FakeSource[], curated = 0): ResearchSourceCounts {
+  const count = (provenance: string): number => registry.filter((s) => s.provenance === provenance).length;
+  return {
+    registry: registry.length,
+    verified: registry.filter((s) => s.verified).length,
+    curated,
+    opened: count("retrieved"),
+    searchOnly: count("search_only"),
+    attempted: count("attempted"),
+    listedEarlier: registry.filter((s) => s.provenance === undefined && s.verified).length,
+    evidence: registry.reduce((sum, s) => sum + fakeEvidenceRank(s), 0),
+  };
 }
 
 /** A run view with every field filled, for the fake client and for render tests. */

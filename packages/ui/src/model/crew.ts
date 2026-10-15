@@ -5,8 +5,8 @@ import type {
 import { agentNumbers, type AgentNumbers } from "./agents.js";
 import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold, type TurnInfo } from "./fold.js";
 import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
-import { costOf, formatCost, listedPrice } from "./pricing.js";
-import { phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
+import { costOf, formatCost, priceOf } from "./pricing.js";
+import { interruptedLine, phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
 import { projectForCwd } from "./status.js";
 import type { AppState, ThreadState } from "./store.js";
 import { TERMINAL_FAILURES, reconciled } from "./workflow.js";
@@ -52,6 +52,8 @@ export interface ResearchRunInfo {
   maxRounds: number;
   question: string;
   sources: ResearchRunView["sources"];
+  /** The report was written with no source to cite; absent otherwise. */
+  noCitableSources?: true;
   /** When the window routes the run to writing; null once it has ended or before it started. */
   deadlineAt: number | null;
   /** The run wrote a report, which the transcript row shows. */
@@ -201,6 +203,10 @@ export interface RunVM {
   plannedKnown: boolean;
   tokens: { total: number; reported: number; of: number } | null;
   cost: { usd: number; model: string } | null;
+  /** The model the estimate is priced at, or would be: null when none is known. It lets a missing price say why. */
+  priceModel?: string | null;
+  /** A research run whose roles ran on different models, so no single list price stands for its usage. */
+  mixedModels?: boolean;
   slots: { used: number; max: number } | null;
   /** Ten bins of revisions per minute, oldest first. */
   pulse: number[];
@@ -327,7 +333,6 @@ export interface CrewOptions {
   pending?: Readonly<Record<string, PendingAction>>;
   /** Skips this client sent, by `pendingKey`, so a cancelled attempt reads "Skipped by you". */
   skipped?: readonly string[];
-  sessionModel?: string | null;
   models?: readonly ModelOption[];
   numbers?: AgentNumbers;
   /** The thread's DeepResearch runs, from the store; each becomes a run beside the workflow ones. */
@@ -411,9 +416,14 @@ function plural(n: number, word: string, words = `${word}s`): string {
   return `${n} ${n === 1 ? word : words}`;
 }
 
-/** Tokens an agent used: what went in, what came out, and what it thought, as Muse counts them apart. */
+/**
+ * Tokens an agent used: what went in plus what came out. Reasoning is part of the output (Muse's own totalTokens is
+ * promptTokens + outputTokens), so it is shown beside the total and never added to it. A workflow agent or a subagent
+ * carries only the provider's raw counters, so for those this is the provider-raw count; a lead turn's total comes
+ * from the counted-once figures Muse sends with each call.
+ */
 export function usageTotal(usage: TokenUsage | null | undefined): number {
-  return usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) + (usage.reasoningTokens ?? 0) : 0;
+  return usage ? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0) : 0;
 }
 
 /** `41m 16s`, `4s`, `2h 13m`: seconds stay while the run is under an hour, so a line visibly ticks. */
@@ -997,6 +1007,7 @@ interface RunContext {
   partialHistory: boolean;
   pending: Readonly<Record<string, PendingAction>>;
   skipped: ReadonlySet<string>;
+  /** The thread's current model. */
   model: string | null;
   models: readonly ModelOption[];
   numbers: AgentNumbers;
@@ -1168,15 +1179,33 @@ function binsOf(eventMinutes: readonly number[], clock: number): number[] {
   return bins;
 }
 
-/** An estimate in dollars at the model's list price; null without a price or without usage. */
+/**
+ * An estimate in dollars at the model's list price; null without a price or without usage. Reasoning is part of the
+ * output tokens, so only `outputTokens` is priced: the same arithmetic as the thread's own cost.
+ */
 export function costEstimate(tokens: TokenUsage | null | undefined, modelId: string | null, models: readonly ModelOption[] = []): number | null {
   if (!tokens || !modelId) return null;
-  const catalog = models.find((m) => m.modelId === modelId)?.cost ?? null;
-  const price = catalog ? { input: catalog.input, output: catalog.output, cached: catalog.cached, currency: catalog.currency ?? "USD" } : listedPrice(modelId);
+  const price = priceOf(modelId, models);
   if (!price) return null;
   const input = tokens.inputTokens ?? 0;
   const cached = Math.min(input, tokens.cacheReadTokens || tokens.cachedTokens || 0);
-  return costOf(price, { promptTokens: input, outputTokens: (tokens.outputTokens ?? 0) + (tokens.reasoningTokens ?? 0), cachedTokens: cached });
+  return costOf(price, { promptTokens: input, outputTokens: tokens.outputTokens ?? 0, cachedTokens: cached });
+}
+
+/**
+ * The model the lead ran on when it launched a run: the one every recorded call of the launching turn names, when
+ * they agree. Agents report no model of their own, so this is the nearest thing to what they ran on, and it does
+ * not move when the thread switches models later. Null when the turn has no call that names a model.
+ */
+function launchModel(fold: ThreadFold, turnId: string | null | undefined): string | null {
+  if (!turnId) return null;
+  let found: string | null = null;
+  for (const call of Object.values(fold.meta.calls)) {
+    if (call.turnId !== turnId || !call.modelId || call.modelId === "unknown") continue;
+    if (found !== null && found !== call.modelId) return null;
+    found = call.modelId;
+  }
+  return found;
 }
 
 /** The most agents that were ever running at once, and the phase most of them were in then. */
@@ -1487,7 +1516,10 @@ function runView(item: MspItem, ctx: RunContext): RunVM {
     if (agent.durationMs !== null) agentTimeMs = (agentTimeMs ?? 0) + agent.durationMs;
     if (agent.attempt > 1) retried += 1;
   }
-  const usd = reported > 0 ? costEstimate(usageSum, ctx.model, ctx.models) : null;
+  // A finished run is priced at the model its launching turn used, so a later /model does not reprice it; while it
+  // runs, or when no call of that turn names a model, the thread's current model stands in.
+  const priceModel = (ended ? launchModel(fold, item.turnId) : null) ?? ctx.model;
+  const usd = reported > 0 ? costEstimate(usageSum, priceModel, ctx.models) : null;
   const policy = launch?.policy ?? null;
   const slotsMax = policy?.maxParallelAgents ?? policy?.childLimit ?? null;
 
@@ -1542,7 +1574,8 @@ function runView(item: MspItem, ctx: RunContext): RunVM {
     currentPhase: current?.name ?? null,
     plannedKnown,
     tokens: reported > 0 ? { total: tokenTotal, reported, of: children.length } : null,
-    cost: usd !== null && ctx.model ? { usd, model: ctx.model } : null,
+    cost: usd !== null && priceModel ? { usd, model: priceModel } : null,
+    priceModel,
     slots: slotsMax !== null ? { used: counts.working + counts.finishing + counts.noUpdate, max: slotsMax } : null,
     pulse: pulseBins(trace, clock),
     longestFinishedMs,
@@ -1876,7 +1909,17 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
   const ended = researchEnded(run);
   const startedAt = isoMs(run.startedAt) ?? isoMs(run.createdAt);
   const endedAt = ended ? isoMs(run.endedAt) : null;
-  const workerModel = run.config.models.worker ?? run.config.models.supervisor ?? run.config.models.writer ?? null;
+  // The server runs each role on the model the config names, else on the thread's model. The run's usage adds up the
+  // brief, supervisor, worker and writer calls, so one list price stands for it only when every role resolves to the
+  // same model; a role nobody names and no thread model fills leaves the price unknown rather than guessed. A run
+  // belongs to no turn, so unlike a workflow run it has no launching turn to take the model from: a role the config
+  // leaves open follows the thread's current model, and a later /model moves the estimate.
+  const workerModel = run.config.models.worker ?? ctx.model;
+  const supervisorModel = run.config.models.supervisor ?? ctx.model;
+  const writerModel = run.config.models.writer ?? ctx.model;
+  const resolved = workerModel !== null && supervisorModel !== null && writerModel !== null;
+  const mixedModels = resolved && (workerModel !== supervisorModel || workerModel !== writerModel);
+  const priceModel = resolved && !mixedModels ? workerModel : null;
 
   // Rounds in order, and within a round the daemon's numbering, so the phases read in the order they ran.
   const workers = [...run.workers].sort((a, b) => a.round - b.round || a.agentId - b.agentId);
@@ -1955,7 +1998,7 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
   const status = researchRunStatus(run);
   const elapsedMs = startedAt !== null ? Math.max(0, (endedAt ?? clock) - startedAt) : null;
   const usage = researchUsage(run);
-  const usd = usage && workerModel ? costEstimate(usage, workerModel, ctx.models) : null;
+  const usd = usage && priceModel ? costEstimate(usage, priceModel, ctx.models) : null;
   let agentTimeMs: number | null = null;
   for (const agent of agents) {
     if (agent.durationMs !== null) agentTimeMs = (agentTimeMs ?? 0) + agent.durationMs;
@@ -1979,6 +2022,7 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
       maxRounds: run.maxRounds,
       question: run.question,
       sources: run.sources,
+      ...(run.noCitableSources ? { noCitableSources: true as const } : {}),
       deadlineAt: ended ? null : isoMs(run.researchDeadlineAt),
       reportAvailable: run.reportAvailable,
     },
@@ -1999,7 +2043,9 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
     plannedKnown: false,
     // The usage is the run's own; workers report none, so nothing is "reported" by an agent.
     tokens: usage ? { total: run.usage.totalTokens, reported: 0, of: workers.length } : null,
-    cost: usd !== null && workerModel ? { usd, model: workerModel } : null,
+    cost: usd !== null && priceModel ? { usd, model: priceModel } : null,
+    priceModel,
+    mixedModels,
     slots: run.config.maxParallel > 0 ? { used: counts.working + counts.finishing + counts.noUpdate, max: run.config.maxParallel } : null,
     pulse: binsOf(eventMinutes, clock),
     longestFinishedMs,
@@ -2007,7 +2053,8 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
     peakConcurrency: peakOf(agents, clock),
     waitedOnYouMs: null,
     retried: 0,
-    report: ended ? { summary, failure: run.failure, handoffs: [] } : null,
+    // An interrupted run's stored reason is a sentence in lower case after a prefix; the card says it as the row does.
+    report: ended ? { summary, failure: run.status === "interrupted" && run.failure ? interruptedLine(run.failure) : run.failure, handoffs: [] } : null,
     stale: ctx.stale,
     staleAt: ctx.stale ? ctx.staleAt : null,
     clockAt: clock,
@@ -2066,11 +2113,15 @@ function turnRunView(turn: TurnInfo, tools: readonly MspItem[], ctx: RunContext)
   const runningTools = toolRows.filter((agent) => LIVE_STATES.has(agent.state));
   const latestAt = toolRows.reduce((latest, agent) => Math.max(latest, agent.lastEventAt ?? 0), startedAt ?? 0);
   const key = ctx.sessionId ? pendingKey(ctx.sessionId, itemId, 1) : null;
+  // The lead's total is Muse's counted-once figure per call (promptTokens + outputTokens, the call's totalTokens);
+  // the raw counters only feed the in/out/cached breakdown on its row, since a provider may count cache beside input.
   const usage: TokenUsage = {};
+  let leadTotal = 0;
   let reported = false;
   for (const call of Object.values(fold.meta.calls)) {
     if (call.turnId !== turn.turnId) continue;
     reported = true;
+    leadTotal += call.promptTokens + call.outputTokens;
     for (const field of ["inputTokens", "outputTokens", "reasoningTokens", "cachedTokens", "cacheReadTokens", "cacheWriteTokens"] as const) {
       usage[field] = (usage[field] ?? 0) + call[field];
     }
@@ -2094,7 +2145,7 @@ function turnRunView(turn: TurnInfo, tools: readonly MspItem[], ctx: RunContext)
     itemId, runId: turn.turnId, name: "Thread activity", kind: "turn", research: null, status, revision: foreground.length,
     startedAt, endedAt, elapsedMs, elapsedApprox: startedAt === null, partialHistory: ctx.partialHistory,
     phases, agents, counts, attention: attentionOrder(agents), runNeeds: [], currentPhase: live ? "Lead" : null,
-    plannedKnown: false, tokens: reported ? { total: usageTotal(usage), reported: 1, of: 1 } : null, cost: null,
+    plannedKnown: false, tokens: reported ? { total: leadTotal, reported: 1, of: 1 } : null, cost: null,
     slots: null, pulse: [], longestFinishedMs: null, agentTimeMs: null, peakConcurrency: null, waitedOnYouMs: null, retried: 0,
     report: live ? null : { summary: null, failure: turn.error?.message ?? null, handoffs: [] },
     stale: ctx.stale, staleAt: ctx.staleAt, clockAt: clock,
@@ -2143,7 +2194,8 @@ export function crewView(fold: ThreadFold, session: SessionSummary | null, now: 
     partialHistory: opts.partialHistory === true,
     pending: opts.pending ?? {},
     skipped: new Set(opts.skipped ?? []),
-    model: opts.sessionModel ?? fold.meta.modelId ?? session?.modelId ?? null,
+    // The thread's current model, resolved one way for every caller; a finished run prices at the model its launching turn used.
+    model: fold.meta.modelId ?? session?.modelId ?? null,
     models: opts.models ?? [],
     numbers: opts.numbers ?? (sessionId ? agentNumbers(sessionId) : new Map()),
   };
@@ -2291,12 +2343,16 @@ function shortDuration(ms: number | null): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** "All ten landed." and its variants, from the counts of the agents that were scheduled. */
-export function headline(counts: Counts, status: RunStatus, elapsedMs: number | null): string {
+/**
+ * "All ten landed." and its variants, from the counts of the agents that were scheduled. A stopped run says the
+ * user stopped it, unless it was interrupted: the server shutting down or restarting under a research run is not
+ * something the user did.
+ */
+export function headline(counts: Counts, status: RunStatus, elapsedMs: number | null, interrupted = false): string {
   const total = counts.total - counts.planned;
   const landed = counts.done;
   const had = `${numberWord(landed)} of ${numberWord(total)} had landed.`;
-  if (status === "stopped") return `Stopped by you after ${shortDuration(elapsedMs)}; ${had}`;
+  if (status === "stopped") return `${interrupted ? "Interrupted" : "Stopped by you"} after ${shortDuration(elapsedMs)}; ${had}`;
   if (status === "failed") return `The run failed after ${shortDuration(elapsedMs)}; ${had}`;
   if (total === 0) return "Nothing was scheduled.";
   if (landed === total) return total === 1 ? "The agent landed." : `All ${numberWord(total)} landed.`;
@@ -2320,6 +2376,9 @@ function factLine(run: RunVM): string {
     facts.push(unknown.length > 0 ? `${plural(unknown.length, "agent was", "agents were")} still working` : "Nothing was still working");
   } else if (run.status === "failed") {
     facts.push(run.report?.failure ?? "Muse has not reported a reason");
+  } else if (run.research?.noCitableSources) {
+    // The run wrote its report but had nothing to cite, which is why it is partial; the daemon sends no failure text.
+    facts.push("No source could be cited for this report");
   } else if (run.research && run.status === "finished-with-failures") {
     facts.push("The run ended before every round was done");
   } else if (skipped.length === 0 && failed.length === 0 && unknown.length === 0) {
@@ -2440,6 +2499,21 @@ function fingerprintOf(run: RunVM): FingerprintVM {
   };
 }
 
+/**
+ * `8 of 9 reported` while some agents of a workflow have sent no usage, so a total and an estimate built from the
+ * ones that did are not read as the run's whole; null once every agent has, and for a run that counts its own tokens.
+ */
+export function reportCoverage(run: Pick<RunVM, "kind" | "tokens">): string | null {
+  if (run.kind !== "workflow" || !run.tokens || run.tokens.reported >= run.tokens.of) return null;
+  return `${run.tokens.reported} of ${run.tokens.of} reported`;
+}
+
+/**
+ * What the run's token total counts once an agent was retried: Muse does not say whether a retry's usage covers the
+ * attempts before it, so the newest report stands for the agent and the earlier attempts are not added on top.
+ */
+export const RETRIED_TOKENS_NOTE = " · latest attempt of each agent";
+
 /** The report card for a run that has ended; null while it runs. */
 export function completionView(run: RunVM): CompletionVM | null {
   if (runLive(run)) return null;
@@ -2447,11 +2521,11 @@ export function completionView(run: RunVM): CompletionVM | null {
   const stats: StatVM[] = [
     { value: String(run.kind === "turn" ? run.agents.filter((agent) => agent.kind === "task").length : scheduled), label: run.kind === "turn" ? "tools" : scheduled === 1 ? "agent" : "agents" },
     { value: run.elapsedMs === null ? "—" : run.elapsedApprox ? aboutText(run.elapsedMs) : durationText(run.elapsedMs), label: "wall clock" },
-    run.tokens ? { value: formatTokens(run.tokens.total), label: run.research ? "tokens, the run's own count" : "tokens, reported by Muse" } : { value: "—", label: "tokens not reported" },
+    run.tokens ? { value: formatTokens(run.tokens.total), label: run.research ? "tokens, the run's own count" : `tokens, reported by Muse${run.retried > 0 ? RETRIED_TOKENS_NOTE : ""}` } : { value: "—", label: "tokens not reported" },
   ];
   if (run.cost) stats.push({ value: `~${formatCost(run.cost.usd)}`, label: "estimate at list price" });
   return {
-    headline: run.kind === "turn" ? run.status === "failed" ? "Turn failed" : run.status === "stopped" ? "Turn stopped" : run.agents[0]?.state === "done" ? "Turn finished" : "Turn ended" : headline(run.counts, run.status, run.elapsedMs),
+    headline: run.kind === "turn" ? run.status === "failed" ? "Turn failed" : run.status === "stopped" ? "Turn stopped" : run.agents[0]?.state === "done" ? "Turn finished" : "Turn ended" : headline(run.counts, run.status, run.elapsedMs, run.research?.status === "interrupted"),
     factLine: run.kind === "turn" ? `${plural(run.agents.filter((agent) => agent.kind === "task" && agent.state === "done").length, "tool")} completed${run.counts.failed > 0 ? ` · ${run.counts.failed} failed` : ""}${run.counts.unknown > 0 ? ` · ${plural(run.counts.unknown, "outcome")} not reported` : ""}` : factLine(run),
     stats,
     highlights: highlightsOf(run),
@@ -2505,7 +2579,7 @@ export function announcements(prev: CrewVM | null, next: CrewVM): string[] {
       }
     }
     if (before && runLive(before) && !runLive(run)) {
-      out.push(headline(run.counts, run.status, run.elapsedMs));
+      out.push(headline(run.counts, run.status, run.elapsedMs, run.research?.status === "interrupted"));
     }
     if (before && !before.stale && run.stale) {
       out.push("Connection stale; showing last known state.");
@@ -2624,7 +2698,8 @@ export function activityView(state: AppState, now: number): ActivityVM {
   const open = state.route.kind === "thread" ? state.route.sessionId : null;
   let stopAll: ActivityVM["stopAll"] = null;
   let untracked = false;
-  let tokensToday = 0;
+  // The runs this window folds: for an ordinary prompt that is its latest turn only, so this is not the day's total.
+  let tokensInRuns = 0;
   const threadsWorking = new Set<string>();
   const sessions = Object.values(state.sessions).sort((a, b) => (a.activityAt < b.activityAt ? 1 : a.activityAt > b.activityAt ? -1 : 0));
   for (const session of sessions) {
@@ -2666,7 +2741,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
       } else if (run.endedAt !== null && run.endedAt >= dayStart) {
         finishedToday.push({ ...base, itemId: run.itemId, agentId: null, kind: "run", text: run.name, sub: summaryLine(run).progress, state: run.kind === "turn" && run.agents[0]?.state === "unknown" ? "unknown" : run.status === "finished" ? "done" : run.status === "stopped" ? "skipped" : "failed", startedAt: run.startedAt, endedAt: run.endedAt, stale: false });
       }
-      if (run.tokens && run.startedAt !== null && run.startedAt >= dayStart) tokensToday += run.tokens.total;
+      if (run.tokens && run.startedAt !== null && run.startedAt >= dayStart) tokensInRuns += run.tokens.total;
     }
     for (const task of view.tasks) {
       if (LIVE_STATES.has(task.state)) {
@@ -2694,7 +2769,7 @@ export function activityView(state: AppState, now: number): ActivityVM {
   }
   const empty = needsYou.length + working.length + finishedToday.length === 0;
   const foot = working.length > 0
-    ? `${working.length} running in ${plural(threadsWorking.size, "thread")}${tokensToday > 0 ? ` · ${formatTokens(tokensToday)} tokens today` : ""}`
+    ? `${working.length} running in ${plural(threadsWorking.size, "thread")}${tokensInRuns > 0 ? ` · ${formatTokens(tokensInRuns)} tokens in current runs` : ""}`
     : needsYou.length > 0 ? `${plural(needsYou.length, "request")} waiting for you` : "Nothing runs and nothing waits for you.";
   return { needsYou, working, finishedToday, stopAll, foot, empty, note: untracked ? UNTRACKED_NOTE : null };
 }

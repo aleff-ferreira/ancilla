@@ -26,7 +26,9 @@ export type NotifyEvent =
   | { kind: "approval"; sessionId: string; thread: string }
   | { kind: "question"; sessionId: string; thread: string }
   | { kind: "finished"; sessionId: string; thread: string; failed: boolean }
-  | { kind: "goal"; sessionId: string; thread: string; status: string };
+  | { kind: "goal"; sessionId: string; thread: string; status: string }
+  /** Several turns that ended while the app was not hearing the stream, said once instead of once each. */
+  | { kind: "finishedMany"; count: number; failed: number };
 
 /** One thread flapping between states should not buzz over and over. */
 const REPEAT_MS = 20_000;
@@ -45,6 +47,10 @@ function copy(event: NotifyEvent): { title: string; body: string } {
       return event.status === "complete"
         ? { title: "Goal complete", body: `${event.thread} reached its goal.` }
         : { title: "A goal needs attention", body: `${event.thread} is ${event.status}.` };
+    case "finishedMany":
+      return event.failed > 0
+        ? { title: "Threads finished", body: `${event.count} threads ended, ${event.failed} with an error.` }
+        : { title: "Muse finished", body: `${event.count} threads are done.` };
   }
 }
 
@@ -71,7 +77,7 @@ export class NotificationManager {
     if ((await this.notifier.permission()) !== "granted") {
       return;
     }
-    const tag = `${event.kind}:${event.sessionId}`;
+    const tag = event.kind === "finishedMany" ? event.kind : `${event.kind}:${event.sessionId}`;
     const at = this.now();
     if (at - (this.shown.get(tag) ?? Number.NEGATIVE_INFINITY) < REPEAT_MS) {
       return;

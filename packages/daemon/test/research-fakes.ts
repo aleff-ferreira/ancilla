@@ -17,6 +17,7 @@ import type {
   ResearchRunState,
   SavedSource,
   TokenUsage,
+  ToolCallOutcome,
   WorkerBudgets,
   WorkerResult,
   WorkerRunner,
@@ -107,6 +108,16 @@ export function searchCall(query: string, results: { url: string; title: string 
 
 export function fetchCall(url: string): ObservedToolCall {
   return { tool: "web_fetch", kind: "fetch", query: null, urls: [url], results: [], at: new Date(T0).toISOString() };
+}
+
+/** A tool call as the runner reports it once Muse said how it ended: `outcome`, and the size of its output when known. */
+export function withOutcome(call: ObservedToolCall, outcome: ToolCallOutcome, outputSize: number | null = null): ObservedToolCall {
+  return { ...call, outcome, outputSize };
+}
+
+/** A fetch that Muse reported as failed (a DNS error, a 404 turned into a failure, a timeout). */
+export function failedFetchCall(url: string): ObservedToolCall {
+  return withOutcome(fetchCall(url), "failed", 0);
 }
 
 export function saved(url: string, title: string | null = null, reason = "relevant", excerpt: string | null = null): SavedSource {

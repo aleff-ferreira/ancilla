@@ -6,10 +6,15 @@
  *   node scripts/bump-version.mjs --check v0.18.0  fail unless every version is 0.18.0
  *
  * The version lives in the npm packages and their lockfile, the Tauri config (which names the
- * installers, and is what the updater compares against), the Rust crate and its lockfile, and the
- * server's ANCILLA_VERSION. Each is edited in place, touching only the version, and a target that
- * cannot be found is an error rather than a skip: one file quietly left behind is exactly what this
- * is here to prevent. CI runs --check on every push, and the release workflow checks the tag.
+ * installers, and is what the updater compares against), the Rust crate and its lockfile, the
+ * server's ANCILLA_VERSION, and the "New in X" headings of the release body (.github/workflows/release.yml,
+ * which becomes the update notes shown in the app) and of the README banner. Each is edited in place,
+ * touching only the version, and a target that cannot be found is an error rather than a skip: one
+ * file quietly left behind is exactly what this is here to prevent. CI runs --check on every push,
+ * and the release workflow checks the tag. The two headings are renamed here, but the notes under
+ * them are words only a person can write, so the bump leaves a marker line under each heading it
+ * renamed, and --check fails while one is there: a heading with the new version over last release's
+ * bullets must not pass for done.
  *
  * The changelog is checked but not written, since its entry needs words: until docs/CHANGELOG.md
  * has an entry for the version and scripts/sync-changelog.mjs has been run, --check fails.
@@ -66,6 +71,49 @@ function patternField(path, label, pattern, verify) {
       return text.slice(0, start) + version + text.slice(start + match[2].length);
     },
   };
+}
+
+// The line a bump leaves under a "New in" heading it renamed. The heading says the right version while the notes under
+// it are still the last release's, and nothing but a person can tell; the marker holds `--check` red until that
+// person deletes it. No other text of the project uses this wording.
+const marker = (version) => `[notes for ${version} not written yet: rewrite them to describe this release, then delete this line]`;
+const MARKER_LINE = /^.*\[notes for \d+\.\d+\.\d+ not written yet[^\n]*\n?/gm;
+
+/**
+ * A "New in" heading, renamed by a bump, with the marker line put under it when the heading changed: notes that were
+ * already written for the new version (the heading already said so) get none. A marker left by an earlier bump goes,
+ * since it is about a version that is no longer the one.
+ */
+function notesHeading(path, label, pattern, linePrefix) {
+  const field = patternField(path, label, pattern);
+  return {
+    ...field,
+    rewriteNotes: true,
+    write(text, version) {
+      if (field.read(text) === version) {
+        return text;
+      }
+      const renamed = field.write(text, version).replace(MARKER_LINE, "");
+      const heading = [...renamed.matchAll(new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`))][0];
+      const end = renamed.indexOf("\n", heading.index);
+      const eol = end > 0 && renamed[end - 1] === "\r" ? "\r\n" : "\n";
+      const prefix = linePrefix.exec(heading[1])[0];
+      const at = end === -1 ? renamed.length : end + 1;
+      return `${renamed.slice(0, at)}${end === -1 ? eol : ""}${prefix}${marker(version)}${eol}${renamed.slice(at)}`;
+    },
+  };
+}
+
+/** The files whose headings still carry a marker, with the version it names. */
+function pendingNotes(list) {
+  const found = [];
+  for (const path of new Set(list.filter((field) => field.rewriteNotes).map((field) => field.path))) {
+    const version = /\[notes for (\d+\.\d+\.\d+) not written yet/.exec(read(path))?.[1];
+    if (version) {
+      found.push({ path, version });
+    }
+  }
+  return found;
 }
 
 /**
@@ -176,6 +224,10 @@ function fields() {
       new RegExp(`^(\\[\\[package\\]\\]\\r?\\nname = "${escape(crate)}"\\r?\\nversion = ")([^"]*)(")`, "m"),
     ),
     patternField("packages/server/src/server.ts", "ANCILLA_VERSION", /^(export const ANCILLA_VERSION = ")([^"]*)(";)/m),
+    // What users read first: the release page's text, which tauri-action also copies into latest.json as the update's
+    // notes shown in the app, and the README banner. Only the heading is written here; the words under it are not.
+    notesHeading(".github/workflows/release.yml", `release notes "New in" heading`, /^([ \t]*\*\*New in )(\d+\.\d+\.\d+)(\*\*)/m, /^[ \t]*/),
+    notesHeading("README.md", `README "New in" heading`, /^(> \*\*New in )(\d+\.\d+\.\d+)(:\*\*)/m, /^> /),
     readOnlyField(
       "docs/CHANGELOG.md",
       "newest entry",
@@ -211,7 +263,8 @@ function report(rows, log, expected) {
 }
 
 function check(wanted) {
-  const rows = survey(fields());
+  const list = fields();
+  const rows = survey(list);
   // Without a version to hold them to, the odd ones out are whatever differs from the majority.
   const counts = new Map();
   for (const { version } of rows) {
@@ -219,14 +272,24 @@ function check(wanted) {
   }
   const expected = wanted ?? [...counts].sort((a, b) => b[1] - a[1])[0][0];
   const wrong = rows.filter(({ version }) => version !== expected);
-  if (wrong.length === 0) {
+  // The versions can all agree and the words still be the last release's: a bump says so with a marker line.
+  const pending = pendingNotes(list);
+  if (wrong.length === 0 && pending.length === 0) {
     console.log(`All ${rows.length} versions are ${expected}.`);
     return true;
   }
-  console.error(wanted ? `Not every version is ${wanted}:` : "The versions do not agree:");
-  report(rows, console.error, expected);
-  const fixes = new Set(wrong.map(({ field }) => field.hint ?? `run npm run version:bump -- ${expected}`));
-  console.error(`To fix: ${[...fixes].join("; ")}.`);
+  if (wrong.length > 0) {
+    console.error(wanted ? `Not every version is ${wanted}:` : "The versions do not agree:");
+    report(rows, console.error, expected);
+    const fixes = new Set(wrong.map(({ field }) => field.hint ?? `run npm run version:bump -- ${expected}`));
+    console.error(`To fix: ${[...fixes].join("; ")}.`);
+  }
+  for (const { path, version } of pending) {
+    console.error(`The notes for ${version} are not written yet in ${path}.`);
+  }
+  if (pending.length > 0) {
+    console.error(`To fix: rewrite the notes under each "New in" heading so they describe this release, then delete the marker line under it.`);
+  }
   return false;
 }
 
@@ -251,6 +314,14 @@ function bump(version) {
   const previous = [...new Set(before.filter(({ field }) => field.written).map((row) => row.version))].join(", ");
   console.log(`Set ${version} in ${written.length} places across ${edited.size} files (was ${previous}):`);
   report(after.filter(({ field }) => field.written), console.log);
+  const notes = [...new Set(written.filter((field) => field.rewriteNotes).map((field) => field.path))];
+  if (notes.length > 0) {
+    console.info(`Only the headings were renamed. Rewrite the notes under "New in ${version}" in ${notes.join(" and ")} so they describe this release.`);
+    const marked = pendingNotes(list).map(({ path }) => path);
+    if (marked.length > 0) {
+      console.info(`A marker line under the heading in ${marked.join(" and ")} keeps npm run version:check failing until the notes are rewritten and the line is deleted.`);
+    }
+  }
   for (const { field, version: now } of after.filter(({ field: f }) => !f.written)) {
     if (now !== version) {
       console.log(`${field.path} is still at ${now}: ${field.hint}.`);

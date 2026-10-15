@@ -75,7 +75,7 @@ describe("Inspector", () => {
     assert.equal(fact(failed, "status"), "Failed, terminal · the run went on without it");
     assert.equal(fact(failed, "attempts"), "2 · 2m 08s + 3m 51s");
     assert.match(fact(failed, "started"), /^\d+:\d\d:\d\d · 14m 18s into the run$/, "the latest attempt's start");
-    assert.equal(fact(failed, "tokens"), "64k · in 52k · out 6.4k · reasoning 5.7k");
+    assert.equal(fact(failed, "tokens"), "59k · in 52k · out 6.4k · incl. reasoning 5.7k");
     assert.equal(fact(failed, "tool-calls"), AT_RUN_END);
     assert.equal(fact(failed, "model"), "Not reported for workflow agents · the lead runs muse-spark-1.3");
     assert.equal(fact(failed, "result"), "None · this agent did not finish");
@@ -169,7 +169,7 @@ describe("Inspector", () => {
     const run = lanternRun();
     const failed = render(run, "design:conflict-ledger");
     assert.match(failed, /data-compare="time"[\s\S]*?3m 51s of 12m 40s longest/);
-    assert.match(failed, /data-compare="tokens"[\s\S]*?64k of 288k most/);
+    assert.match(failed, /data-compare="tokens"[\s\S]*?59k of 270k most/);
     const quiet = render(run, "judge:perf");
     assert.match(quiet, /data-compare="time"[\s\S]*?16m 02s · past the longest/);
     assert.doesNotMatch(quiet, /data-compare="tokens"/, "nothing reported, nothing to compare");

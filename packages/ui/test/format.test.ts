@@ -59,6 +59,13 @@ describe("formatting", () => {
     assert.equal(formatTokens(1_007_997), "1M");
   });
 
+  it("never prints a thousand thousands", () => {
+    assert.equal(formatTokens(999_499), "999k");
+    assert.equal(formatTokens(999_500), "1M");
+    assert.equal(formatTokens(999_999), "1M");
+    assert.equal(formatTokens(1_000_000), "1M");
+  });
+
   it("shortens long paths from the middle", () => {
     assert.equal(shortenPath("D:\\Projects\\ancilla", 48), "D:\\Projects\\ancilla");
     const short = shortenPath("D:\\Projects\\clients\\acme\\platform\\packages\\ui\\src", 32);
@@ -309,5 +316,34 @@ describe("approvals and models", () => {
     assert.equal(contributor?.isDefault, true);
     assert.equal(models.find((m) => m.modelId === "muse-spark-1.3")?.contributor, false);
     assert.equal(modelDisplayName("muse-spark-1.3-contributor"), "muse-spark-1.3");
+  });
+
+  it("names the model bucket the server uses for calls that carry no id", () => {
+    assert.equal(modelDisplayName("unknown"), "Unknown model");
+    assert.equal(modelDisplayName(null), "Default model");
+    assert.equal(modelDisplayName(""), "Default model");
+  });
+
+  it("prices a Wonder row from the table and leaves Wonder Full unpriced", () => {
+    const [wonder, full, catalogPriced, bare] = parseModelList({
+      models: [
+        { modelId: "muse-wonder-1.0", displayLabel: "muse-wonder-1.0", contextLimit: 1_048_576, outputLimit: 128_000, cost: null },
+        { modelId: "muse-wonder-full-1.0", displayLabel: "muse-wonder-full-1.0", cost: null },
+        { modelId: "muse-spark-1.3", cost: { input: "3", output: "15", cached: "0.3", currency: "USD" } },
+        { modelId: "muse-wonder-1.0-contributor" },
+      ],
+    });
+    assert.deepEqual(wonder?.cost, { input: 4, output: 20, cached: 0.2, currency: "USD" });
+    assert.equal(wonder?.contributor, false);
+    assert.equal(wonder?.contextLimit, 1_048_576);
+    assert.equal(full?.cost, null);
+    assert.deepEqual(catalogPriced?.cost, { input: 3, output: 15, cached: 0.3, currency: "USD" });
+    assert.equal(bare?.cost, null);
+    assert.equal(bare?.contributor, true);
+  });
+
+  it("skips catalog rows without an id and reads a bare array", () => {
+    const models = parseModelList([{ displayLabel: "no id" }, null, { modelId: "muse-wonder-1.0" }]);
+    assert.deepEqual(models.map((m) => m.modelId), ["muse-wonder-1.0"]);
   });
 });

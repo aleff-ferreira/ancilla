@@ -106,6 +106,10 @@ export function formatTokens(value: number | null | undefined): string {
   }
   if (value < 1_000_000) {
     const k = value / 1000;
+    if (k >= 999.5) {
+      // 999,500 and up round to a thousand thousands, which reads better as a million.
+      return "1M";
+    }
     return `${k < 10 ? k.toFixed(1).replace(/\.0$/, "") : Math.round(k)}k`;
   }
   const m = value / 1_000_000;
@@ -708,6 +712,10 @@ export function describeApproval(request: ApprovalRequest): ApprovalDescription 
 export function modelDisplayName(modelId: string | null | undefined): string {
   if (!modelId) {
     return "Default model";
+  }
+  // The server files calls that carry no model id under this word.
+  if (modelId === "unknown") {
+    return "Unknown model";
   }
   return modelId.replace(/-contributor$/i, "");
 }

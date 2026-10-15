@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { formatTokens } from "../../model/format.js";
 import {
+  interruptedLine,
   phaseLine,
   preferredStopAction,
   reportView,
   researchClock,
   researchLive,
   researchReported,
+  SOURCES_LINE_TITLE,
   sourcesLine,
   STATUS_WORD,
   STOP_ACTION_ORDER,
@@ -84,6 +86,7 @@ function Progress(props: { run: ResearchRunView }) {
   const now = useNow(1000);
   const clock = researchClock(run, now);
   const sources = sourcesLine(run.sources);
+  const explainId = useId();
   const pending = run.runId.startsWith("pending:");
   return (
     <div className="flex flex-col gap-2">
@@ -101,7 +104,20 @@ function Progress(props: { run: ResearchRunView }) {
         </ul>
       ) : null}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        <span className="text-xs text-subtle tabular-nums">{sources ?? "No sources yet"}</span>
+        {sources ? (
+          <>
+            <Tip label={SOURCES_LINE_TITLE} side="top" align="start">
+              <span tabIndex={0} aria-describedby={explainId} className="rounded-md text-xs text-subtle tabular-nums">
+                {sources}
+              </span>
+            </Tip>
+            <span id={explainId} hidden>
+              {SOURCES_LINE_TITLE}
+            </span>
+          </>
+        ) : (
+          <span className="text-xs text-subtle tabular-nums">No sources yet</span>
+        )}
         {run.usage.totalTokens > 0 ? <span className="text-xs text-subtle tabular-nums">{formatTokens(run.usage.totalTokens)} tokens</span> : null}
         <span className="min-w-0 flex-1" />
         {pending ? null : (
@@ -235,10 +251,22 @@ function Report(props: { run: ResearchRunView; sessionId: string; latest: boolea
   };
   return (
     <div className="flex flex-col gap-2">
+      {run.noCitableSources ? (
+        <p data-research-no-sources className="flex items-start gap-1.5 text-xs text-warn-text">
+          <WarningCircleIcon size={13} className="mt-px shrink-0" />
+          <span>No source could be cited for this report, so nothing in it can be traced to a page.</span>
+        </p>
+      ) : null}
       {run.status === "partial" && run.failure ? (
         <p className="flex items-start gap-1.5 text-xs text-warn-text">
           <WarningCircleIcon size={13} className="mt-px shrink-0" />
           <span>Written from what the workers had found: {run.failure}</span>
+        </p>
+      ) : null}
+      {run.reportWriteError ? (
+        <p role="status" className="flex items-start gap-1.5 text-xs text-warn-text">
+          <WarningCircleIcon size={13} className="mt-px shrink-0" />
+          <span>The report is here, but it could not be saved as a file in the project. {run.reportWriteError}</span>
         </p>
       ) : null}
       {view === "report" && run.report ? (
@@ -322,12 +350,9 @@ function Ended(props: { run: ResearchRunView }) {
   const { run } = props;
   const failed = run.status === "failed";
   const text =
-    run.failure ??
-    (run.status === "cancelled"
-      ? "Stopped before it wrote a report."
-      : run.status === "interrupted"
-        ? "Ancilla restarted while the run was going, so it stopped where it was."
-        : "The run ended without saying why.");
+    run.status === "interrupted"
+      ? interruptedLine(run.failure)
+      : (run.failure ?? (run.status === "cancelled" ? "Stopped before it wrote a report." : "The run ended without saying why."));
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
       <p className={cn("flex min-w-0 flex-1 items-start gap-1.5 text-xs", failed ? "text-danger-text" : "text-muted")}>

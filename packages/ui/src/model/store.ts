@@ -3,6 +3,7 @@ import type {
   AttachmentView,
   EnvironmentStatus,
   ModelOption,
+  ModelsStatus,
   OutgoingAttachment,
   PlanUsage,
   ProjectView,
@@ -90,6 +91,11 @@ export interface Prefs {
   baseline: string;
   defaultMode: ApprovalMode;
   defaultModelId: string | null;
+  /**
+   * `defaultModelId` is a model the user tried by its id, which the list Muse sent did not offer. Such a pin is kept
+   * and passed on at thread start, and it survives a restart; any other choice of model clears it.
+   */
+  defaultModelTried: boolean;
   effort: ReasoningEffort | null;
   /** The last project a new thread was started in. */
   lastProject: string | null;
@@ -202,6 +208,7 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     baseline: now,
     defaultMode: "onRequest",
     defaultModelId: null,
+    defaultModelTried: false,
     effort: null,
     lastProject: null,
     contributorAck: false,
@@ -279,7 +286,12 @@ export interface AppState {
   discovering: boolean;
   route: Route;
   threads: Record<string, ThreadState>;
+  /** Every loaded catalog's models once each, the default login's first, so a price or context window resolves any of them. */
   models: ModelOption[];
+  /** Each catalog scope's own list, by `modelsKey`: `default`, `acct:<accountId>` or `thread:<sessionId>`. Menus read these. */
+  accountModels: Record<string, ModelOption[]>;
+  /** How each scope's load stands, by the same keys; a scope never asked for has no entry. */
+  modelsStatus: Record<string, ModelsStatus>;
   /** Server-owned thread-title switch and model; null until the first boot load answers. */
   titleSettings: TitleSettings | null;
   /** Server-owned sandbox posture; null until the first boot load answers. */
@@ -394,6 +406,8 @@ export function initialState(prefs: Prefs): AppState {
     route: { kind: "home" },
     threads: {},
     models: [],
+    accountModels: {},
+    modelsStatus: {},
     titleSettings: null,
     sandboxSettings: null,
     yoloSettings: null,
@@ -478,6 +492,7 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
       Object.values(snapshot.threads).every((mode) => mode === null || isApprovalMode(mode))
     );
   };
+  const defaultModelId = pick("defaultModelId", (v) => v === null || typeof v === "string");
   return {
     groupBy: pick("groupBy", (v) => v === "project" || v === "status"),
     theme: pick("theme", (v) => v === "system" || v === "light" || v === "dark"),
@@ -493,7 +508,9 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     baseline: pick("baseline", (v) => typeof v === "string" && !Number.isNaN(Date.parse(v))),
     codeTheme: pick("codeTheme", (v) => CODE_THEMES.includes(v as CodeTheme)),
     defaultMode: pick("defaultMode", (v) => v === "onRequest" || v === "promptUnmatched" || v === "denyUnmatched" || v === "allowAll"),
-    defaultModelId: pick("defaultModelId", (v) => v === null || typeof v === "string"),
+    defaultModelId,
+    // A flag with no pin to belong to is stale, however it was saved.
+    defaultModelTried: defaultModelId !== null && pick("defaultModelTried", (v) => typeof v === "boolean"),
     effort: pick("effort", (v) => v === null || ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(v as string)),
     lastProject: pick("lastProject", (v) => v === null || typeof v === "string"),
     contributorAck: pick("contributorAck", (v) => typeof v === "boolean"),

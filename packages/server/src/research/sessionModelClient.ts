@@ -1,5 +1,6 @@
 import { ResearchFailure, type ModelClient, type ModelRequest, type ModelResponse, type ResearchModelIds } from "@ancilla/daemon";
 import { maxExecPromptChars, modelIdForRole } from "./execModelClient.js";
+import { DEFAULT_RESEARCH_STARTUP_MS, describeMs, raceStartup } from "./startup.js";
 import { failureKindOf, kindOfTurnError, planApproval, runTurn, type SessionNotificationHandler, type TurnClock, type TurnSession } from "./turn.js";
 
 /**
@@ -16,10 +17,14 @@ export const CONTROL_DENY_FEEDBACK = "Answer directly from the material in the p
 /** Why a control session declines a user-input prompt. */
 export const CONTROL_INPUT_DECLINED = "This call runs unattended; answer from the prompt alone.";
 
-/** What the client needs from the server: the run's control session on the thread's host, and its notifications. */
+/** What the client needs from the server: a control session on the thread's host, and its notifications. */
 export interface ControlSessionHost {
-  /** Starts the control session for one model, recorded archived under `research-worker` so it never reaches the sidebar. */
-  startControlSession(modelId: string | null): Promise<TurnSession>;
+  /**
+   * Starts a control session for one model, recorded archived under `research-worker` so it never reaches the
+   * sidebar. `giveUp` is aborted when the caller stopped waiting for the start (a stop, or the startup allowance),
+   * so the host side knows the session it is still opening has no one behind it.
+   */
+  startControlSession(modelId: string | null, giveUp?: AbortSignal): Promise<TurnSession>;
   /** Delivers that session's host notifications until the returned function is called. */
   subscribe(sessionId: string, handler: SessionNotificationHandler): () => void;
   log?(message: string): void;
@@ -33,20 +38,48 @@ export interface MuseSessionModelClientOptions {
   fallbackModelId: string | null;
   clock?: TurnClock;
   cancelGraceMs?: number;
+  /** How long a session start may take, in milliseconds or as a function read at each call; two minutes unless given. */
+  startupMs?: number | (() => number);
+}
+
+/** Rejects with `cancelled` when `signal` fires while `started()` is still false; settles with `call` otherwise. */
+function abandonWhileQueued<T>(call: Promise<T>, signal: AbortSignal, started: () => boolean): Promise<T> {
+  if (signal.aborted) {
+    return call;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      if (!started()) {
+        reject(new ResearchFailure("cancelled", "The run was stopped while the model call waited for its turn."));
+      }
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    call.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /**
- * Tool-less completions as turns in a dedicated research control session: the transport for prompts a command
- * line cannot carry (see `MAX_EXEC_PROMPT_CHARS_*`). The session is started lazily on the first call and reused
- * across calls, which run one at a time; each call is one `turn/start` whose final agent message is the answer
- * and whose `session/tokenUsage` is the usage. The supervisor and the writer may be configured with different
- * models, so there is one session per model id in use, which is one session for the usual config. Approvals are
- * denied and user-input prompts declined, since the answer is meant to come without tools; a session Muse closes
- * is replaced on the next call.
+ * Tool-less completions as turns in a research control session: the transport for prompts a command line cannot
+ * carry (see `MAX_EXEC_PROMPT_CHARS_*`). Every call opens a session of its own and runs one `turn/start` in it,
+ * whose final agent message is the answer and whose `session/tokenUsage` is the usage. A session is never reused:
+ * a reused one can still deliver the late output or terminal of an earlier call, which an unbound turn would take
+ * for its own, so the answer to one request could become another's (and the supervisor and the writer would share
+ * one history). Calls run one after another, in the order they were made. Approvals are denied and user-input
+ * prompts declined, since the answer is meant to come without tools; a session Muse closes ends its call, and the
+ * next call opens another. Starting a session is bounded by `startupMs` and by the run's stop, like every other
+ * wait the engine has, so a Muse that never opens a session cannot hold a run (or Stop) hostage.
  */
 export class MuseSessionModelClient implements ModelClient {
-  private readonly sessions = new Map<string, Promise<TurnSession>>();
-  /** Calls run one after another: a control session holds one turn at a time. */
+  /** Calls run one after another: a call that is waiting its turn is the one a stop reaches first. */
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly options: MuseSessionModelClientOptions) {}
@@ -56,41 +89,47 @@ export class MuseSessionModelClient implements ModelClient {
       throw new ResearchFailure("cancelled", "The run was stopped before the model call started.");
     }
     const modelId = modelIdForRole(request.role, this.options.models, this.options.fallbackModelId);
-    const call = this.queue.then(() => this.turn(request, modelId));
+    let started = false;
+    const call = this.queue.then(() => {
+      started = true;
+      return this.turn(request, modelId);
+    });
     this.queue = call.catch(() => undefined);
-    return call;
+    return abandonWhileQueued(call, request.signal, () => started);
   }
 
-  private sessionFor(modelId: string | null): Promise<TurnSession> {
-    const key = modelId ?? "";
-    const known = this.sessions.get(key);
-    if (known) {
-      return known;
-    }
-    const started = this.options.host.startControlSession(modelId).catch((error: unknown) => {
-      // A failed start is not kept: the next call tries again.
-      this.sessions.delete(key);
-      throw error;
-    });
-    this.sessions.set(key, started);
-    return started;
+  private startupMs(): number {
+    const configured = this.options.startupMs;
+    const value = typeof configured === "function" ? configured() : configured;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : DEFAULT_RESEARCH_STARTUP_MS;
   }
 
   private async turn(request: ModelRequest, modelId: string | null): Promise<ModelResponse> {
     if (request.signal.aborted) {
       throw new ResearchFailure("cancelled", "The run was stopped before the model call started.");
     }
-    const key = modelId ?? "";
-    let session: TurnSession;
-    try {
-      session = await this.sessionFor(modelId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+    const log = (message: string): void => this.options.host.log?.(message);
+    const allowance = this.startupMs();
+    const opened = await raceStartup((giveUp) => this.options.host.startControlSession(modelId, giveUp), {
+      signal: request.signal,
+      ...(this.options.clock ? { clock: this.options.clock } : {}),
+      timeoutMs: allowance,
+      onLate: (late) => log(`research: control (${request.role}) session ${late.sessionId} opened after the call gave up on it; it stays idle.`),
+    });
+    if (opened.kind === "aborted") {
+      throw new ResearchFailure("cancelled", "The run was stopped while the control session was starting.");
+    }
+    if (opened.kind === "timed_out") {
+      log(`research: control (${request.role}) session did not open within ${describeMs(allowance)}; giving up on it.`);
+      throw new ResearchFailure("unavailable", `could not start the research control session: Muse did not open it within ${describeMs(allowance)}.`);
+    }
+    if (opened.kind === "failed") {
+      const message = opened.error instanceof Error ? opened.error.message : String(opened.error);
       const kind = failureKindOf(message);
       throw new ResearchFailure(kind === "other" ? "unavailable" : kind, `could not start the research control session: ${message}`);
     }
+    const session: TurnSession = opened.value;
     const { sessionId, manager } = session;
-    const log = (message: string): void => this.options.host.log?.(message);
     const outcome = await runTurn(session, `${request.prompt}\n\n${CONTROL_TURN_INSTRUCTION}`, {
       timeoutMs: request.timeoutMs,
       signal: request.signal,
@@ -134,19 +173,11 @@ export class MuseSessionModelClient implements ModelClient {
             control.stop("failed", "invalid_output: the model asked for user input instead of answering.");
             return;
           }
-          case "session/closed": {
-            this.sessions.delete(key);
-            return;
-          }
           default:
             return;
         }
       },
     });
-    if (outcome.startFailed) {
-      // A session that no longer takes a turn (closed between calls, say) is dropped; the next call starts a new one.
-      this.sessions.delete(key);
-    }
     if (outcome.status === "completed") {
       if (!outcome.text.trim()) {
         throw new ResearchFailure("invalid_output", "the research control session gave no answer.");
@@ -160,7 +191,7 @@ export class MuseSessionModelClient implements ModelClient {
 export interface MuseModelClientOptions {
   /** The `muse exec` path: one process per call, the prompt as an argument. */
   exec: ModelClient;
-  /** The control-session path: one turn per call in a reused session. */
+  /** The control-session path: one turn per call in a session of its own. */
   session: ModelClient;
   platform?: string;
   log?(message: string): void;

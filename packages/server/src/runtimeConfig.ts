@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
+import { normalizeAllowHost } from "./admission.js";
+import { parseHostStartTimeoutMs } from "./hostBounds.js";
 
 /**
- * `runtime.json` in the data dir: the machine's runtime, WSL distro, Muse path, title sharing and the environment
- * Muse gets inside WSL. People write it by hand, often from Windows PowerShell, which saves UTF-8 with a byte order
+ * `runtime.json` in the data dir: the machine's runtime, WSL distro, Muse path, title sharing, the host names the server
+ * answers behind a proxy and the environment Muse gets inside WSL. People write it by hand, often from Windows PowerShell, which saves UTF-8 with a byte order
  * mark (`Set-Content -Encoding utf8`) or UTF-16 (`>`). None of it may stop the server: a file that cannot be read is
  * ignored as a whole, and a field that is wrong is ignored on its own, each with one line saying why.
  */
@@ -11,6 +13,10 @@ export interface RuntimeConfig {
   distro?: string;
   musePath?: string;
   syncSessionNames?: boolean;
+  /** Host names the server answers besides the loopback ones, for a proxy or tunnel in front of it. */
+  allowHosts?: string[];
+  /** How long a Muse host may take to answer its start, in milliseconds; 0 turns the limit off. */
+  hostStartTimeoutMs?: number;
   /** Environment variables for Muse inside WSL, never set on the server itself. */
   wslEnv: Record<string, string>;
 }
@@ -77,6 +83,31 @@ export function parseRuntimeConfig(bytes: Buffer): { config: RuntimeConfig | nul
       config.syncSessionNames = raw["syncSessionNames"];
     } else {
       warnings.push(`"syncSessionNames" was ignored: it must be true or false, not ${describe(raw["syncSessionNames"])}`);
+    }
+  }
+  const hosts = raw["allowHosts"];
+  if (hosts !== undefined) {
+    if (!Array.isArray(hosts)) {
+      warnings.push(`"allowHosts" was ignored: it must be a list of host names, not ${describe(hosts)}`);
+    } else {
+      const kept: string[] = [];
+      for (const entry of hosts) {
+        const host = typeof entry === "string" ? normalizeAllowHost(entry) : null;
+        if (host === null) {
+          warnings.push(`"allowHosts" entry ${JSON.stringify(entry)} was ignored: it is not a host name`);
+        } else if (!kept.includes(host)) {
+          kept.push(host);
+        }
+      }
+      if (kept.length > 0) config.allowHosts = kept;
+    }
+  }
+  if (raw["hostStartTimeoutMs"] !== undefined) {
+    const ms = parseHostStartTimeoutMs(raw["hostStartTimeoutMs"]);
+    if (ms !== null) {
+      config.hostStartTimeoutMs = ms;
+    } else {
+      warnings.push(`"hostStartTimeoutMs" was ignored: it must be whole milliseconds (0 turns the limit off), not ${describe(raw["hostStartTimeoutMs"])}`);
     }
   }
   const env = raw["wslEnv"];

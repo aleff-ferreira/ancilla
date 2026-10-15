@@ -83,9 +83,9 @@ describe("CrewPanel", () => {
     assert.match(textOf(agents), /^Agents 9 \+1 planned 2 working now$/);
     assert.deepEqual(digits(agents), ["9"]);
     const tokens = kpi(markup, "tokens");
-    assert.match(textOf(tokens), /^Tokens so far 1\.3M 8 of 9 reported$/);
+    assert.match(textOf(tokens), /^Tokens so far 1\.2M 8 of 9 reported$/);
     const cost = kpi(markup, "cost");
-    assert.match(textOf(cost), /^Est\. cost ~\$[\d.]+ at list price$/);
+    assert.match(textOf(cost), /^Est\. cost ~\$[\d.]+ at list price · 8 of 9 reported$/);
     assert.match(textOf(kpi(markup, "slots")), /^Slots 2 of 16 launch policy$/);
     assert.match(textOf(kpi(markup, "pulse")), /^Pulse · 10 min \d+ events?\/min$/);
     assert.equal((kpi(markup, "pulse").match(/<span class="block w-1/g) ?? []).length, 10, "ten bins");
@@ -106,7 +106,7 @@ describe("CrewPanel", () => {
     const markup = renderPanel({ fold: lanternFold(S(46, 0), [], lanternDone()) }, S(46, 0));
     assert.deepEqual(attrs(markup, "data-kpi"), ["agents", "tokens", "cost", "wall", "agent-time", "peak"]);
     assert.match(textOf(kpi(markup, "agents")), /^Agents 10 1 retried$/);
-    assert.match(textOf(kpi(markup, "tokens")), /^Tokens 1\.5M all 10 reported$/);
+    assert.match(textOf(kpi(markup, "tokens")), /^Tokens 1\.4M all 10 reported$/);
     assert.match(textOf(kpi(markup, "wall")), /^Wall time 45m 06s started /);
     assert.match(textOf(kpi(markup, "agent-time")), /^Agent time \d+h \d\dm across 10 agents$/);
     assert.match(textOf(kpi(markup, "peak")), /^Peak 4 at once during Research$/);
@@ -128,9 +128,9 @@ describe("CrewPanel", () => {
     const markup = renderPanel();
     assert.deepEqual(rows(markup), ["phase:Research", "phase:Design", "c-cl", "c-ol", "c-cf", "phase:Judge", "c-jc", "c-jp", "phase:Synthesize"]);
     // Phase spans run from the first start to the last end the fold recorded.
-    assert.match(rowTag(markup, "phase:Research"), /tabindex="0" aria-selected="true" aria-expanded="false" aria-label="Research, 4 of 4 done, 660k tokens, 11m 58s"/);
-    assert.match(rowTag(markup, "phase:Design"), /aria-expanded="true" aria-label="Design, 2 of 3 done, 1 failed, 468k tokens, 12m 40s"/);
-    assert.match(rowTag(markup, "phase:Judge"), /aria-label="Judge, 0 of 2 done, 148k tokens, 16m 02s so far"/);
+    assert.match(rowTag(markup, "phase:Research"), /tabindex="0" aria-selected="true" aria-expanded="false" aria-label="Research, 4 of 4 done, 618k tokens, 11m 58s"/);
+    assert.match(rowTag(markup, "phase:Design"), /aria-expanded="true" aria-label="Design, 2 of 3 done, 1 failed, 445k tokens, 12m 40s"/);
+    assert.match(rowTag(markup, "phase:Judge"), /aria-label="Judge, 0 of 2 done, 138k tokens, 16m 02s so far"/);
     assert.match(rowTag(markup, "phase:Synthesize"), /aria-label="Synthesize, 1 planned"/);
     assert.match(markup, /aria-sort="descending"[^>]*>Time/);
     const run = lanternRun();
@@ -153,7 +153,7 @@ describe("CrewPanel", () => {
     assert.equal(subline(markup, "c-jc"), "Finishing · usage reported 53s ago");
     assert.equal(subline(markup, "c-jp"), "Working No update for 16m 02s");
     assert.equal(subline(markup, "c-cl"), "");
-    assert.match(markup, /aria-label="design:conflict-ledger, Failed · 2 attempts, attempt 2 of 2, Muse has not reported a reason yet, 64k tokens, 3m 51s"/);
+    assert.match(markup, /aria-label="design:conflict-ledger, Failed · 2 attempts, attempt 2 of 2, Muse has not reported a reason yet, 59k tokens, 3m 51s"/);
     assert.match(markup, /aria-label="judge:perf, No update for 16m 02s, 16m 02s"/);
     const pending = renderPanel({ state: { crew: { panels: {}, activityOpen: false, pending: { [pendingKey("s1", "c-cf", 2)]: "retry" }, skipped: [], leftAt: {}, dismissedReports: [], dismissedRecaps: [] } } });
     assert.equal(subline(pending, "c-cf"), "Retrying · attempt 3 starting · Muse has not confirmed yet");

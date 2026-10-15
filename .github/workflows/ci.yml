@@ -19,8 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # Linux is pinned: ubuntu-latest moves to a newer image on GitHub's schedule and would change the gate unannounced.
+        os: [windows-latest, macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
         with:
@@ -52,12 +54,18 @@ jobs:
         run: |
           set -o pipefail
           npm run test --workspace @ancilla/web 2>&1 | tee "$RUNNER_TEMP/web-test.log"
+      # The scripts that cut a release and police commits (scripts/test): the release workflow cannot be run from a
+      # branch, so what can be tested of it is tested here, on every system.
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test:scripts 2>&1 | tee "$RUNNER_TEMP/scripts-test.log"
       # One annotation per failing test, with its file, line and error. The run's annotations can be read
       # through the API where the job log cannot, so a failure on a runner one cannot open still says which test.
       - name: Annotate failing tests
         if: failure()
         shell: bash
-        run: node scripts/annotate-test-failures.mjs "$RUNNER_TEMP/test.log" "$RUNNER_TEMP/web-test.log"
+        run: node scripts/annotate-test-failures.mjs "$RUNNER_TEMP/test.log" "$RUNNER_TEMP/web-test.log" "$RUNNER_TEMP/scripts-test.log"
 
   # The desktop crate is only otherwise compiled while cutting a release, which is far too late to
   # find out that it does not build.
@@ -65,8 +73,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # Pinned for the same reason as the node job above.
+        os: [windows-latest, macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

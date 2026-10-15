@@ -4,16 +4,19 @@ import { constants, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import type { Readable } from "node:stream";
 import {
   AncillaMspHost,
   AncillaStore,
+  HostStartTimeoutError,
   SessionManager,
   isApprovalMode,
   isGoalAction,
   isIfBusy,
   isReasoningEffort,
+  isStoreBusy,
   isSubagentAction,
   isWorkflowChildAction,
   parseSubscriptionUsage,
@@ -52,18 +55,32 @@ import {
   type SubscriptionUsage,
   type TurnImage,
 } from "@ancilla/daemon";
+import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
+import { attachmentHeaders, normalizeMediaType } from "./attachments.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
+import { DEFAULT_HOST_WAITS, HOST_START_TIMEOUT_ENV, closeInBackground, resolveHostStartTimeoutMs, settledWithin, waitUnlessAborted, type HostWaits } from "./hostBounds.js";
 import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
+import { SHELL_TIMEOUT_MS, runCapture, stopPendingCaptures, type PendingCaptures } from "./runCapture.js";
 import { wslSpawnEnv } from "./runtimeConfig.js";
+import { SseBroadcaster } from "./sse.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
+import { replayUsageAt, turnStartTimes } from "./usageTime.js";
+import { dayBucketer, usageWindow } from "./usageWindow.js";
+import { ATTACHMENT_DIR, RESEARCH_DIR, assertWritableFile, entryState, ownedProjectDir, writeAttachment, type AttachmentWriter } from "./workspaceWrite.js";
 import {
+  BOOT_SWEEP_RETRY_MS,
+  MAX_RESEARCH_QUESTION_CHARS,
+  MIN_RESEARCH_STARTUP_ENV_MS,
   MuseExecModelClient,
   MuseModelClient,
   MuseSessionModelClient,
   MuseSessionWorkerRunner,
   ResearchJobManager,
+  gaveUpOnTimeout,
   museExecArgs,
+  researchStartupAllowanceMs,
+  startupEnvMs,
   uuidv7,
   type MuseExecPlan,
   type ResearchEngine,
@@ -84,6 +101,8 @@ export const ANCILLA_VERSION = "0.20.3";
 export interface HostExit {
   code: number | null;
   signal: string | null;
+  /** The host's connection ended while its process lived; the host was closed, so there is no exit of its own. */
+  reason?: "connection-ended";
 }
 
 /** What a session's live notification feed has done, for answering "did it go quiet, or was it idle?". */
@@ -109,8 +128,6 @@ export type HostFactory = (target: ServeTarget) => HostHandle;
 
 export type OpenTarget = "files" | "editor";
 export type Opener = (path: string, target: OpenTarget) => Promise<void>;
-
-const realHostFactory: HostFactory = (target) => new AncillaMspHost(target);
 
 /** The shape of a spawned `muse login` child the route needs: readable output and a way to kill it. */
 export interface LoginChild {
@@ -145,6 +162,8 @@ export interface ServerOptions {
   token?: string | null;
   /** Browser origins allowed to reach this daemon from another site. Empty means same-origin only. */
   allowOrigins?: string[];
+  /** Host names the daemon answers besides the loopback ones; see `admission.ts`. */
+  allowHosts?: string[];
   platform?: string;
   distro?: string;
   musePath?: string | null;
@@ -181,10 +200,46 @@ export interface ServerOptions {
   researchEngine?: ResearchEngine;
   /** Research workers running at once across every run. */
   researchMaxWorkers?: number;
+  /**
+   * How long a research session start may take before the run gives up on it, in milliseconds. Unset, the
+   * `ANCILLA_RESEARCH_STARTUP_MS` environment variable decides, else two minutes (three on Windows with Muse in WSL).
+   */
+  researchStartupMs?: number;
+  /**
+   * Puts a non-image attachment into the project at the folder this machine reaches it by, and answers the name it
+   * was saved under. The real one refuses links and never replaces a file; a test replaces it to see where it is aimed.
+   */
+  attachmentWriter?: AttachmentWriter;
+  /**
+   * The most unsent bytes the event stream holds for one client behind the frame being added. A client over it is
+   * disconnected and reloads what it missed when its stream reconnects. Four mebibytes by default.
+   */
+  sseMaxBacklogBytes?: number;
+  /**
+   * How long a client may go without finishing a write, once the event stream could not hand it a frame, before it
+   * is disconnected. Ninety seconds by default; zero turns the deadline off.
+   */
+  sseStallMs?: number;
+  /**
+   * How long a Muse host may take to answer its start before it is given up on, in milliseconds; 0 turns the limit off.
+   * Unset, `ANCILLA_HOST_START_TIMEOUT_MS` decides, else five minutes.
+   */
+  hostStartTimeoutMs?: number;
+  /** How long a restart or a shutdown waits for a host start still open, and for a host to close, before it goes on. */
+  hostWaits?: HostWaits;
+  /** The waits between the tries of the sweeps at boot while another process holds the database locked; see `BOOT_SWEEP_RETRY_MS`. */
+  bootSweepRetryMs?: readonly number[];
 }
 
-/** Where a run's report and sources land inside the workspace, beside attachments. */
-const RESEARCH_DIR = [".ancilla", "research"];
+/** A host start in progress; see `startTokens`. */
+interface StartToken {
+  /** Set once the host exists, so that giving up on the start can close it. */
+  handle: HostHandle | null;
+  /** A restart or a shutdown gave up on this start: its host must never be registered. */
+  abandoned: boolean;
+  /** The host was already told to close, so a second close is not sent. */
+  closing: boolean;
+}
 
 interface ManagedHost {
   quotaCacheScope: string | null;
@@ -292,11 +347,26 @@ function goalOf(value: unknown): GoalBlock | null | undefined {
   };
 }
 
-type SseSink = (event: string, data: unknown) => void;
+/** Session ids whose research origin is remembered, so a frame on the event stream does not ask the store each time. */
+const RESEARCH_ORIGIN_CACHE_LIMIT = 4096;
+/** How long a session the store has no row for stays unasked about; its row is written moments after its first frames. */
+const RESEARCH_MISS_MS = 1_000;
 
 const MAX_HISTORY_PAGES = 4;
 const HISTORY_PAGE_SIZE = 1000;
 const DISCOVER_LIMIT = 200;
+/**
+ * The most pages one discovery reads. A page is a hundred sessions, so this is room for two thousand: hidden
+ * research sessions are skipped without counting toward `DISCOVER_LIMIT`, and a busy project can hold many.
+ */
+const DISCOVER_MAX_PAGES = 20;
+/**
+ * Research session starts one host may have outstanding after their runs gave up on them because the startup
+ * allowance passed (a stop is not counted). A host that never answers `session/start` would otherwise be sent one
+ * more every round; past this count a further start waits, unsent, until the host answers one of them (or they fail,
+ * when the host goes away) or until its own allowance passes.
+ */
+const MAX_ABANDONED_RESEARCH_STARTS = 2;
 /** Echo-titled threads one discovery may hand to the titler. Each is a model call on the user's plan, so it is a
  * handful of recent threads rather than a whole history. */
 const TITLE_BACKFILL_LIMIT = 30;
@@ -315,11 +385,23 @@ class HttpError extends Error {
   }
 }
 
+/** One request header as text; a repeated header counts as absent. */
+function headerText(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return typeof value === "string" ? value : undefined;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value === "object" && value !== null && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
   return null;
+}
+
+/** The prompt tokens a session says it has used so far, from a read's session or a snapshot's state; null when it names none. */
+function runningPromptTotal(source: Record<string, unknown> | null): number | null {
+  const usage = asRecord(source?.["tokenUsage"]);
+  return num(asRecord(usage?.["cumulative"])?.["promptTokens"] ?? usage?.["promptTokens"]) ?? null;
 }
 
 function str(value: unknown): string | null {
@@ -331,6 +413,12 @@ function sameSubscriptionUsage(a: SubscriptionUsage | null | undefined, b: Subsc
     (["window", "weekly"] as const).every((key) => a[key].usedPercent === b[key].usedPercent &&
       a[key].resetsAtMs === b[key].resetsAtMs && a[key].windowDurationMins === b[key].windowDurationMins);
 }
+
+/** How far ahead of this clock a host's observation stamp may be before it stops being believed. */
+const QUOTA_CLOCK_SKEW_MS = 5 * 60_000;
+
+/** What a saved row with a stamp from the future is taken to be: a reading of unknown age, old enough never to look current. */
+const QUOTA_RESTORED_AGE_MS = 30 * 60_000;
 
 function num(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -369,46 +457,6 @@ function lastLines(text: string): string {
 }
 
 /** Runs a command to completion; rejects with the tail of its stderr. */
-/** Output kept from a `!` command Ancilla runs itself, and how long it may run. */
-const MAX_SHELL_OUTPUT = 64 * 1024;
-const SHELL_TIMEOUT_MS = 2 * 60_000;
-
-/** Runs a program and keeps what it printed, both streams together, as a terminal would show it. */
-function runCapture(
-  command: string,
-  args: string[],
-  cwd: string | undefined,
-  timeoutMs: number,
-): Promise<{ output: string; exitCode: number | null; truncated: boolean }> {
-  return new Promise((done) => {
-    const child = spawn(command, args, { cwd, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-    let output = "";
-    let truncated = false;
-    const take = (chunk: Buffer) => {
-      output += chunk.toString();
-      if (output.length > MAX_SHELL_OUTPUT) {
-        output = output.slice(-MAX_SHELL_OUTPUT);
-        truncated = true;
-      }
-    };
-    child.stdout?.on("data", take);
-    child.stderr?.on("data", take);
-    const timer = setTimeout(() => {
-      truncated = true;
-      output += "\n[stopped: the command ran longer than two minutes]";
-      child.kill();
-    }, timeoutMs);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      done({ output: `${output}\n${error.message}`.trim(), exitCode: null, truncated });
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      done({ output, exitCode: code, truncated });
-    });
-  });
-}
-
 function runProcess(command: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((done, fail) => {
     const child = spawn(command, args, {
@@ -464,12 +512,15 @@ function normalizeCwd(value: string): string {
 /** A name safe to write into a workspace: the base name only, and nothing that needs quoting. */
 export function safeFileName(raw: string | null): string {
   const base = (raw ?? "").split(/[\\/]/).pop() ?? "";
-  const clean = base
-    .replace(/[^A-Za-z0-9._-]+/g, "-")
-    .replace(/^[-.]+|-+$/g, "")
-    .slice(0, 80);
+  const lead = base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "");
+  // Windows reads CON, NUL, COM1 and the like as devices, with or without an extension, and drops trailing dots and
+  // spaces: a file of that name could not be opened or deleted there, and Muse on Windows would read the device.
+  const named = WINDOWS_DEVICE_NAME.test(lead.split(".", 1)[0] ?? "") ? `_${lead}` : lead;
+  const clean = named.slice(0, 80).replace(/[-.]+$/, "");
   return clean.length > 0 ? clean : "file";
 }
+
+const WINDOWS_DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 export { deriveTitle };
 
@@ -727,10 +778,23 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 const MAX_BODY_BYTES = 96 * 1024 * 1024;
 /**
- * Where a non-image attachment lands inside the workspace, so Muse's own tools can open it. Prompts sent from Helicon
- * mention `.helicon/attachments` instead; nothing here parses either path, and those files are left where they are.
+ * The handshake carries one token; a body past its room is not one, and is refused before anything is compared. The
+ * room is this much at least, and for a longer token six bytes a character (the most JSON spends on one, as `\u00xx`)
+ * plus the braces and key, so no token can lock itself out.
  */
-const ATTACHMENT_DIR = [".ancilla", "attachments"];
+const MIN_AUTH_BODY_BYTES = 4 * 1024;
+/** How many different refused hosts are written to the log in a process's lifetime. */
+const MAX_REFUSED_HOSTS_LOGGED = 5;
+/** The longest a host name can be (DNS); a longer Host header is described as unusable and never offered as a name to list. */
+const MAX_HOST_NAME_LENGTH = 253;
+/** What the JSON answers and the page itself say about being framed: only by this same origin (the PDF preview). */
+const FRAME_HEADERS = { "content-security-policy": "frame-ancestors 'self'", "x-frame-options": "SAMEORIGIN" } as const;
+/**
+ * A file written for a send that Muse then did not take stays this long as the one a retry of the same file uses,
+ * instead of leaving a second copy. The retry the controller makes after resuming a session comes within seconds.
+ */
+const PREPARED_REUSE_MS = 10 * 60_000;
+const PREPARED_REUSE_MAX = 64;
 
 interface PreparedAttachment {
   name: string;
@@ -743,17 +807,47 @@ interface PreparedAttachment {
 
 export class AncillaServer {
   private readonly server: Server;
+  /** Host names the daemon answers; see `admission.ts`. */
+  private readonly trustedHosts: ReadonlySet<string>;
+  /** Whether the Host check runs: on a loopback bind, or when `--allow-host` was given. */
+  private readonly enforceHost: boolean;
+  /** The refused hosts already written to the log, capped at `MAX_REFUSED_HOSTS_LOGGED`. */
+  private readonly refusedHostsLogged = new Set<string>();
+  /** Every request refused for its Host, logged or not, and the last such name that could have been listed. */
+  private hostRefusals = 0;
+  private lastRefusedHost: string | null = null;
   private readonly store: AncillaStore;
   private readonly aonia: Aonia;
   private readonly linuxInstaller: LinuxMuseInstaller;
   private readonly hosts = new Map<string, ManagedHost>();
   private readonly starting = new Map<string, Promise<ManagedHost>>();
+  /**
+   * The token of each start in `starting`, by host key. A start that a restart or a shutdown gave up on is marked
+   * abandoned and dropped from both maps; if its host answers later, it is closed and never registered.
+   */
+  private readonly startTokens = new Map<string, StartToken>();
+  /** The ceiling on a host's start, in milliseconds (0 is none); see `resolveHostStartTimeoutMs`. */
+  private readonly hostStartTimeoutMs: number;
+  private readonly hostWaits: Required<HostWaits>;
   /** Restarts queued by a settings flip, oldest first. Hosts are only acquired past the tail. */
   private restartChain: Promise<void> = Promise.resolve();
   private readonly fingerprints = new Map<string, unknown>();
-  private readonly sinks = new Set<SseSink>();
+  /** The clients of `/api/events`, with the bounds that keep one that stopped reading from costing memory. */
+  private readonly sse: SseBroadcaster;
+  /** Whether each session is a research run's own, as the event stream last learned it; see `isResearchFrame`. */
+  private readonly researchOrigins = new Map<string, boolean>();
+  /** Sessions the store had no row for, to the monotonic reading until which that is not asked again. */
+  private readonly researchMisses = new Map<string, number>();
   private readonly live = new Map<string, LiveState>();
   private readonly sessionHosts = new Map<string, string>();
+  /**
+   * The model id each session was last switched to by hand although its catalog does not list it, to the id. Muse
+   * keeps such an id for the session only, so the `modelChanged` that follows it is not a pick to restore on resume.
+   * Dropped when the session closes or its host is forgotten.
+   */
+  private readonly modelTrials = new Map<string, string>();
+  /** Compactions and forks in flight: they hold a host without any turn showing it, so a restart must not cut them off. */
+  private hostWork = 0;
   private readonly opener: Opener;
   private readonly titleQueue: string[] = [];
   private titleWorker: Promise<void> | null = null;
@@ -773,7 +867,12 @@ export class AncillaServer {
   private readonly directQuota = new Map<string | null, SubscriptionReading>();
   private readonly subscriptionReader: MuseSubscriptionReader;
   private readonly pendingHostQuotas = new WeakMap<ManagedHost, Promise<SubscriptionUsage | null>>();
-  private readonly savedQuotaSources = new Set<string | null>();
+  /** Where each account's current reading came from, recorded when it was observed rather than guessed later. */
+  private readonly usageSources = new Map<string | null, "meta" | "runtime" | "saved">();
+  /** The last plan name Meta reported per account, kept so one failed check does not blank it. */
+  private readonly lastPlanNames = new Map<string | null, string>();
+  /** A future stamp and the moment it first arrived, so reading the same observation again does not make it look new. */
+  private readonly clampedStamps = new Map<string | null, { from: number; to: number }>();
   private readonly removedQuotaAccounts = new Set<string>();
   private readonly quotaAccountGenerations = new Map<string, number>();
   private planUsageReadRevision = 0;
@@ -792,6 +891,11 @@ export class AncillaServer {
   private lastProtocolError: string | null = null;
   private forwardFailures = 0;
   private lastForwardFailure: string | null = null;
+  /** Hosts that exited on their own, and when the last did; counts only, for `/api/health`. */
+  private hostExits = 0;
+  private lastHostExitAt: string | null = null;
+  /** Research runs the sweep at boot marked interrupted. */
+  private researchInterruptedAtBoot = 0;
   /** Notifications that carried no sessionId, so nothing could be routed from them. */
   private unroutedByMethod = new Map<string, number>();
   /** Where Muse runs, once known; see `museRuntime`. */
@@ -801,6 +905,12 @@ export class AncillaServer {
   /** Hosts whose Muse reported the rename-broken event log; no title is sent to them again. */
   private readonly renameRefused = new Set<string>();
   private closed = false;
+  /** Set when `close()` begins, to cut short the waits of the sweeps at boot. */
+  private readonly shutdownSignal = new AbortController();
+  /** Set once the store is closed: a frame that arrives after that (from a host that outlived its close) is dropped. */
+  private storeClosed = false;
+  /** The `!` commands this server started whose answer is pending; `close()` stops them. Never shared with another server. */
+  private readonly pendingCaptures: PendingCaptures = new Set();
   private readonly options: Required<
     Omit<
       ServerOptions,
@@ -819,6 +929,12 @@ export class AncillaServer {
       | "subscriptionReader"
       | "researchEngine"
       | "researchMaxWorkers"
+      | "researchStartupMs"
+      | "attachmentWriter"
+      | "sseMaxBacklogBytes"
+      | "sseStallMs"
+      | "hostStartTimeoutMs"
+      | "hostWaits"
     >
   > &
     Pick<ServerOptions, "staticDir" | "token" | "findNativeMuse"> & {
@@ -835,10 +951,28 @@ export class AncillaServer {
   /** Reserved before async setup, so a slow earlier POST cannot replace a newer account sign-in. */
   private readonly loginStartGenerations = new Map<string, number>();
   private readonly researchJobs: ResearchJobManager;
+  /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
+  private readonly researchStartupOverride: { option: number | undefined; env: string | undefined };
+  /** Session starts per host key that a research run gave up on and the host has not yet answered. */
+  private readonly abandonedStarts = new Map<string, number>();
+  /** Starts held back because their host key is at `MAX_ABANDONED_RESEARCH_STARTS`; each re-checks when woken. */
+  private readonly startWaiters = new Set<() => void>();
+  private readonly attachmentWriter: AttachmentWriter;
+  /**
+   * Files written for a send that is still open, by session, name and content, so the retry of a send Muse did not
+   * take finds its file instead of writing another. Forgotten once a send of the file is accepted.
+   */
+  private readonly preparedFiles = new Map<string, { root: string; name: string; size: number; at: number }>();
   /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
   private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
 
   constructor(options: ServerOptions = {}) {
+    this.hostStartTimeoutMs = resolveHostStartTimeoutMs({
+      option: options.hostStartTimeoutMs,
+      env: process.env[HOST_START_TIMEOUT_ENV],
+      warn: (line) => this.log(line),
+    });
+    this.hostWaits = { ...DEFAULT_HOST_WAITS, ...(options.hostWaits ?? {}) };
     this.options = {
       port: options.port ?? 3127,
       host: options.host ?? "127.0.0.1",
@@ -846,6 +980,7 @@ export class AncillaServer {
       staticDir: options.staticDir ? resolve(options.staticDir) : null,
       token: options.token ?? null,
       allowOrigins: options.allowOrigins ?? [],
+      allowHosts: options.allowHosts ?? [],
       platform: options.platform ?? process.platform,
       distro: options.distro,
       musePath: options.musePath,
@@ -854,14 +989,27 @@ export class AncillaServer {
       syncSessionNames: options.syncSessionNames === true,
       wslEnv: { ...(options.wslEnv ?? {}) },
       findNativeMuse: options.findNativeMuse,
-      hostFactory: options.hostFactory ?? realHostFactory,
+      // The host's own lines go where the server's do, so that a log of the server has them too.
+      hostFactory: options.hostFactory ?? ((target) => new AncillaMspHost(target, undefined, undefined, { startTimeoutMs: this.hostStartTimeoutMs, log: (line) => this.log(line) })),
       home: options.home ?? homedir(),
       autoSettleDays: options.autoSettleDays === undefined ? 3 : options.autoSettleDays,
       exec: options.exec ?? defaultExec,
-      shellRunner: options.shellRunner ?? ((command, args) => runCapture(command, args, undefined, SHELL_TIMEOUT_MS)),
+      shellRunner: options.shellRunner ?? ((command, args) => runCapture(command, args, undefined, SHELL_TIMEOUT_MS, { pending: this.pendingCaptures })),
+      bootSweepRetryMs: options.bootSweepRetryMs ?? BOOT_SWEEP_RETRY_MS,
       loginSpawn: options.loginSpawn ?? defaultLoginSpawn,
     };
+    this.trustedHosts = trustedHostSet(this.options.allowHosts, this.options.allowOrigins, this.options.host);
+    this.enforceHost = isLoopbackBind(this.options.host) || parseAllowHosts(this.options.allowHosts).hosts.length > 0;
+    const startupEnv = process.env["ANCILLA_RESEARCH_STARTUP_MS"];
+    this.researchStartupOverride = { option: options.researchStartupMs, env: startupEnv };
+    if (startupEnv !== undefined && startupEnv.trim() !== "" && startupEnvMs(startupEnv) === null) {
+      this.log(
+        `ignoring ANCILLA_RESEARCH_STARTUP_MS=${JSON.stringify(startupEnv)}: it takes whole milliseconds, ${MIN_RESEARCH_STARTUP_ENV_MS} or more (for example 180000).`,
+      );
+    }
     this.opener = options.opener ?? defaultOpener(this.options.platform);
+    this.sse = new SseBroadcaster({ maxBacklogBytes: options.sseMaxBacklogBytes, stallMs: options.sseStallMs });
+    this.attachmentWriter = options.attachmentWriter ?? writeAttachment;
     // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
     importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
     this.store = new AncillaStore(
@@ -889,12 +1037,13 @@ export class AncillaServer {
           }),
           session: new MuseSessionModelClient({
             host: {
-              startControlSession: (modelId) => this.startResearchSession(thread, "Research control", modelId),
+              startControlSession: (modelId, giveUp) => this.startResearchSession(thread, "Research control", modelId, giveUp),
               subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
               log: (message) => this.log(message),
             },
             models: run.config.models,
             fallbackModelId: thread.modelId,
+            startupMs: () => this.researchStartupMs(),
           }),
           platform: this.options.platform,
           log: (message) => this.log(message),
@@ -902,37 +1051,97 @@ export class AncillaServer {
       createWorkerRunner: (run, thread, onWorkerUpdate) =>
         new MuseSessionWorkerRunner({
           host: {
-            startWorkerSession: (task, modelId) => this.startResearchSession(thread, `Research worker A${task.agentId}`, modelId),
+            startWorkerSession: (task, modelId, giveUp) => this.startResearchSession(thread, `Research worker A${task.agentId}`, modelId, giveUp),
             subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
             onWorkerUpdate,
             log: (message) => this.log(message),
           },
           models: run.config.models,
           fallbackModelId: thread.modelId,
+          startupMs: () => this.researchStartupMs(),
         }),
       broadcast: (run) => this.emit("ancilla", { type: "research-run", sessionId: run.sessionId, run }),
       writeReport: (thread, run, report, state) => this.writeResearchReport(thread, run, report, state),
       log: (message) => this.log(message),
     });
-    // Runs the previous process left in flight cannot be picked up (stage 3's Resume will); they are marked now.
-    this.researchJobs.markInterruptedOnBoot();
+    // The runs the previous process left in flight are marked interrupted in `listen`, once the port is bound: a
+    // second server that cannot take the port must not rewrite the rows of the one that holds it.
     this.server = createServer((req, res) => {
       void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
     });
   }
 
   async listen(): Promise<{ port: number; host: string }> {
-    await new Promise<void>((resolve) => this.server.listen(this.options.port, this.options.host, resolve));
+    // This server can run commands in the user's projects. Reaching it from the network takes a credential, and
+    // nothing here would notice a missing one later, so the refusal comes before anything is bound.
+    if (!this.options.token && !isLoopbackBind(this.options.host)) {
+      throw new Error(
+        `Refusing to listen on ${this.options.host || "every interface"}: that address can be reached from other machines, and this server can run commands in your projects. Pass --token <value> (a long random string), or leave --host out to listen on 127.0.0.1 only.`,
+      );
+    }
+    await new Promise<void>((resolve, reject) => {
+      // A port that is taken is an error to report, not an uncaught event that ends the process after the fact.
+      const refused = (error: Error) => reject(error);
+      this.server.once("error", refused);
+      this.server.listen(this.options.port, this.options.host, () => {
+        this.server.off("error", refused);
+        resolve();
+      });
+    });
     const address = this.server.address();
     const port = typeof address === "object" && address ? address.port : this.options.port;
-    // No sweep at startup: which threads are busy in other Muse clients is only known after discovery.
-    this.settleTimer = setInterval(() => this.autoSettle(), AUTO_SETTLE_SWEEP_MS);
-    this.settleTimer.unref?.();
+    // Only now, holding the port, is this the server whose data this is: what the last process left in flight is
+    // marked interrupted here (a Resume will act on them), and the turns it left running are of unknown fate.
+    // Each sweep on its own, and each waits out a database another process has locked: one that cannot be done does not
+    // take the other with it. The ready line waits for both, so with the database locked throughout that is about
+    // twice the sum of the waits whatever the number of rows (each sweep stops at the first row the lock refuses).
+    try {
+      this.researchInterruptedAtBoot = (
+        await this.researchJobs.sweepInterruptedOnBoot(this.options.bootSweepRetryMs, this.shutdownSignal.signal)
+      ).length;
+    } catch (error) {
+      this.log(`the research sweep at boot failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    await this.sweepTurnsAtBoot();
+    // A server that was closed while it swept has nothing to schedule.
+    if (!this.closed) {
+      // No sweep at startup: which threads are busy in other Muse clients is only known after discovery.
+      this.settleTimer = setInterval(() => this.autoSettle(), AUTO_SETTLE_SWEEP_MS);
+      this.settleTimer.unref?.();
+    }
     return { port, host: this.options.host };
+  }
+
+  /**
+   * The turns the last process left running become of unknown fate; a database another process has locked is waited
+   * for. A close ends it at once, in the middle of a wait too: nothing here touches the store after that.
+   */
+  private async sweepTurnsAtBoot(): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      if (this.closed) {
+        return;
+      }
+      try {
+        const unknown = this.store.markRunningTurnsUnknown();
+        if (unknown > 0) {
+          this.log(`${unknown} turn(s) the last process left running are now of unknown outcome.`);
+        }
+        return;
+      } catch (error) {
+        const delay = this.options.bootSweepRetryMs[attempt];
+        if (!isStoreBusy(error) || delay === undefined || this.closed) {
+          this.log(`the turn sweep at boot failed: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        await waitUnlessAborted(delay, this.shutdownSignal.signal);
+      }
+    }
   }
 
   async close(): Promise<void> {
     this.closed = true;
+    this.shutdownSignal.abort();
+    this.wakeStartWaiters();
     this.subscriptionReader.close();
     await this.linuxInstaller.close();
     for (const child of this.loginChildren.values()) child.kill();
@@ -948,36 +1157,158 @@ export class AncillaServer {
     this.titleQueue.length = 0;
     // Research jobs go first: their workers still need the hosts to take the interrupts.
     await this.researchJobs.close();
-    for (const sink of [...this.sinks]) {
-      this.sinks.delete(sink);
-    }
-    for (const pending of this.starting.values()) {
-      await pending.catch(() => undefined);
-    }
-    for (const managed of this.hosts.values()) {
-      try {
-        await managed.handle.close();
-      } catch {
-        /* best effort */
-      }
-    }
+    this.sse.close();
+    // What is left waits on something that may never answer, so all of it waits at once and the longest wait bounds the
+    // close (`worstCaseCloseMs` adds it up): the starts still open, each registered host, the title worker, and the `!`
+    // commands still running. The listener stays up meanwhile, so a request is answered 503 instead of being refused.
+    const registered = [...this.hosts.values()];
+    await Promise.all([
+      this.settleStarts(),
+      ...registered.map((managed) => this.closeHost(managed)),
+      this.titleWorker ? settledWithin(this.titleWorker, this.hostWaits.startsMs) : undefined,
+      stopPendingCaptures(this.pendingCaptures, { graceMs: this.hostWaits.shellsMs }),
+    ]);
     this.hosts.clear();
     this.server.closeAllConnections?.();
     await new Promise<void>((resolve, reject) =>
-      this.server.close((error) => (error ? reject(error) : resolve())),
+      // A server that refused to listen has nothing to close.
+      this.server.close((error) => (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve())),
     );
-    await this.titleWorker?.catch(() => undefined);
+    // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
+    this.storeClosed = true;
     this.store.close();
   }
 
+  /**
+   * Waits up to `hostWaits.startsMs` for every host start in flight, then gives up on those still open: each is marked
+   * abandoned, forgotten, and its host closed (which ends a start that is still waiting for an answer). An abandoned
+   * start that answers later is closed and never registered, so it cannot outlive the restart or shutdown that gave
+   * up on it. During a shutdown a start that answers inside the wait finds the server closed, so it too is closed in
+   * the background and never awaited: `close()` does not wait for those closes (a host that ignores both the end of
+   * its input and SIGTERM can outlive a server that exits; see docs/muse-recovery.md).
+   */
+  private async settleStarts(): Promise<void> {
+    const open = [...this.starting.values()];
+    if (open.length > 0) {
+      await settledWithin(Promise.allSettled(open), this.hostWaits.startsMs);
+    }
+    for (const [key, token] of this.startTokens) {
+      token.abandoned = true;
+      if (token.handle && !token.closing) {
+        token.closing = true;
+        closeInBackground(token.handle);
+      }
+      this.starting.delete(key);
+    }
+    this.startTokens.clear();
+  }
+
+  /** Closes one registered host, for at most `hostWaits.closeMs`; a host that will not close is dropped all the same. */
+  private async closeHost(managed: ManagedHost): Promise<void> {
+    const closing = (async () => managed.handle.close())();
+    closing.catch(() => undefined);
+    await settledWithin(closing, this.hostWaits.closeMs);
+  }
+
+  /**
+   * One event to every client of the stream, serialised once and shared. Nothing here merges or drops an event for a
+   * client that keeps up, `session-status` and the lifecycle edges above all; what the stream sheds is a client that
+   * does not (see `SseBroadcaster`), and a research run's own sessions, which no client has any use for.
+   */
   private emit(type: string, data: unknown): void {
-    for (const sink of this.sinks) {
-      try {
-        sink(type, data);
-      } catch {
-        /* drop broken sinks on next write */
+    if (this.sse.size === 0) {
+      return;
+    }
+    if (this.isResearchFrame(type, data)) {
+      this.sse.countSkipped();
+      return;
+    }
+    let frame: string;
+    try {
+      const body = JSON.stringify(data);
+      if (typeof body !== "string") {
+        throw new TypeError("the event has no JSON form");
+      }
+      frame = `event: ${type}\ndata: ${body}\n\n`;
+    } catch (error) {
+      // An event that cannot be written is not worth a client's stream, nor a crash: this runs from timers and
+      // from inside the host's read loop.
+      this.sse.countSerializationFailure();
+      this.log(`event stream: could not serialise a ${type} event: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    this.sse.publish(frame);
+  }
+
+  /**
+   * Whether an event belongs to one of a research run's own sessions: its frames, its tool output (fetched web text
+   * among it) and its status. The run reads them through its own listeners and its progress reaches the browser as
+   * `research-run`, so no client needs them, and an unlisted `session-status` only makes every client refresh its
+   * lists. Decided here and not in `forward`, which still records their usage and hands them to those listeners.
+   */
+  private isResearchFrame(type: string, data: unknown): boolean {
+    if (type !== "ancilla" || typeof data !== "object" || data === null) {
+      return false;
+    }
+    const event = data as { type?: unknown; sessionId?: unknown };
+    if ((event.type !== "msp" && event.type !== "session-status") || typeof event.sessionId !== "string") {
+      return false;
+    }
+    return this.knownResearchSession(event.sessionId);
+  }
+
+  /**
+   * `isResearchSession`, remembered: this runs for every frame of every session. A session is looked up until the
+   * store has it, so a frame that beats the row into the store (it is written when Muse answers the start) is
+   * broadcast and never cached as ordinary; `openResearchSession` records its own at once. A session with no row is
+   * asked about again after `RESEARCH_MISS_MS`, not for every frame in between.
+   */
+  private knownResearchSession(sessionId: string): boolean {
+    const known = this.researchOrigins.get(sessionId);
+    if (known !== undefined) {
+      return known;
+    }
+    const missUntil = this.researchMisses.get(sessionId);
+    if (missUntil !== undefined) {
+      if (performance.now() < missUntil) {
+        return false;
+      }
+      this.researchMisses.delete(sessionId);
+    }
+    let found: boolean;
+    try {
+      const record = this.store.getSession(sessionId);
+      if (record === null) {
+        this.rememberResearchMiss(sessionId);
+        return false;
+      }
+      found = record.origin === "research-worker";
+    } catch {
+      return false;
+    }
+    this.rememberResearchOrigin(sessionId, found);
+    return found;
+  }
+
+  private rememberResearchMiss(sessionId: string): void {
+    this.researchMisses.delete(sessionId);
+    if (this.researchMisses.size >= RESEARCH_ORIGIN_CACHE_LIMIT) {
+      const oldest = this.researchMisses.keys().next();
+      if (!oldest.done) {
+        this.researchMisses.delete(oldest.value);
       }
     }
+    this.researchMisses.set(sessionId, performance.now() + RESEARCH_MISS_MS);
+  }
+
+  private rememberResearchOrigin(sessionId: string, research: boolean): void {
+    if (this.researchOrigins.size >= RESEARCH_ORIGIN_CACHE_LIMIT) {
+      const oldest = this.researchOrigins.keys().next();
+      if (!oldest.done) {
+        this.researchOrigins.delete(oldest.value);
+      }
+    }
+    this.researchOrigins.set(sessionId, research);
   }
 
   /** Coalesce bursts (discovery, title backfill) into one sidebar refresh. */
@@ -1020,7 +1351,8 @@ export class AncillaServer {
     for (const part of raw.split(";")) {
       const [key, ...rest] = part.trim().split("=");
       if (key === name) {
-        return decodeURIComponent(rest.join("="));
+        // A cookie with a broken escape is no credential, not a crash.
+        return safeDecode(rest.join("="));
       }
     }
     return null;
@@ -1046,17 +1378,26 @@ export class AncillaServer {
     return true;
   }
 
+  /** Whether the request carries the token in an `Authorization: Bearer` header; a page does not hold the token, so it cannot send a valid one. */
+  private bearerValid(req: IncomingMessage): boolean {
+    const token = this.options.token;
+    const header = req.headers["authorization"];
+    return !!token && typeof header === "string" && header.startsWith("Bearer ") && safeEqual(header.slice("Bearer ".length), token);
+  }
+
   private authorized(req: IncomingMessage): boolean {
-    if (!this.options.token) {
+    const token = this.options.token;
+    if (!token) {
       return true;
     }
-    if (
-      this.cookie(req, AncillaServer.AUTH_COOKIE) === this.options.token ||
-      this.cookie(req, AncillaServer.LEGACY_AUTH_COOKIE) === this.options.token
-    ) {
+    const held = (name: string) => {
+      const value = this.cookie(req, name);
+      return value !== null && safeEqual(value, token);
+    };
+    if (held(AncillaServer.AUTH_COOKIE) || held(AncillaServer.LEGACY_AUTH_COOKIE)) {
       return true;
     }
-    if (req.headers["authorization"] === `Bearer ${this.options.token}`) {
+    if (this.bearerValid(req)) {
       return true;
     }
     // A token in the URL leaks through history, server logs and any shared link, so it counts only
@@ -1065,13 +1406,66 @@ export class AncillaServer {
       return false;
     }
     const url = new URL(req.url ?? "/", "http://localhost");
-    return url.searchParams.get("token") === this.options.token;
+    const given = url.searchParams.get("token");
+    return given !== null && safeEqual(given, token);
   }
 
   private json(res: ServerResponse, status: number, body: unknown): void {
     const text = JSON.stringify(body);
-    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...FRAME_HEADERS });
     res.end(text);
+  }
+
+  /** A path segment as the person's text: a malformed escape is a bad request, not a server error. */
+  private segment(raw: string): string {
+    const decoded = safeDecode(raw);
+    if (decoded === null) {
+      throw new HttpError(400, "That address is not valid.");
+    }
+    return decoded;
+  }
+
+  /** The 403 for a request that names a host this daemon was not told to answer, and the one line saying so. */
+  private refuseHost(req: IncomingMessage, res: ServerResponse): void {
+    const raw = req.headers["host"];
+    const shown = typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 100).replace(/[^\x21-\x7e]/g, "?") : "";
+    // The header is the other side's text. A command to copy is built only from a name or address that
+    // `--allow-host` would take (without port or brackets); anything else is described, never repeated as a command.
+    // No host name is longer than 253 characters, so a longer one is not a name, whatever its letters.
+    const parsed = typeof raw === "string" ? normalizeHost(raw) : null;
+    const name = parsed !== null && parsed.length <= MAX_HOST_NAME_LENGTH ? parsed : null;
+    const hint = name === null ? null : `--allow-host ${name}`;
+    // Counted for every refusal, whatever the log has stopped saying, so a wrong proxy setting is visible in the
+    // diagnostics after five other names used up the log. Only a name that passed the checks above is kept.
+    this.hostRefusals += 1;
+    if (name !== null) {
+      this.lastRefusedHost = name;
+    }
+    // Each distinct host is logged once, and only the first few: a page that tries many made-up names must not be
+    // able to fill the log.
+    const key = name ?? (shown || "(none)");
+    if (!this.refusedHostsLogged.has(key) && this.refusedHostsLogged.size < MAX_REFUSED_HOSTS_LOGGED) {
+      this.refusedHostsLogged.add(key);
+      const last = this.refusedHostsLogged.size === MAX_REFUSED_HOSTS_LOGGED ? " No more refused hosts will be logged." : "";
+      let line: string;
+      if (hint !== null) {
+        line = `refused a request for host ${JSON.stringify(shown)}; if this is your own proxy or tunnel, add ${hint} (or "allowHosts" in runtime.json).`;
+      } else if (shown) {
+        line = `refused a request for an unusable host name (${JSON.stringify(shown)}); it is not a name or address that could be allowed.`;
+      } else {
+        line = "refused a request that names no host.";
+      }
+      this.log(line + last);
+    }
+    let message: string;
+    if (hint !== null) {
+      message = `This daemon does not answer requests for the host "${shown}". If it is behind a proxy or a tunnel, start the server with ${hint}, or list that name under "allowHosts" in runtime.json.`;
+    } else if (shown) {
+      message = `This daemon does not answer requests for an unusable host name (${JSON.stringify(shown)}). A host name is letters, digits, dots and hyphens, or an IP address.`;
+    } else {
+      message = `This request names no host, which this daemon does not answer. Send a Host header, or start the server with --allow-host <name> (or "allowHosts" in runtime.json).`;
+    }
+    this.fail(res, 403, message, "host");
   }
 
   private fail(res: ServerResponse, status: number, message: string, kind: string | null = null): void {
@@ -1082,12 +1476,17 @@ export class AncillaServer {
     }
   }
 
-  private async readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  private async readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
+    // A body that says up front it is too large is refused without reading any of it.
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > limit) {
+      throw new HttpError(413, "That request is too large.");
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
       size += (chunk as Buffer).length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         throw new HttpError(413, "That request is too large.");
       }
       chunks.push(chunk as Buffer);
@@ -1100,9 +1499,34 @@ export class AncillaServer {
   }
 
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    // First, for every request: the API, the page, a preflight. A page that was rebound to this address still names
+    // its own host. A valid Bearer token is the one thing that skips it, because a page does not hold the token and
+    // so cannot send a valid Bearer: that keeps a loopback server behind a proxy or tunnel reachable for clients that
+    // hold the token. A cookie or a token in the URL does not count: the browser, not the page's author, decides when
+    // those are sent.
+    if (this.enforceHost && !trustedHost(req.headers["host"], this.trustedHosts) && !this.bearerValid(req)) {
+      this.refuseHost(req, res);
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+    } catch {
+      this.fail(res, 400, "That address is not valid.");
+      return;
+    }
     const path = url.pathname;
     const method = (req.method ?? "GET").toUpperCase();
+    // With no origin listed, nothing but this server's own pages should be asking, and a browser says when one is
+    // not. With origins listed, a page there may legitimately load an image or a frame: its credential and the origin
+    // list still decide, and the cross-site answer to a plain GET is opaque to it.
+    if (
+      this.options.allowOrigins.length === 0 &&
+      crossSiteApiRequest(headerText(req, "sec-fetch-site"), headerText(req, "sec-fetch-mode"), path)
+    ) {
+      this.fail(res, 403, "This daemon does not answer requests started by another site.", "fetchMetadata");
+      return;
+    }
     if (!this.cors(req, res)) {
       this.fail(res, 403, "This daemon does not answer that origin.");
       return;
@@ -1115,6 +1539,12 @@ export class AncillaServer {
     // The handshake is how a browser earns its cookie, so it cannot itself demand one.
     if (!(method === "POST" && path === "/api/auth") && !this.authorized(req)) {
       this.fail(res, 401, "Missing or invalid token.");
+      return;
+    }
+    // A server that is closing waits on its hosts for as long as the waits allow, with the listener still up. Nothing
+    // new is started meanwhile (a research row, a thread, a command); `/api/health` still says how it is doing.
+    if (this.closed && !(method === "GET" && path === "/api/health")) {
+      this.fail(res, 503, "Ancilla is shutting down.");
       return;
     }
     if (path.startsWith("/api/")) {
@@ -1146,13 +1576,14 @@ export class AncillaServer {
     res: ServerResponse,
   ): Promise<boolean> {
     if (method === "POST" && path === "/api/auth") {
-      const body = await this.readBody(req);
+      const body = await this.readBody(req, Math.max(MIN_AUTH_BODY_BYTES, (this.options.token ?? "").length * 6 + 256));
       if (!this.options.token) {
         // Nothing to prove: a daemon started without a token answers whoever can reach it.
         this.json(res, 200, { ok: true, required: false });
         return true;
       }
-      if (str(body["token"]) !== this.options.token) {
+      const given = str(body["token"]);
+      if (given === null || !safeEqual(given, this.options.token)) {
         throw new HttpError(401, "That token does not match this daemon.");
       }
       // The stream cannot carry a header, so the cookie is what it authenticates with. Cross-site
@@ -1175,6 +1606,8 @@ export class AncillaServer {
     if (method === "GET" && path === "/api/health") {
       this.json(res, 200, {
         ok: true,
+        // True once `close()` has begun: the route keeps answering while the server winds down, and a supervisor can tell.
+        closing: this.closed,
         version: ANCILLA_VERSION,
         hosts: [...this.hosts.values()].map((h) => ({
           key: h.key,
@@ -1182,6 +1615,8 @@ export class AncillaServer {
           startedAt: h.startedAt,
         })),
         lastHostError: this.lastHostError,
+        // Counts only: this route is public, so nothing about what a run is about may be here.
+        research: { ...this.researchJobs.counts(), interruptedAtBoot: this.researchInterruptedAtBoot },
         fingerprintWarnings: Object.fromEntries(this.fingerprints),
         // Enough to answer "has this session's feed gone quiet, and did anything get dropped?".
         diagnostics: {
@@ -1190,6 +1625,14 @@ export class AncillaServer {
           lastProtocolError: this.lastProtocolError,
           forwardFailures: this.forwardFailures,
           lastForwardFailure: this.lastForwardFailure,
+          // Muse hosts that exited on their own (a restart this server asked for is not one), and when the last did.
+          hostExits: { count: this.hostExits, lastExitAt: this.lastHostExitAt },
+          // Counts only: this route is public. Clients cut for not reading, frames that could not be written.
+          sse: this.sse.stats(),
+          // Requests refused for their Host header, and the last refused name that could have been listed; the
+          // log reports only the first few different ones.
+          hostRefusals: this.hostRefusals,
+          lastRefusedHost: this.lastRefusedHost,
           unroutedByMethod: Object.fromEntries(this.unroutedByMethod),
           sessions: Object.fromEntries(
             [...this.notifyStats].map(([id, stats]) => [
@@ -1431,7 +1874,7 @@ export class AncillaServer {
 
     const proxyMatch = path.match(/^\/api\/sessions\/([^/]+)\/shell-proxy$/);
     if (method === "POST" && proxyMatch) {
-      const sessionId = decodeURIComponent(proxyMatch[1] as string);
+      const sessionId = this.segment(proxyMatch[1] as string);
       const body = await this.readBody(req);
       const command = str(body["command"])?.trim();
       if (!command) {
@@ -1442,6 +1885,10 @@ export class AncillaServer {
         throw new HttpError(404, "Unknown session.");
       }
       const result = await this.runInWorkspace(found.cwd, command);
+      // A command that a shutdown stopped answers into a store that may be closed by now.
+      if (this.storeClosed) {
+        throw new HttpError(503, "Ancilla is shutting down.");
+      }
       const run = this.store.addShellRun({
         id: randomUUID(),
         sessionId,
@@ -1460,7 +1907,7 @@ export class AncillaServer {
 
     const outputMatch = path.match(/^\/api\/sessions\/([^/]+)\/output$/);
     if (method === "GET" && outputMatch) {
-      const sessionId = decodeURIComponent(outputMatch[1] as string);
+      const sessionId = this.segment(outputMatch[1] as string);
       const itemId = url.searchParams.get("itemId");
       const outputRef = url.searchParams.get("outputRef");
       if (!itemId || !outputRef) {
@@ -1479,7 +1926,7 @@ export class AncillaServer {
 
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(?:\/(resume|model|approval-mode|compact|shell|fork|effort|goal|subagent|tasks|workflow))?$/);
     if (sessionMatch) {
-      const sessionId = decodeURIComponent(sessionMatch[1] as string);
+      const sessionId = this.segment(sessionMatch[1] as string);
       const action = sessionMatch[2];
       if (method === "PATCH" && !action) {
         const body = await this.readBody(req);
@@ -1492,9 +1939,19 @@ export class AncillaServer {
         if (settled === true && this.isBusy(sessionId)) {
           throw new HttpError(409, "Stop the running turn and answer its requests before settling this thread.");
         }
+        // A research run's job lives in this server and neither of these stops it; asked again after the last await,
+        // since a run can have started while the rename was under way.
+        const shelving = body["archived"] === true ? "archiving" : settled === true ? "settling" : null;
+        const refuseWhileResearching = (): void => {
+          if (shelving && this.hasLiveResearch(sessionId)) {
+            throw new HttpError(409, `This thread has a research run in progress. Stop it, or wait for it to finish, before ${shelving} the thread.`);
+          }
+        };
+        refuseWhileResearching();
         if (title && title !== found.session.title) {
           await this.renameInMuse(sessionId, title);
         }
+        refuseWhileResearching();
         const record = this.store.updateSession(sessionId, {
           ...(title ? { title, titleSource: "user" as const } : {}),
           ...(typeof body["archived"] === "boolean" ? { archived: body["archived"] } : {}),
@@ -1517,17 +1974,48 @@ export class AncillaServer {
           if (!("model" in body)) {
             throw new HttpError(400, "model is required.");
           }
-          await manager.setSessionModel(sessionId, await this.modelSelection(manager, sessionId, body["model"]));
+          const { selection, listed, source } = await this.resolveModelSelection(manager, sessionId, body["model"]);
           const modelId = str(asRecord(body["model"])?.["modelId"]);
+          // An id the catalog does not list is tried on this thread only: Muse keeps it for the session, and a typo
+          // is not found out until the next turn. The mark is set first, because the `modelChanged` that answers the
+          // switch can arrive before this request does. A list that is only Muse's built-in one (`source` is not
+          // `providerCatalog`) proves nothing about the plan, but it cannot tell a typo from a model either, so an id
+          // missing from it is a trial just the same.
+          const trial = modelId !== null && listed === false;
+          const marked = this.modelTrials.get(sessionId);
+          if (modelId && trial) {
+            this.modelTrials.set(sessionId, modelId);
+          } else {
+            this.modelTrials.delete(sessionId);
+          }
+          try {
+            await manager.setSessionModel(sessionId, selection);
+          } catch (error) {
+            // A rejected switch stores nothing and leaves the mark as it was.
+            if (marked === undefined) {
+              this.modelTrials.delete(sessionId);
+            } else {
+              this.modelTrials.set(sessionId, marked);
+            }
+            throw error;
+          }
           if (modelId) {
             // The user's pick, kept apart from what Muse reports: a resume that comes back on another model restores it.
-            this.store.updateSession(sessionId, { modelId, chosenModelId: modelId });
+            // A trial is no pick, and it must not leave an older one standing either (a pin the thread started with,
+            // say): that would be put back over it on the next resume. Cleared, the host's own model wins.
+            this.store.updateSession(sessionId, trial ? { modelId, chosenModelId: null } : { modelId, chosenModelId: modelId });
+            if (trial) {
+              // The id comes off the wire: quoted, so a line break in it cannot split the record.
+              this.log(
+                `${sessionId} tries ${JSON.stringify(modelId)}, which ${source ? `Muse's ${source} list` : "Muse's list"} does not name; kept for this session only`,
+              );
+            }
           }
           this.json(res, 200, { ok: true });
           return true;
         }
         if (action === "compact") {
-          this.json(res, 200, { result: await manager.compactSession(sessionId) });
+          this.json(res, 200, { result: await this.holdingHost(() => manager.compactSession(sessionId)) });
           return true;
         }
         if (action === "shell") {
@@ -1542,7 +2030,7 @@ export class AncillaServer {
           return true;
         }
         if (action === "fork") {
-          this.json(res, 200, { session: await this.forkSession(sessionId, manager) });
+          this.json(res, 200, { session: await this.holdingHost(() => this.forkSession(sessionId, manager)) });
           return true;
         }
         if (action === "effort") {
@@ -1717,6 +2205,33 @@ export class AncillaServer {
       this.json(res, 200, next);
       return true;
     }
+    if (method === "POST" && path === "/api/hosts/restart") {
+      // Closing a host ends the turns running on it, so this goes ahead only while Muse is idle. A newer Muse
+      // build or a changed plan shows in the model list once the hosts start again.
+      // A host that is starting counts, whatever it starts for: a thread, or only a model list (GET /api/models).
+      const busy = "A turn, approval, research run, compaction, fork or Muse host start is still open. Let it finish or stop it, then restart Muse.";
+      if (this.anythingRunning()) {
+        throw new HttpError(409, busy);
+      }
+      // Queued like a settings flip's restart, so a session started meanwhile never lands on a retiring host. The
+      // queue can be a while in coming round (a flip's restart may be mid-close ahead of this one), and a prompt can
+      // start meanwhile, so the answer is asked for again when this restart's turn comes.
+      let refused = false;
+      const run = this.restartChain.then(async () => {
+        if (this.anythingRunning()) {
+          refused = true;
+          return;
+        }
+        await this.restartHosts("The Muse host restarted to read a fresh model list.");
+      });
+      this.restartChain = run.catch(() => undefined);
+      await run;
+      if (refused) {
+        throw new HttpError(409, busy);
+      }
+      this.json(res, 200, { ok: true });
+      return true;
+    }
     if (method === "GET" && path === "/api/accounts") {
       this.json(res, 200, { accounts: await this.accountList() });
       return true;
@@ -1742,7 +2257,7 @@ export class AncillaServer {
     }
     const accountLoginMatch = /^\/api\/accounts\/([^/]+)\/login$/.exec(path);
     if (path === "/api/login" || accountLoginMatch) {
-      const id = accountLoginMatch ? decodeURIComponent(accountLoginMatch[1] as string) : null;
+      const id = accountLoginMatch ? this.segment(accountLoginMatch[1] as string) : null;
       const key = id ?? "";
       if (method === "GET" || method === "DELETE") {
         const attempt = this.loginAttempts.get(key);
@@ -1773,7 +2288,7 @@ export class AncillaServer {
       }
     }
     if (method === "PATCH" && path.startsWith("/api/accounts/")) {
-      const id = decodeURIComponent(path.slice("/api/accounts/".length));
+      const id = this.segment(path.slice("/api/accounts/".length));
       const body = await this.readBody(req);
       const name = str(body["name"]);
       if (!name) {
@@ -1788,9 +2303,11 @@ export class AncillaServer {
       return true;
     }
     if (method === "DELETE" && path.startsWith("/api/accounts/")) {
-      const id = decodeURIComponent(path.slice("/api/accounts/".length));
+      const id = this.segment(path.slice("/api/accounts/".length));
       try {
         await this.aonia.removeProfile(id);
+        // A project must not keep naming an account that is gone: a new thread there would fail on it.
+        this.store.clearDefaultAccount(id);
         this.removedQuotaAccounts.add(id);
         this.quotaAccountGenerations.set(id, (this.quotaAccountGenerations.get(id) ?? 0) + 1);
         this.planUsageReadRevision += 1;
@@ -1827,7 +2344,8 @@ export class AncillaServer {
     if (method === "GET" && path === "/api/usage") {
       const requested = Number.parseInt(url.searchParams.get("days") ?? "30", 10);
       const days = Number.isFinite(requested) ? Math.min(365, Math.max(1, requested)) : 30;
-      this.json(res, 200, this.usageReport(days));
+      // The viewer's IANA zone, so a day is their day; without one (or with one Intl does not know) days are UTC.
+      this.json(res, 200, this.usageReport(days, url.searchParams.get("tz")));
       return true;
     }
     const attachmentMatch = path.match(/^\/api\/attachments\/([A-Za-z0-9-]{1,64})$/);
@@ -1836,11 +2354,8 @@ export class AncillaServer {
       if (!found) {
         throw new HttpError(404, "No such attachment.");
       }
-      res.writeHead(200, {
-        "content-type": found.record.mediaType,
-        "content-length": String(found.bytes.length),
-        "cache-control": "private, max-age=86400",
-      });
+      // Whatever the row says it is, a stored file is shown as an image or downloaded, never run as a page.
+      res.writeHead(200, attachmentHeaders(found.record, found.bytes.length));
       res.end(Buffer.from(found.bytes));
       return true;
     }
@@ -1865,7 +2380,7 @@ export class AncillaServer {
       if (typeof effort === "string") {
         await this.applyEffort(manager, sessionId, effort);
       }
-      const prepared = await this.prepareAttachments(this.store.findSession(sessionId)?.cwd ?? "", files);
+      const prepared = await this.prepareAttachments(sessionId, this.store.findSession(sessionId)?.cwd ?? "", files);
       this.wake(sessionId);
       const live = this.liveFor(sessionId);
       const sentAtRevision = ++live.activityRevision;
@@ -1875,37 +2390,60 @@ export class AncillaServer {
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
       });
-      // A host that took the turn has the session loaded.
-      if (this.hosts.get(managed.key) === managed) {
-        this.sessionHosts.set(sessionId, managed.key);
-      }
-      if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
-        live.activityRevision += 1;
-        live.activeTurnId = ack.turnId;
-        live.turnStartedAt = nowIso();
-        live.turnHost = managed.key;
-        live.lastTerminal = null;
-        live.lastError = null;
-        this.emitStatus(sessionId);
+      // Muse has the prompt. From here nothing may fail the request: an error now would tell the client that a
+      // prompt Muse accepted was not sent, and sending it again would put it in the thread twice. What Ancilla
+      // keeps beside the turn is best effort, and a failure is logged.
+      prepared.accepted();
+      const saved: Record<string, unknown>[] = [];
+      try {
+        // A host that took the turn has the session loaded.
+        if (this.hosts.get(managed.key) === managed) {
+          this.sessionHosts.set(sessionId, managed.key);
+        }
+        // Only a turn that has started is registered: a queued or a steered prompt has no turn of its own to run yet.
+        if (ack.disposition === "started" && ack.turnId) {
+          this.recordTurnStart(sessionId, ack.turnId);
+        }
+        if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
+          live.activityRevision += 1;
+          live.activeTurnId = ack.turnId;
+          live.turnStartedAt = nowIso();
+          live.turnHost = managed.key;
+          live.lastTerminal = null;
+          live.lastError = null;
+          this.emitStatus(sessionId);
+        }
+      } catch (error) {
+        this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but its live state could not be updated: ${errorInfo(error).message}`);
       }
       // The saved attachments go back with the ack: the open thread shows them without waiting for a reload.
-      const saved = prepared.files.map((file, index) =>
-        this.attachmentView(
-          this.store.addAttachment({
-            id: randomUUID(),
-            sessionId,
-            turnId: ack.turnId,
-            ord: index,
-            name: file.name,
-            mediaType: file.mediaType,
-            kind: file.kind,
-            width: file.width,
-            height: file.height,
-            bytes: file.bytes,
-          }),
-        ),
-      );
-      this.store.updateSession(sessionId, { activityAt: nowIso() });
+      prepared.files.forEach((file, index) => {
+        try {
+          saved.push(
+            this.attachmentView(
+              this.store.addAttachment({
+                id: randomUUID(),
+                sessionId,
+                turnId: ack.turnId,
+                ord: index,
+                name: file.name,
+                mediaType: file.mediaType,
+                kind: file.kind,
+                width: file.width,
+                height: file.height,
+                bytes: file.bytes,
+              }),
+            ),
+          );
+        } catch (error) {
+          this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but ${file.name} could not be kept with it: ${errorInfo(error).message}`);
+        }
+      });
+      try {
+        this.store.updateSession(sessionId, { activityAt: nowIso() });
+      } catch (error) {
+        this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but the thread's activity could not be saved: ${errorInfo(error).message}`);
+      }
       this.json(res, 200, { turnId: ack.turnId, status: ack.status, disposition: ack.disposition, attachments: saved });
       return true;
     }
@@ -1965,8 +2503,16 @@ export class AncillaServer {
 
     if (method === "GET" && path === "/api/models") {
       const sessionId = url.searchParams.get("sessionId") ?? undefined;
-      const manager = sessionId ? await this.managerForSession(sessionId) : (await this.hostFor("")).manager;
-      this.json(res, 200, { models: await manager.listModels(sessionId) });
+      // A thread's own host answers for it, whatever account its record names. Without one, the account's host,
+      // which is the default login's when no account is given; an unknown account is the 400 hostFor raises. A
+      // named account's list comes from a host of that account that is already running (its threads' hosts are
+      // keyed by folder, so a listing host of its own would be one more resident process), and only a login with
+      // none running starts one.
+      const accountId = url.searchParams.get("accountId") || null;
+      const host = sessionId
+        ? await this.hostForSession(sessionId)
+        : ((accountId ? await this.runningHostOf(accountId) : null) ?? (await this.hostFor("", accountId)));
+      this.json(res, 200, { models: await host.manager.listModels(sessionId), hostVersion: host.serverVersion });
       return true;
     }
 
@@ -2130,31 +2676,12 @@ export class AncillaServer {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
+      // A reverse proxy in front of a remote daemon would otherwise hold frames back until its buffer fills.
+      "x-accel-buffering": "no",
     });
-    const sink: SseSink = (event, data) => {
-      if (res.writableEnded) {
-        this.sinks.delete(sink);
-        return;
-      }
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-    this.sinks.add(sink);
-    sink("ancilla", { type: "hello", version: ANCILLA_VERSION });
-    const heartbeat = setInterval(() => {
-      if (res.writableEnded) {
-        clearInterval(heartbeat);
-        this.sinks.delete(sink);
-        return;
-      }
-      // A named event rather than a comment: EventSource never surfaces comments to a listener, so a client
-      // holding a stream whose upstream died behind a proxy cannot tell it from a quiet one. This is what
-      // the client's watchdog listens for.
-      res.write(`event: ping\ndata: ${Date.now()}\n\n`);
-    }, 25000);
-    res.on("close", () => {
-      clearInterval(heartbeat);
-      this.sinks.delete(sink);
-    });
+    // Heartbeats, the backlog cap and the stall deadline are the broadcaster's: a client that stops reading is
+    // destroyed, and its EventSource reconnects and rereads, so nothing needs replaying.
+    this.sse.add(res, `event: ancilla\ndata: ${JSON.stringify({ type: "hello", version: ANCILLA_VERSION })}\n\n`);
   }
 
   private async serveStatic(path: string, res: ServerResponse): Promise<boolean> {
@@ -2175,6 +2702,7 @@ export class AncillaServer {
       res.writeHead(200, {
         "content-type": MIME[extname(file)] ?? "application/octet-stream",
         "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+        ...FRAME_HEADERS,
       });
       res.end(body);
       return true;
@@ -2254,6 +2782,39 @@ export class AncillaServer {
     return Boolean(live && (live.activeTurnId || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0));
   }
 
+  /**
+   * Whether a research run of this thread is in flight in this process, by the job map. Not `isBusy`, which is about
+   * the thread's own turn and also decides whether a refresh may load an unloaded thread, and not a row that says
+   * `running`, which a stale one does for good.
+   */
+  private hasLiveResearch(sessionId: string): boolean {
+    return this.researchJobs.hasLiveRun(sessionId);
+  }
+
+  /**
+   * Whether closing the hosts now would cut something off: a thread with a turn, approval or question open, a
+   * research run in flight, a host still starting (for a thread about to be created on it, or only to read a model
+   * list) or a compaction or fork that holds one.
+   */
+  private anythingRunning(): boolean {
+    return (
+      [...this.live.keys()].some((sessionId) => this.isBusy(sessionId)) ||
+      this.store.listRunningResearchRuns().some((run) => this.researchJobs.isActive(run.id)) ||
+      this.starting.size > 0 ||
+      this.hostWork > 0
+    );
+  }
+
+  /** Runs `work` while counting it in `anythingRunning`: a compaction or fork shows no turn, yet closing its host ends it. */
+  private async holdingHost<T>(work: () => Promise<T>): Promise<T> {
+    this.hostWork += 1;
+    try {
+      return await work();
+    } finally {
+      this.hostWork -= 1;
+    }
+  }
+
   /** New activity wakes a settled thread, and lifts a manual "keep active" so auto-settle can apply again. */
   private wake(sessionId: string): void {
     const record = this.store.getSession(sessionId);
@@ -2277,7 +2838,7 @@ export class AncillaServer {
     const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
     let changed = false;
     for (const record of this.store.listSettleCandidates(cutoff)) {
-      if (this.isBusy(record.id)) {
+      if (this.isBusy(record.id) || this.hasLiveResearch(record.id)) {
         continue;
       }
       this.store.updateSession(record.id, { settledOverride: "settled", settledAt: record.activityAt, unsettledAt: null });
@@ -2441,6 +3002,31 @@ export class AncillaServer {
     } catch {
       return this.localPathFor(cwd);
     }
+  }
+
+  /**
+   * `localRootFor` for what Ancilla writes into a project. On Windows a rooted Linux path is a path on the current
+   * drive, which is never the project: when the folder could not be placed (no distro to reach it through), writing
+   * would drop files on the wrong disk, so it is refused instead. A root that is not an absolute path at all would
+   * land relative to the daemon's own folder, so it is refused too.
+   */
+  private async workspaceRootFor(cwd: string): Promise<string> {
+    const root = await this.localRootFor(cwd);
+    if (this.options.platform === "win32" && root.startsWith("/")) {
+      throw new FileError(
+        409,
+        `Ancilla could not work out where ${cwd} is on this computer (it is a Linux folder and no WSL distribution is available to reach it), so it will not save into it. Start WSL and try again.`,
+        "workspaceWrite",
+      );
+    }
+    if (this.options.platform === "win32" && !win32.isAbsolute(root)) {
+      throw new FileError(
+        409,
+        `Ancilla could not work out where ${cwd} is on this computer (it is not a full path), so it will not save into it. Open the project from its full folder path and try again.`,
+        "workspaceWrite",
+      );
+    }
+    return root;
   }
 
   /** A path the local OS can open: WSL `/mnt/x` roots become `X:\` on Windows. */
@@ -2660,6 +3246,8 @@ export class AncillaServer {
       createdAt: normalizeIso(raw?.["createdAt"]),
       // A fork branches its source session, so it inherits the source's posture.
       sandboxDisabled: found.session.sandboxDisabled,
+      // And its account: the host it resumes on, the models it offers and the plan it counts against.
+      accountId: found.session.accountId,
     });
     const hostKey = this.sessionHosts.get(sessionId);
     if (hostKey) {
@@ -2674,29 +3262,55 @@ export class AncillaServer {
    * The selection `session/setModel` gets for a model id: the catalog's own entry for it, provider and profile
    * included, the way a picker in Muse's client would send it. A bare id is what the UI knows; whether Muse keeps a
    * selection that names no provider across a restart is not something to rely on. The catalog is a request away,
-   * so the id alone still goes out when the catalog cannot be read or does not list it.
+   * so the id alone still goes out when the catalog cannot be read.
    */
   private async modelSelection(manager: SessionManager, sessionId: string, model: unknown): Promise<unknown> {
+    return (await this.resolveModelSelection(manager, sessionId, model)).selection;
+  }
+
+  /**
+   * `modelSelection`, and whether the catalog lists the id: `false` for an id it lacks, `null` when it could not be
+   * read or lists nothing at all, which says nothing about the id. An id the catalog lacks goes out with the
+   * provider and profile of the catalog itself, else of the session's active row: Muse 1.4.5 switches to an unlisted
+   * id on the same provider, and a selection that names none is not something to rely on. `source` is where the
+   * catalog says it came from (`providerCatalog`, or a built-in list such as `bundledCatalog`), for the log: the
+   * verdict is the same, because a built-in list cannot say a model is wrong and cannot say it is right.
+   */
+  private async resolveModelSelection(
+    manager: SessionManager,
+    sessionId: string,
+    model: unknown,
+  ): Promise<{ selection: unknown; listed: boolean | null; source: string | null }> {
     const given = asRecord(model);
     const modelId = str(given?.["modelId"]);
     if (!given || !modelId || (given["providerId"] !== undefined && given["profileId"] !== undefined)) {
-      return model;
+      return { selection: model, listed: null, source: null };
     }
     try {
-      const list = asRecord(await manager.listModels(sessionId))?.["models"];
-      const entry = Array.isArray(list) ? list.map(asRecord).find((m) => m && str(m["modelId"]) === modelId) : null;
-      if (!entry) {
-        return model;
+      const result = asRecord(await manager.listModels(sessionId));
+      const source = str(result?.["source"]);
+      const rows = (Array.isArray(result?.["models"]) ? result["models"] : []).map(asRecord);
+      if (rows.length === 0) {
+        return { selection: model, listed: null, source };
       }
+      const entry = rows.find((m) => str(m?.["modelId"]) === modelId) ?? null;
       const selection: Record<string, unknown> = { ...given };
-      for (const key of ["providerId", "profileId", "displayLabel"]) {
-        if (selection[key] === undefined && (typeof entry[key] === "string" || entry[key] === null)) {
-          selection[key] = entry[key];
+      const copy = (from: Record<string, unknown> | null, keys: string[]) => {
+        for (const key of keys) {
+          if (from && selection[key] === undefined && (typeof from[key] === "string" || from[key] === null)) {
+            selection[key] = from[key];
+          }
         }
+      };
+      if (entry) {
+        copy(entry, ["providerId", "profileId", "displayLabel"]);
+      } else {
+        copy(result, ["providerId", "profileId"]);
+        copy(rows.find((m) => m?.["isActive"] === true) ?? null, ["providerId", "profileId"]);
       }
-      return selection;
+      return { selection, listed: entry !== null, source };
     } catch {
-      return model;
+      return { selection: model, listed: null, source: null };
     }
   }
 
@@ -2766,22 +3380,25 @@ export class AncillaServer {
    * which is how Muse reaches a file. Every one is kept here too, so a reopened thread can show it.
    */
   private async prepareAttachments(
+    sessionId: string,
     cwd: string,
     raw: unknown[],
-  ): Promise<{ images: TurnImage[]; files: PreparedAttachment[]; prompt: (text: string) => string }> {
+  ): Promise<{ images: TurnImage[]; files: PreparedAttachment[]; prompt: (text: string) => string; accepted: () => void }> {
     const mentions: string[] = [];
     const images: TurnImage[] = [];
     const files: PreparedAttachment[] = [];
+    const written: string[] = [];
     if (raw.length > MAX_ATTACHMENTS) {
       throw new HttpError(400, `A message takes at most ${MAX_ATTACHMENTS} files.`);
     }
     for (const entry of raw) {
       const record = asRecord(entry);
       const base64 = record ? str(record["base64"]) : null;
-      const mediaType = record ? str(record["mediaType"]) : null;
-      if (!record || !base64 || !mediaType) {
+      if (!record || !base64 || !str(record["mediaType"])) {
         throw new HttpError(400, "Each attachment needs a name, a mediaType and base64 bytes.");
       }
+      // Stored and served as one clean type, whatever the client called it: it ends up in a header.
+      const mediaType = normalizeMediaType(record["mediaType"]);
       const name = safeFileName(str(record["name"]));
       const bytes = Buffer.from(base64, "base64");
       if (bytes.length === 0) {
@@ -2804,44 +3421,85 @@ export class AncillaServer {
       if (!cwd) {
         throw new HttpError(400, `${name} needs a workspace to land in.`);
       }
-      const written = await this.writeIntoWorkspace(cwd, name, bytes);
-      mentions.push(`@${[...ATTACHMENT_DIR, written].join("/")}`);
-      files.push({ name: written, mediaType, kind: "file", width, height, bytes });
+      const savedAs = await this.writeIntoWorkspace(sessionId, cwd, name, bytes, written);
+      written.push(savedAs.key);
+      mentions.push(`@${[...ATTACHMENT_DIR, savedAs.name].join("/")}`);
+      files.push({ name: savedAs.name, mediaType, kind: "file", width, height, bytes });
     }
     return {
       images,
       files,
       prompt: (text: string) => [text, ...mentions].filter((part) => part.length > 0).join("\n\n"),
+      // Muse took the send, so a later send of the same file is a new one and gets a file of its own.
+      accepted: () => {
+        for (const key of written) {
+          this.preparedFiles.delete(key);
+        }
+      },
     };
   }
 
-  /** Writes an attached file into the workspace, keeping its name unless one is already taken. */
-  private async writeIntoWorkspace(cwd: string, name: string, bytes: Buffer): Promise<string> {
-    const directory = join(cwd, ...ATTACHMENT_DIR);
-    await mkdir(directory, { recursive: true });
-    const dot = name.lastIndexOf(".");
-    const stem = dot > 0 ? name.slice(0, dot) : name;
-    const suffix = dot > 0 ? name.slice(dot) : "";
-    let candidate = name;
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const taken = await stat(join(directory, candidate)).then(
-        () => true,
-        () => false,
-      );
-      if (!taken) {
+  /**
+   * Puts an attached file in the project, where this machine reaches it: the folder the file viewer and the research
+   * reports use, which for a Linux project folder on Windows is its `\\wsl.localhost\` share and not a path on the
+   * current drive. A file that an earlier try of this same send wrote, when Muse did not take that send, is the one
+   * used again, so a retry does not leave a copy behind.
+   */
+  private async writeIntoWorkspace(
+    sessionId: string,
+    cwd: string,
+    name: string,
+    bytes: Buffer,
+    alreadyKept: readonly string[],
+  ): Promise<{ name: string; key: string }> {
+    const root = await this.workspaceRootFor(cwd);
+    const base = [sessionId, name, createHash("sha256").update(bytes).digest("hex")].join("\n");
+    // The same file twice in one message is two files, each with its own place to come back to.
+    let key = base;
+    for (let copy = 1; alreadyKept.includes(key); copy += 1) {
+      key = `${base}\n${copy}`;
+    }
+    const earlier = this.preparedFiles.get(key);
+    if (earlier) {
+      const stillThere = earlier.root === root && Date.now() - earlier.at < PREPARED_REUSE_MS && (await this.isPreparedFile(root, earlier.name, earlier.size));
+      if (stillThere) {
+        return { name: earlier.name, key };
+      }
+      this.preparedFiles.delete(key);
+    }
+    const saved = await this.attachmentWriter(root, name, bytes);
+    this.preparedFiles.set(key, { root, name: saved, size: bytes.length, at: Date.now() });
+    while (this.preparedFiles.size > PREPARED_REUSE_MAX) {
+      const oldest = this.preparedFiles.keys().next().value;
+      if (oldest === undefined) {
         break;
       }
-      candidate = `${stem}-${attempt + 2}${suffix}`;
+      this.preparedFiles.delete(oldest);
     }
-    await writeFile(join(directory, candidate), bytes);
-    return candidate;
+    return { name: saved, key };
+  }
+
+  /** Whether the file a failed send wrote is still there, a plain file, and still the size it was written at. */
+  private async isPreparedFile(root: string, name: string, size: number): Promise<boolean> {
+    const path = join(root, ...ATTACHMENT_DIR, name);
+    if ((await entryState(path).catch(() => "missing")) !== "file") {
+      return false;
+    }
+    return (await stat(path).then((info) => info.size, () => -1)) === size;
   }
 
   /**
    * One model call's tokens, kept so the usage page can look across every thread rather than only the ones
-   * open in the UI. The view cursor is the key, so replaying a thread's history never counts a call twice.
+   * open in the UI. The view cursor is the key, so replaying a thread's history never counts a call twice, and
+   * the store also recognises a call it already holds under the other cursor a history page gives it. A live
+   * notification is dated by its arrival, which is when the call ran; a call read back from history is dated by
+   * `replayed`, taken from its turn, because "now" would put old spend on the day the thread was opened.
    */
-  private recordUsage(sessionId: string, params: Record<string, unknown>): void {
+  private recordUsage(
+    sessionId: string,
+    params: Record<string, unknown>,
+    replayed?: { at: string; source: "replay" | "estimate" },
+  ): void {
     const usage = asRecord(params["usage"]) ?? {};
     const promptTokens = num(params["promptTokens"]) ?? num(usage["inputTokens"]) ?? 0;
     const outputTokens = num(usage["outputTokens"]) ?? Math.max(0, (num(params["totalTokens"]) ?? 0) - promptTokens);
@@ -2861,18 +3519,72 @@ export class AncillaServer {
       cacheWriteTokens: num(usage["cacheWriteTokens"]) ?? 0,
       reasoningTokens: num(usage["reasoningTokens"]) ?? 0,
       durationMs: num(params["durationMs"]) ?? null,
-      at: normalizeIso(params["at"]) ?? nowIso(),
+      at: replayed?.at ?? normalizeIso(params["at"]) ?? nowIso(),
+      atSource: replayed?.source ?? "live",
     });
   }
 
-  /** Tokens per day and model, plus a row per thread, for the usage page to price. */
-  private usageReport(days: number): Record<string, unknown> {
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    const rows = this.store.listUsage(since);
+  /**
+   * Records the calls a thread's history holds, each dated from its own turn, and whether that was all of them.
+   * History is paged only so far back, so a long thread's oldest calls can be missing; the session's own running
+   * prompt total (from its read, or the newest call's `cumulative`) says what a complete read would have found,
+   * and a thread whose recorded calls fall short of it is marked partly counted. Without such a total, a read that
+   * hit the page limit is what marks it. `read` is null when no history could be paged at all, which says nothing
+   * either way and leaves an earlier verdict alone.
+   *
+   * A call's date is its turn's start, so a turn that runs past UTC midnight books its later calls on the earlier day.
+   */
+  private backfillUsage(
+    sessionId: string,
+    events: { method: string; params: Record<string, unknown> }[],
+    stored: SessionRecord | null,
+    read: { runningPrompt: number | null; truncated: boolean } | null,
+  ): void {
+    const turnStarts = turnStartTimes(events);
+    let newestTotal: number | null = null;
+    for (const event of events) {
+      if (event.method !== "session/tokenUsage") {
+        continue;
+      }
+      const turnId = str(event.params["turnId"]);
+      const when = replayUsageAt({
+        turnId,
+        itemAt: turnId ? turnStarts.get(turnId) : null,
+        activityAt: stored?.activityAt,
+        createdAt: stored?.createdAt,
+      });
+      // Only a date taken from the turn itself may move a row stored earlier; the thread's own dates only seed one.
+      this.recordUsage(sessionId, event.params, { at: when.at, source: when.verified ? "replay" : "estimate" });
+      // A call that names no running total says nothing about it, which is not the same as a total of zero.
+      const total = num(asRecord(event.params["cumulative"])?.["promptTokens"]);
+      if (total !== undefined) {
+        newestTotal = Math.max(newestTotal ?? 0, total);
+      }
+    }
+    if (read) {
+      const expected = read.runningPrompt === null && newestTotal === null ? null : Math.max(read.runningPrompt ?? 0, newestTotal ?? 0);
+      // When the session names its own total, what is recorded reaching it settles the question, even for a history
+      // longer than the pages read (calls seen live are already in). Only with no total does a cut-short read mean
+      // calls may be missing.
+      this.store.setUsageCoverage(sessionId, expected === null ? !read.truncated : this.store.sumUsagePrompt(sessionId) >= expected);
+    }
+  }
+
+  /**
+   * Tokens per local day and model, plus a row per thread, for the usage page to price. The window is the last
+   * `days` calendar days in the viewer's zone, today included, so `7` is today and the six days before it and `1` is
+   * today alone; without a known zone the days are UTC. DeepResearch worker sessions are not threads anyone opens,
+   * so each project's (and account's) workers fold into one row of their own. The coverage block says how much the
+   * totals do not cover: threads whose history could not be read back in full, and threads never read at all.
+   */
+  private usageReport(days: number, tz: string | null = null): Record<string, unknown> {
+    const window = usageWindow(days, tz);
+    const dayOf = dayBucketer(window.tz);
+    const rows = this.store.listUsage(window.since);
     const buckets = new Map<string, Record<string, unknown>>();
     const threads = new Map<string, Record<string, unknown>>();
     for (const row of rows) {
-      const day = row.at.slice(0, 10);
+      const day = dayOf(row.at);
       const modelId = row.modelId ?? "unknown";
       const cached = Math.min(row.promptTokens, row.cacheReadTokens || row.cachedTokens);
       const bucketKey = `${day}|${modelId}`;
@@ -2898,10 +3610,18 @@ export class AncillaServer {
       bucket["durationMs"] = (bucket["durationMs"] as number) + (row.durationMs ?? 0);
       buckets.set(bucketKey, bucket);
 
-      const thread = threads.get(row.sessionId) ?? {
-        sessionId: row.sessionId,
-        title: row.sessionTitle,
+      // A project's research workers share one row (per account), under an id no thread can have.
+      const research = row.origin === "research-worker";
+      const threadKey = research
+        ? `research-workers:${row.projectCwd ?? ""}${row.accountId ? `:${row.accountId}` : ""}`
+        : row.sessionId;
+      const thread = threads.get(threadKey) ?? {
+        sessionId: threadKey,
+        title: research ? "DeepResearch workers" : row.sessionTitle,
         cwd: row.projectCwd,
+        ...(research ? { kind: "research" } : {}),
+        // The login the thread runs under; null is the default one.
+        accountId: row.accountId,
         calls: 0,
         promptTokens: 0,
         outputTokens: 0,
@@ -2936,13 +3656,15 @@ export class AncillaServer {
         });
       }
       thread["lastAt"] = row.at;
-      threads.set(row.sessionId, thread);
+      threads.set(threadKey, thread);
     }
     return {
-      since,
+      since: window.since,
       days,
+      tz: window.tz,
       buckets: [...buckets.values()],
       threads: [...threads.values()].sort((a, b) => ((a["lastAt"] as string) < (b["lastAt"] as string) ? 1 : -1)),
+      coverage: this.store.usageCoverage(window.since),
     };
   }
 
@@ -2955,7 +3677,13 @@ export class AncillaServer {
     command: string,
   ): Promise<{ output: string; exitCode: number | null; truncated: boolean; durationMs: number }> {
     const started = Date.now();
-    if ((await this.museRuntime()) === "native") {
+    const runtime = await this.museRuntime();
+    // The wait above can outlast the start of a shutdown, which has already stopped the commands it knew of: nothing is
+    // spawned after that, or it would outlive the server.
+    if (this.closed) {
+      throw new HttpError(503, "Ancilla is shutting down.");
+    }
+    if (runtime === "native") {
       // Native Windows Muse works in PowerShell, so `!` commands run there too, in the workspace folder.
       // PowerShell reads curly single quotes as quotes too, so each kind is doubled to stay literal.
       const folder = this.spawnCwdFor(cwd).replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&");
@@ -3074,12 +3802,21 @@ export class AncillaServer {
       }
     }
 
+    // What the session says it has used so far, taken before paging so a call that lands meanwhile cannot make a
+    // complete page look short.
+    const runningPrompt = [
+      runningPromptTotal(msp),
+      runningPromptTotal(asRecord(asRecord(asRecord(read?.["history"])?.["snapshot"])?.["state"])),
+    ].reduce<number | null>((most, total) => (total === null ? most : Math.max(most ?? 0, total)), null);
     let events: { method: string; params: Record<string, unknown> }[] = [];
     let truncated = false;
+    // Whether view/page was read at all: a session another client holds, or that is not loaded, gives it nothing.
+    let pagedHistory = false;
     try {
       const paged = await this.pageTranscript(manager, sessionId);
       events = paged.events;
       truncated = paged.truncated;
+      pagedHistory = true;
     } catch (error) {
       const kind = errorInfo(error).kind;
       // view/page needs a loaded session; another host's lease leaves this host with nothing to page.
@@ -3231,11 +3968,7 @@ export class AncillaServer {
       }
     }
     // Opening a thread backfills the usage page with the calls it made before this server ever ran.
-    for (const event of events) {
-      if (event.method === "session/tokenUsage") {
-        this.recordUsage(sessionId, event.params);
-      }
-    }
+    this.backfillUsage(sessionId, events, found?.session ?? null, pagedHistory ? { runningPrompt, truncated } : null);
     // The history's last goal change is the goal as of now, unless a live one arrived while this load ran, or the
     // history is a stale prefix whose goal is not newer than the one held.
     for (let index = events.length - 1; live.goalSeq === goalSeqAtStart && index >= 0; index -= 1) {
@@ -3303,19 +4036,40 @@ export class AncillaServer {
     };
   }
 
+  /** Whether a listed session is one of a research run's own, which discovery leaves out. */
+  private isHiddenResearchItem(item: unknown): boolean {
+    const record = asRecord(item);
+    const session = (record && asRecord(record["session"])) ?? record;
+    const sessionId = session ? str(session["sessionId"]) : null;
+    return sessionId !== null && this.isResearchSession(sessionId);
+  }
+
   private async discover(cwd?: string): Promise<Record<string, unknown>[]> {
     const host = await this.hostFor(cwd ?? "");
     const remote: unknown[] = [];
     let cursor: string | null = null;
-    do {
+    // Cursors already handed to the host: one it hands back again would be the same page forever.
+    const asked = new Set<string>();
+    for (let pages = 0; pages < DISCOVER_MAX_PAGES; pages += 1) {
       const page = await host.manager.listSessionsPage({
         workspaceRoot: cwd ? this.hostPathFor(cwd) : undefined,
         limit: 100,
         cursor,
       });
-      remote.push(...page.sessions);
+      // Research worker and control sessions are hidden and are not the user's threads: they are paged past, so a
+      // run's many sessions cannot use up the window the user's own sessions are looked for in.
+      for (const item of page.sessions) {
+        if (!this.isHiddenResearchItem(item)) {
+          remote.push(item);
+        }
+      }
       cursor = page.nextCursor;
-    } while (cursor && remote.length < DISCOVER_LIMIT);
+      // An empty page ends the listing even when a cursor comes with it, and so does a cursor already used.
+      if (!cursor || page.sessions.length === 0 || asked.has(cursor) || remote.length >= DISCOVER_LIMIT) {
+        break;
+      }
+      asked.add(cursor);
+    }
 
     const views: Record<string, unknown>[] = [];
     let backfill = 0;
@@ -3556,22 +4310,124 @@ export class AncillaServer {
   }
 
   /**
+   * How long a research session start may take now: the option, else `ANCILLA_RESEARCH_STARTUP_MS`, else two
+   * minutes, or three on Windows with Muse in WSL. Read at each start, because where Muse runs can be settled only
+   * after the first host came up.
+   */
+  private researchStartupMs(): number {
+    return researchStartupAllowanceMs({
+      platform: this.options.platform,
+      runtime: this.runtimeHint() ?? this.runtimeKnown,
+      option: this.researchStartupOverride.option,
+      env: this.researchStartupOverride.env,
+    });
+  }
+
+  /**
    * A session a research run uses, on the thread's own host so it shares the thread's folder and account: a
    * worker session for one delegated task, or the run's control session for the tool-less model calls that do
    * not fit a command line. Recorded archived under `research-worker`, so it never reaches the sidebar; its usage
    * still lands under the project. The approval mode is the host's default: the runner decides every request
    * itself, and `isResearchSession` keeps such requests out of the live state clients see.
    */
-  private async startResearchSession(thread: ResearchThread, title: string, modelId: string | null): Promise<WorkerSessionHandle & TurnSession> {
+  private async startResearchSession(thread: ResearchThread, title: string, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle & TurnSession> {
     if (this.closed) {
       throw new Error("Ancilla is shutting down.");
     }
-    const project = this.store.upsertProject(thread.cwd);
+    const key = this.hostKey(thread.cwd, thread.accountId);
+    // A host that has not answered the starts earlier runs gave up on is sent no more until it does; the wait is
+    // bounded by the same allowance as the start itself, which the caller's give-up signal ends.
+    await this.waitForStartSlot(key, giveUp);
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    if (giveUp?.aborted) {
+      // The caller stopped waiting while this start was released; nobody would read its answer, so it is not sent.
+      throw new Error("The research run stopped waiting for this session start.");
+    }
+    // A run that stops waiting for this start because the allowance passed counts it against the host until the
+    // host answers it, one way or the other. A stop does not: a host that is merely slow would otherwise refuse the
+    // next run for the time it takes to answer the starts the stopped one left behind.
+    let abandoned = false;
+    const onGiveUp = (): void => {
+      if (!abandoned && giveUp && gaveUpOnTimeout(giveUp)) {
+        abandoned = true;
+        this.abandonedStarts.set(key, (this.abandonedStarts.get(key) ?? 0) + 1);
+      }
+    };
+    giveUp?.addEventListener("abort", onGiveUp, { once: true });
+    try {
+      return await this.openResearchSession(thread, title, modelId, giveUp);
+    } finally {
+      giveUp?.removeEventListener("abort", onGiveUp);
+      if (abandoned) {
+        const left = (this.abandonedStarts.get(key) ?? 1) - 1;
+        if (left > 0) {
+          this.abandonedStarts.set(key, left);
+        } else {
+          this.abandonedStarts.delete(key);
+        }
+        this.wakeStartWaiters();
+      }
+    }
+  }
+
+  /**
+   * Returns once the host key has room for another session start: fewer than `MAX_ABANDONED_RESEARCH_STARTS` starts
+   * that a run gave up on and the host has not answered. A start that finds the host full waits, and is released
+   * when the host answers one of them or when its caller gives up (`giveUp`), whichever comes first; it is not sent
+   * meanwhile. Callers always pass the signal, so a call without one is refused instead of waiting without end.
+   */
+  private async waitForStartSlot(key: string, giveUp: AbortSignal | undefined): Promise<void> {
+    while ((this.abandonedStarts.get(key) ?? 0) >= MAX_ABANDONED_RESEARCH_STARTS) {
+      const outstanding = this.abandonedStarts.get(key) ?? 0;
+      if (this.closed) {
+        throw new Error("Ancilla is shutting down.");
+      }
+      if (!giveUp || giveUp.aborted) {
+        throw new Error(`Muse is still waiting on ${outstanding} earlier session starts on this host and has not answered them; not sending another.`);
+      }
+      await new Promise<void>((resolve, reject) => {
+        const release = (): void => {
+          this.startWaiters.delete(release);
+          giveUp.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const onAbort = (): void => {
+          this.startWaiters.delete(release);
+          reject(new Error(`Muse is still waiting on ${outstanding} earlier session starts on this host and has not answered them; not sending another.`));
+        };
+        this.startWaiters.add(release);
+        giveUp.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  }
+
+  /** Lets every start waiting for a slot look again: the count dropped, or the server is closing. */
+  private wakeStartWaiters(): void {
+    for (const release of [...this.startWaiters]) {
+      release();
+    }
+  }
+
+  private async openResearchSession(thread: ResearchThread, title: string, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle & TurnSession> {
     const host = await this.hostFor(thread.cwd, thread.accountId);
+    // A start the host answers after the server began closing must not touch a store that is about to be closed.
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    if (giveUp?.aborted) {
+      // The caller stopped waiting while the host was still coming up (a cold distro); nobody would read the answer.
+      throw new Error("The research run stopped waiting for this session start.");
+    }
     const started = await host.manager.startSession({
       workspaceRoot: this.hostPathFor(thread.cwd),
       ...(modelId ? { modelId } : {}),
     });
+    if (this.closed) {
+      throw new Error("Ancilla is shutting down.");
+    }
+    const project = this.store.upsertProject(thread.cwd);
     const raw = asRecord(asRecord(started.raw)?.["session"]);
     this.store.recordSession({
       id: started.sessionId,
@@ -3586,6 +4442,7 @@ export class AncillaServer {
       accountId: thread.accountId,
     });
     this.store.updateSession(started.sessionId, { archived: true });
+    this.rememberResearchOrigin(started.sessionId, true);
     this.sessionHosts.set(started.sessionId, host.key);
     this.liveFor(started.sessionId);
     return { sessionId: started.sessionId, manager: host.manager };
@@ -3596,8 +4453,11 @@ export class AncillaServer {
     if (!thread.cwd) {
       return null;
     }
-    const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
-    await mkdir(directory, { recursive: true });
+    // The run's folder is new, so a plain write is enough; a rename over a file a viewer has open fails on Windows.
+    const directory = await ownedProjectDir(await this.workspaceRootFor(thread.cwd), [...RESEARCH_DIR, run.id]);
+    // Both names are looked at before either is written: a link planted at one must not leave the other behind.
+    await assertWritableFile(directory, "report.md");
+    await assertWritableFile(directory, "sources.json");
     await writeFile(join(directory, "report.md"), report, "utf8");
     await writeFile(
       join(directory, "sources.json"),
@@ -3682,6 +4542,12 @@ export class AncillaServer {
       if (!question) {
         throw new HttpError(400, "question is required.");
       }
+      if (question.length > MAX_RESEARCH_QUESTION_CHARS) {
+        throw new HttpError(
+          400,
+          `The question is too long: ${question.length} characters, and the limit is ${MAX_RESEARCH_QUESTION_CHARS}. Shorten it, or put the material in a file in the project and point the question at it.`,
+        );
+      }
       const overrides = body["config"] === undefined || body["config"] === null ? null : asRecord(body["config"]);
       if (body["config"] !== undefined && body["config"] !== null && !overrides) {
         throw new HttpError(400, "config must be an object.");
@@ -3723,13 +4589,13 @@ export class AncillaServer {
     }
     const exportMatch = path.match(/^\/api\/research\/([^/]+)\/export(?:\/([^/]+))?$/);
     if (exportMatch) {
-      return this.routeResearchExport(method, decodeURIComponent(exportMatch[1] as string), exportMatch[2] ?? null, req, res);
+      return this.routeResearchExport(method, this.segment(exportMatch[1] as string), exportMatch[2] ?? null, req, res);
     }
     const runMatch = path.match(/^\/api\/research\/([^/]+)(?:\/(events|stop|resume))?$/);
     if (!runMatch) {
       return false;
     }
-    const runId = decodeURIComponent(runMatch[1] as string);
+    const runId = this.segment(runMatch[1] as string);
     const action = runMatch[2];
     const record = this.store.getResearchRun(runId);
     if (!record) {
@@ -3748,7 +4614,16 @@ export class AncillaServer {
     }
     if (method === "POST" && action === "stop") {
       const body = await this.readBody(req);
-      this.researchJobs.stop(runId, body["writeReport"] === true);
+      if (!this.researchJobs.stop(runId, body["writeReport"] === true) && !this.researchJobs.isActive(runId)) {
+        // Nobody is running it. If the row still says it is in flight it is stale, and Stop closes it out instead of
+        // answering with a row that goes on saying `running`; one that has ended is left exactly as it is. Read
+        // again, after the last await: the record read before it may be a different run's by now.
+        const stale = this.store.getResearchRun(runId);
+        if (stale && (stale.status === "queued" || stale.status === "running")) {
+          this.researchJobs.markInterrupted(stale, "The run was found in flight without a job running it.");
+          this.log(`research: run ${stale.id} was stopped while recorded in flight but not running; marked interrupted.`);
+        }
+      }
       const current = this.store.getResearchRun(runId) ?? record;
       this.json(res, 200, { run: this.researchJobs.view(current, false) });
       return true;
@@ -3784,8 +4659,8 @@ export class AncillaServer {
         throw new HttpError(409, "This thread has no project folder to save into.");
       }
       const fileName = exportFileName(format);
-      const directory = join(await this.localRootFor(thread.cwd), ...RESEARCH_DIR, run.id);
-      await mkdir(directory, { recursive: true });
+      const directory = await ownedProjectDir(await this.workspaceRootFor(thread.cwd), [...RESEARCH_DIR, run.id]);
+      await assertWritableFile(directory, fileName);
       await writeFile(join(directory, fileName), file);
       const relative = [...RESEARCH_DIR, run.id, fileName].join("/");
       this.json(res, 200, { path: relative, name: fileName, size: file.length, url: `/api/research/${encodeURIComponent(run.id)}/export/${fileName}` });
@@ -3809,6 +4684,27 @@ export class AncillaServer {
 
   private async managerForSession(sessionId: string): Promise<SessionManager> {
     return (await this.hostForSession(sessionId)).manager;
+  }
+
+  /**
+   * A host of the named account that is up now, the listing host (no folder) first, else null. A removed account is
+   * still the 400 it is everywhere else, even while a host of its is not yet closed. Like `hostFor`, it waits out a
+   * restart in progress, so it never answers from a host that is being closed.
+   */
+  private async runningHostOf(accountId: string): Promise<ManagedHost | null> {
+    await this.restartChain;
+    const running = () => [...this.hosts.values()].filter((host) => host.accountId === accountId);
+    if (running().length === 0) {
+      return null;
+    }
+    try {
+      await this.aonia.getProfile(accountId);
+    } catch (error) {
+      throw this.accountError(error);
+    }
+    // Looked at again: a host can have gone while the profile was read.
+    const up = running();
+    return up.find((host) => host.key === this.hostKey("", accountId)) ?? up[0] ?? null;
   }
 
   /** The host that has the session loaded, else the one its workspace and account start. */
@@ -3843,6 +4739,11 @@ export class AncillaServer {
     // starts on a host with the previous posture. Starts never wait for the chain, so this
     // cannot deadlock against the restart awaiting them.
     await this.restartChain;
+    // Before any host is handed out: one that is closing is still in the map, and a start that is still open is
+    // abandoned by the close, so neither is an answer to give once the server is shutting down.
+    if (this.closed) {
+      throw new HttpError(503, "Ancilla is shutting down.");
+    }
     const key = this.hostKey(cwd, accountId);
     const existing = this.hosts.get(key);
     if (existing) {
@@ -3852,31 +4753,55 @@ export class AncillaServer {
     if (pending) {
       return pending;
     }
-    if (this.closed) {
-      throw new HttpError(503, "Ancilla is shutting down.");
-    }
-    const startup = this.spawnHost(key, cwd, accountId);
+    const token: StartToken = { handle: null, abandoned: false, closing: false };
+    const startup = this.spawnHost(key, cwd, accountId, token);
     this.starting.set(key, startup);
+    this.startTokens.set(key, token);
     try {
       return await startup;
     } finally {
-      this.starting.delete(key);
+      // A start that was given up on has already left both maps, and its key may belong to a newer start by now.
+      if (this.starting.get(key) === startup) {
+        this.starting.delete(key);
+      }
+      if (this.startTokens.get(key) === token) {
+        this.startTokens.delete(key);
+      }
     }
   }
 
-  private async spawnHost(key: string, cwd: string, accountId: string | null): Promise<ManagedHost> {
+  private async spawnHost(key: string, cwd: string, accountId: string | null, token: StartToken): Promise<ManagedHost> {
     const quotaAccountGeneration = accountId ? this.quotaAccountGenerations.get(accountId) ?? 0 : 0;
     const target = await this.serveTargetFor(cwd, accountId);
     if (accountId) this.removedQuotaAccounts.delete(accountId);
     const quotaCacheScope = await this.quotaCacheScope(accountId);
+    // The awaits above can outlast the restart or the shutdown that gave up on this start: nothing is spawned for it.
+    this.assertStartWanted(token);
     const handle = this.options.hostFactory(target);
+    token.handle = handle;
     let started: { fingerprintWarning?: unknown; initializeResult?: unknown } | null;
     try {
       started = (await handle.start(ANCILLA_VERSION)) as typeof started;
     } catch (error) {
+      this.assertStartWanted(token);
       this.lastHostError = error instanceof Error ? error.message : String(error);
       this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
+      // A start the ceiling ended is a gateway timeout, not a refusal; the answer names the setting that moves it.
+      if (error instanceof HostStartTimeoutError) {
+        throw new HttpError(
+          504,
+          `Could not start Muse: ${this.lastHostError} The limit is ${HOST_START_TIMEOUT_ENV} (or "hostStartTimeoutMs" in runtime.json), in milliseconds; 0 turns it off.`,
+        );
+      }
       throw new HttpError(502, `Could not start Muse: ${this.lastHostError}`);
+    }
+    if (token.abandoned || this.closed) {
+      // It answered after the restart or the shutdown that gave up on it: it is closed, and no one is told it exists.
+      if (!token.closing) {
+        token.closing = true;
+        closeInBackground(handle);
+      }
+      this.assertStartWanted(token);
     }
     this.lastHostError = null;
     this.fingerprints.set(key, started?.fingerprintWarning ?? null);
@@ -3884,7 +4809,7 @@ export class AncillaServer {
     manager.onNotification((notification) => {
       // Quota has no session id: a retired host's late observation must not inherit its replacement's login.
       if (notification.method === "usage/changed" && this.hosts.get(key)?.handle !== handle) return;
-      this.forward(key, notification);
+      this.forward(key, notification, handle);
     });
     // A frame the SDK refuses never becomes a notification, so without this it is indistinguishable
     // from the backend having nothing to send (#42, H3).
@@ -3913,12 +4838,26 @@ export class AncillaServer {
     return managed;
   }
 
+  /** Throws the 503 a start gets once a restart or the shutdown has given up on it. */
+  private assertStartWanted(token: StartToken): void {
+    if (this.closed) {
+      throw new HttpError(503, "Ancilla is shutting down.");
+    }
+    if (token.abandoned) {
+      throw new HttpError(503, "The Muse host was restarted while it was starting. Try again.");
+    }
+  }
+
   private hostExited(managed: ManagedHost, exit: HostExit): void {
     if (this.hosts.get(managed.key) !== managed) {
       return;
     }
     const detail = managed.handle.recentStderr?.trim();
-    const message = `The Muse host exited (${exit.code ?? exit.signal ?? "unknown"}).${detail ? ` ${detail}` : ""}`;
+    const message = exit.reason === "connection-ended"
+      ? `The connection to the Muse host ended while the host was still running, so it was closed.${detail ? ` ${detail}` : ""}`
+      : `The Muse host exited (${exit.code ?? exit.signal ?? "unknown"}).${detail ? ` ${detail}` : ""}`;
+    this.hostExits += 1;
+    this.lastHostExitAt = nowIso();
     this.lastHostError = message;
     this.emit("ancilla", { type: "host", key: managed.key, state: "exited", message });
     this.forgetHost(managed, message);
@@ -3937,6 +4876,8 @@ export class AncillaServer {
       }
       this.sessionHosts.delete(sessionId);
       this.effortApplied.delete(sessionId);
+      // What was tried on the retired host is over with it: the next resume reads the model from the new one.
+      this.modelTrials.delete(sessionId);
       affected.add(sessionId);
     }
     // A turn this host was seen running is over too, even when the session's binding had already moved or lapsed.
@@ -3956,6 +4897,7 @@ export class AncillaServer {
         live.turnHost = null;
       }
       if (live.activeTurnId || live.pendingApprovals.size || live.pendingInputs.size) {
+        const killed = live.activeTurnId;
         live.activeTurnId = null;
         live.turnStartedAt = null;
         live.turnHost = null;
@@ -3963,7 +4905,33 @@ export class AncillaServer {
         live.pendingInputs.clear();
         live.lastTerminal = "failed";
         live.lastError = lastError;
+        // The ledger must not keep saying the turn runs. Once per turn: the live state no longer names it. A late word
+        // of the host's own is still heard, and the turn is counted only on its first end.
+        if (killed) {
+          this.recordTurnEnd(sessionId, killed, "failed");
+        }
         this.emitStatus(sessionId);
+      }
+    }
+    // A research turn on one of these sessions is told its session is over now, not left to run into its wall time. Real
+    // Muse reports `session/closed` too when it shuts down gracefully, so this is only the report a host that died
+    // cannot make; a turn that already ended pays no attention to a second one.
+    for (const sessionId of affected) {
+      this.notifySessionClosed(sessionId, lastError);
+    }
+  }
+
+  /** Tells the listeners of one session that it closed, with a frame of the shape the host sends. Never throws. */
+  private notifySessionClosed(sessionId: string, reason: string): void {
+    const listeners = this.sessionListeners.get(sessionId);
+    if (!listeners) {
+      return;
+    }
+    for (const listener of [...listeners]) {
+      try {
+        listener("session/closed", { sessionId, reason: "hostGone", message: reason });
+      } catch (error) {
+        this.log(`session listener (session/closed) threw: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
@@ -3974,22 +4942,19 @@ export class AncillaServer {
    * the same way. The respawn only fixes new sessions: Muse commits each session's
    * filesystem/network posture at creation (a `yolo` cause carries fs=unrestricted,
    * net=enabled), so only new threads pick a flipped posture up. The approval side of YOLO
-   * mode flips over MSP instead.
+   * mode flips over MSP instead. `message` is what each host's `restarted` event tells the user.
+   * A host start still open is waited for only briefly: a wedged one must not hold the restart, and with it every
+   * workspace's next host, for as long as it takes to give up.
    */
-  private async restartHosts(): Promise<void> {
-    for (const pending of this.starting.values()) {
-      await pending.catch(() => undefined);
-    }
-    for (const managed of [...this.hosts.values()]) {
-      try {
-        await managed.handle.close();
-      } catch {
-        /* best effort */
-      }
-      const message = "The Muse host restarted to apply a settings change.";
-      this.forgetHost(managed, message);
-      this.emit("ancilla", { type: "host", key: managed.key, state: "restarted", message });
-    }
+  private async restartHosts(message = "The Muse host restarted to apply a settings change."): Promise<void> {
+    await this.settleStarts();
+    await Promise.all(
+      [...this.hosts.values()].map(async (managed) => {
+        await this.closeHost(managed);
+        this.forgetHost(managed, message);
+        this.emit("ancilla", { type: "host", key: managed.key, state: "restarted", message });
+      }),
+    );
   }
 
   private async accountList(): Promise<Record<string, unknown>[]> {
@@ -4222,8 +5187,16 @@ export class AncillaServer {
    * so a throw used to take the whole host connection down with it and end every session on it, not
    * just the one that produced the bad frame (#42).
    */
-  private forward(hostKey: string, notification: { method: string; params?: unknown; emittedAtMs?: number }): void {
+  private forward(hostKey: string, notification: { method: string; params?: unknown; emittedAtMs?: number }, source?: HostHandle): void {
+    // A host that outlived its close can still speak. The store is closed by then, so there is nothing to record the
+    // frame in and no one to tell: it is dropped, and neither the log nor `forwardFailures` hears of it.
+    if (this.storeClosed) {
+      return;
+    }
     try {
+      // A frame from a host that has since been retired (restarted, exited): the host is not the one registered under
+      // its key any more, or none is. What it reports is a straggler; it must not bind a session to it or open a turn.
+      const retired = source !== undefined && this.hosts.get(hostKey)?.handle !== source;
       const params = asRecord(notification.params) ?? {};
       if (notification.method === "usage/changed") {
         const usage = parseSubscriptionUsage(params);
@@ -4231,7 +5204,7 @@ export class AncillaServer {
         if (!host || !this.isCurrentQuotaHost(host)) return;
         const accountId = host.accountId;
         if (!this.quotaScopes.has(accountId) || this.quotaScopes.get(accountId) === host.quotaCacheScope) {
-          this.observeUsage(usage, accountId, false, host.quotaCacheScope);
+          this.observeUsage(usage, accountId, "runtime", host.quotaCacheScope);
         }
         return;
       }
@@ -4241,7 +5214,9 @@ export class AncillaServer {
         this.unroutedByMethod.set(notification.method, (this.unroutedByMethod.get(notification.method) ?? 0) + 1);
         return;
       }
-      this.sessionHosts.set(event.sessionId, hostKey);
+      if (!retired) {
+        this.sessionHosts.set(event.sessionId, hostKey);
+      }
       this.noteNotification(event.sessionId, notification.method);
       const listeners = this.sessionListeners.get(event.sessionId);
       if (listeners) {
@@ -4253,7 +5228,7 @@ export class AncillaServer {
           }
         }
       }
-      this.track(event.sessionId, notification.method, params, hostKey);
+      this.track(event.sessionId, notification.method, params, hostKey, retired);
       this.emit("ancilla", event);
     } catch (error) {
       this.forwardFailures += 1;
@@ -4285,8 +5260,16 @@ export class AncillaServer {
     process.stderr.write(`[ancilla] ${new Date().toISOString()} ${message}\n`);
   }
 
-  private track(sessionId: string, method: string, params: Record<string, unknown>, hostKey: string | null = null): void {
+  private track(sessionId: string, method: string, params: Record<string, unknown>, hostKey: string | null = null, retired = false): void {
     const live = this.liveFor(sessionId);
+    if (method === "turn/started") {
+      // A start from a retired host, or one replayed for a turn that already finished, is not a turn running now:
+      // opening it would leave the thread busy with a turn nothing will ever end.
+      const startedId = str(params["turnId"]);
+      if (retired || (startedId !== null && this.turnFinished(sessionId, startedId))) {
+        return;
+      }
+    }
     if (["approval/requested", "approval/resolved", "userInput/requested", "userInput/settled", "session/statusChanged"].includes(method)) {
       live.activityRevision += 1;
     }
@@ -4325,30 +5308,35 @@ export class AncillaServer {
         live.lastError = null;
         live.lastTerminal = null;
         changed = true;
+        const startedId = str(params["turnId"]);
+        if (startedId) {
+          this.recordTurnStart(sessionId, startedId);
+        }
         this.wake(sessionId);
         break;
       }
       case "turn/completed": {
         live.activityRevision += 1;
         const turnId = str(params["turnId"]);
-        if (!live.activeTurnId || live.activeTurnId === turnId) {
+        const terminal = str(params["terminal"]) ?? "completed";
+        // The completion of a turn other than the one running (a straggler's, say) is a turn that finished, and
+        // nothing more: it says nothing about the turn that is running, which must not be marked failed by it.
+        const foreign = live.activeTurnId !== null && live.activeTurnId !== turnId;
+        if (!foreign) {
           live.activeTurnId = null;
           live.turnStartedAt = null;
           live.turnHost = null;
+          live.lastTerminal = terminal;
+          live.lastError = terminal === "failed" ? (str(asRecord(params["error"])?.["message"]) ?? "The turn failed.") : null;
+          changed = true;
         }
-        const terminal = str(params["terminal"]) ?? "completed";
-        live.lastTerminal = terminal;
-        live.lastError = terminal === "failed" ? (str(asRecord(params["error"])?.["message"]) ?? "The turn failed.") : null;
         if (turnId) {
-          try {
-            this.store.recordTurn(turnId, sessionId);
-            this.store.updateTurnStatus(turnId, terminal);
-          } catch {
-            /* session not tracked locally */
-          }
+          this.recordTurnEnd(sessionId, turnId, terminal);
         }
-        changed = true;
-        this.sessionsChanged();
+        // A research run's own session is hidden: the sidebar has no row for it, so a refresh would find nothing new.
+        if (!this.isResearchSession(sessionId)) {
+          this.sessionsChanged();
+        }
         break;
       }
       case "session/viewHealthChanged": {
@@ -4397,6 +5385,11 @@ export class AncillaServer {
         break;
       }
       case "session/closed": {
+        // A host retired while it was still draining says this late: the session may run on its replacement by now, and
+        // what this one closed was ended when it was given up on. Its listeners were told already.
+        if (retired) {
+          break;
+        }
         // A read taken before the close must not reopen the turn or requests the close ended.
         live.activityRevision += 1;
         changed = live.activeTurnId !== null || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0;
@@ -4406,13 +5399,22 @@ export class AncillaServer {
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         this.sessionHosts.delete(sessionId);
+        this.modelTrials.delete(sessionId);
         break;
       }
       case "session/modelChanged": {
         const modelId = str(params["modelId"]);
         if (modelId) {
           // A change the user made, here or in another Muse client, is their pick; a default or a policy is not.
-          this.store.updateSession(sessionId, params["source"] === "user" ? { modelId, chosenModelId: modelId } : { modelId });
+          // Neither is an id tried here that the catalog does not list: Muse keeps that one for the session only,
+          // and an older pick must not outlive it, so it is cleared (the set-model route does the same once Muse
+          // accepts the switch).
+          const byUser = params["source"] === "user";
+          const trial = byUser && this.modelTrials.get(sessionId) === modelId;
+          this.store.updateSession(
+            sessionId,
+            trial ? { modelId, chosenModelId: null } : byUser ? { modelId, chosenModelId: modelId } : { modelId },
+          );
         }
         break;
       }
@@ -4460,6 +5462,40 @@ export class AncillaServer {
     }
     if (changed) {
       this.emitStatus(sessionId);
+    }
+  }
+
+  /** Whether this turn has already ended as far as the ledger knows; a thread this server does not track has no record. */
+  private turnFinished(sessionId: string, turnId: string): boolean {
+    try {
+      const status = this.store.turnStatus(turnId, sessionId);
+      return status !== null && status !== "running" && status !== "unknown";
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The ledger of turns this server has seen. A thread it does not track (no row for it) has none, and that is
+   * not worth a line per frame; a write that fails for any other reason is logged, and never reaches the caller.
+   */
+  private recordTurnStart(sessionId: string, turnId: string): void {
+    try {
+      if (this.store.getSession(sessionId)) {
+        this.store.registerTurn(turnId, sessionId);
+      }
+    } catch (error) {
+      this.log(`turn ${turnId} of ${sessionId} could not be recorded as started: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private recordTurnEnd(sessionId: string, turnId: string, terminal: string): void {
+    try {
+      if (this.store.getSession(sessionId)) {
+        this.store.finishTurn(turnId, sessionId, terminal);
+      }
+    } catch (error) {
+      this.log(`turn ${turnId} of ${sessionId} could not be recorded as ${terminal}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -4583,35 +5619,59 @@ export class AncillaServer {
     } catch { return null; }
   }
 
+  /**
+   * A stamp well ahead of this clock would outrank every honest reading until real time caught up, and its saved
+   * row would outrank them after a restart. A frame counts as arriving when it first did, and the same observation
+   * read again keeps that moment, so a runtime that stops reporting still goes stale. A saved row did not arrive
+   * just now and nothing says when it was observed, so it is restored as an old reading: it neither claims to be
+   * fresh nor outranks a reading Muse made since.
+   */
+  private settleStamp(usage: SubscriptionUsage, accountId: string | null, origin: "meta" | "runtime" | "saved"): SubscriptionUsage {
+    const now = Date.now();
+    if (usage.observedAtMs <= now + QUOTA_CLOCK_SKEW_MS) return usage;
+    if (origin === "saved") return { ...usage, observedAtMs: now - QUOTA_RESTORED_AGE_MS };
+    const seen = this.clampedStamps.get(accountId);
+    const to = seen?.from === usage.observedAtMs ? seen.to : now;
+    this.clampedStamps.set(accountId, { from: usage.observedAtMs, to });
+    return { ...usage, observedAtMs: to };
+  }
+
   /** A newer observation wins; cached readings keep their original timestamp and source account. */
-  private observeUsage(usage: SubscriptionUsage | null, accountId: string | null = null, saved = false, scope: string | null = null): void {
-    if (!usage || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+  private observeUsage(reported: SubscriptionUsage | null, accountId: string | null = null,
+    origin: "meta" | "runtime" | "saved" = "runtime", scope: string | null = null): void {
+    if (!reported || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+    const usage = this.settleStamp(reported, accountId, origin);
     const direct = this.directQuota.get(accountId);
     if (direct?.status === "no-subscription" && direct.checkedAtMs >= usage.observedAtMs) return;
     const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
     if (prior && prior.observedAtMs > usage.observedAtMs) return;
-    if (saved && prior?.observedAtMs === usage.observedAtMs) return;
+    if (origin === "saved" && prior?.observedAtMs === usage.observedAtMs) return;
     const changed = !sameSubscriptionUsage(prior, usage);
     if (accountId) this.planUsageByAccount.set(accountId, usage);
     else this.defaultPlanUsage = usage;
-    if (saved && changed) this.savedQuotaSources.add(accountId);
-    else if (!saved) this.savedQuotaSources.delete(accountId);
+    // When Meta and the runtime report the very same observation, the account's own reading is the better label.
+    if (changed || origin !== "runtime" || this.usageSources.get(accountId) !== "meta") this.usageSources.set(accountId, origin);
     this.quotaScopes.set(accountId, scope);
     if (!this.planUsage || this.planUsage.observedAtMs < usage.observedAtMs ||
       (this.planUsageAccountId === accountId && this.planUsage.observedAtMs === usage.observedAtMs)) {
       this.planUsage = usage;
       this.planUsageAccountId = accountId;
     }
-    if (changed && !saved) {
+    if (changed && origin !== "saved") {
       if (scope) this.store.setSubscriptionUsage(scope, usage);
       this.emit("ancilla", { type: "plan-usage", usage, accountId });
+    } else if (origin === "saved" && usage !== reported && scope) {
+      // Heal a saved row that was stamped in the future, so the next start reads it as an ordinary old reading.
+      this.store.setSubscriptionUsage(scope, usage);
     }
   }
 
   private forgetQuota(accountId: string | null): void {
     if (accountId) this.planUsageByAccount.delete(accountId);
     else this.defaultPlanUsage = null;
-    this.savedQuotaSources.delete(accountId);
+    this.usageSources.delete(accountId);
+    this.lastPlanNames.delete(accountId);
+    this.clampedStamps.delete(accountId);
     this.quotaScopes.delete(accountId);
     this.directQuota.delete(accountId);
     const readings: [string | null, SubscriptionUsage][] = [...this.planUsageByAccount];
@@ -4656,7 +5716,7 @@ export class AncillaServer {
     for (const [accountId, scope] of scopes) {
       if (revision !== this.planUsageReadRevision || (accountId && this.removedQuotaAccounts.has(accountId))) continue;
       if (this.quotaScopes.has(accountId) && this.quotaScopes.get(accountId) !== scope) this.forgetQuota(accountId);
-      if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, true, scope);
+      if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, "saved", scope);
       this.quotaScopes.set(accountId, scope);
     }
     const hosts = [...this.hosts.values()];
@@ -4678,7 +5738,7 @@ export class AncillaServer {
         if (revision !== this.planUsageReadRevision || !this.isCurrentQuotaHost(managed) ||
           this.quotaScopes.get(managed.accountId) !== managed.quotaCacheScope) return;
         outcome.succeeded += 1;
-        this.observeUsage(usage, managed.accountId, false, managed.quotaCacheScope);
+        this.observeUsage(usage, managed.accountId, "runtime", managed.quotaCacheScope);
       } catch { failed += 1; }
     });
     const directReads = [...sources].map(async (accountId) => {
@@ -4692,12 +5752,14 @@ export class AncillaServer {
         if (scope !== scopes.get(accountId)) { this.forgetQuota(accountId); this.quotaScopes.set(accountId, scope); return; }
         if (!reading) { this.directQuota.delete(accountId); return; }
         if (reading.status === "no-subscription") {
+          // A plan that ended is not the plan to show after the next failed check.
+          this.lastPlanNames.delete(accountId);
           const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
           if (!prior || prior.observedAtMs <= reading.checkedAtMs) this.forgetQuota(accountId);
-        }
+        } else if (reading.planName) this.lastPlanNames.set(accountId, reading.planName);
         this.directQuota.set(accountId, reading);
         this.quotaScopes.set(accountId, scope);
-        this.observeUsage(reading.usage, accountId, false, scope);
+        this.observeUsage(reading.usage, accountId, "meta", scope);
       } catch { /* A missing or inaccessible profile still has its runtime-only row below. */ }
     });
     await Promise.all([...hostReads, ...directReads]);
@@ -4706,15 +5768,19 @@ export class AncillaServer {
       .map((accountId) => {
         const reading = this.directQuota.get(accountId);
         const usage = accountId ? this.planUsageByAccount.get(accountId) ?? null : this.defaultPlanUsage;
-        const fromMeta = sameSubscriptionUsage(reading?.usage, usage);
         const newerRuntime = usage !== null && reading !== undefined && usage.observedAtMs > reading.checkedAtMs;
         const outcome = hostOutcomes.get(accountId);
         const hostUnavailable = outcome && outcome.attempted > 0 && outcome.succeeded === 0 && usage === outcome.usageAtStart;
         const status = newerRuntime ? "runtime-only" : reading?.status ?? (hostUnavailable ? "unavailable" : "runtime-only");
+        // Only Meta names the plan, and only when it answers. A failed check, a login it rejected and a login that no
+        // longer holds a token (so no check ran) keep the name it gave before; a changed login, an ended plan and a
+        // removed account have already cleared it.
+        const unanswered = !reading || reading.status === "unavailable" || reading.status === "login-required";
+        const kept = unanswered ? this.lastPlanNames.get(accountId) : undefined;
         return {
           accountId, usage: status === "no-subscription" ? null : usage,
-          planName: reading?.planName ?? null,
-          source: usage ? fromMeta ? "meta" : this.savedQuotaSources.has(accountId) ? "saved" : "runtime" : null,
+          planName: reading?.planName ?? kept ?? null,
+          source: usage ? this.usageSources.get(accountId) ?? "runtime" : null,
           status, checkedAtMs: reading?.checkedAtMs ?? null,
         };
       });
@@ -4723,8 +5789,8 @@ export class AncillaServer {
       usage: this.planUsage,
       byAccount: Object.fromEntries(this.planUsageByAccount),
       accountId: this.planUsageAccountId,
-      saved: this.planUsage !== null && this.savedQuotaSources.has(this.planUsageAccountId),
-      savedAccountIds: [...this.savedQuotaSources].filter((id): id is string => id !== null),
+      saved: this.planUsage !== null && this.usageSources.get(this.planUsageAccountId) === "saved",
+      savedAccountIds: [...this.usageSources].flatMap(([id, source]) => id !== null && source === "saved" ? [id] : []),
       status: metaAvailable ? "ready" : hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
       accounts,
     };

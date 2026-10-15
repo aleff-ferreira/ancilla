@@ -1,4 +1,4 @@
-import { errorKind, errorMessage, type AncillaClient } from "../client.js";
+import { errorKind, errorMessage, noAnswer, type AncillaClient } from "../client.js";
 import type {
   ApprovalMode,
   ApprovalRequest,
@@ -7,9 +7,13 @@ import type {
   LinuxDesktopStatus,
   LinuxSetupView,
   AncillaEvent,
+  ModelCatalog,
+  ModelOption,
+  ModelsStatus,
   MspItem,
   OutgoingAttachment,
   OutputRange,
+  ProjectView,
   ReasoningEffort,
   ResearchConfig,
   ResearchExportFormat,
@@ -27,12 +31,36 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { canStopAgent, pendingKey, researchRunIdOf, turnIdOf, runLive, crewBusy, crewView, type AgentVM } from "./crew.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
-import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
+import { EMPTY_RESEARCH_CONFIG, mintCommandId, reconcileResearchRuns, researchLive, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
+import { unionById } from "./union.js";
 import { projectForCwd } from "./status.js";
 import { contextualPlanAccountId, legacyPlanAccounts, mergePlanAccounts, samePlanUsage } from "./plan.js";
 import {
-  INIT_PROMPT,
+  CONTRIBUTOR_NOTE,
+  MODEL_COPY,
+  anyWorkRunning,
+  effectiveEffort,
+  effortLabel,
   findModel,
+  isLimitedCatalog,
+  isModelId,
+  isPlanCatalog,
+  isStale,
+  knownModels,
+  literalModelId,
+  modelIdError,
+  modelMatches,
+  modelStub,
+  modelsKey,
+  modelsNeedSignIn,
+  modelsShown,
+  modelsStanding,
+  publishedStubs,
+  trustedModel,
+  type ModelsScope,
+} from "./models.js";
+import {
+  INIT_PROMPT,
   parseEffort,
   parseMode,
   parseSlash,
@@ -46,6 +74,8 @@ import {
   applyEvents,
   emptyFold,
   foldFromLoad,
+  promptIds,
+  promptLanded,
   removeEcho,
   updateEcho,
   type EchoAttachment,
@@ -80,7 +110,7 @@ import {
   type ThreadState,
   type Toast,
 } from "./store.js";
-import { NotificationManager, type Notifier } from "./notify.js";
+import { NotificationManager, type NotifyEvent, type Notifier } from "./notify.js";
 import { UpdateManager, type AppUpdater } from "./updates.js";
 import { saveBrowserFile, type FileSaver } from "./fileSave.js";
 
@@ -305,8 +335,64 @@ const QUIET_TURN_MS = 90_000;
 const STALE_RELOAD_LIMIT = 2;
 /** After the first attempts, continue read-only recovery slowly instead of leaving a permanent spinner. */
 const STALE_BACKOFF_MS = 120_000;
+/**
+ * The least time between two full rereads after the stream comes back. A stream that keeps dropping (a slow client
+ * the server cuts, a flaky link) would otherwise reread the lists and the open thread on every reconnect; one that
+ * comes back inside the gap rereads once, when it is over.
+ */
+const RESYNC_GAP_MS = 15_000;
+/**
+ * Threads one watchdog tick may start rereading. After a sleep every running turn looks quiet at once, and reading
+ * them all in the same moment is a burst the server and the next sleep's wake would have to take again. The open
+ * thread goes first; the rest wait for the next tick, which is seconds away.
+ */
+const WATCHDOG_RELOADS_PER_TICK = 2;
+/** The least time between two notices that the app failed to handle an event, which would otherwise repeat per event. */
+const LISTENER_ERROR_TOAST_MS = 60_000;
+/** Turns that ended while the stream was down are named one by one up to this many; past it, one summary says them all. */
+const CATCH_UP_NAMED_LIMIT = 1;
 /** A retry Muse scheduled postpones the quiet-turn clock by its delay, up to this much: the wait is expected silence. */
 const RETRY_PAUSE_MAX_MS = 15 * 60_000;
+/**
+ * A send that got no answer is checked by reading the thread after each of these waits, and then settled one way or the
+ * other. About half a minute in all: long enough for a slow host to have taken the prompt and written it down, short
+ * enough that the composer is never left waiting on something that will not resolve.
+ */
+const UNCONFIRMED_CHECKS_MS = [1_500, 3_500, 8_000, 15_000] as const;
+/** A model list that failed to load at boot is asked for once more after this, by when a host still starting is up. */
+const MODELS_BOOT_RETRY_MS = 3_000;
+/**
+ * While Muse answers with only its built-in list, which says nothing about the plan, the list is asked for again after
+ * each of these waits, in turn, until the plan's own arrives. A host that has only just started often has no saved list yet.
+ */
+const MODELS_RELIST_MS = [2_000, 10_000, 30_000] as const;
+/** Open threads whose own model list is kept; the one asked for longest ago goes first. */
+const MODELS_THREAD_SCOPES = 8;
+
+/** What a request for a model list can say beyond the catalog it names. */
+export interface ModelsRefresh extends ModelsScope {
+  /** Ask even when the list is fresh. Without it a fresh list, or one already being asked for, is left be. */
+  force?: boolean;
+  /**
+   * Ask now, fresh or not, and keep asking in the background while the answer is only Muse's built-in list: for the
+   * moments a host starts, restarts or a sign-in finishes.
+   */
+  watch?: boolean;
+  /**
+   * The ask comes from moving around the app (a route, Settings opening, a thread loading), not from the picker or
+   * Retry: a built-in list younger than ten minutes, and an error younger than a minute, are left be.
+   */
+  navigation?: boolean;
+}
+
+/** Where a scope's load stands before anything has asked for it. */
+const NO_MODELS_STATUS: ModelsStatus = { status: "idle", error: null, loadedAt: null, catalog: null };
+
+/** Which background re-list chain a load belongs to, and how many re-lists that chain has made. */
+interface ModelsWatch {
+  token: number;
+  attempt: number;
+}
 
 /** Why a loaded thread needs reloading from history: its ending never landed, or its stream went quiet mid-turn. */
 export type StaleThreadReason = "diverged" | "quiet";
@@ -528,6 +614,8 @@ export class AncillaController {
   private readonly inflightLoads = new Map<string, { run: Promise<void>; resume: boolean }>();
   /** Keys of prompt deliveries still waiting for the server, so a double-sent draft turns once. */
   private readonly inflightSends = new Set<string>();
+  /** The waits of the sends being checked after they got no answer, so closing the controller can cancel them. */
+  private readonly sendChecks = new Set<unknown>();
   private readonly disposers: (() => void)[] = [];
   private flushHandle: unknown = null;
   private refreshHandle: unknown = null;
@@ -555,6 +643,23 @@ export class AncillaController {
   private planUsageLoad: Promise<void> | null = null;
   private planUsageEventRevision = 0;
   private refreshQueued = false;
+  /** When the lists and the open thread were last reread after the stream came back; see `RESYNC_GAP_MS`. */
+  private lastResyncAt = Number.NEGATIVE_INFINITY;
+  private resyncHandle: unknown = null;
+  /**
+   * What each thread's live state was when the stream came back, held until the next list read says what it is now.
+   * The difference is what happened while the app was not listening, and nothing else would announce it.
+   */
+  private catchUpBase: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
+  /** The base the list read now under way will be compared with; kept in step with live status like `catchUpBase`. */
+  private catchUpReading: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
+  /**
+   * How many status events the stream has delivered per session. A list or a transcript read takes the count when
+   * it is asked for: if it moved by the time the answer lands, the stream spoke after the question was put, and
+   * the answer may name a turn as running that the stream has already ended (see `heardStatus`).
+   */
+  private statusHeard = new Map<string, number>();
+  private lastListenerErrorAt = Number.NEGATIVE_INFINITY;
   private toastSeq = 0;
   /** Bumped by every title-settings request, so only the latest completion or rollback lands. */
   private titleSettingsRev = 0;
@@ -587,6 +692,29 @@ export class AncillaController {
   private preYolo: { defaultMode: ApprovalMode; threads: Record<string, ApprovalMode | null> } | null = null;
   /** The main route Back leaves the settings/usage pages for; cleared once back on a main route. */
   private returnRoute: Route | null = null;
+  /** Bumped by every request for a scope's model list, so only the latest answer lands. Keys are `modelsKey`'s. */
+  private readonly modelRevs = new Map<string, number>();
+  /** Model lists in flight, so a request for one already being asked for waits on it instead of asking again. */
+  private readonly modelLoads = new Map<string, Promise<void>>();
+  /** Which background re-list chain is current per scope; a newer chain ends the older. */
+  private readonly modelWatches = new Map<string, number>();
+  /** Scopes being read because Muse's hosts came back; a second report of the same restart waits on that read. */
+  private readonly modelHostReads = new Set<string>();
+  private readonly modelTimers = new Set<unknown>();
+  /** The thread scopes held, least recently asked for first. */
+  private readonly modelThreadKeys: string[] = [];
+  /** When each scope's last load failed, so moving around the app does not retry a failure at once. */
+  private readonly modelFailedAt = new Map<string, number>();
+  /** Notes already shown (a stale pin, a clamped effort), so each says its piece once. */
+  private readonly modelNotes = new Set<string>();
+  /** Bumped by every model switch on any thread, so only the newest pick writes the default new threads start on. */
+  private modelSwitchRev = 0;
+  /** Bumped by every model switch on a thread, per thread, so a refusal only puts back what a newer switch of the same thread did not move. */
+  private readonly modelSwitchRevs = new Map<string, number>();
+  /** The first read of the accounts has ended, whether or not it answered: before it, whether an account has a login is unknown. */
+  private accountsSettled = false;
+  /** Unserved-route notices already shown, by session and command. */
+  private readonly unservedNotes = new Set<string>();
 
   private updates: UpdateManager | null = null;
   private notifications: NotificationManager | null = null;
@@ -614,7 +742,7 @@ export class AncillaController {
   start(): () => void {
     // React's development StrictMode mounts, cleans up and starts the same controller again.
     this.disposed = false;
-    this.disposers.push(this.client.subscribe((event) => this.onEvent(event)));
+    this.disposers.push(this.client.subscribe((event) => this.hear(event)));
     this.disposers.push(
       this.platform.onHashChange(() => {
         const hash = this.platform.readHash();
@@ -712,14 +840,23 @@ export class AncillaController {
     for (const dispose of this.disposers.splice(0)) {
       dispose();
     }
-    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
+    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.resyncHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
       if (handle !== null) {
         this.platform.cancel(handle);
       }
     }
     this.staleHandle = null;
+    this.resyncHandle = null;
     this.loginPollHandle = null;
     this.linuxSetupPollHandle = null;
+    for (const handle of this.modelTimers) {
+      this.platform.cancel(handle);
+    }
+    this.modelTimers.clear();
+    for (const handle of this.sendChecks) {
+      this.platform.cancel(handle);
+    }
+    this.sendChecks.clear();
     this.platform.savePrefs(this.state.prefs);
   }
 
@@ -741,9 +878,10 @@ export class AncillaController {
       await this.refresh();
       if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, boot: "ready" }));
+      // Ahead of the route, so a composer that asks for its models on arrival meets the load already under way.
+      void this.bootModels();
       this.applyRoute(hashToRoute(this.platform.readHash()), false);
       void this.discoverAll(true);
-      void this.loadModels();
       void this.loadTitleSettings();
       void this.loadSandboxSettings();
       void this.loadYoloSettings();
@@ -909,17 +1047,68 @@ export class AncillaController {
   }
 
   private async loadLists(): Promise<void> {
-    const [projects, sessions] = await Promise.all([this.client.listProjects(), this.client.listSessions()]);
+    // Taken before the read starts: a read already under way began before the stream came back and says nothing
+    // about it, so only one that starts now may be compared with what the app knew.
+    const catchUp = this.catchUpBase;
+    this.catchUpBase = null;
+    this.catchUpReading = catchUp;
+    const asked = new Map(this.statusHeard);
+    let projects: ProjectView[];
+    let sessions: SessionSummary[];
+    try {
+      [projects, sessions] = await Promise.all([this.client.listProjects(), this.client.listSessions()]);
+    } catch (error) {
+      this.catchUpBase ??= catchUp;
+      throw error;
+    } finally {
+      this.catchUpReading = null;
+    }
     const byId: Record<string, SessionSummary> = {};
     for (const session of sessions) {
       byId[session.sessionId] = session;
     }
-    this.update((s) => ({ ...s, projects, sessions: byId, sessionsLoaded: true }));
+    this.update((s) => {
+      for (const [id, session] of Object.entries(byId)) {
+        byId[id] = this.heardStatus(session, s.sessions[id], asked.get(id) ?? 0);
+      }
+      return { ...s, projects, sessions: byId, sessionsLoaded: true };
+    });
+    // A session that left the list is counted no more: one that comes back starts again from nothing.
+    for (const id of [...this.statusHeard.keys()]) {
+      if (!(id in byId)) {
+        this.statusHeard.delete(id);
+      }
+    }
+    if (catchUp) {
+      this.catchUp(catchUp);
+      // A second drop while this read was in flight took its base from what the app showed before this read landed,
+      // so the reread it scheduled would say again what was just said. Everything up to this read has been said:
+      // what that reread may add is only what it finds after it.
+      if (this.catchUpBase !== null) {
+        this.catchUpBase = this.catchUpSnapshot();
+      }
+    }
     for (const id of Object.keys(this.state.threads)) {
       if (!this.listed(id)) {
         this.forget(id);
       }
     }
+  }
+
+  /**
+   * A session as a list or a transcript read answered it, unless the answer is older than the stream: the stream
+   * gave the session a status after the read was asked for (`asked` is the count then), and the answer names a
+   * different active turn than the stream's status does, a turn that has since ended or none for one that has since
+   * begun. The answer is the older picture, so the stream's live status stands, in both directions. An answer that
+   * names the same turn, or none while the stream has none either, is believed whole: it may carry what the stream
+   * has not told yet, such as a new approval. Anything else the answer says is taken. A turn id is assumed never to
+   * be reused by Muse for the same session; nothing in this repository guarantees it.
+   */
+  private heardStatus(answer: SessionSummary, local: SessionSummary | undefined, asked: number): SessionSummary {
+    if (!local || (this.statusHeard.get(answer.sessionId) ?? 0) === asked) {
+      return answer;
+    }
+    return (answer.live?.activeTurnId ?? null) === (local.live?.activeTurnId ?? null) ? answer : { ...answer, live: local.live };
   }
 
   private scheduleRefresh(): void {
@@ -942,6 +1131,8 @@ export class AncillaController {
       await Promise.all([this.refresh(), this.loadPlanUsage()]);
       if (!silent) {
         this.toast("success", "Threads refreshed");
+        // Asked for by hand, so a good moment to look at the models again; a list that is fresh is left be.
+        this.refreshModelsInUse(false);
       }
     } catch (error) {
       if (!silent) {
@@ -952,12 +1143,341 @@ export class AncillaController {
     }
   }
 
-  private async loadModels(): Promise<void> {
+  // ---------------------------------------------------------------- models
+
+  /**
+   * The catalog the composer on screen picks from: an open thread's own host, the project's account wherever the
+   * new-thread composer shows (its own route, and the home screen, which renders the same one), and the default
+   * login's everywhere else (Settings included).
+   */
+  modelsScope(): ModelsScope {
+    const route = this.state.route;
+    if (route.kind === "thread") {
+      return { sessionId: route.sessionId };
+    }
+    if (route.kind === "new" || route.kind === "home") {
+      return { accountId: projectForCwd(this.state.projects, this.composerCwd())?.defaultAccountId ?? null };
+    }
+    return {};
+  }
+
+  /** The account whose login a scope's host runs as: a thread's record names it, an account scope is it. */
+  private modelsAccount(scope: ModelsScope): string | null {
+    return scope.sessionId ? (this.state.sessions[scope.sessionId]?.accountId ?? null) : (scope.accountId ?? null);
+  }
+
+  /**
+   * Asks Muse for a scope's models and files the answer under the scope's key. A list that is fresh, or already being
+   * asked for, is left be unless `force`; a failed ask keeps the last good list and says why; an older answer never
+   * lands over a newer one. A named account with no login yet is never asked: its menu offers to sign in instead.
+   */
+  refreshModels(options: ModelsRefresh = {}): Promise<void> {
+    const scope: ModelsScope = { accountId: options.accountId ?? null, sessionId: options.sessionId ?? null };
+    const watching = options.watch === true;
+    return this.loadModelsFor(scope, options.force === true || watching, watching ? this.startModelsWatch(scope) : null, options.navigation === true);
+  }
+
+  private loadModelsFor(scope: ModelsScope, force: boolean, watch: ModelsWatch | null, navigation = false): Promise<void> {
+    const key = modelsKey(scope);
+    const account = this.modelsAccount(scope);
+    if (modelsNeedSignIn(this.state.accounts, account)) {
+      return Promise.resolve();
+    }
+    // Until the accounts have been read, whether a named account has a login is not known, and asking one that has
+    // none would start a Muse host for nothing: reading the accounts asks for the lists in use when it ends.
+    if (account !== null && this.state.accounts === null && !this.accountsSettled) {
+      return Promise.resolve();
+    }
+    if (!force) {
+      const running = this.modelLoads.get(key);
+      if (running) {
+        return running;
+      }
+      const stale = isStale(this.state.modelsStatus[key], this.platform.now(), this.state.accountModels[key], {
+        navigation,
+        failedAt: this.modelFailedAt.get(key),
+      });
+      if (!stale) {
+        return Promise.resolve();
+      }
+    }
+    const run: Promise<void> = this.readModels(scope, key, watch).finally(() => {
+      if (this.modelLoads.get(key) === run) {
+        this.modelLoads.delete(key);
+      }
+    });
+    this.modelLoads.set(key, run);
+    return run;
+  }
+
+  private async readModels(scope: ModelsScope, key: string, watch: ModelsWatch | null): Promise<void> {
+    const rev = (this.modelRevs.get(key) ?? 0) + 1;
+    this.modelRevs.set(key, rev);
+    this.holdModelsScope(key);
+    this.putModels(key, undefined, { status: "loading", error: null });
     try {
-      const models = await this.client.listModels();
-      this.update((s) => ({ ...s, models }));
-    } catch {
-      /* the picker falls back to the session's model */
+      const { models, ...info } = await this.fetchModelCatalog(scope).catch((error: unknown) => {
+        // A thread its host has not loaded cannot flag an active row, but its account's catalog still lists the models.
+        const kind = errorKind(error);
+        if (scope.sessionId && (kind === "sessionNotLoaded" || kind === "sessionNotFound" || kind === "sessionStreamMismatch")) {
+          return this.fetchModelCatalog({ accountId: this.modelsAccount(scope) });
+        }
+        throw error;
+      });
+      if (this.disposed || this.modelRevs.get(key) !== rev) {
+        return;
+      }
+      this.modelFailedAt.delete(key);
+      this.putModels(key, models, { status: "ready", error: null, loadedAt: this.platform.now(), catalog: info });
+      if (watch && isLimitedCatalog(info)) {
+        this.relistModels(scope, key, watch);
+      }
+    } catch (error) {
+      if (this.disposed || this.modelRevs.get(key) !== rev) {
+        return;
+      }
+      this.modelFailedAt.set(key, this.platform.now());
+      this.putModels(key, undefined, { status: "error", error: errorMessage(error) });
+    }
+  }
+
+  private fetchModelCatalog(scope: ModelsScope): Promise<ModelCatalog> {
+    const sessionId = scope.sessionId ?? undefined;
+    const accountId = scope.accountId ?? undefined;
+    if (this.client.listModelCatalog) {
+      return this.client.listModelCatalog(sessionId, accountId);
+    }
+    // A transport that cannot say where its list came from gives the rows alone.
+    return this.client
+      .listModels(sessionId, accountId)
+      .then((models) => ({ models, source: null, providerId: null, profileId: null, hostVersion: null }));
+  }
+
+  /** Files a scope's list and/or load status. The union every lookup reads is rebuilt when a list lands. */
+  private putModels(key: string, models: ModelOption[] | undefined, status: Partial<ModelsStatus>): void {
+    this.update((s) => {
+      const accountModels = { ...s.accountModels, [key]: models ?? s.accountModels[key] ?? [] };
+      const modelsStatus = { ...s.modelsStatus, [key]: { ...(s.modelsStatus[key] ?? NO_MODELS_STATUS), ...status } };
+      return { ...s, accountModels, modelsStatus, models: models ? knownModels(accountModels, modelsStatus) : s.models };
+    });
+  }
+
+  /** Keeps at most a few threads' lists: the scope asked for longest ago is let go when another comes. */
+  private holdModelsScope(key: string): void {
+    if (!key.startsWith("thread:")) {
+      return;
+    }
+    const at = this.modelThreadKeys.indexOf(key);
+    if (at >= 0) {
+      this.modelThreadKeys.splice(at, 1);
+    }
+    this.modelThreadKeys.push(key);
+    const dropped = this.modelThreadKeys.splice(0, Math.max(0, this.modelThreadKeys.length - MODELS_THREAD_SCOPES));
+    if (dropped.length > 0) {
+      this.forgetModelsScopes(dropped);
+    }
+  }
+
+  /**
+   * Lets go of scopes' lists and everything that waits on them: loads and re-list chains in flight end (an older
+   * answer or a pending timer no longer matches), and the union every lookup reads is rebuilt without them. Revisions
+   * and watch tokens are moved on, not deleted, so a scope asked for again later never meets an old chain's number.
+   */
+  private forgetModelsScopes(keys: readonly string[]): void {
+    for (const key of keys) {
+      this.modelRevs.set(key, (this.modelRevs.get(key) ?? 0) + 1);
+      this.modelWatches.set(key, (this.modelWatches.get(key) ?? 0) + 1);
+      this.modelLoads.delete(key);
+      this.modelHostReads.delete(key);
+      this.modelFailedAt.delete(key);
+      const held = this.modelThreadKeys.indexOf(key);
+      if (held >= 0) {
+        this.modelThreadKeys.splice(held, 1);
+      }
+    }
+    this.update((s) => {
+      const accountModels = { ...s.accountModels };
+      const modelsStatus = { ...s.modelsStatus };
+      for (const key of keys) {
+        delete accountModels[key];
+        delete modelsStatus[key];
+      }
+      return { ...s, accountModels, modelsStatus, models: knownModels(accountModels, modelsStatus) };
+    });
+  }
+
+  /** A removed account's lists: its own, and every open thread's that ran on it. Nothing of it is asked for again. */
+  private forgetAccountModels(accountId: string): void {
+    const threads = Object.keys(this.state.accountModels).filter(
+      (key) => key.startsWith("thread:") && this.state.sessions[key.slice("thread:".length)]?.accountId === accountId,
+    );
+    this.forgetModelsScopes([`acct:${accountId}`, ...threads]);
+    for (const note of [...this.modelNotes]) {
+      if (note.startsWith(`pin:acct:${accountId}:`)) {
+        this.modelNotes.delete(note);
+      }
+    }
+  }
+
+  private startModelsWatch(scope: ModelsScope): ModelsWatch {
+    const key = modelsKey(scope);
+    const token = (this.modelWatches.get(key) ?? 0) + 1;
+    this.modelWatches.set(key, token);
+    return { token, attempt: 0 };
+  }
+
+  /** Asks again for a scope that still has only Muse's built-in list, on the schedule, until the plan's own arrives. */
+  private relistModels(scope: ModelsScope, key: string, watch: ModelsWatch): void {
+    const wait = MODELS_RELIST_MS[watch.attempt];
+    if (wait === undefined) {
+      return;
+    }
+    this.later(() => {
+      if (this.modelWatches.get(key) === watch.token && isLimitedCatalog(this.state.modelsStatus[key]?.catalog)) {
+        void this.loadModelsFor(scope, true, { token: watch.token, attempt: watch.attempt + 1 });
+      }
+    }, wait);
+  }
+
+  /** Runs `fn` after `ms` unless the controller has been disposed by then. */
+  private later(fn: () => void, ms: number): void {
+    const handle = this.platform.schedule(() => {
+      this.modelTimers.delete(handle);
+      if (!this.disposed) {
+        fn();
+      }
+    }, ms);
+    this.modelTimers.add(handle);
+  }
+
+  /** The first load of the default login's models; one that fails is tried once more shortly. */
+  private async bootModels(): Promise<void> {
+    await this.refreshModels({ watch: true });
+    if (this.state.modelsStatus["default"]?.status === "error") {
+      this.later(() => void this.refreshModels({ watch: true }), MODELS_BOOT_RETRY_MS);
+    }
+  }
+
+  /**
+   * Asks for the lists the composer on screen needs, each only if it is stale: the default login's and its own. A
+   * `navigation` (a route change, the accounts arriving) leaves a built-in list or a recent failure be; a refresh by
+   * hand looks again at everything that is stale.
+   */
+  private refreshModelsInUse(navigation = true): void {
+    const scope = this.modelsScope();
+    void this.refreshModels({ navigation });
+    if (modelsKey(scope) === "default") {
+      return;
+    }
+    // An open thread's own list is read when its load ends, and not at all when it is read-only (it cannot switch models).
+    const thread = scope.sessionId ? this.state.threads[scope.sessionId] : null;
+    if (scope.sessionId && (!thread || thread.load !== "ready" || thread.readOnly)) {
+      return;
+    }
+    void this.refreshModels({ ...scope, navigation });
+  }
+
+  /**
+   * Muse's hosts were restarted, and the new ones read the catalog afresh. The lists in use are read from them; any
+   * other is marked old, to be read when it is next wanted. A restart reports once per host, and asking again for each
+   * report would only repeat the read: one already under way for a list is the one that sees the new hosts, since the
+   * server holds a read back until the restart is over.
+   */
+  private modelsHostChanged(): void {
+    const scope = this.modelsScope();
+    const here = modelsKey(scope);
+    this.update((s) => {
+      const modelsStatus = { ...s.modelsStatus };
+      let changed = false;
+      for (const [key, status] of Object.entries(modelsStatus)) {
+        if (key !== "default" && key !== here && status.status === "ready") {
+          modelsStatus[key] = { ...status, status: "idle" };
+          changed = true;
+        }
+      }
+      return changed ? { ...s, modelsStatus } : s;
+    });
+    this.readAfterHostChange({});
+    if (here !== "default") {
+      this.readAfterHostChange(scope);
+    }
+  }
+
+  private readAfterHostChange(scope: ModelsScope): void {
+    const key = modelsKey(scope);
+    if (this.modelHostReads.has(key)) {
+      return;
+    }
+    this.modelHostReads.add(key);
+    void this.refreshModels({ ...scope, watch: true }).finally(() => this.modelHostReads.delete(key));
+  }
+
+  /**
+   * A Muse host died. Nothing is asked of Muse here: a host that dies as it starts would be started again by each
+   * read, over and over. Every list that has rows is marked old instead, so the next time one is wanted (the picker
+   * or Settings opens, a thread loads) it is read from whatever host runs by then, and the lists keep showing what
+   * they had meanwhile. A built-in list's background re-listing ends with the host it was waiting on.
+   */
+  private modelsHostExited(): void {
+    for (const [key, token] of this.modelWatches) {
+      this.modelWatches.set(key, token + 1);
+    }
+    this.update((s) => {
+      const modelsStatus = { ...s.modelsStatus };
+      let changed = false;
+      for (const [key, status] of Object.entries(modelsStatus)) {
+        if (status.status === "ready" && (s.accountModels[key]?.length ?? 0) > 0) {
+          modelsStatus[key] = { ...status, status: "idle" };
+          changed = true;
+        }
+      }
+      return changed ? { ...s, modelsStatus } : s;
+    });
+  }
+
+  /**
+   * Closes Muse's hosts so the next ask starts fresh ones that read the model list again, then reads it. Nothing is
+   * closed under work this client can see (a turn, a workflow run, a subagent, a background task, a research run);
+   * the server refuses while a turn, approval or research run is open, and that refusal is the toast.
+   */
+  async restartMuse(): Promise<boolean> {
+    if (!this.client.restartHosts || this.state.busy["models:restart"]) {
+      return false;
+    }
+    if (anyWorkRunning(this.state)) {
+      this.toast("info", MODEL_COPY.restartRunning, "Restart Muse once it has finished.");
+      return false;
+    }
+    this.setBusy("models:restart", true);
+    try {
+      await this.client.restartHosts();
+      this.modelsHostChanged();
+      return true;
+    } catch (error) {
+      this.toast("error", "Could not restart Muse", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy("models:restart", false);
+    }
+  }
+
+  /**
+   * Muse says a thread's standing model cannot be served any more, after a sign-in changed the provider. Nothing was
+   * switched: the repair is picking a model the plan offers, so say so and, on that thread, open the picker.
+   */
+  private modelRouteUnserved(sessionId: string, params: Record<string, unknown>): void {
+    const command = typeof params["commandId"] === "string" ? params["commandId"] : "";
+    const note = `${sessionId}:${command}`;
+    if (this.unservedNotes.has(note)) {
+      return;
+    }
+    this.unservedNotes.add(note);
+    const modelId = typeof params["modelId"] === "string" ? params["modelId"] : null;
+    this.toast("info", "Pick a model your plan offers", modelId ? `${modelDisplayName(modelId)} can no longer be served for this thread.` : undefined);
+    void this.refreshModels({ sessionId, force: true });
+    const route = this.state.route;
+    if (route.kind === "thread" && route.sessionId === sessionId) {
+      this.setPicker("model");
     }
   }
 
@@ -1106,9 +1626,14 @@ export class AncillaController {
       if (!thread || thread.load === "idle" || thread.load === "error" || thread.fold.closed || thread.stale) {
         void this.loadThread(route.sessionId);
       }
-    } else if (route.kind === "new" && route.cwd) {
-      this.setPrefs({ lastProject: route.cwd });
+    } else if (route.kind === "new" || route.kind === "home") {
+      if (route.kind === "new" && route.cwd) {
+        this.setPrefs({ lastProject: route.cwd });
+      }
+      // The new-thread composer shows on both, and picks from its project's account.
+      this.refreshModelsInUse();
     } else if (route.kind === "settings") {
+      void this.refreshModels({ navigation: true });
       void this.refreshLinuxSetup();
       void this.refreshLinuxDesktop();
       if (this.state.titleSettings === null) {
@@ -1142,21 +1667,25 @@ export class AncillaController {
   /**
    * Loads a thread. By default a session that may still be working or waiting on the user is only read in place
    * (`mayBeBusy`), and any other is resumed, which is what brings back a session its host unloaded. `resume` asks
-   * for the attach outright, for a caller that knows nothing of the session runs on this host any more.
+   * for the attach outright, for a caller that knows nothing of the session runs on this host any more. `read` asks
+   * for the opposite: only ever read in place, for a caller that is checking on a thread. The read never asks to
+   * resume; the server may still load an idle session its host dropped, as opening the thread does, but it does not
+   * resume into a turn it knows to be running.
    */
-  loadThread(sessionId: string, options: { resume?: boolean } = {}): Promise<void> {
+  loadThread(sessionId: string, options: { resume?: boolean; read?: boolean } = {}): Promise<void> {
     // A second load while one is in flight would orphan the first load's buffer: every event that
     // streamed into it is dropped, and the thread never shows them (#32: a frozen view on a thread
     // whose backend kept working). Coalescing waits on the one buffer instead, so nothing is lost.
     const inflight = this.inflightLoads.get(sessionId);
     const resume = options.resume === true;
+    const read = options.read === true && !resume;
     if (inflight && (inflight.resume || !resume)) {
       return inflight.run;
     }
     // A read in flight cannot attach the session, so a resume queues behind it: still one request at a time.
     const started = inflight
-      ? inflight.run.catch(() => undefined).then(() => this.reloadThread(sessionId, resume))
-      : this.reloadThread(sessionId, resume);
+      ? inflight.run.catch(() => undefined).then(() => this.reloadThread(sessionId, resume, read))
+      : this.reloadThread(sessionId, resume, read);
     const run = started.finally(() => {
       if (this.inflightLoads.get(sessionId)?.run === run) {
         this.inflightLoads.delete(sessionId);
@@ -1186,12 +1715,14 @@ export class AncillaController {
     return crewBusy(fold);
   }
 
-  private async reloadThread(sessionId: string, resume = false): Promise<void> {
+  private async reloadThread(sessionId: string, resume = false, read = false): Promise<void> {
     const readStartedAt = this.platform.now();
+    const heardAtAsk = this.statusHeard.get(sessionId) ?? 0;
     const existing = this.state.threads[sessionId];
-    // Reading never reattaches: a fresh browser has no fold yet, but the server may already own a running turn.
-    // What happened to recover the thread before says nothing about whether it is busy now.
-    const refresh = !resume && this.mayBeBusy(sessionId, existing);
+    // A read does not ask to resume: a fresh browser has no fold yet, but the server may already own a running turn,
+    // and a read never resumes into one. What happened to recover the thread before says nothing about whether it is
+    // busy now.
+    const refresh = !resume && (read || this.mayBeBusy(sessionId, existing));
     this.loading.set(sessionId, []);
     this.setThread(sessionId, { ...(existing ?? blankThread()), load: "loading", error: null });
     try {
@@ -1235,6 +1766,10 @@ export class AncillaController {
       // An idle session has nothing left to recover; a later turn starts from a clean slate.
       if (historySync) this.recoveryAt.set(sessionId, readStartedAt);
       else if (!active) this.recoveryAt.delete(sessionId);
+      // The snapshot may be older than what the stream delivered while the read was out: it is reconciled with what
+      // the thread holds now (read after the await, with nothing between this and the update) and never replaces it.
+      const held = this.state.threads[sessionId];
+      const researchRuns = reconcileResearchRuns(held?.researchRuns ?? [], load.researchRuns ?? []);
       this.update((s) => ({
         ...s,
         threads: {
@@ -1246,9 +1781,9 @@ export class AncillaController {
             readOnlyReason: unexplained ? current?.readOnlyReason ?? null : load.readOnlyReason,
             truncated: load.truncated,
             fold,
-            attachments: (load.attachments ?? []).map((file) => this.stamp(file)),
-            shellRuns: load.shellRuns ?? [],
-            researchRuns: load.researchRuns ?? [],
+            attachments: unionById(held?.attachments ?? [], (load.attachments ?? []).map((file) => this.stamp(file))),
+            shellRuns: unionById(held?.shellRuns ?? [], load.shellRuns ?? []),
+            researchRuns,
             // Saved progress is useful even when the live projection remains unavailable.
             // Keep that distinction in historySync instead of claiming the stream recovered.
             stalled,
@@ -1257,15 +1792,20 @@ export class AncillaController {
         },
         // A read that was in flight when the thread was archived or left the list must not put it back.
         sessions: load.session && !load.session.archived && (!s.sessionsLoaded || s.sessions[sessionId])
-          ? { ...s.sessions, [sessionId]: load.session }
+          ? { ...s.sessions, [sessionId]: this.heardStatus(load.session, s.sessions[sessionId], heardAtAsk) }
           : s.sessions,
         // A stop the stream never answered, because the connection dropped, is answered by the reload.
-        researchStopping: settleStopping(s.researchStopping, load.researchRuns ?? []),
+        researchStopping: settleStopping(s.researchStopping, researchRuns),
       }));
       // Whatever was already waiting when the thread opened counts too, not only what arrives next.
       this.autoAllow([sessionId]);
       this.convergeThread(sessionId);
       this.settlePending(sessionId, fold);
+      // The open thread's picker lists what its own host offers; a read-only thread cannot switch models.
+      const route = this.state.route;
+      if (route.kind === "thread" && route.sessionId === sessionId && !load.readOnly) {
+        void this.refreshModels({ sessionId, navigation: true });
+      }
     } catch (error) {
       const buffered = this.loading.get(sessionId) ?? [];
       this.loading.delete(sessionId);
@@ -1298,35 +1838,158 @@ export class AncillaController {
 
   // ---------------------------------------------------------------- events
 
+  /**
+   * What the client hands each event to. A handler that throws would otherwise be swallowed by the stream, or end
+   * it: the event is lost either way and nobody is told. It is logged and shown once a minute instead, and the
+   * stream, which has nothing to do with it, carries on.
+   */
+  private hear(event: AncillaEvent): void {
+    try {
+      this.onEvent(event);
+    } catch (error) {
+      console.error(`Ancilla: handling a ${event.type} event failed`, error);
+      const now = this.platform.now();
+      if (now - this.lastListenerErrorAt >= LISTENER_ERROR_TOAST_MS) {
+        this.lastListenerErrorAt = now;
+        this.toast("error", "Something went wrong updating the view", `${errorMessage(error)} Reopen the thread if it looks out of date.`);
+      }
+    }
+  }
+
+  /**
+   * The stream is back after a drop. Nothing replays what it carried while it was down, so the lists and the open
+   * thread are read again, and every other thread shows what it has as last known until it is opened. Reading is
+   * all this does: a prompt is never sent from here. The reread is not repeated inside `RESYNC_GAP_MS` however often
+   * the stream drops and returns; a reconnect inside the gap schedules the one reread that was held back.
+   */
+  private resyncAfterLost(): void {
+    // Goals could have moved while the stream was down, and only the open thread is reloaded. Let every other
+    // thread take the server's goal again rather than the last one it saw streamed.
+    for (const id of Object.keys(this.state.threads)) {
+      this.patchFold(id, (f) => (f.meta.goalSeen ? { ...f, meta: { ...f.meta, goalSeen: false } } : f));
+    }
+    this.markOthersStale();
+    this.catchUpBase ??= this.catchUpSnapshot();
+    const now = this.platform.now();
+    // A clock set back puts the last reread in the future: that is a gap long past, not one still to wait out, and
+    // without this the wait would be as long as the step.
+    if (this.lastResyncAt > now) {
+      this.lastResyncAt = Number.NEGATIVE_INFINITY;
+    }
+    const wait = this.lastResyncAt + RESYNC_GAP_MS - now;
+    if (wait > 0) {
+      if (this.resyncHandle === null) {
+        this.resyncHandle = this.platform.schedule(() => {
+          this.resyncHandle = null;
+          if (!this.disposed) {
+            this.markOthersStale();
+            this.rereadAfterLost();
+          }
+        }, wait);
+      }
+      return;
+    }
+    this.rereadAfterLost();
+  }
+
+  /** What the app knows of each session's status right now: the base a later reread is compared with. */
+  private catchUpSnapshot(): Map<string, { title: string; live: SessionSummary["live"] }> {
+    return new Map(Object.values(this.state.sessions).map((s) => [s.sessionId, { title: s.title, live: s.live }] as const));
+  }
+
+  private rereadAfterLost(): void {
+    this.lastResyncAt = this.platform.now();
+    void this.refresh();
+    const route = this.state.route;
+    const open = route.kind === "thread" ? route.sessionId : null;
+    // A load already in flight is joined, not restarted: that read was asked for before the loss and may predate it.
+    const joined = open !== null && this.inflightLoads.has(open);
+    if (open !== null) {
+      void this.loadThread(open);
+    }
+    this.healResearchAfterLost(joined ? null : open);
+  }
+
+  /**
+   * A run's ending, or a resume done in another window, can have happened while the stream was down, and nothing
+   * replays it. The open thread is read again with its transcript (`skip` names it, unless that read was only
+   * joined to one already out); every other thread that shows a run still going, or one that was interrupted, gets
+   * one read of its research list, reconciled like any snapshot. A thread with nothing live, or one that left the
+   * sidebar, is not asked about, and a read that fails is not an event: the thread keeps what it has. Only the
+   * list is read: no thread is loaded, no prompt sent, no run resumed from here.
+   */
+  private healResearchAfterLost(skip: string | null): void {
+    for (const [sessionId, thread] of Object.entries(this.state.threads)) {
+      if (sessionId === skip || !this.listed(sessionId) || !thread.researchRuns.some((run) => researchLive(run) || run.status === "interrupted")) {
+        continue;
+      }
+      void Promise.resolve()
+        .then(() => this.client.listResearch(sessionId))
+        .then(
+          (runs) => {
+            if (!this.disposed) {
+              this.applyResearchRuns(sessionId, Array.isArray(runs) ? runs : []);
+            }
+          },
+          () => undefined,
+        );
+    }
+  }
+
+  /** Every loaded thread but the open one shows what it has as last known; it is read again when opened. */
+  private markOthersStale(): void {
+    const route = this.state.route;
+    const routed = route.kind === "thread" ? route.sessionId : null;
+    this.update((s) => {
+      const threads = { ...s.threads };
+      for (const [id, thread] of Object.entries(threads)) {
+        if (id !== routed && !thread.stale) {
+          threads[id] = { ...thread, stale: true };
+        }
+      }
+      return { ...s, threads };
+    });
+  }
+
+  /**
+   * Says what happened while the stream was down: an approval or a question that came up, a goal that stopped, a turn
+   * that ended. The status events that would have said so were never heard. Several turns that ended are one notice.
+   */
+  private catchUp(before: Map<string, { title: string; live: SessionSummary["live"] }>): void {
+    const manager = this.notifications;
+    if (!manager) {
+      return;
+    }
+    const finished: Extract<NotifyEvent, { kind: "finished" }>[] = [];
+    for (const session of Object.values(this.state.sessions)) {
+      const prior = before.get(session.sessionId);
+      if (!prior) {
+        continue;
+      }
+      for (const note of this.liveEdges(session.sessionId, session.title, prior.live, session.live)) {
+        if (note.kind === "finished") {
+          finished.push(note);
+        } else {
+          void manager.announce(note);
+        }
+      }
+    }
+    if (finished.length > CATCH_UP_NAMED_LIMIT) {
+      void manager.announce({ kind: "finishedMany", count: finished.length, failed: finished.filter((note) => note.failed).length });
+    } else {
+      for (const note of finished) {
+        void manager.announce(note);
+      }
+    }
+  }
+
   private onEvent(event: AncillaEvent): void {
     switch (event.type) {
       case "hello": {
         const wasLost = this.state.connection === "lost";
         this.update((s) => ({ ...s, connection: "open" }));
         if (wasLost && this.state.boot === "ready") {
-          // Goals could have moved while the stream was down, and only the open thread is reloaded. Let every
-          // other thread take the server's goal again rather than the last one it saw streamed.
-          for (const id of Object.keys(this.state.threads)) {
-            this.patchFold(id, (f) => (f.meta.goalSeen ? { ...f, meta: { ...f.meta, goalSeen: false } } : f));
-          }
-          void this.refresh();
-          const route = this.state.route;
-          const routed = route.kind === "thread" ? route.sessionId : null;
-          // Nothing replays what the stream carried while it was down: a turn or a background agent that finished
-          // meanwhile would go on showing as working. The open thread reloads now; every other one shows what it
-          // has as last known until it is opened and read again.
-          this.update((s) => {
-            const threads = { ...s.threads };
-            for (const [id, thread] of Object.entries(threads)) {
-              if (id !== routed && !thread.stale) {
-                threads[id] = { ...thread, stale: true };
-              }
-            }
-            return { ...s, threads };
-          });
-          if (routed) {
-            void this.loadThread(routed);
-          }
+          this.resyncAfterLost();
         }
         break;
       }
@@ -1336,6 +1999,9 @@ export class AncillaController {
       case "msp":
         if (event.method === "skill/changed") {
           this.refreshSkillsFor(event.sessionId);
+        }
+        if (event.method === "session/modelRouteUnserved") {
+          this.modelRouteUnserved(event.sessionId, event.params);
         }
         if (event.method === "session/viewHealthChanged" && event.params["health"] === "unavailable") {
           const thread = this.state.threads[event.sessionId];
@@ -1363,6 +2029,7 @@ export class AncillaController {
           this.scheduleRefresh();
           break;
         }
+        this.statusHeard.set(event.sessionId, (this.statusHeard.get(event.sessionId) ?? 0) + 1);
         // Held onto before the update overwrites it: what changed is the entire question.
         const before = known.live;
         this.update((s) => {
@@ -1370,6 +2037,12 @@ export class AncillaController {
           return current ? { ...s, sessions: { ...s.sessions, [event.sessionId]: { ...current, live: event.live } } } : s;
         });
         this.announce(event.sessionId, known.title, before, event.live);
+        // Said live, so the reread that follows a reconnect must not say it again from an older reading.
+        for (const base of [this.catchUpBase, this.catchUpReading]) {
+          if (base?.has(event.sessionId)) {
+            base.set(event.sessionId, { title: known.title, live: event.live });
+          }
+        }
         if (before?.viewHealth?.status === "unavailable" && event.live?.viewHealth?.status !== "unavailable") {
           this.viewRecovered(event.sessionId);
         }
@@ -1383,7 +2056,7 @@ export class AncillaController {
         this.addShellRun(event.sessionId, event.run);
         break;
       case "research-run":
-        this.mergeResearchRun(event.sessionId, event.run);
+        this.applyResearchRuns(event.sessionId, [event.run]);
         break;
       case "sessions-changed":
         this.scheduleRefresh();
@@ -1392,6 +2065,10 @@ export class AncillaController {
         if (event.state === "failed" || event.state === "exited") {
           this.update((s) => ({ ...s, hostError: event.message }));
           this.toast("error", event.state === "failed" ? "Muse could not start" : "Muse stopped unexpectedly", event.message);
+          if (event.state === "exited") {
+            // The next read starts a fresh host, which may know more models than the one that went away.
+            this.modelsHostExited();
+          }
         } else if (event.state === "restarted") {
           this.update((s) => ({ ...s, hostError: null }));
           this.toast("info", "Muse hosts restarted", event.message);
@@ -1399,6 +2076,7 @@ export class AncillaController {
           // so this client's posture (and any thread it owns) tracks what actually took effect.
           void this.loadYoloSettings();
           void this.loadSandboxSettings();
+          this.modelsHostChanged();
         }
         break;
     }
@@ -1550,7 +2228,12 @@ export class AncillaController {
       this.scheduleStaleCheck();
     }
     const now = this.platform.now();
-    for (const [id, thread] of Object.entries(this.state.threads)) {
+    const route = this.state.route;
+    const openId = route.kind === "thread" ? route.sessionId : null;
+    // The open thread is looked at first, and only so many others are started this tick: see `WATCHDOG_RELOADS_PER_TICK`.
+    const threads = Object.entries(this.state.threads).sort(([a], [b]) => Number(b === openId) - Number(a === openId));
+    let started = 0;
+    for (const [id, thread] of threads) {
       if (!this.listed(id)) {
         // Archived, or in a project taken out of the sidebar: nobody can see it, so nothing reads it until it is
         // opened again. Its stream events still land, as they do for any loaded thread.
@@ -1591,12 +2274,15 @@ export class AncillaController {
         }
         continue;
       }
-      const selected = this.state.route.kind === "thread" && this.state.route.sessionId === id;
+      const selected = id === openId;
       const historyInterval = selected ? HISTORY_SYNC_MS : STALE_BACKOFF_MS;
       if (thread.historySync && this.readableHistory.has(id) && !thread.error) {
         // Measure request cadence from its start. Response latency must not turn every
         // 15-second check into a 30-second interval on the shared watchdog timer.
         if (now - (this.recoveryAt.get(id) ?? thread.historySync.checkedAt) < historyInterval) continue;
+        // Over this tick's share: nothing is recorded, so the next tick finds it just as due.
+        if (!selected && started >= WATCHDOG_RELOADS_PER_TICK) continue;
+        started += 1;
         const spent = this.staleReloads.get(id);
         this.staleReloads.set(id, { turnId, count: spent?.turnId === turnId ? spent.count + 1 : 1 });
         this.recoveryAt.set(id, now);
@@ -1622,6 +2308,10 @@ export class AncillaController {
       if ((count >= STALE_RELOAD_LIMIT || unavailable || thread.error) && now - (this.recoveryAt.get(id) ?? applied) < delay) {
         continue;
       }
+      if (!selected && started >= WATCHDOG_RELOADS_PER_TICK) {
+        continue;
+      }
+      started += 1;
       this.recoveryAt.set(id, now);
       this.staleReloads.set(id, { turnId, count: count + 1 });
       void this.loadThread(id);
@@ -1805,15 +2495,21 @@ export class AncillaController {
       // The account is the project's, whichever of its folders the thread starts in.
       const project = projectForCwd(this.state.projects, cwd);
       const accountId = project?.defaultAccountId ?? null;
+      const modelId = this.startModel(defaultModelId, accountId);
       const session = await this.client.startSession(cwd, {
         approvalMode,
-        modelId: defaultModelId ?? undefined,
+        modelId: modelId ?? undefined,
         accountId,
       });
+      // No model was asked for by name, so the one Muse started on is Muse's own pick: a Contributor model is said once,
+      // whatever the list names as its default (a built-in list names none).
+      if (modelId === null) {
+        this.noteStartedContributor(session.modelId, accountId);
+      }
       const base = emptyFold();
       const fold: ThreadFold = {
         ...base,
-        meta: { ...base.meta, modelId: session.modelId ?? defaultModelId, approvalMode },
+        meta: { ...base.meta, modelId: session.modelId ?? modelId, approvalMode },
       };
       this.update((s) => ({
         ...s,
@@ -1889,6 +2585,12 @@ export class AncillaController {
       return true;
     }
     this.inflightSends.add(key);
+    // The prompts already in the thread, so a check after a send with no answer knows which one is new.
+    const known = promptIds(thread.fold);
+    // Set when a send with no answer is being checked: the key then stays until the check settles it.
+    let checking = false;
+    // Set when the retry below takes the key over: the call it makes owns the key's release, not this one.
+    let delegated = false;
     // A caller that knows a turn is starting elsewhere can say so, before its `turn/started` reaches us.
     const running = thread.fold.activeTurnId !== null || options.queue === true;
     const echo: LocalEcho = {
@@ -1904,7 +2606,7 @@ export class AncillaController {
     try {
       const ack = await this.client.sendTurn(sessionId, text, {
         ifBusy: running ? (options.steer ? "steer" : "queue") : undefined,
-        reasoningEffort: this.state.prefs.effort ?? undefined,
+        reasoningEffort: this.turnEffort(sessionId) ?? undefined,
         // Attachment paths and image markers belong to the model input, not the shown prompt.
         displayText: options.displayText ?? (options.attachments?.length ? text : undefined),
         attachments: options.attachments,
@@ -1928,6 +2630,29 @@ export class AncillaController {
       }
       return true;
     } catch (error) {
+      if (noAnswer(error)) {
+        // No answer is not "not sent": the server may have handed the prompt to Muse and only the reply was lost.
+        // The echo stays, marked, while the thread is read to find out; the prompt is never sent again meanwhile,
+        // and the composer is free at once.
+        this.patchFold(sessionId, (f) => updateEcho(f, echo.localId, { disposition: "unconfirmed" }));
+        checking = true;
+        this.checkUnconfirmedSend({
+          sessionId,
+          key,
+          localId: echo.localId,
+          shown: echo.text,
+          known,
+          // Muse holds a prompt sent during a turn until that turn ends, so the saved thread cannot show it yet.
+          held: running,
+          cause: errorMessage(error),
+          draft: {
+            text: options.displayText ?? text,
+            ...(options.attachments?.length ? { attachments: options.attachments } : {}),
+            ...(options.previews?.length ? { previews: options.previews } : {}),
+          },
+        });
+        return true;
+      }
       this.patchFold(sessionId, (f) => removeEcho(f, echo.localId));
       const kind = errorKind(error);
       if (!retried && (kind === "sessionNotLoaded" || kind === "sessionStreamMismatch")) {
@@ -1935,15 +2660,118 @@ export class AncillaController {
         // resume brings it back, where a read in place would leave it unloaded. Another client's lease still
         // comes back as read-only, with its reason, and the retry below then stops.
         await this.loadThread(sessionId, { resume: true });
-        // The retry re-sends under this key, so it must not trip over its own guard.
+        // The retry re-sends under this key, so it must not trip over its own guard; it then owns the key, and
+        // holds it while it checks a send with no answer.
         this.inflightSends.delete(key);
-        return this.sendToThread(sessionId, text, options, true);
+        delegated = true;
+        return await this.sendToThread(sessionId, text, options, true);
       }
       this.toast("error", "Message not sent", errorMessage(error));
       return false;
     } finally {
-      this.inflightSends.delete(key);
+      if (!checking && !delegated) {
+        this.inflightSends.delete(key);
+      }
     }
+  }
+
+  /**
+   * Finds out what became of a send that got no answer, by reading the thread after each wait in `UNCONFIRMED_CHECKS_MS`.
+   * The read only reads: it may load an idle session its host dropped, exactly as opening the thread does, but it
+   * never resends a prompt and never resumes into a running turn the server knows about. A prompt that shows up, or that the live stream delivered meanwhile, settles it as sent
+   * and nothing more is said. One that never shows up after a read that worked is not sent; one that could not be
+   * checked is said to be unconfirmed. Either way the text comes back to the composer, and nothing is ever sent again
+   * here: only the person can do that.
+   */
+  private checkUnconfirmedSend(send: {
+    sessionId: string;
+    key: string;
+    localId: string;
+    shown: string;
+    known: readonly string[];
+    /** The send was made while a turn ran (queued or steered): a prompt Muse holds is not in the saved thread yet. */
+    held: boolean;
+    /** What the send itself failed with, for a check that cannot say more. */
+    cause: string;
+    draft: { text: string; attachments?: OutgoingAttachment[]; previews?: EchoAttachment[] };
+  }): void {
+    const { sessionId, localId } = send;
+    let step = 0;
+    const pending = () => this.state.threads[sessionId]?.fold.echoes.some((echo) => echo.localId === localId) === true;
+    const release = (): void => {
+      this.inflightSends.delete(send.key);
+    };
+    const settle = (verdict: "sent" | "notSent" | "unknown", why?: string) => {
+      release();
+      this.patchFold(sessionId, (f) => removeEcho(f, localId));
+      if (verdict !== "sent") {
+        this.returnUnsent(sessionId, send.draft, verdict, send.held ? "held" : (why ?? send.cause));
+      }
+    };
+    const look = async () => {
+      if (this.disposed) {
+        return release();
+      }
+      // The live stream may have delivered the prompt since the last look, which is the answer.
+      if (!pending()) {
+        return release();
+      }
+      await this.loadThread(sessionId, { read: true });
+      if (this.disposed || !pending()) {
+        return release();
+      }
+      const thread = this.state.threads[sessionId];
+      const readable = thread !== undefined && thread.load === "ready" && thread.error === null;
+      if (thread && readable && promptLanded(thread.fold, send.known, send.shown)) {
+        return settle("sent");
+      }
+      step += 1;
+      if (step < UNCONFIRMED_CHECKS_MS.length) {
+        return wait();
+      }
+      // A prompt that was queued or steered may simply not have started yet, so its absence proves nothing.
+      settle(readable && !send.held ? "notSent" : "unknown", thread?.error ?? undefined);
+    };
+    const wait = () => {
+      let handle: unknown = null;
+      handle = this.platform.schedule(() => {
+        this.sendChecks.delete(handle);
+        void look().catch(() => settle("unknown"));
+      }, UNCONFIRMED_CHECKS_MS[step] as number);
+      this.sendChecks.add(handle);
+    };
+    wait();
+  }
+
+  /**
+   * Gives a send's text back after it turned out not to have gone, or could not be checked. The composer takes it at
+   * once when it is empty; one the person has already typed into is left alone, with a button to bring the text back.
+   */
+  private returnUnsent(
+    sessionId: string,
+    draft: { text: string; attachments?: OutgoingAttachment[]; previews?: EchoAttachment[] },
+    verdict: "notSent" | "unknown",
+    /** For an unknown verdict: "held" when the send was queued or steered, otherwise what went wrong with the check. */
+    detail: string,
+  ): void {
+    const files = {
+      ...(draft.attachments ? { attachments: draft.attachments } : {}),
+      ...(draft.previews ? { previews: draft.previews } : {}),
+    };
+    const title = verdict === "notSent" ? "Message not sent" : "Could not confirm the message";
+    const why =
+      verdict === "notSent"
+        ? "It never showed up in the thread, so nothing ran."
+        : detail === "held"
+          ? "It was sent while a turn was running, so Muse may still be holding it in its queue, where Ancilla cannot see it. Check the thread and its queue before sending it again."
+          : `Ancilla could not read the thread to check it (${detail}). Look there before sending it again.`;
+    const tone = verdict === "notSent" ? "error" : "info";
+    if (loadDraft(sessionId).trim() === "") {
+      this.prefillComposer(sessionId, draft.text, files);
+      this.toast(tone, title, `${why} Your text is back in the composer.`);
+      return;
+    }
+    this.toast(tone, title, why, { label: "Put it back", run: () => this.prefillComposer(sessionId, draft.text, files) });
   }
 
   /** What makes two prompt deliveries the same send: the thread, the text, and the files riding along. */
@@ -2066,9 +2894,25 @@ export class AncillaController {
     after: SessionSummary["live"],
   ): void {
     const manager = this.notifications;
-    if (!manager || !after) {
+    if (!manager) {
       return;
     }
+    for (const note of this.liveEdges(sessionId, thread, before, after)) {
+      void manager.announce(note);
+    }
+  }
+
+  /** The edges between two readings of a thread's live state that are worth saying, in the order they are said. */
+  private liveEdges(
+    sessionId: string,
+    thread: string,
+    before: SessionSummary["live"],
+    after: SessionSummary["live"],
+  ): NotifyEvent[] {
+    if (!after) {
+      return [];
+    }
+    const notes: NotifyEvent[] = [];
     // An armed thread answers its own approvals, so "needs you" would be a lie told a second before the
     // bypass lands. But a rule-only request offers the bypass nothing to click, so it is left for the
     // user exactly as `autoAllow` leaves it: that one still needs the announcement.
@@ -2077,19 +2921,20 @@ export class AncillaController {
       (before?.pendingApprovals ?? 0) === 0 &&
       (!this.bypassArmed(sessionId) || this.hasUnanswerableApproval(sessionId))
     ) {
-      void manager.announce({ kind: "approval", sessionId, thread });
+      notes.push({ kind: "approval", sessionId, thread });
     }
     if ((after.pendingInputs ?? 0) > 0 && (before?.pendingInputs ?? 0) === 0) {
-      void manager.announce({ kind: "question", sessionId, thread });
+      notes.push({ kind: "question", sessionId, thread });
     }
     if (after.activeTurnId === null && before?.activeTurnId != null && after.lastTerminal) {
       const failed = Boolean(after.lastError) || after.lastTerminal === "failed";
-      void manager.announce({ kind: "finished", sessionId, thread, failed });
+      notes.push({ kind: "finished", sessionId, thread, failed });
     }
     const status = after.goal?.status ?? null;
     if (status && status !== "active" && status !== (before?.goal?.status ?? null)) {
-      void manager.announce({ kind: "goal", sessionId, thread, status });
+      notes.push({ kind: "goal", sessionId, thread, status });
     }
+    return notes;
   }
 
   /** Opens a thread only so the bypass can reach its approvals, and answers them once it is there. */
@@ -2270,29 +3115,262 @@ export class AncillaController {
 
   // ---------------------------------------------------------------- composer settings
 
-  async setModel(modelId: string): Promise<void> {
-    const model = this.state.models.find((m) => m.modelId === modelId);
-    if (model?.contributor && !this.state.prefs.contributorAck) {
+  /**
+   * Picks a model: for the open thread, which switches it, else for the threads that start next. The default new
+   * threads start on is written only once Muse has taken the switch, so a refusal leaves it where it was. A model
+   * the list does not offer can still be tried, since Muse checks access when a prompt is sent: on a thread for
+   * that thread alone, and as the default on the new-thread screen and in Settings, where it is remembered as tried.
+   * A pick from the default login's list standing in for an account whose own did not load is a try too: that account
+   * has not confirmed it. `typed` is text typed by hand (`/model`, an "Other model id" field), which an empty list
+   * cannot vouch for either. Says whether the choice took.
+   */
+  async setModel(modelId: string, options: { typed?: boolean } = {}): Promise<boolean> {
+    const id = modelId.trim();
+    const scope = this.modelsScope();
+    const { models, fallback } = modelsShown(this.state, scope);
+    const listed = models.find((m) => m.modelId === id);
+    // The account a stand-in list stands in for; none when the list is the default login's own (a thread of that login
+    // whose host did not answer), which vouches for its models as it always does.
+    const standIn = fallback ? this.modelsOwner(scope) : null;
+    // An empty list says nothing about an id picked from a menu: it may only not have loaded yet. Typed text is
+    // another matter, and a stand-in list is the default login's, not the account's.
+    const unlisted = standIn !== null || (!listed && (models.length > 0 || options.typed === true));
+    if (!listed && !isModelId(id)) {
+      this.toast("info", "That is not a model id", modelIdError(id) ?? undefined);
+      return false;
+    }
+    const route = this.state.route;
+    if (route.kind !== "thread") {
+      this.setPrefs({ defaultModelId: id, defaultModelTried: unlisted });
+      this.noteContributorPick(id, listed);
+      this.settleModel(id, unlisted, standIn);
+      return true;
+    }
+    const sessionId = route.sessionId;
+    const previous = this.state.threads[sessionId]?.fold.meta.modelId ?? null;
+    const rev = ++this.modelSwitchRev;
+    const mine = (this.modelSwitchRevs.get(sessionId) ?? 0) + 1;
+    this.modelSwitchRevs.set(sessionId, mine);
+    this.patchMeta(sessionId, { modelId: id });
+    try {
+      await this.client.setSessionModel(sessionId, id);
+    } catch (error) {
+      // Only a newer switch of this same thread keeps it from being put back; another thread's is no business of it.
+      if (this.modelSwitchRevs.get(sessionId) === mine) {
+        this.patchMeta(sessionId, { modelId: previous });
+      }
+      this.toast("error", "Could not switch models", errorMessage(error));
+      return false;
+    }
+    // Only a model Muse's list offers becomes what new threads start on; one tried by its id is this thread's alone.
+    // The newest pick on any thread is the one that writes it.
+    if (!unlisted && rev === this.modelSwitchRev) {
+      this.setPrefs({ defaultModelId: id, defaultModelTried: false });
+    }
+    this.noteContributorPick(id, listed);
+    this.settleModel(id, unlisted, standIn);
+    return true;
+  }
+
+  /**
+   * The named account a scope's stand-in list stands in for, in words: its name, else its id. Null for the default
+   * login, whose list the stand-in already is, so nobody is left to have not confirmed a model it listed.
+   */
+  private modelsOwner(scope: ModelsScope): string | null {
+    const accountId = this.modelsAccount(scope);
+    return accountId === null ? null : (this.state.accounts?.find((account) => account.id === accountId)?.name ?? accountId);
+  }
+
+  /** The notice every Contributor model carries, once a switch to one has taken: a refused switch leaves it unsaid and unspent. */
+  private noteContributorPick(id: string, listed: ModelOption | undefined): void {
+    if ((listed?.contributor ?? /-contributor$/i.test(id)) && !this.state.prefs.contributorAck) {
       this.setPrefs({ contributorAck: true });
       this.toast(
         "info",
         "Contributor model selected",
-        model.description ?? "Prompts and outputs on contributor models may be used for product improvement.",
+        listed?.description ?? "Prompts and outputs on contributor models may be used for product improvement.",
       );
     }
-    this.setPrefs({ defaultModelId: modelId });
-    const route = this.state.route;
-    if (route.kind !== "thread") {
+  }
+
+  /**
+   * What a taken model choice owes the user: that an id Muse did not list is only tried, that an account whose own list
+   * did not load (`standIn`) has not confirmed it, and what the new model does with the effort.
+   */
+  private settleModel(id: string, unlisted: boolean, standIn: string | null): void {
+    if (standIn !== null) {
+      this.toast("info", MODEL_COPY.unconfirmed(id, standIn), MODEL_COPY.unconfirmedDetail);
+    } else if (unlisted) {
+      this.toast("info", `Using ${id}, which your Muse did not list`, "Muse checks access when you send a prompt.");
+    }
+    // A new model starts the effort notes over: the level wished for may be one it does not have.
+    for (const note of this.modelNotes) {
+      if (note.startsWith("effort:")) {
+        this.modelNotes.delete(note);
+      }
+    }
+    this.effortOn(id, this.modelRow(id, modelsKey(this.modelsScope())), this.state.prefs.effort);
+  }
+
+  /**
+   * "Muse default": new threads start on whatever Muse picks. Nothing is switched on the open thread. When Muse's
+   * own pick is a Contributor model nobody chose by name, the notice every such model carries is shown once. Choosing
+   * it again when new threads already follow Muse changes nothing, so it says nothing either.
+   */
+  clearModelPref(): void {
+    if (this.state.prefs.defaultModelId === null) {
       return;
     }
-    const previous = this.state.threads[route.sessionId]?.fold.meta.modelId ?? null;
-    this.patchMeta(route.sessionId, { modelId });
-    try {
-      await this.client.setSessionModel(route.sessionId, modelId);
-    } catch (error) {
-      this.patchMeta(route.sessionId, { modelId: previous });
-      this.toast("error", "Could not switch models", errorMessage(error));
+    // Setting the default also ends its being a model tried by hand.
+    this.setPrefs({ defaultModelId: null, defaultModelTried: false });
+    const { models } = modelsShown(this.state, this.modelsScope());
+    const followed = models.find((m) => m.isDefault);
+    const noticed = this.noteDefaultContributor(followed);
+    const route = this.state.route;
+    if (route.kind === "thread" && !noticed) {
+      const current = this.state.threads[route.sessionId]?.fold.meta.modelId;
+      this.toast("info", "New threads will use Muse's default", current ? `This thread stays on ${modelDisplayName(current)}.` : undefined);
     }
+  }
+
+  /** Shown once, as for any Contributor model, when Muse's own default is one and nobody picked it by name. */
+  private noteDefaultContributor(row: ModelOption | undefined): boolean {
+    if (!row?.contributor || this.state.prefs.contributorAck) {
+      return false;
+    }
+    this.setPrefs({ contributorAck: true });
+    this.toast("info", `Muse's default is ${modelDisplayName(row.modelId)}, a Contributor model`, row.description ?? CONTRIBUTOR_NOTE);
+    return true;
+  }
+
+  /**
+   * A thread Muse started on a model nobody asked for by name: if that is a Contributor model, the notice every such
+   * model carries is shown once, whether or not the list names a default row (a built-in list does not).
+   */
+  private noteStartedContributor(modelId: string | null | undefined, accountId: string | null): void {
+    if (!modelId || this.state.prefs.contributorAck) {
+      return;
+    }
+    const row = this.state.accountModels[modelsKey({ accountId })]?.find((m) => m.modelId === modelId);
+    if (row?.contributor ?? /-contributor$/i.test(modelId)) {
+      this.noteDefaultContributor(row ?? modelStub(modelId, { contributor: true }));
+    }
+  }
+
+  /**
+   * The model a new thread asks Muse for. The saved default, unless the account's own list says the plan does not
+   * offer it: then Muse's default, said once, with the saved choice kept (the list comes from one account, and the
+   * choice may be right for another). A built-in list proves nothing, so it never overrides a choice; nor does an id
+   * the user tried by hand, which stays tried across a restart (`prefs.defaultModelTried`). Muse's default being a
+   * Contributor model nobody picked by name is noted once.
+   */
+  private startModel(saved: string | null, accountId: string | null): string | null {
+    const key = modelsKey({ accountId });
+    const list = this.state.accountModels[key] ?? [];
+    const tried = saved !== null && this.state.prefs.defaultModelTried && saved === this.state.prefs.defaultModelId;
+    const dropped =
+      saved !== null &&
+      list.length > 0 &&
+      isPlanCatalog(this.state.modelsStatus[key]?.catalog) &&
+      !list.some((m) => m.modelId === saved) &&
+      !tried;
+    if (dropped) {
+      const note = `pin:${key}:${saved}`;
+      if (!this.modelNotes.has(note)) {
+        this.modelNotes.add(note);
+        this.toast("info", `${modelDisplayName(saved)} is not offered on this account; using Muse's default`);
+      }
+    }
+    if (saved === null || dropped) {
+      this.noteDefaultContributor(list.find((m) => m.isDefault));
+      return null;
+    }
+    return saved;
+  }
+
+  /**
+   * A model's catalog row for the reasoning levels it takes: from the scope it is asked about, else from any other
+   * list, but never from one Muse only built in, which can list fewer levels than the plan's own does.
+   */
+  private modelRow(modelId: string | null | undefined, key: string): ModelOption | undefined {
+    return trustedModel(this.state, key, modelId);
+  }
+
+  /** The model the composer on screen is on: the open thread's, else the saved default, else what Muse lists as its own. */
+  private composerModel(): { id: string | null; row: ModelOption | undefined } {
+    const route = this.state.route;
+    if (route.kind === "thread") {
+      const id = this.state.threads[route.sessionId]?.fold.meta.modelId ?? this.state.sessions[route.sessionId]?.modelId ?? null;
+      return { id, row: this.modelRow(id, modelsKey({ sessionId: route.sessionId })) };
+    }
+    const scope = this.modelsScope();
+    const { models } = modelsShown(this.state, scope);
+    const id = this.state.prefs.defaultModelId ?? models.find((m) => m.isDefault)?.modelId ?? null;
+    return { id, row: this.modelRow(id, modelsKey(scope)) };
+  }
+
+  /**
+   * The level a turn on a model runs at for the level wished for: the wish itself when the model has it, else the
+   * nearest it does. The wish is never rewritten, so another model gets it back; when the two differ the user hears
+   * so once for each model and wish.
+   */
+  private effortOn(modelId: string | null, row: ModelOption | undefined, wish: ReasoningEffort | null): ReasoningEffort | null {
+    const level = effectiveEffort(wish, row);
+    if (wish !== null && level !== null && level !== wish && modelId) {
+      const note = `effort:${modelId}:${wish}`;
+      if (!this.modelNotes.has(note)) {
+        this.modelNotes.add(note);
+        this.toast("info", `${effortLabel(wish)} is not available on ${modelDisplayName(modelId)}`, `Using ${effortLabel(level)}. Your choice is kept for other models.`);
+      }
+    }
+    return level;
+  }
+
+  /** The level the next turn on a thread is sent with. */
+  private turnEffort(sessionId: string): ReasoningEffort | null {
+    const modelId = this.state.threads[sessionId]?.fold.meta.modelId ?? this.state.sessions[sessionId]?.modelId ?? null;
+    return this.effortOn(modelId, this.modelRow(modelId, modelsKey({ sessionId })), this.state.prefs.effort);
+  }
+
+  /**
+   * `/model <name>`: the model the name picks out in the composer's list. A name that fits nothing reads the list
+   * again once and tries again; while Muse sent only its built-in list, the models Meta publishes answer to the name
+   * too, so `wonder` finds Wonder. A name that fits models of different families opens the picker rather than guess.
+   * Text is tried as a model id only when it plainly is one (an id that is listed or published, or any id-shaped text
+   * with a separator or a digit, like `muse-wonder-2.0`); a bare word that fits nothing is a name nobody has, so the
+   * picker opens instead and nothing is saved.
+   */
+  private async chooseModel(name: string): Promise<boolean> {
+    const scope = this.modelsScope();
+    const shown = (): readonly ModelOption[] => modelsShown(this.state, scope).models;
+    let found = findModel(shown(), name, modelDisplayName);
+    let matches = modelMatches(shown(), name, modelDisplayName);
+    if (!found && matches.length === 0) {
+      await this.refreshModels({ ...scope, force: true });
+      found = findModel(shown(), name, modelDisplayName);
+      matches = modelMatches(shown(), name, modelDisplayName);
+    }
+    if (!found && matches.length === 0 && modelsStanding(this.state, scope).limited) {
+      // The built-in list names few models; what Meta publishes stands in for the rest, ranked the same way.
+      const pool = [...shown(), ...publishedStubs(shown())];
+      found = findModel(pool, name, modelDisplayName);
+      matches = modelMatches(pool, name, modelDisplayName);
+    }
+    if (found) {
+      return this.setModel(found.modelId, { typed: true });
+    }
+    if (matches.length > 1) {
+      this.toast("info", `More than one model fits ${name}`, "Pick one from the list.");
+      this.setPicker("model");
+      return true;
+    }
+    const literal = literalModelId(name, shown());
+    if (literal) {
+      return this.setModel(literal, { typed: true });
+    }
+    this.toast("info", MODEL_COPY.noModel(name), "Pick one from the list.");
+    this.setPicker("model");
+    return false;
   }
 
   async setMode(mode: ApprovalMode): Promise<void> {
@@ -2522,13 +3600,16 @@ export class AncillaController {
    * the thread where it is.
    */
   setEffort(effort: ReasoningEffort | null): void {
+    // The level asked for is kept as it is; what the thread is told is what its model can run.
     this.setPrefs({ effort });
     const route = this.state.route;
     const thread = route.kind === "thread" ? this.state.threads[route.sessionId] : undefined;
-    if (effort === null || route.kind !== "thread" || !thread || thread.readOnly) {
+    const { id, row } = this.composerModel();
+    const level = this.effortOn(id, row, effort);
+    if (level === null || route.kind !== "thread" || !thread || thread.readOnly) {
       return;
     }
-    void this.client.setReasoningEffort(route.sessionId, effort).catch((error: unknown) => {
+    void this.client.setReasoningEffort(route.sessionId, level).catch((error: unknown) => {
       // A thread that is not loaded yet takes the effort with its next turn instead.
       const kind = errorKind(error);
       if (kind !== "sessionNotLoaded" && kind !== "sessionStreamMismatch") {
@@ -2543,10 +3624,21 @@ export class AncillaController {
     this.update((s) => ({ ...s, planUsageSelectedAccountId: accountId }));
   }
 
-  /** Refresh account quotas without starting a thread; runtime observations also arrive as events. */
-  loadPlanUsage(): Promise<void> {
+  /**
+   * Refresh account quotas without starting a thread; runtime observations also arrive as events. A background read
+   * (a timer, the window coming back into sight) never raises the loading flag, so Refresh does not spin and the
+   * "Checking subscription…" text does not flash on its own. A person's click while one is in flight still shows it,
+   * and it clears when that shared read ends.
+   */
+  loadPlanUsage(options: { background?: boolean } = {}): Promise<void> {
+    if (options.background !== true && !this.state.planUsageLoading) {
+      this.update((s) => ({ ...s, planUsageLoading: true }));
+    }
     if (this.planUsageLoad) return this.planUsageLoad;
-    this.planUsageLoad = this.readPlanUsage().finally(() => { this.planUsageLoad = null; });
+    this.planUsageLoad = this.readPlanUsage().finally(() => {
+      this.planUsageLoad = null;
+      if (this.state.planUsageLoading) this.update((s) => ({ ...s, planUsageLoading: false }));
+    });
     return this.planUsageLoad;
   }
 
@@ -2555,7 +3647,6 @@ export class AncillaController {
     const before = this.state.planUsage;
     const accountsBefore = this.state.planUsageByAccount;
     const recordsBefore = this.state.planUsageAccounts;
-    this.update((s) => ({ ...s, planUsageLoading: true }));
     try {
       const report = await this.client.planUsage();
       const { usage, byAccount, accountId: sourceAccount, saved, savedAccountIds, status } = report;
@@ -2598,8 +3689,6 @@ export class AncillaController {
         planUsageAccounts: s.planUsageAccounts.map((account) => account === recordsBefore.find((entry) => entry.accountId === account.accountId)
           ? { ...account, status: "unavailable" } : account),
       }));
-    } finally {
-      this.update((s) => ({ ...s, planUsageLoading: false }));
     }
   }
 
@@ -2641,6 +3730,11 @@ export class AncillaController {
       }
     } catch {
       /* opening Settings retries the load */
+    }
+    // The model lists of a named account wait for this: now it is known whether the account has a login to ask with.
+    this.accountsSettled = true;
+    if (!this.disposed) {
+      this.refreshModelsInUse();
     }
     void this.loadAccountsHealth();
   }
@@ -2700,12 +3794,31 @@ export class AncillaController {
     );
     try {
       await run;
-      await this.loadAccounts();
-      return true;
     } catch (error) {
       this.toast("error", "Could not remove the account", errorMessage(error));
       return false;
     }
+    this.forgetPlanAccount(id);
+    this.forgetAccountModels(id);
+    await this.loadAccounts();
+    // A read already in flight was asked before the account went, so it may still list it: read again once it ends.
+    void (this.planUsageLoad ?? Promise.resolve()).then(() => this.loadPlanUsage({ background: true }));
+    return true;
+  }
+
+  /** The removed account's meter readings, the Usage selection and project defaults point at nothing now. */
+  private forgetPlanAccount(id: string): void {
+    this.update((s) => ({
+      ...s,
+      planUsage: s.planUsageAccountId === id ? null : s.planUsage,
+      planUsageAccountId: s.planUsageAccountId === id ? null : s.planUsageAccountId,
+      planUsageSaved: s.planUsageAccountId === id ? false : s.planUsageSaved,
+      planUsageAccounts: s.planUsageAccounts.filter((account) => account.accountId !== id),
+      planUsageByAccount: Object.fromEntries(Object.entries(s.planUsageByAccount).filter(([key]) => key !== id)),
+      planUsageSavedAccounts: s.planUsageSavedAccounts.filter((key) => key !== id),
+      planUsageSelectedAccountId: s.planUsageSelectedAccountId === id ? null : s.planUsageSelectedAccountId,
+      projects: s.projects.map((project) => (project.defaultAccountId === id ? { ...project, defaultAccountId: null } : project)),
+    }));
   }
 
   async setProjectDefaultAccount(cwd: string, accountId: string | null): Promise<void> {
@@ -2719,6 +3832,10 @@ export class AncillaController {
     );
     try {
       await run;
+      if (rev === this.projectDefaultRev) {
+        // New threads in the project run on this account, so its catalog is the one the new-thread picker lists.
+        void this.refreshModels({ accountId });
+      }
     } catch (error) {
       if (rev === this.projectDefaultRev) {
         this.update((s) => ({ ...s, projects: previous }));
@@ -2827,8 +3944,9 @@ export class AncillaController {
         }
         return { ...s, accountLogin: { ...login, status: "done" } };
       });
-      void this.loadAccounts();
-      void this.loadModels();
+      // The sign-in is what lets the account's models be asked for, so its record is read first. Muse can answer
+      // with only its built-in list for a moment after a login: the watch asks again until the plan's own arrives.
+      void this.loadAccounts().then(() => this.refreshModels({ accountId: id, watch: true }));
       void this.loadPlanUsage();
       return;
     }
@@ -2883,6 +4001,12 @@ export class AncillaController {
     if (!current) {
       return;
     }
+    // The server refuses to archive a thread whose research run is in flight (archiving would not stop the run), so
+    // the thread is kept, with the reason, before the optimistic removal below takes it out of the sidebar.
+    if (this.state.threads[sessionId]?.researchRuns.some(researchLive)) {
+      this.toast("error", "Could not archive the thread", "A research run is in progress on this thread. Stop it, or wait for it to finish, then archive the thread.");
+      return;
+    }
     this.update((s) => {
       const sessions = { ...s.sessions };
       delete sessions[sessionId];
@@ -2909,6 +4033,11 @@ export class AncillaController {
   async setSettled(sessionId: string, settled: boolean): Promise<void> {
     const current = this.state.sessions[sessionId];
     if (!current || current.settled === settled) {
+      return;
+    }
+    // Shelving a thread does not stop its research run, so the server refuses it; the reason is given before the thread moves.
+    if (settled && this.state.threads[sessionId]?.researchRuns.some(researchLive)) {
+      this.toast("error", "Could not settle the thread", "A research run is in progress on this thread. Stop it, or wait for it to finish, then settle the thread.");
       return;
     }
     const now = new Date(this.platform.now()).toISOString();
@@ -3191,6 +4320,10 @@ export class AncillaController {
 
   setPicker(picker: ComposerPicker | null): void {
     this.update((s) => (s.picker === picker ? s : { ...s, picker }));
+    if (picker === "model") {
+      // Opening the menu is the moment to see whether its list has gone stale; a fresh one is left be.
+      void this.refreshModels(this.modelsScope());
+    }
   }
 
   /** Closes `picker` only if it is still the open one, so a menu closing after it hands off to a dialog leaves the dialog open. */
@@ -3348,18 +4481,17 @@ export class AncillaController {
       config: { ...defaults, ...(config ?? {}), models: { ...defaults.models, ...(config?.models ?? {}) } },
     };
     this.setBusy(key, true);
-    this.mergeResearchRun(sessionId, optimistic);
+    this.applyResearchRuns(sessionId, [optimistic]);
     try {
       const run = await this.client.startResearch(sessionId, trimmed, config, commandId);
-      this.dropResearchRun(sessionId, placeholder);
-      this.mergeResearchRun(sessionId, run);
+      this.applyResearchRuns(sessionId, [run], placeholder);
       // The question went out; the next thing typed is a message again.
       if (this.state.researchMode) {
         this.update((s) => ({ ...s, researchMode: false }));
       }
       return true;
     } catch (error) {
-      this.dropResearchRun(sessionId, placeholder);
+      this.applyResearchRuns(sessionId, [], placeholder);
       this.toast("error", "Could not start the research run", errorMessage(error));
       return false;
     } finally {
@@ -3382,7 +4514,7 @@ export class AncillaController {
     this.setResearchStopping(runId, writeReport ? "write" : "now");
     try {
       const run = await this.client.stopResearch(runId, writeReport);
-      this.mergeResearchRun(run.sessionId, run);
+      this.applyResearchRuns(run.sessionId, [run]);
       return true;
     } catch (error) {
       this.setResearchStopping(runId, null);
@@ -3417,7 +4549,7 @@ export class AncillaController {
     this.setBusy(key, true);
     try {
       const run = await this.client.getResearch(runId);
-      this.mergeResearchRun(run.sessionId, run);
+      this.applyResearchRuns(run.sessionId, [run]);
       return true;
     } catch (error) {
       this.toast("error", "Could not read the report", errorMessage(error));
@@ -3541,37 +4673,26 @@ export class AncillaController {
   }
 
   /**
-   * Keeps the newest state of a run in its thread, by `runId`. Newest is not last to arrive: the answer to a stop
-   * or a read is a snapshot that can land after the stream has moved on, so a run that has ended is never taken
-   * back to running, and between two pictures of a live run the more advanced one stays. The stream's summaries
-   * carry no report, so a report already read stays on the run as long as the server still says one is available.
-   * A run for a thread this app has not opened is dropped: the thread reads its runs with its transcript when it
-   * is opened. Once a run has ended, a stop waiting on it is answered.
+   * Reconciles snapshots of a thread's runs with what it holds, by `runId`: the one way a run reaches a thread
+   * (the stream, the answer to a start, a stop or a read, a research list read after a reconnect; a transcript
+   * reload does the same through `reloadThread`). Newest is not last to arrive, so `reconcileResearchRuns` says
+   * which picture of a run stands and never drops a run a snapshot does not mention. `replacing` names the
+   * placeholder row of a start, swapped out in the same update. A run for a thread this app has not opened is
+   * dropped: the thread reads its runs with its transcript when it is opened. Once a run has ended, a stop
+   * waiting on it is answered.
    */
-  private mergeResearchRun(sessionId: string, run: ResearchRunView): void {
+  private applyResearchRuns(sessionId: string, incoming: readonly ResearchRunView[], replacing?: string): void {
     this.update((s) => {
       const thread = s.threads[sessionId];
       if (!thread) {
         return s;
       }
-      const index = thread.researchRuns.findIndex((existing) => existing.runId === run.runId);
-      const previous = index >= 0 ? thread.researchRuns[index] : undefined;
-      if (previous && (researchEnded(previous) ? researchLive(run) : !researchSnapshotCurrent(previous, run))) {
+      const researchRuns = reconcileResearchRuns(thread.researchRuns, incoming, replacing);
+      const researchStopping = settleStopping(s.researchStopping, researchRuns);
+      if (researchRuns === thread.researchRuns && researchStopping === s.researchStopping) {
         return s;
       }
-      const kept = run.report === null && run.reportAvailable && previous?.report ? { ...run, report: previous.report } : run;
-      const researchRuns = index >= 0 ? thread.researchRuns.map((existing, i) => (i === index ? kept : existing)) : [...thread.researchRuns, kept];
-      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } }, researchStopping: settleStopping(s.researchStopping, [kept]) };
-    });
-  }
-
-  private dropResearchRun(sessionId: string, runId: string): void {
-    this.update((s) => {
-      const thread = s.threads[sessionId];
-      if (!thread || !thread.researchRuns.some((run) => run.runId === runId)) {
-        return s;
-      }
-      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns: thread.researchRuns.filter((run) => run.runId !== runId) } } };
+      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } }, researchStopping };
     });
   }
 
@@ -3658,13 +4779,7 @@ export class AncillaController {
           this.setPicker("model");
           return true;
         }
-        const model = findModel(this.state.models, args, modelDisplayName);
-        if (!model) {
-          this.toast("info", `No model named ${args}`, "Type /model to pick from the list.");
-          return false;
-        }
-        await this.setModel(model.modelId);
-        return true;
+        return this.chooseModel(args);
       }
       case "effort": {
         if (!args) {
@@ -3960,7 +5075,9 @@ export class AncillaController {
   // ---------------------------------------------------------------- prefs and chrome
 
   setPrefs(patch: Partial<Prefs>): void {
-    this.update((s) => ({ ...s, prefs: { ...s.prefs, ...patch } }));
+    // A saved model that changes without saying it was tried by hand is no longer one that was: the flag follows its pin.
+    const saved = "defaultModelId" in patch && !("defaultModelTried" in patch) ? { ...patch, defaultModelTried: false } : patch;
+    this.update((s) => ({ ...s, prefs: { ...s.prefs, ...saved } }));
     if (this.saveHandle === null) {
       this.saveHandle = this.platform.schedule(() => {
         this.saveHandle = null;

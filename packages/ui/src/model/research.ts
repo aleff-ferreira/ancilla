@@ -149,6 +149,164 @@ export function researchSnapshotCurrent(current: ResearchRunView, next: Research
   return true;
 }
 
+/** How many times a run was resumed; a view from a server that predates the counter was never resumed. */
+function resumesOf(run: Pick<ResearchRunView, "resumes">): number {
+  return run.resumes ?? 0;
+}
+
+/** Whether a snapshot of the run is level with another on everything `PROGRESS` reads, so only arrival order tells them apart. */
+function levelProgress(current: ResearchRunView, next: ResearchRunView): boolean {
+  return PROGRESS.every((measure) => measure(current) === measure(next));
+}
+
+/**
+ * Whether `next` replaces `current`, two pictures of one run. The resume counter comes first for every pair: a
+ * picture with a lower one is of an earlier attempt and loses whatever its status, and a higher one is a new
+ * attempt that replaces even an ended run. At the same counter an ending is final against a live picture of
+ * the run, and an ending supersedes a live run whatever the progress measures say: an interrupted snapshot read
+ * after a restart is behind the stale live row on every one of them. Two endings take the later answer; two live
+ * pictures take the more advanced.
+ */
+function supersedes(current: ResearchRunView, next: ResearchRunView): boolean {
+  const before = resumesOf(current);
+  const after = resumesOf(next);
+  if (before !== after) {
+    return after > before;
+  }
+  const wasLive = researchLive(current);
+  const isLive = researchLive(next);
+  if (wasLive !== isLive) {
+    return !isLive;
+  }
+  return wasLive ? researchSnapshotCurrent(current, next) : true;
+}
+
+const WORKER_RANK: Record<ResearchWorkerState, number> = { queued: 0, working: 1, completed: 2, failed: 2, timed_out: 2, cancelled: 2 };
+
+/** Whether `known` is a further-along picture of a worker than `seen`. */
+function workerAhead(known: ResearchWorkerView, seen: ResearchWorkerView): boolean {
+  const a = [WORKER_RANK[known.state], known.toolCalls, known.searches + known.reads + known.saved];
+  const b = [WORKER_RANK[seen.state], seen.toolCalls, seen.searches + seen.reads + seen.saved];
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return (a[i] as number) > (b[i] as number);
+    }
+  }
+  return false;
+}
+
+/** The counters of `next`, none of them lower than in `known`: the tokens a run has spent only grow while it goes. */
+function noLower<T extends object>(known: T, next: T): T {
+  const merged = { ...next };
+  for (const key of Object.keys(next) as (keyof T)[]) {
+    const value = next[key];
+    const before = known[key];
+    if (typeof value === "number" && typeof before === "number" && before > value) {
+      merged[key] = before;
+    }
+  }
+  return merged;
+}
+
+/**
+ * Whether `next` is behind `known` on a source count that only grows while a run goes: the registry, what can be
+ * cited, the curated list, the sources opened, and the evidence total. The counts of search-only and failed sources
+ * are no measure of that, since a source moves out of them when it is opened, so they never decide it. A count a
+ * server does not send is not compared, and neither is one that is not a number: the evidence total of a server
+ * that could not rank a source reaches the wire as null, and null would otherwise read as lower than any total.
+ */
+function sourcesBehind(known: ResearchRunView["sources"], next: ResearchRunView["sources"]): boolean {
+  if (next.registry < known.registry || next.verified < known.verified || next.curated < known.curated) {
+    return true;
+  }
+  if (known.opened !== undefined && next.opened !== undefined && next.opened < known.opened) {
+    return true;
+  }
+  return isCount(known.evidence) && isCount(next.evidence) && next.evidence < known.evidence;
+}
+
+/** Whether a count off the wire is a number that can be compared. */
+function isCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * What a snapshot that is level with the run on every progress measure brings: it arrived last, so it is taken,
+ * but a worker that had finished, or a count of tokens that had risen, is not put back by it. The source counts
+ * are one picture, so they are taken whole from whichever snapshot is the more advanced, never mixed: a source
+ * that was opened since is no longer search only, and a mix would count it as both.
+ */
+function holdGains(current: ResearchRunView, next: ResearchRunView): ResearchRunView {
+  const workers = next.workers.map((worker) => {
+    const known = current.workers.find((w) => w.agentId === worker.agentId);
+    return known && workerAhead(known, worker) ? known : worker;
+  });
+  return { ...next, workers, sources: sourcesBehind(current.sources, next.sources) ? current.sources : next.sources, usage: noLower(current.usage, next.usage) };
+}
+
+/** Structural equality of two JSON-shaped values. */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null || Array.isArray(a) !== Array.isArray(b)) {
+    return false;
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every((key) => key in right && sameValue(left[key], right[key]));
+}
+
+/** The id the optimistic row of a run being started carries until the server answers. */
+const PENDING_PREFIX = "pending:";
+
+/**
+ * The runs of a thread after `incoming` is reconciled with them: a union by run id, so a snapshot that predates a
+ * run never drops it, and for a run both know, the picture `supersedes` says is the later. The stream's summaries
+ * carry no report, so a report already read stays on the run, within one attempt, while the server still says one is available. A real
+ * run that is live replaces a `pending:` placeholder, since the server allows one live run per thread; `replacing`
+ * names the placeholder a start's answer swaps out in the same step, whatever state the answer is in.
+ *
+ * Returns `local` itself when nothing changed, and keeps the old element of a run whose new picture equals it, so
+ * a snapshot that adds nothing costs the store no update.
+ */
+export function reconcileResearchRuns(local: readonly ResearchRunView[], incoming: readonly ResearchRunView[], replacing?: string): ResearchRunView[] {
+  let runs = [...local];
+  let changed = false;
+  if (replacing !== undefined && runs.some((run) => run.runId === replacing)) {
+    runs = runs.filter((run) => run.runId !== replacing);
+    changed = true;
+  }
+  for (const run of incoming) {
+    const index = runs.findIndex((existing) => existing.runId === run.runId);
+    if (index < 0) {
+      runs.push(run);
+      changed = true;
+      continue;
+    }
+    const previous = runs[index] as ResearchRunView;
+    if (!supersedes(previous, run)) {
+      continue;
+    }
+    // Only within one attempt: the report read from an earlier attempt is not the one a resumed attempt ended with.
+    const carried = run.report === null && run.reportAvailable && previous.report && resumesOf(previous) === resumesOf(run) ? { ...run, report: previous.report } : run;
+    const next = researchLive(previous) && researchLive(carried) && levelProgress(previous, carried) && resumesOf(previous) === resumesOf(carried) ? holdGains(previous, carried) : carried;
+    if (!sameValue(previous, next)) {
+      runs[index] = next;
+      changed = true;
+    }
+  }
+  if (runs.some((run) => !run.runId.startsWith(PENDING_PREFIX) && researchLive(run))) {
+    const real = runs.filter((run) => !run.runId.startsWith(PENDING_PREFIX));
+    if (real.length !== runs.length) {
+      runs = real;
+      changed = true;
+    }
+  }
+  return changed ? runs : (local as ResearchRunView[]);
+}
+
 /** The popover's fields as typed: null until the user touches one, so an untouched field sends nothing. */
 export interface ResearchTyped {
   windowMin: string | null;
@@ -282,12 +440,61 @@ export function workerChip(worker: ResearchWorkerView): string {
   return parts.join(" · ");
 }
 
-/** `12 sources · 9 verified · 4 curated`, or nothing before the first source. */
+/**
+ * `12 sources · 6 opened · 3 search only · 2 fetch failed or cut off · 9 citable · 4 curated`, or nothing before the
+ * first source. A source counts in at most one of opened, search only, or fetch failed or cut off: the last is every
+ * source a fetch was tried for and did not open, whether the fetch failed, was cancelled, or never reported. A source
+ * that no worker call saw is in the total and in none of the three, and cannot be cited. The citable
+ * count is how many sources a report may cite, which can include sources that were only in a search result. Sources
+ * an earlier version listed without recording how it reached them say so (`7 listed by an earlier version`) and are
+ * never counted as opened. A server that sends no provenance counts gets the older `9 verified`.
+ */
 export function sourcesLine(sources: ResearchRunView["sources"]): string | null {
   if (sources.registry === 0) return null;
-  const parts = [`${sources.registry} ${sources.registry === 1 ? "source" : "sources"}`, `${sources.verified} verified`];
+  const parts = [`${sources.registry} ${sources.registry === 1 ? "source" : "sources"}`];
+  if (sources.opened === undefined) {
+    parts.push(`${sources.verified} verified`);
+  } else {
+    const earlier = sources.listedEarlier ?? 0;
+    if (sources.opened > 0 || earlier === 0) parts.push(`${sources.opened} opened`);
+    if ((sources.searchOnly ?? 0) > 0) parts.push(`${sources.searchOnly} search only`);
+    if ((sources.attempted ?? 0) > 0) parts.push(`${sources.attempted} fetch failed or cut off`);
+    if (earlier > 0) parts.push(`${earlier} listed by an earlier version`);
+    parts.push(`${sources.verified} citable`);
+  }
   if (sources.curated > 0) parts.push(`${sources.curated} curated`);
   return parts.join(" · ");
+}
+
+/**
+ * What the sources line says when it is asked to explain itself. The three buckets are not a partition of the
+ * count: a source no worker call saw is in the count and in none of them.
+ */
+export const SOURCES_LINE_TITLE =
+  "A source counts in at most one of opened, search only, or fetch failed or cut off; a fetch that failed, was stopped, or never reported lands in the last. A source no worker call saw is in none of them and cannot be cited. Citable is how many sources a report may cite.";
+
+/** What an interrupted run says when the server named no reason, as in a run an older build interrupted. */
+const INTERRUPTED_FALLBACK = "Ancilla restarted while the run was going, so it stopped where it was.";
+
+/**
+ * How a reason already ends, so no full stop is added to it: a full stop, an exclamation or question mark, an
+ * ellipsis, their full-width forms and the CJK full stop (an operating system's own error text may use any of
+ * them), and a colon, which says the text goes on and is not closed with a full stop either.
+ */
+const SENTENCE_END = /[.!?\u2026\u3002\uff01\uff1f:\uff1a]$/;
+
+/**
+ * Why an interrupted run stopped, as a sentence. The server stores the reason after an `interrupted: ` prefix, in
+ * lower case and sometimes without a full stop (the server shut down, the store could not keep the run's progress,
+ * and what the store said); the row shows it capitalised and closed, and its own sentence when there is none.
+ */
+export function interruptedLine(failure: string | null): string {
+  const reason = (failure ?? "").replace(/^\s*interrupted:\s*/i, "").trim();
+  if (reason === "") {
+    return INTERRUPTED_FALLBACK;
+  }
+  const sentence = `${reason.charAt(0).toUpperCase()}${reason.slice(1)}`;
+  return SENTENCE_END.test(sentence) ? sentence : `${sentence}.`;
 }
 
 /**

@@ -87,12 +87,19 @@ export function MenuItem(props: {
   hint?: ReactNode;
   tone?: "default" | "danger";
   disabled?: boolean;
+  /** Keeps the menu open after the item runs, for an action whose result shows in the menu itself. */
+  keepOpen?: boolean;
   onSelect?: () => void;
 }) {
   return (
     <DropdownMenu.Item
       disabled={props.disabled}
-      onSelect={props.onSelect}
+      onSelect={(event) => {
+        if (props.keepOpen) {
+          event.preventDefault();
+        }
+        props.onSelect?.();
+      }}
       className={cn(ITEM, props.tone === "danger" && "text-danger-text")}
     >
       {props.icon ? (

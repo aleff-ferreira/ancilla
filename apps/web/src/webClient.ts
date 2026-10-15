@@ -1,7 +1,7 @@
 import {
   AncillaError,
   parseAccounts,
-  parseModelList,
+  parseModelCatalog,
   parseSandboxSettings,
   parseTitleSettings,
   parseYoloSettings,
@@ -27,6 +27,7 @@ import {
   type GoalAction,
   type AncillaClient,
   type AncillaEvent,
+  type ModelCatalog,
   type ModelOption,
   type OutputRange,
   type ProjectView,
@@ -165,6 +166,16 @@ async function call<T>(method: string, path: string, body?: unknown, timeoutMs =
 
 const enc = encodeURIComponent;
 
+/** `tz=<IANA zone>` for this browser, or nothing when the platform cannot say. */
+function timeZoneParam(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return zone ? `tz=${enc(zone)}` : "";
+  } catch {
+    return "";
+  }
+}
+
 /** The Ancilla client over the local server's REST API and server-sent events. */
 export class WebAncillaClient implements AncillaClient {
   private readonly handlers = new Set<EventHandler>();
@@ -172,6 +183,8 @@ export class WebAncillaClient implements AncillaClient {
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   /** The handshake is awaited before the stream opens; this stops a second subscriber racing it. */
   private connecting = false;
+  /** Whether the app was already told the stream is down, so a browser's retries do not tell it again. */
+  private lostReported = false;
 
   probeEnvironment(refresh = false): Promise<EnvironmentStatus> {
     return call<EnvironmentStatus>("GET", `/api/env${refresh ? "?refresh=1" : ""}`);
@@ -240,7 +253,9 @@ export class WebAncillaClient implements AncillaClient {
   }
 
   usage(days?: number): Promise<UsageReport> {
-    return call<UsageReport>("GET", `/api/usage${days ? `?days=${days}` : ""}`);
+    // The server buckets by calendar day in this zone; without one (an older server, or no Intl) it uses UTC.
+    const query = [days ? `days=${days}` : "", timeZoneParam()].filter(Boolean).join("&");
+    return call<UsageReport>("GET", `/api/usage${query ? `?${query}` : ""}`);
   }
 
   // ---------------------------------------------------------------- deep research
@@ -370,9 +385,17 @@ export class WebAncillaClient implements AncillaClient {
     await call("POST", "/api/user-input/clarify", { sessionId, userInputId, content });
   }
 
-  async listModels(sessionId?: string): Promise<ModelOption[]> {
-    const result = await call<{ models: unknown }>("GET", `/api/models${sessionId ? `?sessionId=${enc(sessionId)}` : ""}`);
-    return parseModelList(result.models);
+  async listModels(sessionId?: string, accountId?: string | null): Promise<ModelOption[]> {
+    return (await this.listModelCatalog(sessionId, accountId)).models;
+  }
+
+  async listModelCatalog(sessionId?: string, accountId?: string | null): Promise<ModelCatalog> {
+    const query = [sessionId ? `sessionId=${enc(sessionId)}` : "", accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
+    return parseModelCatalog(await call<unknown>("GET", `/api/models${query ? `?${query}` : ""}`));
+  }
+
+  async restartHosts(): Promise<void> {
+    await call("POST", "/api/hosts/restart", {});
   }
 
   async getTitleSettings(): Promise<TitleSettings> {
@@ -555,6 +578,7 @@ export class WebAncillaClient implements AncillaClient {
         this.stopWatchdog();
         this.source?.close();
         this.source = null;
+        this.lostReported = false;
       }
     };
   }
@@ -581,16 +605,25 @@ export class WebAncillaClient implements AncillaClient {
     const source = new EventSource(url("/api/events"), { withCredentials: Boolean(daemon.base) });
     source.addEventListener("ancilla", (message) => {
       this.touch();
+      this.lostReported = false;
+      let event: AncillaEvent;
       try {
-        this.dispatch(JSON.parse((message as MessageEvent<string>).data) as AncillaEvent);
+        event = JSON.parse((message as MessageEvent<string>).data) as AncillaEvent;
       } catch {
         /* ignore malformed frames */
+        return;
       }
+      // Kept apart from the parse above: a handler that throws is not a frame that could not be read.
+      this.dispatch(event);
     });
     // The server's heartbeat: proof the stream is still carrying, and nothing else.
     source.addEventListener("ping", () => this.touch());
-    source.addEventListener("open", () => this.touch());
-    source.addEventListener("error", () => this.dispatch({ type: "connection", state: "lost" }));
+    source.addEventListener("open", () => {
+      this.touch();
+      this.lostReported = false;
+    });
+    // The browser retries a dropped stream by itself and reports every failed attempt: say it is lost once.
+    source.addEventListener("error", () => this.reportLost());
     this.source = source;
     this.touch();
   }
@@ -617,15 +650,32 @@ export class WebAncillaClient implements AncillaClient {
     this.stopWatchdog();
     this.source?.close();
     this.source = null;
-    this.dispatch({ type: "connection", state: "lost" });
+    this.reportLost();
     if (this.handlers.size > 0) {
       void this.connect();
     }
   }
 
+  /** Tells the app the stream is down, once until it is heard from again. */
+  private reportLost(): void {
+    if (this.lostReported) {
+      return;
+    }
+    this.lostReported = true;
+    this.dispatch({ type: "connection", state: "lost" });
+  }
+
+  /**
+   * One handler that throws must not cost the others the event, nor end the stream: it is logged, and the app's own
+   * controller, which is the handler that matters, shows it to the user.
+   */
   private dispatch(event: AncillaEvent): void {
     for (const handler of [...this.handlers]) {
-      handler(event);
+      try {
+        handler(event);
+      } catch (error) {
+        console.error(`Ancilla: an event handler failed on a ${event.type} event`, error);
+      }
     }
   }
 }

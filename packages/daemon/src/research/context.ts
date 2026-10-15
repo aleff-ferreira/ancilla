@@ -7,6 +7,7 @@ import type { ResearchConfig } from "./config.js";
 import {
   ResearchFailure,
   addUsage,
+  type CheckpointOptions,
   type ModelRole,
   type ResearchDeps,
   type ResearchEvent,
@@ -94,8 +95,8 @@ export class RunContext {
     this.deps.events.emit(event);
   }
 
-  async checkpoint(): Promise<void> {
-    await this.deps.checkpoint(this.state);
+  async checkpoint(options?: CheckpointOptions): Promise<void> {
+    await this.deps.checkpoint(this.state, options);
   }
 
   /** Throws `RunCancelled` when the signal that governs the current work has fired. */

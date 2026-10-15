@@ -16,7 +16,7 @@ import {
   toolKind,
 } from "../../model/format.js";
 import { streamingSpeed, turnCosts, turnSpeeds, type TurnCost, type TurnSpeed } from "../../model/usage.js";
-import { formatCost } from "../../model/pricing.js";
+import { turnCostLabel, turnCostTip } from "../../model/usage-labels.js";
 import { stuckThread } from "../../model/errors.js";
 import type { ThreadState } from "../../model/store.js";
 import type { AttachmentView, MspItem, OutgoingAttachment, ShellRun, UserInputAnswer } from "../../types.js";
@@ -122,7 +122,7 @@ export function Transcript(props: { sessionId: string; thread: ThreadState }) {
     return null;
   }, [timeline]);
   // A prompt already on its way makes the failure above it an earlier one.
-  const followed = echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started");
+  const followed = echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started" || echo.disposition === "unconfirmed");
 
   const attachmentsByTurn = useMemo(() => {
     const map: Record<string, AttachmentView[]> = {};
@@ -593,12 +593,10 @@ function TurnFooter(props: { turn: TurnView; speed: TurnSpeed | null; cost: Turn
       {props.cost && props.cost.cost > 0 ? (
         <>
           {completed !== null || props.speed || (duration !== null && !hasWork) ? dot : null}
-          <Tip
-            label={`At API rates: ${formatTokens(props.cost.promptTokens)} in (${formatTokens(props.cost.cachedTokens)} cached), ${formatTokens(props.cost.outputTokens)} out${props.cost.complete ? "" : "; a call here has no published price"}`}
-          >
+          {/* A turn's "+" reads "plus unpriced" and stays; a thread's floor is "≥ $x" (see turnCostLabel). */}
+          <Tip label={turnCostTip(props.cost)}>
             <span tabIndex={0} className="tabular-nums">
-              {formatCost(props.cost.cost, props.cost.currency ?? undefined)}
-              {props.cost.complete ? "" : "+"}
+              {turnCostLabel(props.cost)}
             </span>
           </Tip>
         </>
@@ -689,6 +687,7 @@ const ECHO_LABEL: Record<LocalEcho["disposition"], string> = {
   started: "Sent",
   queued: "Queued",
   steered: "Adding to the current turn",
+  unconfirmed: "No answer yet. Checking whether it was sent",
 };
 
 function PendingPrompt(props: { echo: LocalEcho }) {

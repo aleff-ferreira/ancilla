@@ -9,6 +9,8 @@ import { parseLoginOutput } from "@harjjotsinghh/aonia";
 const INSTALLER_URL = "https://dev.meta.ai/install.sh";
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024;
+/** How long a cancelled installer gets to end after the polite stop before its whole group is killed. */
+export const INSTALLER_KILL_GRACE_MS = 2000;
 
 export interface LinuxInstallState {
   status: "idle" | "installing" | "installed" | "error" | "cancelled";
@@ -29,6 +31,15 @@ interface InstallerRunOptions {
 export type LinuxInstallerRunner = (script: string, options: InstallerRunOptions) => Promise<number | null>;
 type InstallerFetch = (url: string, options: { signal: AbortSignal; redirect: "error" }) => Promise<Response>;
 
+/** Calls `fire` once after `ms`; the returned function withdraws the call. */
+export type InstallerDeadline = (fire: () => void, ms: number) => () => void;
+
+const realDeadline: InstallerDeadline = (fire, ms) => {
+  const timer = setTimeout(fire, ms);
+  timer.unref();
+  return () => clearTimeout(timer);
+};
+
 export interface LinuxMuseInstallerOptions {
   platform: string;
   home: string;
@@ -36,6 +47,8 @@ export interface LinuxMuseInstallerOptions {
   fetch?: InstallerFetch;
   run?: LinuxInstallerRunner;
   timeoutMs?: number;
+  /** How the attempt's time limit is scheduled. Tests replace it to fire the limit at an exact point. */
+  deadline?: InstallerDeadline;
 }
 
 /** The installer and all curl/launcher children belong to this one cancellable process group. */
@@ -57,7 +70,7 @@ const runInstaller: LinuxInstallerRunner = (script, options) => new Promise((res
   };
   const cancel = () => {
     signalChild("SIGTERM");
-    forceStop = setTimeout(() => signalChild("SIGKILL"), 2000);
+    forceStop = setTimeout(() => signalChild("SIGKILL"), INSTALLER_KILL_GRACE_MS);
     forceStop.unref();
   };
   const cleanup = () => {
@@ -158,8 +171,10 @@ export class LinuxMuseInstaller {
     let directory: string | null = null;
     let output = "";
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; abort.abort(); }, this.options.timeoutMs ?? 10 * 60_000);
-    timeout.unref();
+    const cancelDeadline = (this.options.deadline ?? realDeadline)(
+      () => { timedOut = true; abort.abort(); },
+      this.options.timeoutMs ?? 10 * 60_000,
+    );
     const update = (changes: Partial<LinuxInstallState>) => {
       if (this.state.attemptId === id && this.state.status === "installing") this.state = { ...this.state, ...changes };
     };
@@ -219,7 +234,7 @@ export class LinuxMuseInstaller {
           : installFailure(output, error), loginUrl: null, loginCode: null });
       }
     } finally {
-      clearTimeout(timeout);
+      cancelDeadline();
       if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }

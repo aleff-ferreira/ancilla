@@ -10,6 +10,7 @@ import {
   type SessionTelemetry,
   type TelemetryModelUsage,
 } from "../../model/usage.js";
+import { SPEED_TIP } from "../../model/usage-labels.js";
 import { Tip, FLOATING } from "../ui/overlays.js";
 
 /** Which telemetry dialog is open; at most one at a time. */
@@ -116,7 +117,7 @@ function TimingPanel(props: { telemetry: SessionTelemetry }) {
       </div>
       <dl className="flex flex-col gap-1 text-xs">
         <Row label="Steps" value={`${t.steps}`} />
-        <Row label="Request average" value={t.tokensPerSecond === null ? "—" : formatTokensPerSecond(t.tokensPerSecond)} />
+        <Row label="Request average" tip={SPEED_TIP} value={t.tokensPerSecond === null ? "—" : formatTokensPerSecond(t.tokensPerSecond)} />
         <Row label="Timed" value={`${t.timedCalls} of ${t.steps} calls timed`} />
       </dl>
       <ModelBreakdown models={t.models} />
@@ -175,10 +176,20 @@ function ModelBreakdown(props: { models: TelemetryModelUsage[] }) {
   );
 }
 
-function Row(props: { label: string; value: string }) {
+function Row(props: { label: string; value: string; tip?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
-      <dt className="text-muted">{props.label}</dt>
+      <dt className="text-muted">
+        {props.tip ? (
+          <Tip label={props.tip}>
+            <span tabIndex={0} className="cursor-default">
+              {props.label}
+            </span>
+          </Tip>
+        ) : (
+          props.label
+        )}
+      </dt>
       <dd className="tabular-nums text-fg">{props.value}</dd>
     </div>
   );

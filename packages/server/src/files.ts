@@ -1,7 +1,9 @@
-import { createReadStream } from "node:fs";
 import { lstat, open, readdir, realpath, rename, stat, writeFile, unlink } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { pipeline } from "node:stream/promises";
+import { SANDBOX_CSP } from "./attachments.js";
 
 /** A failure the HTTP layer turns into a status; `kind` lets the UI tell "changed on disk" apart from the rest. */
 export class FileError extends Error {
@@ -293,43 +295,81 @@ export async function serveProjectFile(req: IncomingMessage, res: ServerResponse
   if (!info.isFile()) {
     throw new FileError(400, "That is not a file.");
   }
-  const head = new Uint8Array(Math.min(info.size, 8192));
+  // Opened once, before any header goes out: a file that cannot be read is an error for this request, and the
+  // same handle sniffs the type and then streams, so there is one descriptor to release however the download ends.
   const handle = await open(abs, "r");
+  let streaming = false;
   try {
+    const head = new Uint8Array(Math.min(info.size, 8192));
     await handle.read(head, 0, head.length, 0);
-  } finally {
-    await handle.close();
-  }
-  const { kind, mediaType } = classifyFile(basename(abs), head);
-  const type = kind === "text" || kind === "markdown" ? "text/plain; charset=utf-8" : mediaType;
-  const headers: Record<string, string> = {
-    "content-type": type,
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-    "accept-ranges": "bytes",
-    "content-disposition": "inline",
-  };
-  if (kind !== "pdf") {
-    headers["content-security-policy"] = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
-  }
-  const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers["range"] ?? ""));
-  if (range && info.size > 0 && (range[1] || range[2])) {
-    let start = range[1] ? Number(range[1]) : Math.max(0, info.size - Number(range[2]));
-    let end = range[1] && range[2] ? Number(range[2]) : info.size - 1;
-    end = Math.min(end, info.size - 1);
-    start = Math.min(start, end);
-    res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${info.size}`, "content-length": String(end - start + 1) });
+    const { kind, mediaType } = classifyFile(basename(abs), head);
+    const type = kind === "text" || kind === "markdown" ? "text/plain; charset=utf-8" : mediaType;
+    const headers: Record<string, string> = {
+      "content-type": type,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "accept-ranges": "bytes",
+      "content-disposition": "inline",
+    };
+    if (kind !== "pdf") {
+      headers["content-security-policy"] = SANDBOX_CSP;
+    }
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers["range"] ?? ""));
+    if (range && info.size > 0 && (range[1] || range[2])) {
+      let start = range[1] ? Number(range[1]) : Math.max(0, info.size - Number(range[2]));
+      let end = range[1] && range[2] ? Number(range[2]) : info.size - 1;
+      end = Math.min(end, info.size - 1);
+      start = Math.min(start, end);
+      res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${info.size}`, "content-length": String(end - start + 1) });
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      streaming = true;
+      await pipeFile(res, handle, { start, end });
+      return;
+    }
+    res.writeHead(200, { ...headers, "content-length": String(info.size) });
     if (req.method === "HEAD") {
       res.end();
       return;
     }
-    createReadStream(abs, { start, end }).pipe(res);
-    return;
+    streaming = true;
+    await pipeWholeFile(res, handle, info.size);
+  } finally {
+    if (!streaming) {
+      await handle.close().catch(() => undefined);
+    }
   }
-  res.writeHead(200, { ...headers, "content-length": String(info.size) });
-  if (req.method === "HEAD") {
+}
+
+/**
+ * Streams an open file to a response and releases it however that ends: done, a client that went away, or a read
+ * that failed part way. The stream owns the handle from here and closes it when it is destroyed, which a plain
+ * `createReadStream(...).pipe(res)` does not do for a response that closes early, so each dropped download used to
+ * leave a descriptor open. A read that fails after the headers went out ends the connection instead of raising an
+ * error nobody handles.
+ */
+export async function pipeFile(res: ServerResponse, handle: FileHandle, range?: { start: number; end: number }): Promise<void> {
+  const stream = handle.createReadStream(range ? { start: range.start, end: range.end } : {});
+  try {
+    await pipeline(stream, res);
+  } catch {
+    stream.destroy();
+    res.destroy();
+  }
+}
+
+/**
+ * Streams the first `size` bytes of an open file, the length the response declared. A file that grows during the
+ * download would otherwise send bytes past its `content-length` and put a keep-alive connection out of step; a file
+ * that shrinks ends the response early, as before. An empty file has nothing to send, and its handle is released here.
+ */
+export async function pipeWholeFile(res: ServerResponse, handle: FileHandle, size: number): Promise<void> {
+  if (size <= 0) {
+    await handle.close().catch(() => undefined);
     res.end();
     return;
   }
-  createReadStream(abs).pipe(res);
+  await pipeFile(res, handle, { start: 0, end: size - 1 });
 }

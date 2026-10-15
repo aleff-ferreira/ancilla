@@ -1,10 +1,10 @@
 import { CaretDownIcon, PauseIcon, PlayIcon, SquareIcon, TargetIcon, XIcon } from "../ui/icons.js";
 import { useMemo } from "react";
 import { shallowEqual, useApp, useController, useNow } from "../../app/context.js";
-import { formatDuration, formatTokens, relativeTime } from "../../model/format.js";
+import { formatDuration, relativeTime } from "../../model/format.js";
 import { goalView, type GoalTone, type GoalView } from "../../model/goal.js";
-import { formatCost } from "../../model/pricing.js";
-import { turnCost } from "../../model/usage.js";
+import { turnsCost } from "../../model/usage.js";
+import { goalCostTip, goalCostValue, goalTokensTip, goalTokensValue } from "../../model/usage-labels.js";
 import { CloseCard } from "../requests/Requests.js";
 import { Tip } from "../ui/overlays.js";
 import { Button, cn } from "../ui/primitives.js";
@@ -78,30 +78,14 @@ function GoalBody(props: { view: GoalView; elapsed: number | null; now: number; 
   const controller = useController();
   const { view } = props;
   const models = useApp((s) => s.models);
+  const truncated = useApp((s) => s.threads[props.sessionId]?.truncated ?? false);
   // The same turns the token count covers, priced at each call's own model rate.
   const spend = useMemo(() => {
     const fold = controller.store.get().threads[props.sessionId]?.fold;
-    if (!fold) {
-      return null;
-    }
-    let cost = 0;
-    let currency: string | null = null;
-    let complete = true;
-    let priced = false;
-    for (const turnId of view.turnIds) {
-      const turn = turnCost(fold, turnId, models);
-      if (!turn) {
-        continue;
-      }
-      priced = true;
-      cost += turn.cost;
-      currency = currency ?? turn.currency;
-      complete = complete && turn.complete;
-    }
-    return priced ? { cost, currency, complete } : null;
-  }, [view, models, controller, props.sessionId]);
+    return fold ? turnsCost(fold, view.turnIds, models, truncated, view.startedAt) : null;
+  }, [view, models, truncated, controller, props.sessionId]);
   const busy = useApp((s) => Boolean(s.busy[`goal:${props.sessionId}`]));
-  const muse = view.tokensUsed !== null && view.tokensUsed > 0 ? ` Muse's own count at its last goal update: ${formatTokens(view.tokensUsed)}.` : "";
+  const earlierMissing = spend?.partial ?? false;
   const lastUpdate = view.lastProgressAt ?? view.endedAt;
   const newGoal = () => {
     // Keep an unsent draft: it becomes the start of the objective, and nothing is sent until the user does.
@@ -132,21 +116,14 @@ function GoalBody(props: { view: GoalView; elapsed: number | null; now: number; 
       <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-5">
         <Metric label={view.tone === "active" ? "Running for" : "Ran for"} value={props.elapsed === null ? "Not known" : formatDuration(props.elapsed) || "0s"} />
         <Metric label="Turns" value={String(view.turns)} />
-        <Tip label={`Input and output tokens of this goal's model calls.${muse}`}>
+        <Tip label={goalTokensTip(earlierMissing, view.tokensUsed)}>
           <div tabIndex={0} className="min-w-0 cursor-default">
-            <Metric label="Tokens" value={view.tokenBudget ? `${formatTokens(view.tokens)} of ${formatTokens(view.tokenBudget)}` : formatTokens(view.tokens)} />
+            <Metric label="Tokens" value={goalTokensValue(view.tokens, view.tokenBudget, earlierMissing)} />
           </div>
         </Tip>
-        <Tip
-          label={`What this goal's work would have cost at published API rates.${
-            spend && !spend.complete ? " One of its models has no listed price, so the real figure is higher." : ""
-          }`}
-        >
+        <Tip label={goalCostTip(spend)}>
           <div tabIndex={0} className="min-w-0 cursor-default">
-            <Metric
-              label="Cost"
-              value={spend ? `${spend.complete ? "" : "≥ "}${formatCost(spend.cost, spend.currency ?? undefined)}` : "Not known"}
-            />
+            <Metric label="Cost" value={goalCostValue(spend)} />
           </div>
         </Tip>
         <Metric label="Last update" value={lastUpdate ? relativeTime(new Date(lastUpdate).toISOString(), props.now) : "None yet"} />

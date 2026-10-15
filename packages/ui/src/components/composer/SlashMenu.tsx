@@ -1,11 +1,14 @@
 import { ArrowElbowDownLeftIcon, ArrowsInIcon, BinocularsIcon, BookOpenIcon, BrainIcon, ClockCounterClockwiseIcon, CpuIcon, FileTextIcon, GitForkIcon, NotePencilIcon, ShieldIcon, TargetIcon } from "../ui/icons.js";
 import { useEffect, type ReactNode } from "react";
+import { modelCompletionNote, type ModelCompletion } from "../../model/models.js";
 import type { SlashAction, SlashCommand } from "../../model/slash.js";
 import { Spinner, cn } from "../ui/primitives.js";
 
 /** What the menu above the composer shows while a message starts with a slash. */
 export type SlashMenuState =
   | { kind: "list"; items: SlashCommand[]; loading: boolean; error: string | null }
+  /** `/model <text>`: the models the text fits, one of which runs the command. */
+  | { kind: "models"; items: ModelCompletion[]; query: string }
   | { kind: "unknown"; name: string }
   | { kind: "loading" };
 
@@ -44,6 +47,7 @@ export function SlashMenu(props: {
   active: number;
   onActive: (index: number) => void;
   onPick: (command: SlashCommand) => void;
+  onPickModel: (model: ModelCompletion) => void;
   onSendRaw: () => void;
 }) {
   const { state, active } = props;
@@ -58,10 +62,10 @@ export function SlashMenu(props: {
     <div
       id={props.id}
       role="listbox"
-      aria-label="Commands and skills"
+      aria-label={state.kind === "models" ? "Models" : "Commands and skills"}
       onMouseDown={(event) => event.preventDefault()}
       className={cn(
-        "absolute inset-x-0 z-[var(--z-dropdown)] flex max-h-[min(380px,48vh)] flex-col overflow-hidden rounded-xl bg-raised text-fg shadow-pop",
+        "@container absolute inset-x-0 z-[var(--z-dropdown)] flex max-h-[min(380px,48vh)] flex-col overflow-hidden rounded-xl bg-raised text-fg shadow-pop",
         props.placement === "above" ? "bottom-full mb-2" : "top-full mt-2",
       )}
     >
@@ -97,6 +101,36 @@ export function SlashMenu(props: {
                     </span>
                     {scope ? <span className="shrink-0 text-2xs text-subtle">{scope}</span> : null}
                   </div>
+                </div>
+              );
+            })
+          : null}
+        {state.kind === "models"
+          ? state.items.map((item, index) => {
+              const note = modelCompletionNote(item);
+              return (
+                <div
+                  key={item.id}
+                  id={slashOptionId(props.id, index)}
+                  role="option"
+                  aria-selected={index === active}
+                  onMouseMove={() => props.onActive(index)}
+                  onClick={() => props.onPickModel(item)}
+                  className={cn(ROW, index === active && "bg-hover")}
+                >
+                  <span className="flex size-4 shrink-0 items-center justify-center text-muted">
+                    <CpuIcon size={14} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline gap-2">
+                      {/* The id is what is being chosen: it keeps the room, and the window gives way before it does. */}
+                      <span className="min-w-0 truncate font-medium">{item.label}</span>
+                      {item.detail ? <span className="shrink-0 text-xs text-muted @max-[440px]:hidden">{item.detail}</span> : null}
+                    </span>
+                    {note ? <span className="block text-xs leading-snug text-pretty text-muted [overflow-wrap:anywhere]">{note}</span> : null}
+                  </span>
+                  {item.isDefault ? <span className="shrink-0 rounded-[5px] bg-active px-1 py-px text-2xs font-medium text-muted">Default</span> : null}
+                  {item.contributor ? <span className="shrink-0 rounded-[5px] bg-warn-soft px-1 py-px text-2xs font-medium text-warn-text">Contributor</span> : null}
                 </div>
               );
             })
@@ -140,6 +174,11 @@ export function SlashMenu(props: {
         {state.kind === "list" ? (
           <>
             <span>Enter to run</span>
+            <span>Tab to fill in</span>
+          </>
+        ) : state.kind === "models" ? (
+          <>
+            <span>Enter to switch</span>
             <span>Tab to fill in</span>
           </>
         ) : state.kind === "unknown" ? (

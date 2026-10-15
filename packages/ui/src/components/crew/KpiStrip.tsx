@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { useNow } from "../../app/context.js";
 import { formatTokens } from "../../model/format.js";
-import { formatCost } from "../../model/pricing.js";
-import { aboutText, durationText, runLive, type RunVM } from "../../model/crew.js";
+import { NO_PRICE_REASON, formatCost } from "../../model/pricing.js";
+import { aboutText, durationText, reportCoverage, runLive, type RunVM } from "../../model/crew.js";
 import { cn } from "../ui/primitives.js";
 import { RollingDigits } from "../ui/sourced.js";
 import { clockMinutes } from "./panel.js";
@@ -13,7 +13,7 @@ export interface KpiStripProps {
   className?: string;
 }
 
-interface Cell {
+export interface Cell {
   key: string;
   label: string;
   /** The figure, rolled when it changes; `—` when absent. */
@@ -22,6 +22,8 @@ interface Cell {
   unit?: string;
   /** The line under the figure: the breakdown, or the reason the figure is absent. */
   sub: ReactNode;
+  /** The whole sentence behind a sub line that the cell cuts short; a text sub line is its own title. */
+  title?: string;
   /** A sparkline in place of the figure. */
   figure?: ReactNode;
 }
@@ -59,14 +61,15 @@ export function KpiStrip(props: KpiStripProps) {
               </>
             )}
           </div>
-          <div className="truncate text-2xs text-subtle">{cell.sub}</div>
+          {/* Two lines, not one: the coverage ("at list price · 8 of 9 reported") is wider than a 126 px cell. The title holds the rest. */}
+          <div className="line-clamp-2 break-words text-2xs text-subtle" title={cell.title ?? (typeof cell.sub === "string" ? cell.sub : undefined)}>{cell.sub}</div>
         </div>
       ))}
     </div>
   );
 }
 
-function tokensCell(run: RunVM, live: boolean): Cell {
+export function tokensCell(run: RunVM, live: boolean): Cell {
   const label = live ? "Tokens so far" : "Tokens";
   if (!run.tokens) return { key: "tokens", label, value: "—", sub: "not reported yet" };
   // A research run counts its own tokens; its workers report none, so there is no "of N" to say.
@@ -75,9 +78,20 @@ function tokensCell(run: RunVM, live: boolean): Cell {
   return { key: "tokens", label, value: formatTokens(run.tokens.total), sub: all ? `all ${run.tokens.of} reported` : `${run.tokens.reported} of ${run.tokens.of} reported` };
 }
 
-function costCell(run: RunVM): Cell {
-  if (run.cost) return { key: "cost", label: "Est. cost", value: `~${formatCost(run.cost.usd)}`, sub: "at list price" };
-  return { key: "cost", label: "Est. cost", value: "—", sub: run.tokens ? "no list price for this model" : "no usage reported yet" };
+/**
+ * The estimate is built from the agents that reported, so it carries the same coverage the tokens cell does. A
+ * figure that is absent says why: no usage yet, roles on different models, a model Meta publishes no price for, or
+ * no model to price at.
+ */
+export function costCell(run: RunVM): Cell {
+  const coverage = reportCoverage(run);
+  if (run.cost) return { key: "cost", label: "Est. cost", value: `~${formatCost(run.cost.usd)}`, sub: coverage ? `at list price · ${coverage}` : "at list price" };
+  const absent = { key: "cost", label: "Est. cost", value: "—" };
+  if (!run.tokens) return { ...absent, sub: "no usage reported yet" };
+  if (run.mixedModels) return { ...absent, sub: "Mixed models", title: "The roles of this run ran on different models, so no single list price applies." };
+  // The id as it is, not its display name: that strips `-contributor`, and a contributor row can be the unpriced one.
+  if (run.priceModel) return { ...absent, sub: `no list price for ${run.priceModel}`, title: `${run.priceModel}: ${NO_PRICE_REASON}` };
+  return { ...absent, sub: "model not resolved", title: "Neither the run nor the thread names the model it ran on." };
 }
 
 function runningCells(run: RunVM): Cell[] {

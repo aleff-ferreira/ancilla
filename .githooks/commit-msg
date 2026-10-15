@@ -1,5 +1,20 @@
 #!/bin/sh
 # Commits in this repository carry the author's name only (CLAUDE.md). A message that credits an AI tool is refused.
+# The rule is the one CI applies to new commits (scripts/check-attribution.mjs): any line that names a tool, not only
+# a co-author line. Without node, or when the check cannot run, the old, narrower pattern below still holds, and this
+# says so, so that the strict rule is never quietly off.
+here="$(dirname "$0")"
+if command -v node >/dev/null 2>&1 && [ -f "$here/../scripts/check-attribution.mjs" ]; then
+  node "$here/../scripts/check-attribution.mjs" --message "$1"
+  status=$?
+  [ "$status" -eq 0 ] && exit 0
+  # 3 is the check's own refusal. Anything else, node's 1 for a crash before the check ran any code of its own
+  # included, means it could not look, which is not a reason to refuse.
+  [ "$status" -eq 3 ] && exit 1
+  echo "commit-msg: node could not check the message (exit $status); using the narrower fallback rule." >&2
+else
+  echo "commit-msg: node is not on the PATH here, so the strict attribution rule is not checked; using the narrower fallback rule." >&2
+fi
 if grep -iE '^(co-authored-by|signed-off-by|reviewed-by|assisted-by):.*(claude|anthropic|copilot|codex|openai|gpt|gemini|cursor)' "$1" >/dev/null \
   || grep -iE 'generated (with|by)[^a-z]*(claude|copilot|codex|gpt|gemini|cursor)' "$1" >/dev/null; then
   echo "commit-msg: the message credits an AI tool. Commits here carry the author's name only; take the line out (CLAUDE.md)." >&2

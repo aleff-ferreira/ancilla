@@ -1,4 +1,4 @@
-import type { ApprovalMode, ModelOption, ReasoningEffort, SkillEntry } from "../types.js";
+import type { ApprovalMode, ReasoningEffort, SkillEntry } from "../types.js";
 
 /** What a built-in command does; skills are the other kind of command. */
 export type SlashAction = "compact" | "model" | "effort" | "permissions" | "fork" | "new" | "resume" | "init" | "skill" | "goal" | "research";
@@ -265,12 +265,8 @@ export function parseMode(word: string): ApprovalMode | undefined {
   return MODE_WORDS[word.trim().toLowerCase()];
 }
 
-/** A model by id or display label, exact before prefix. */
-export function findModel(models: readonly ModelOption[], word: string, label: (id: string) => string): ModelOption | undefined {
-  const wanted = word.trim().toLowerCase();
-  if (!wanted) {
-    return undefined;
-  }
-  const names = (m: ModelOption) => [m.modelId.toLowerCase(), m.displayLabel.toLowerCase(), label(m.modelId).toLowerCase()];
-  return models.find((m) => names(m).includes(wanted)) ?? models.find((m) => names(m).some((n) => n.startsWith(wanted)));
-}
+/**
+ * A model by what was typed: its id, its name, a prefix or any part of it, spaces or hyphens alike. The rules (the
+ * regular row over its Contributor sibling, no guessing between families) live with the model vocabulary.
+ */
+export { findModel, modelMatches } from "./models.js";

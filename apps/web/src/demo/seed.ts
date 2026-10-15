@@ -194,12 +194,12 @@ function into(minutes: number, seconds = 0): number {
   return Math.round((minutes * 60 + seconds) * 1000);
 }
 
-/** A token count split the way Muse reports an agent's usage: mostly prompt, part of that cached. */
+/** A token count split the way Muse reports an agent's usage: mostly prompt, part of that cached, the rest output with its reasoning inside it. */
 export function tokensOf(total: number): TokenUsage {
   const inputTokens = Math.round(total * 0.81);
-  const outputTokens = Math.round(total * 0.12);
+  const outputTokens = total - inputTokens;
   const cached = Math.round(inputTokens * 0.6);
-  return { inputTokens, outputTokens, reasoningTokens: total - inputTokens - outputTokens, cachedTokens: cached, cacheReadTokens: cached, cacheWriteTokens: 0 };
+  return { inputTokens, outputTokens, reasoningTokens: Math.round(total * 0.07), cachedTokens: cached, cacheReadTokens: cached, cacheWriteTokens: 0 };
 }
 
 /** A workflow agent's id: a UUIDv7 whose first 48 bits carry its scheduling time, as Muse's child ids do. */
@@ -1411,7 +1411,7 @@ function researchThread(now: number): { thread: SeedThread; runs: ResearchRunVie
       researchWorker(4, 2, "non-text contrast and large text", "completed", { searches: 2, reads: 3, saved: 1 }, doneStarted + 3 * MIN, doneStarted + 4 * MIN + 30_000),
       researchWorker(5, 2, "APCA and the newer models", "completed", { searches: 3, reads: 3, saved: 0 }, doneStarted + 3 * MIN, doneStarted + 5 * MIN),
     ],
-    sources: { registry: 14, verified: 11, curated: 4 },
+    sources: { registry: 14, verified: 11, curated: 4, opened: 9, searchOnly: 2, attempted: 1, listedEarlier: 0, evidence: 141 },
     usage: { inputTokens: 212_400, outputTokens: 9_850, cachedInputTokens: 96_200, totalTokens: 222_250 },
     failure: null,
     reportAvailable: true,
@@ -1442,7 +1442,7 @@ function researchThread(now: number): { thread: SeedThread; runs: ResearchRunVie
       researchWorker(5, 2, "documented contrast figures", "working", { searches: 1, reads: 0, saved: 0 }, runStarted + 2 * MIN + 5_000, null),
       researchWorker(6, 2, "how the scales are generated", "queued", { searches: 0, reads: 0, saved: 0 }, runStarted + 2 * MIN + 5_000, null),
     ],
-    sources: { registry: 9, verified: 7, curated: 0 },
+    sources: { registry: 9, verified: 7, curated: 0, opened: 5, searchOnly: 2, attempted: 1, listedEarlier: 0, evidence: 89 },
     usage: { inputTokens: 88_300, outputTokens: 3_120, cachedInputTokens: 40_100, totalTokens: 91_420 },
     failure: null,
     reportAvailable: false,

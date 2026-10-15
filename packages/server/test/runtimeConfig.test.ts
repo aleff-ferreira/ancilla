@@ -114,30 +114,38 @@ describe("the environment for a process started through wsl.exe", () => {
 });
 
 describe("ancilla-server start-up", () => {
-  it("starts on a runtime.json it cannot fully use, reporting it on stderr and nothing else on stdout", async () => {
+  // How long a real process takes to start is the machine's business: a loaded runner, a cold disk or a network
+  // drive can take far longer than a developer's laptop. The test therefore waits for the handshake line itself and
+  // sets no start-up budget of its own; the generous timeout below only keeps a hung child from hanging the suite.
+  it("starts on a runtime.json it cannot fully use, reporting it on stderr and nothing else on stdout", { timeout: 300_000 }, async () => {
     const dir = await mkdtemp(join(tmpdir(), "ancilla-cli-"));
     await writeFile(join(dir, "runtime.json"), Buffer.concat([BOM, utf8('{"runtime":"wsl","syncSessionNames":"false","wslEnv":{"my-var":"x","TBH_CREDENTIAL_BACKEND":"file"}}')]));
     const child = spawn(process.execPath, [join(__dirname, "..", "src", "cli.js"), "--port", "0", "--data-dir", dir], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    const handshake = new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+        if (stdout.includes("\n")) resolve();
+      });
+      child.once("error", reject);
+      child.once("close", (code) => reject(new Error(`the server exited (${code}) before its readiness line; stderr:\n${stderr}`)));
+    });
     try {
-      const deadline = Date.now() + 20000;
-      while (!stdout.includes("\n") && child.exitCode === null) {
-        if (Date.now() > deadline) throw new Error(`no readiness line; stderr so far:\n${stderr}`);
-        await new Promise((r) => setTimeout(r, 50));
-      }
-      assert.match(stdout.split("\n")[0]!, /^ancilla-server listening on http:\/\/127\.0\.0\.1:\d+$/, "the desktop handshake is the first line");
-      assert.match(stderr, /runtime\.json \(.*runtime\.json\): "syncSessionNames" was ignored/);
-      assert.match(stderr, /runtime\.json \(.*runtime\.json\): wslEnv "my-var" was ignored/);
-      assert.doesNotMatch(stderr, /TBH_CREDENTIAL_BACKEND/, "the usable entry is kept without comment");
+      await handshake;
     } finally {
       child.kill();
       const force = setTimeout(() => child.kill("SIGKILL"), 5000);
-      await exited;
+      await closed;
       clearTimeout(force);
     }
+    // Read only after the pipes have closed, so a line on stderr cannot arrive later than the one on stdout.
+    assert.match(stdout.split("\n")[0]!, /^ancilla-server listening on http:\/\/127\.0\.0\.1:\d+$/, "the desktop handshake is the first line");
+    assert.equal(stdout.trim().split("\n").length, 1, "stdout carries nothing besides the handshake");
+    assert.match(stderr, /runtime\.json \(.*runtime\.json\): "syncSessionNames" was ignored/);
+    assert.match(stderr, /runtime\.json \(.*runtime\.json\): wslEnv "my-var" was ignored/);
+    assert.doesNotMatch(stderr, /TBH_CREDENTIAL_BACKEND/, "the usable entry is kept without comment");
   });
 });

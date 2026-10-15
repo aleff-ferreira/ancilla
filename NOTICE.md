@@ -24,6 +24,11 @@ MIT License.
 - Please report problems
   with the DeepResearch feature in [this repository](https://github.com/aleff-ferreira/ancilla/issues), not upstream.
 
+## Design references
+
+The Host allow-list in `packages/server/src/admission.ts` follows the common trusted-authority design for loopback
+servers (a fence on the `Host` header). No third-party code is included.
+
 ## Third-party software
 
 The desktop installers bundle Node.js and the npm and Rust packages Ancilla is built from. Their licenses and notices

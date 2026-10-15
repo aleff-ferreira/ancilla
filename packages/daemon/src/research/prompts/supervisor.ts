@@ -12,7 +12,7 @@
  * only sub-agent kinds here are web research and web discovery.
  */
 
-import { notesBlock } from "../notes.js";
+import { capText, notesBlock } from "../notes.js";
 import type { SupervisorRound } from "../types.js";
 import { formatPromptDate, jsonFence, yearOf } from "./common.js";
 
@@ -51,19 +51,139 @@ function formatMinutes(minutes: number): string {
   return (Math.round(minutes * 10) / 10).toFixed(1);
 }
 
+/**
+ * The most characters the "Previous Rounds" block of a supervisor prompt carries. Every round adds its reflection
+ * (the supervisor's own denoise report, about twelve thousand characters when it is thorough) and its delegations,
+ * and the block is sent again with every decision, so twelve rounds reached about 148 thousand characters. Sixty
+ * thousand keeps the block to a handful of whole rounds plus a line or two per older round, which is what the next
+ * decision reads it for: it is half the budget of the notes block (`NOTES_BLOCK_CHAR_BUDGET`), so the two
+ * accumulating blocks together stay near 180 thousand characters, some 45 thousand tokens, well inside a model call.
+ */
+export const ROUNDS_BLOCK_CHAR_BUDGET = 60_000;
+
+/** How many of the newest rounds are kept whole when the block outgrows its budget. */
+export const ROUNDS_RECENT_IN_FULL = 3;
+
+/**
+ * The most characters one whole round keeps. Fits a thorough reflection and a full set of delegations; three of
+ * them (48 thousand) always fit the budget, leaving room for the older rounds' digests.
+ */
+export const ROUND_FULL_CHAR_CAP = 16_000;
+
+/** The most characters an older round's digest keeps: its header and a clipped line per delegation. */
+export const ROUND_DIGEST_CHAR_CAP = 700;
+
+const DIGEST_TOPIC_CHARS = 160;
+const DIGEST_OUTCOME_CHARS = 120;
+const ROUNDS_SEPARATOR = "\n\n";
+const OMITTED_MARK = "…[earlier rounds omitted]\n";
+
+function isHighSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+function isLowSurrogate(unit: number): boolean {
+  return unit >= 0xdc00 && unit <= 0xdfff;
+}
+
+/** `end` moved back one code unit when it would cut a surrogate pair in two. */
+function pairSafeEnd(text: string, end: number): number {
+  return end > 0 && end < text.length && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end)) ? end - 1 : end;
+}
+
+/** `start` moved on one code unit when it would begin in the middle of a surrogate pair. */
+function pairSafeStart(text: string, start: number): number {
+  return start > 0 && start < text.length && isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1)) ? start + 1 : start;
+}
+
+function clip(text: string, chars: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= chars) return flat;
+  const end = Math.max(0, chars - 1);
+  return `${flat.slice(0, pairSafeEnd(flat, end))}…`;
+}
+
+function outcomeOf(round: SupervisorRound, agentId: number): string {
+  const result = round.results.find((r) => r.agentId === agentId);
+  return result
+    ? result.status === "completed"
+      ? `completed, ${result.savedCount} saved source(s), ${result.verifiedCount} citable`
+      : `${result.status}${result.error ? `: ${result.error}` : ""}`
+    : "not run";
+}
+
+/** One round as the supervisor reads it: header, its reflection, and a line per delegation with its outcome. */
 function roundSummary(round: SupervisorRound): string {
   const lines = [`Round ${round.round}: verdict ${round.verdict ?? "none"}, ${round.delegations.length} delegation(s).`];
   if (round.reflection.trim()) lines.push(`Reflection:\n${round.reflection.trim()}`);
   for (const d of round.delegations) {
-    const result = round.results.find((r) => r.agentId === d.agentId);
-    const outcome = result
-      ? result.status === "completed"
-        ? `completed, ${result.savedCount} saved source(s), ${result.verifiedCount} verified`
-        : `${result.status}${result.error ? `: ${result.error}` : ""}`
-      : "not run";
-    lines.push(`- A${d.agentId} (${d.discovery ? "discovery" : "research"}): ${d.topic}\n  Outcome: ${outcome}`);
+    lines.push(`- A${d.agentId} (${d.discovery ? "discovery" : "research"}): ${d.topic}\n  Outcome: ${outcomeOf(round, d.agentId)}`);
   }
   return lines.join("\n");
+}
+
+/**
+ * A round within `cap` characters. The reflection gives way first, because the delegations and their outcomes are
+ * what the next decision most needs from a round; only when those alone do not fit is the whole cut at the cap.
+ */
+function cappedRoundSummary(round: SupervisorRound, cap: number): string {
+  const whole = roundSummary(round);
+  if (whole.length <= cap) return whole;
+  const reflection = round.reflection.trim();
+  if (reflection) {
+    const without = roundSummary({ ...round, reflection: "" });
+    const room = cap - without.length - "Reflection:\n".length - 1;
+    if (room > 500) {
+      const lines = without.split("\n");
+      const header = lines[0] as string;
+      const rest = lines.slice(1).join("\n");
+      return capText(`${header}\nReflection:\n${capText(reflection, room)}${rest ? `\n${rest}` : ""}`, cap);
+    }
+  }
+  return capText(whole, cap);
+}
+
+/** An older round reduced to its header and a clipped line per delegation; the reflection is left out. */
+function roundDigest(round: SupervisorRound): string {
+  const lines = [`Round ${round.round}: verdict ${round.verdict ?? "none"}, ${round.delegations.length} delegation(s) (older round; reflection left out).`];
+  for (const d of round.delegations) {
+    lines.push(`- A${d.agentId} (${d.discovery ? "discovery" : "research"}): ${clip(d.topic, DIGEST_TOPIC_CHARS)} -> ${clip(outcomeOf(round, d.agentId), DIGEST_OUTCOME_CHARS)}`);
+  }
+  return capText(lines.join("\n"), ROUND_DIGEST_CHAR_CAP);
+}
+
+/**
+ * The rounds as a supervisor prompt carries them. While the whole list fits `budget` it is the rounds as they are.
+ * Past it, the newest `ROUNDS_RECENT_IN_FULL` rounds stay whole (each within `ROUND_FULL_CHAR_CAP`), older rounds
+ * shrink to digests, newest first until the budget is spent, and the rest are named in one line as omitted. The
+ * result never exceeds `budget`, and for the same rounds it is always the same text.
+ */
+export function roundsBlock(rounds: SupervisorRound[], budget: number = ROUNDS_BLOCK_CHAR_BUDGET): string {
+  if (rounds.length === 0) return "(none yet)";
+  const whole = rounds.map(roundSummary).join(ROUNDS_SEPARATOR);
+  if (whole.length <= budget) return whole;
+
+  const split = Math.max(0, rounds.length - ROUNDS_RECENT_IN_FULL);
+  const recent = rounds.slice(split).map((round) => cappedRoundSummary(round, ROUND_FULL_CHAR_CAP));
+  const older = rounds.slice(0, split).map(roundDigest);
+  const recentLength = recent.join(ROUNDS_SEPARATOR).length;
+  // Room for the digests: what the whole rounds leave, less a separator and the line that names what was dropped.
+  const omittedLine = (count: number): string => `Rounds 1-${count}: ${count} earlier round(s) omitted from this list to keep the prompt within its budget.`;
+  let room = budget - recentLength - ROUNDS_SEPARATOR.length - omittedLine(older.length).length - ROUNDS_SEPARATOR.length;
+  const kept: string[] = [];
+  for (let i = older.length - 1; i >= 0; i -= 1) {
+    const digest = older[i] as string;
+    const cost = digest.length + ROUNDS_SEPARATOR.length;
+    if (cost > room) break;
+    kept.unshift(digest);
+    room -= cost;
+  }
+  const dropped = older.length - kept.length;
+  const parts = [...(dropped > 0 ? [omittedLine(dropped)] : []), ...kept, ...recent];
+  const block = parts.join(ROUNDS_SEPARATOR);
+  if (block.length <= budget) return block;
+  // A budget too small even for the whole rounds: keep the end, which is the newest.
+  return `${OMITTED_MARK}${block.slice(pairSafeStart(block, block.length - Math.max(0, budget - OMITTED_MARK.length)))}`;
 }
 
 export function buildSupervisorPrompt(input: SupervisorPromptInput): string {
@@ -73,7 +193,8 @@ export function buildSupervisorPrompt(input: SupervisorPromptInput): string {
   const remaining = Math.max(0, input.windowMaxMinutes - input.elapsedMinutes);
   // Oldest notes are compacted first when the block outgrows its budget; see `notes.ts`.
   const notes = input.notes.length > 0 ? notesBlock(input.notes) : "(no research findings yet; this is the first round)";
-  const rounds = input.rounds.length > 0 ? input.rounds.map(roundSummary).join("\n\n") : "(none yet)";
+  // Oldest rounds shrink first when the block outgrows its budget; see `roundsBlock`.
+  const rounds = roundsBlock(input.rounds);
   const draft = input.draft?.trim()
     ? `<Draft Report>\n${input.draft.trim()}\n</Draft Report>`
     : "<Draft Report>\n(no draft was written; treat the research brief as a SUGGESTIONS-LIST of angles to cover)\n</Draft Report>";

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   findModel,
   matchSlash,
+  modelMatches,
   parseEffort,
   parseMode,
   parseSlash,
@@ -110,6 +111,25 @@ describe("slash commands", () => {
     assert.equal(findModel(models, "muse max 2", label)?.modelId, "muse-max-2");
     assert.equal(findModel(models, "muse-sp", label)?.modelId, "muse-spark-1.3");
     assert.equal(findModel(models, "gpt", label), undefined);
+  });
+
+  it("finds a model by what is typed: the regular row before its Contributor twin, partial and spaced names", () => {
+    const row = (modelId: string, displayLabel = modelId) => ({ modelId, displayLabel }) as ModelOption;
+    // The Contributor row comes first, as a reordered catalog could send it.
+    const models = [row("muse-spark-1.3-contributor"), row("muse-spark-1.3"), row("muse-wonder-1.0")];
+    assert.equal(findModel(models, "muse-spark-1.3")?.modelId, "muse-spark-1.3");
+    assert.equal(findModel(models, "Muse-Spark-1.3 ")?.modelId, "muse-spark-1.3");
+    assert.equal(findModel(models, "muse-spark-1.3-contributor")?.modelId, "muse-spark-1.3-contributor");
+    assert.equal(findModel(models, "muse spark 1.3 contributor")?.modelId, "muse-spark-1.3-contributor");
+    assert.equal(findModel(models, "wonder")?.modelId, "muse-wonder-1.0");
+    assert.equal(findModel(models, "muse wonder 1.0")?.modelId, "muse-wonder-1.0");
+    assert.equal(findModel(models, "spark")?.modelId, "muse-spark-1.3", "versions of one family resolve to the first listed");
+    assert.equal(findModel(models, ""), undefined);
+    // Two families answer to `wonder`: guessing would be a coin flip, so nothing is chosen.
+    const both = [...models, row("muse-wonder-full-x")];
+    assert.equal(findModel(both, "wonder"), undefined);
+    assert.equal(findModel(both, "muse-wonder-1.0")?.modelId, "muse-wonder-1.0");
+    assert.deepEqual(modelMatches(both, "wonder").map((m) => m.modelId), ["muse-wonder-1.0", "muse-wonder-full-x"]);
   });
 
   it("gives a plugin skill its last name part as the shortcut", () => {

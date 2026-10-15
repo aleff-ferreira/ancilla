@@ -1,11 +1,14 @@
 import {
   ZERO_USAGE,
+  evidenceRank,
   modernizeCitations,
   type ResearchPhase,
   type ResearchRunRecord,
   type ResearchRunView,
+  type ResearchSourceCounts,
   type ResearchWorkerRecord,
   type ResearchWorkerView,
+  type SourceProvenance,
 } from "@ancilla/daemon";
 import type { WorkerUpdate } from "./sessionWorkerRunner.js";
 
@@ -20,6 +23,8 @@ export interface LiveRunOverlay {
 export interface RunViewOptions {
   withReport: boolean;
   live?: LiveRunOverlay | null;
+  /** Why the report has no file; the view carries the field only when there is something to say. */
+  reportWriteError?: string | null;
 }
 
 /**
@@ -69,6 +74,27 @@ export function workerViews(record: ResearchRunRecord, rows: ResearchWorkerRecor
   return [...views.values()].sort((a, b) => a.round - b.round || a.agentId - b.agentId);
 }
 
+/**
+ * The source counts of a run: how many sources the registry holds, how many can be cited, and how each was reached.
+ * A row from before provenance existed has no `provenance`; when it was verified it counts as listed by an earlier
+ * version, never as opened, and it is not rewritten. `evidence` sums `evidenceRank` over the registry, the one
+ * count that never falls while a run goes, because a shared entry only ever takes stronger evidence.
+ */
+export function sourceCounts(state: ResearchRunRecord["state"], curated: number): ResearchSourceCounts {
+  const registry = state?.registry ?? [];
+  const count = (provenance: SourceProvenance): number => registry.filter((s) => s.provenance === provenance).length;
+  return {
+    registry: registry.length,
+    verified: registry.filter((s) => s.verified).length,
+    curated,
+    opened: count("retrieved"),
+    searchOnly: count("search_only"),
+    attempted: count("attempted"),
+    listedEarlier: registry.filter((s) => s.provenance === undefined && s.verified).length,
+    evidence: registry.reduce((sum, s) => sum + evidenceRank(s), 0),
+  };
+}
+
 /** The wire summary of a run. The report only rides along when asked for, so lists stay small. */
 export function runView(record: ResearchRunRecord, rows: ResearchWorkerRecord[], options: RunViewOptions): ResearchRunView {
   const state = record.state;
@@ -90,16 +116,15 @@ export function runView(record: ResearchRunRecord, rows: ResearchWorkerRecord[],
     endedAt: record.endedAt,
     researchDeadlineAt: state?.researchDeadlineAt ?? null,
     workers: workerViews(record, rows, live),
-    sources: {
-      registry: state?.registry.length ?? 0,
-      verified: state?.registry.filter((s) => s.verified).length ?? 0,
-      curated: state?.curated.length ?? 0,
-    },
+    sources: sourceCounts(state, state?.curated.length ?? 0),
     usage: state?.usage ?? { ...ZERO_USAGE },
     failure: record.failure,
+    resumes: 0,
     reportAvailable: record.report !== null && record.report.length > 0,
     report: options.withReport && record.report ? modernizeCitations(record.report) : null,
     reportPath: record.reportPath,
+    ...(options.reportWriteError ? { reportWriteError: options.reportWriteError } : {}),
+    ...(state?.noCitableSources ? { noCitableSources: true } : {}),
     config: record.config,
   };
 }

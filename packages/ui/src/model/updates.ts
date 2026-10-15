@@ -54,7 +54,10 @@ function messageOf(error: unknown): string {
   return typeof error === "string" && error ? error : "Something went wrong.";
 }
 
-/** Tauri throws this when latest.json exists but this OS is not in it yet (Windows publishes first). */
+/**
+ * Tauri throws this when latest.json exists but this OS is not in it. A release is published whole now, so this is
+ * no longer the gap between Windows and Linux uploads (releases up to 0.20.3 had one); it still means "nothing for this system".
+ */
 export function isMissingPlatformFeed(error: unknown): boolean {
   return /fallback platforms/i.test(messageOf(error));
 }

@@ -55,7 +55,11 @@ export interface LocalEcho {
   localId: string;
   text: string;
   turnId: string | null;
-  disposition: "sending" | "started" | "queued" | "steered";
+  /**
+   * `unconfirmed`: the send got no answer at all, so the prompt may or may not have reached Muse. The thread is
+   * being read to find out; it is never sent again meanwhile.
+   */
+  disposition: "sending" | "started" | "queued" | "steered" | "unconfirmed";
   createdAt: number;
   attachments?: EchoAttachment[];
   /**
@@ -93,7 +97,7 @@ export interface ThreadMeta {
   branch: string | null;
   contextUsage: ContextUsage | null;
   tokenTotals: TokenTotals | null;
-  /** Every model call's usage, keyed by view cursor so a reloaded history never counts one twice. */
+  /** Every model call's usage, keyed by the call's own totals (its view cursor when it has none) so live, history and reload never count one twice. */
   calls: Record<string, CallUsage>;
   modelId: string | null;
   approvalMode: ApprovalMode | null;
@@ -1001,7 +1005,14 @@ function applyOne(draft: Draft, event: ViewEvent): void {
       }
       const usage = asRecord(params["usage"]) ?? {};
       const promptTokens = numberOr(params["promptTokens"]) ?? numberOr(usage["inputTokens"]) ?? 0;
-      const key = str(params["viewCursor"]) ?? `${str(params["turnId"]) ?? "turn"}:${Object.keys(d.meta.calls).length}`;
+      // One call, one entry, however it reached us. The live stream and a history page number the same call with
+      // different cursors (the page drops the deltas between them), so a call that carries Muse's running totals is
+      // keyed by those: every call moves them, and a replay or a merge of the same call lands on the same key. The
+      // cursor is only the key for an event without totals.
+      const totals = cumulative ? [numberOr(cumulative["promptTokens"]), numberOr(cumulative["outputTokens"]), numberOr(cumulative["totalTokens"])] : [];
+      const key = totals.some((value) => value !== undefined)
+        ? [str(params["turnId"]) ?? "", ...totals.map((value) => value ?? ""), numberOr(params["durationMs"]) ?? "", promptTokens].join(":")
+        : str(params["viewCursor"]) ?? `${str(params["turnId"]) ?? "turn"}:${Object.keys(d.meta.calls).length}`;
       draft.putCall(key, {
         turnId: str(params["turnId"]),
         modelId: str(params["modelId"]),
@@ -1529,6 +1540,26 @@ export function updateEcho(fold: ThreadFold, localId: string, patch: Partial<Loc
   const echoes = [...fold.echoes];
   echoes[index] = echo;
   return { ...fold, echoes };
+}
+
+/** The ids of the prompts a thread holds, so a later read can tell which ones arrived since. */
+export function promptIds(fold: ThreadFold): string[] {
+  return fold.order.filter((id) => fold.items[id]?.kind === "userMessage");
+}
+
+/**
+ * Whether a prompt that is not among `known` has landed in the thread and reads as `text`. A send with files and no
+ * words has no text to match, so any new prompt counts for it.
+ */
+export function promptLanded(fold: ThreadFold, known: readonly string[], text: string): boolean {
+  const wanted = normalizeText(text);
+  return fold.order.some((id) => {
+    const item = fold.items[id];
+    if (item?.kind !== "userMessage" || known.includes(id)) {
+      return false;
+    }
+    return wanted === "" || promptTexts(item).has(wanted);
+  });
 }
 
 export function removeEcho(fold: ThreadFold, localId: string): ThreadFold {

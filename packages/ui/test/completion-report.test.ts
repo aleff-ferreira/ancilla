@@ -6,7 +6,11 @@ import { TooltipProvider } from "../src/components/ui/overlays.js";
 import { CompletionReport, emphasized, reportMeta, type CompletionReportProps } from "../src/components/crew/CompletionReport.js";
 import { SinceYouLeft, recapText } from "../src/components/crew/SinceYouLeft.js";
 import { CrewCard } from "../src/components/crew/CrewCard.js";
-import { completionView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
+import { completionView, crewView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
+import { emptyFold } from "../src/model/fold.js";
+import type { ResearchRunView } from "../src/types.js";
+import { session } from "./crew-fixtures.js";
+import { RESEARCH_NOW, iso, rs, runningResearch } from "./fixtures/research.js";
 import { S, finishedFeed, finishedRun, flatten, mkAgent, mkRun, mkTask, referenceAgents, textOf as text, view } from "./fixtures/lantern.js";
 
 const noop = () => {};
@@ -49,13 +53,13 @@ describe("CompletionReport", () => {
     assert.equal((markup.match(/class="crew-strip rail finale"/g) ?? []).length, 4);
     assert.doesNotMatch(markup, /crew-sheen/, "no sheen unless asked for");
     const stats = [...markup.matchAll(/class="v">([^<]*)<\/div><div class="k">([^<]*)</g)].map((m) => [m[1], m[2]]);
-    assert.deepEqual(stats.map((s) => s[1]), ["agents", "wall clock", "tokens, reported by Muse", "estimate at list price"]);
-    assert.deepEqual(stats.slice(0, 3).map((s) => s[0]), ["10", "45m 06s", "1.5M"]);
+    assert.deepEqual(stats.map((s) => s[1]), ["agents", "wall clock", "tokens, reported by Muse · latest attempt of each agent", "estimate at list price"]);
+    assert.deepEqual(stats.slice(0, 3).map((s) => s[0]), ["10", "45m 06s", "1.4M"]);
     assert.match(stats[3]?.[0] as string, /^~\$/);
     const rows = [...flatten(markup).matchAll(/<li>(?:<svg[\s\S]*?<\/svg>)?<span>([\s\S]*?)<\/span>(?:<span class="r">([^<]*)<\/span>)?<\/li>/g)].map((m) => [text(m[1] as string), m[2] ?? null]);
     assert.deepEqual(rows.slice(0, 4), [
       ["Longest agent judge:perf · 18m 36s", null],
-      ["Most tokens research:field-notes · 288k", "20% of the run"],
+      ["Most tokens research:field-notes · 270k", "20% of the run"],
       ["Retried design:conflict-ledger · landed on attempt 3", "after 2 failed attempts"],
       ["Waited on you 1m 40s", null],
     ]);
@@ -137,5 +141,28 @@ describe("emphasized", () => {
   it("wraps the strong part once and leaves a line without it alone", () => {
     assert.equal(renderToStaticMarkup(createElement("span", null, emphasized("Waited on you 1m 40s", "1m 40s"))), "<span>Waited on you <b>1m 40s</b></span>");
     assert.equal(renderToStaticMarkup(createElement("span", null, emphasized("Peak concurrency 4 agents", "nothing"))), "<span>Peak concurrency 4 agents</span>");
+  });
+});
+
+describe("CompletionReport for a research run the server interrupted", () => {
+  const ending = { phase: "done" as const, endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } };
+  const research = (over: Partial<ResearchRunView>): RunVM => {
+    const view = crewView(emptyFold(), session("s1", "Research", { modelId: "muse-spark-1.3" }), RESEARCH_NOW, { researchRuns: [runningResearch({ ...ending, ...over })] });
+    return view.runs[0] as RunVM;
+  };
+  const pill = (markup: string): string => /<span class="crew-el[^"]*">(?:<svg[\s\S]*?<\/svg>)?([^<]*)</.exec(markup)?.[1] ?? "";
+
+  it("says Interrupted in its head, not Stopped, beside the headline that says so", () => {
+    const run = research({ status: "interrupted", failure: "interrupted: the server shut down while the run was in flight." });
+    assert.equal(run.status, "stopped", "the run status other consumers read is unchanged");
+    const { markup } = render(run);
+    assert.match(pill(markup), /^Interrupted · 4m 59s$/);
+    assert.match(markup, /<h2>Interrupted after 5m; one of three had landed\.<\/h2>/);
+    assert.match(markup, /class="sub">The server shut down while the run was in flight\. · /);
+  });
+
+  it("keeps Stopped for a run the user stopped, and Failed for one that failed", () => {
+    assert.match(pill(render(research({ status: "cancelled" })).markup), /^Stopped · 4m 59s$/);
+    assert.match(pill(render(research({ status: "failed", failure: "the model refused" })).markup), /^Failed · 4m 59s$/);
   });
 });

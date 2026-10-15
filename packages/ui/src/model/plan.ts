@@ -32,12 +32,17 @@ export interface PlanView {
   stale: boolean;
   /** How long ago Muse reported this, ready to read: "just now", "4m", "2h". */
   age: string;
+  /** Whether Refresh can bring a newer reading, which is what the wording about an old one has to promise. */
+  refreshable: boolean;
 }
 
 /** Past this the reading is called out as old, though its age is shown from the first minute either way. */
 const STALE_MS = 30 * 60 * 1000;
 
 const MINUTE_MS = 60 * 1000;
+
+/** How often the sidebar meter is re-read while the window is in sight, so it never drifts to unknown on its own. */
+export const PLAN_SYNC_MS = 5 * MINUTE_MS;
 
 /** The reading's age, short enough to sit beside the number itself. */
 export function planAge(observedAtMs: number, now: number): string {
@@ -67,8 +72,19 @@ function windowLabel(window: PlanWindow): string {
 
 const HOUR_MS = 60 * 60 * 1000;
 
-/** Hours and minutes for today's window, days and hours for the weekly one: "77h" says less than "3d 5h". */
+/**
+ * Hours and minutes for today's window, days and hours for the weekly one: "77h" says less than "3d 5h". Under an hour
+ * it counts whole minutes, rounded up, and never seconds: the clock ticks once a minute, so seconds would sit on
+ * screen for up to a minute after they stopped being true.
+ */
 export function formatReset(ms: number): string {
+  if (ms < HOUR_MS) {
+    if (ms < MINUTE_MS) {
+      return "<1m";
+    }
+    const minutes = Math.ceil(ms / MINUTE_MS);
+    return minutes >= 60 ? "1h" : `${minutes}m`;
+  }
   if (ms < 48 * HOUR_MS) {
     return formatDuration(ms);
   }
@@ -78,7 +94,7 @@ export function formatReset(ms: number): string {
   return rest === 0 ? `${days}d` : `${days}d ${rest}h`;
 }
 
-function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number, recent: boolean): PlanRow {
+function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number, recent: boolean, refreshable: boolean): PlanRow {
   const percent = Math.round(window.usedPercent);
   const left = window.resetsAtMs - now;
   return {
@@ -89,8 +105,19 @@ function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number
     resetsAtMs: window.resetsAtMs,
     expired: left <= 0,
     current: recent && left > 0,
-    resets: left > 0 ? `Resets in ${formatReset(left)}` : "Reset time passed · refresh needed",
+    resets: left > 0 ? `Resets in ${formatReset(left)}` : refreshable ? "Reset time passed · refresh needed" : "Reset time passed · waiting for Muse's next report",
   };
+}
+
+/**
+ * Refresh asks Meta again, so it can help wherever Ancilla has made a direct check for the account (the server stamps
+ * it with a check time), and after a failed read, which is what a retry is for. A reading only the Muse runtime
+ * reports (a WSL host, a Keychain-only login, a login that lost its token) changes when Muse next sends usage, however
+ * often it is refreshed. A report from a server that predates direct checks has no check time either, and such a
+ * server never asked Meta, so it reads the same way.
+ */
+function canRefresh(account?: PlanAccountUsage): boolean {
+  return !account || account.checkedAtMs !== null || account.status === "unavailable";
 }
 
 /** The plan meter as the UI shows it: the short window and the weekly cap, each with how long until it resets. */
@@ -102,12 +129,112 @@ export function planView(usage: PlanUsage | null, now: number, account?: PlanAcc
   }
   const old = now - usage.observedAtMs > STALE_MS;
   const available = !account || ((account.status === "ready" || account.status === "runtime-only") && account.source !== "saved");
+  const refreshable = canRefresh(account);
   return {
     tier: /^[a-z][a-z0-9_ -]{0,31}$/i.test(usage.tier) ? humanize(usage.tier) : null,
-    rows: [row("window", windowLabel(usage.window), usage.window, now, !old && available), row("weekly", "Weekly limit", usage.weekly, now, !old && available)],
+    rows: [row("window", windowLabel(usage.window), usage.window, now, !old && available, refreshable),
+      row("weekly", "Weekly limit", usage.weekly, now, !old && available, refreshable)],
     observedAtMs: usage.observedAtMs,
     stale: old || usage.window.resetsAtMs <= now || usage.weekly.resetsAtMs <= now,
     age: planAge(usage.observedAtMs, now),
+    refreshable,
+  };
+}
+
+/**
+ * The limit that decides whether the account runs out: the highest percentage among the rows with a current reading,
+ * the short window when they tie. Null when no row is current, so a stale meter never passes for a number.
+ */
+export function bindingRow(view: PlanView): PlanRow | null {
+  let binding: PlanRow | null = null;
+  for (const row of view.rows) {
+    if (row.current && (!binding || row.percent > binding.percent)) {
+      binding = row;
+    }
+  }
+  return binding;
+}
+
+/**
+ * Whether the background sync should read the plan meter now: only while the window is in sight, once per interval.
+ * After a read that failed the interval is a minute, so a passing failure does not leave the pill on a dash for minutes.
+ */
+export function planSyncDue(visibility: string, lastLoadedAt: number, now: number, retrying = false): boolean {
+  return visibility === "visible" && (now - lastLoadedAt >= (retrying ? MINUTE_MS : PLAN_SYNC_MS) || now < lastLoadedAt);
+}
+
+/** Whether the last read left an account without a reading it can stand behind: the read itself failed, or Meta could not be asked. */
+export function planReadFailed(state: Pick<AppState, "planUsageStatus" | "planUsageAccounts">): boolean {
+  return state.planUsageStatus === "unavailable" || state.planUsageAccounts.some((account) => account.status === "unavailable");
+}
+
+/** What the plan meter's upkeep needs from the controller. */
+export interface PlanUpkeepController {
+  readonly store: { get(): AppState };
+  loadPlanUsage(options?: { background?: boolean }): Promise<void>;
+}
+
+/** What it needs from the page: whether the window is in sight, and to hear when that changes. */
+export interface PlanUpkeepPage {
+  readonly visibilityState: string;
+  addEventListener(type: "visibilitychange", listener: () => void): void;
+  removeEventListener(type: "visibilitychange", listener: () => void): void;
+}
+
+/** What it needs from the clock, so the timing can be driven by hand in a test. */
+export interface PlanUpkeepClock {
+  now(): number;
+  setInterval(handler: () => void, ms: number): unknown;
+  clearInterval(handle: unknown): void;
+}
+
+const systemClock: PlanUpkeepClock = {
+  now: () => Date.now(),
+  setInterval: (handler, ms) => setInterval(handler, ms),
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+};
+
+/**
+ * Keeps the sidebar's plan meter current wherever the person is: re-reads it quietly (no spinner) when the window comes
+ * back into sight and once the interval has passed while it is in sight, and does nothing while it is hidden or before
+ * Muse is set up. The timer only looks at the clock, so a late tick cannot skip a read. Returns what stops it.
+ */
+export function startPlanSync(controller: PlanUpkeepController, page: PlanUpkeepPage, clock: PlanUpkeepClock = systemClock): () => void {
+  let lastLoadedAt = clock.now();
+  const sync = () => {
+    const now = clock.now();
+    const state = controller.store.get();
+    if (state.boot !== "ready" || !state.env?.museFound || !planSyncDue(page.visibilityState, lastLoadedAt, now, planReadFailed(state))) {
+      return;
+    }
+    lastLoadedAt = now;
+    void controller.loadPlanUsage({ background: true });
+  };
+  const timer = clock.setInterval(sync, MINUTE_MS);
+  page.addEventListener("visibilitychange", sync);
+  return () => {
+    clock.clearInterval(timer);
+    page.removeEventListener("visibilitychange", sync);
+  };
+}
+
+/**
+ * The Usage page's own upkeep: one read when it opens, which shows that it is checking, then quiet reads every minute
+ * and whenever the window comes back into sight. Returns what stops it.
+ */
+export function startPlanPolling(controller: PlanUpkeepController, page: PlanUpkeepPage, clock: PlanUpkeepClock = systemClock): () => void {
+  void controller.loadPlanUsage();
+  const refresh = () => {
+    if (page.visibilityState === "visible") {
+      void controller.loadPlanUsage({ background: true });
+    }
+  };
+  // This checks the account without creating a thread or making a model call.
+  const timer = clock.setInterval(refresh, MINUTE_MS);
+  page.addEventListener("visibilitychange", refresh);
+  return () => {
+    clock.clearInterval(timer);
+    page.removeEventListener("visibilitychange", refresh);
   };
 }
 

@@ -7,6 +7,7 @@ import type {
   GoalAction,
   AncillaEvent,
   IfBusy,
+  ModelCatalog,
   ModelOption,
   OutgoingAttachment,
   OutputRange,
@@ -23,6 +24,7 @@ import type {
   WorkflowAction,
   YoloSettings,
 } from "./types.js";
+import { parseEfforts } from "./model/models.js";
 import { listedPrice } from "./model/pricing.js";
 
 /** An error from the Ancilla server, carrying the MSP error kind when there is one. */
@@ -39,6 +41,15 @@ export class AncillaError extends Error {
 
 export function errorKind(error: unknown): string | null {
   return error instanceof AncillaError ? error.kind : null;
+}
+
+/**
+ * The call got no answer at all: it timed out or the connection broke, which a client reports as status 0. Unlike
+ * an error the server sent, this says nothing about whether the server did the work, so a send is never simply
+ * called "not sent" on it.
+ */
+export function noAnswer(error: unknown): boolean {
+  return error instanceof AncillaError && error.status === 0;
 }
 
 export function errorMessage(error: unknown): string {
@@ -115,7 +126,15 @@ export interface AncillaClient {
   answerUserInput(sessionId: string, userInputId: string, answers: UserInputAnswer[]): Promise<void>;
   cancelUserInput(sessionId: string, userInputId: string): Promise<void>;
   clarifyUserInput(sessionId: string, userInputId: string, content: string): Promise<void>;
-  listModels(sessionId?: string): Promise<ModelOption[]>;
+  /**
+   * The catalog Muse lists. With a `sessionId` the host that runs that thread answers (and flags its active row);
+   * else the named account's host, or the default login's when `accountId` is absent.
+   */
+  listModels(sessionId?: string, accountId?: string | null): Promise<ModelOption[]>;
+  /** The same list with what Muse says about it (source, provider, host version). Optional for older transports. */
+  listModelCatalog?(sessionId?: string, accountId?: string | null): Promise<ModelCatalog>;
+  /** Closes every live Muse host so the next use starts them again; refused while a turn is running. Optional for older transports. */
+  restartHosts?(): Promise<void>;
   getTitleSettings(): Promise<TitleSettings>;
   setTitleSettings(patch: { enabled?: boolean; modelId?: string | null }): Promise<TitleSettings>;
   getSandboxSettings(): Promise<SandboxSettings>;
@@ -278,9 +297,29 @@ export function parseModelList(value: unknown): ModelOption[] {
       // Muse's catalog carries no prices today, so the published table stands in when it lists none.
       cost: parseCost(r["cost"]) ?? listedPrice(modelId),
       contributor: /contributor/i.test(modelId) || /product improvement/i.test(description ?? ""),
+      // Muse 1.4.0 sends `variants`; later builds send `reasoningEffortVariants`.
+      efforts: parseEfforts(r["variants"], r["reasoningEffortVariants"]),
     });
   }
   return options;
+}
+
+/**
+ * Parse the `/api/models` answer: the rows, and what Muse says about the list they came from. The server wraps
+ * Muse's whole `model/list` result, which carries `source`, `providerId` and `profileId` beside the rows, and adds
+ * the version of the host that answered.
+ */
+export function parseModelCatalog(value: unknown): ModelCatalog {
+  const answer = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const result = (answer["models"] && typeof answer["models"] === "object" ? answer["models"] : {}) as Record<string, unknown>;
+  const text = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v : null);
+  return {
+    models: parseModelList(answer["models"]),
+    source: text(result["source"]),
+    providerId: text(result["providerId"]),
+    profileId: text(result["profileId"]),
+    hostVersion: text(answer["hostVersion"]),
+  };
 }
 
 /** Catalog prices arrive as decimal strings per million tokens. */

@@ -269,11 +269,12 @@ describe("crewView on a running workflow", () => {
   it("adds up the tokens Muse reported and estimates the cost at the session model's list price", () => {
     const { vm } = view(lantern());
     const run = vm.runs[0] as RunVM;
-    assert.deepEqual(run.tokens, { total: 1_276_200, reported: 8, of: 9 });
+    // Input plus output: reasoning (75,700 here) is part of the output, so it is shown beside the total and not added to it.
+    assert.deepEqual(run.tokens, { total: 1_200_500, reported: 8, of: 9 });
     assert.equal(agent(run, "judge:perf").tokens, null, "not reported yet");
     assert.equal(run.cost?.model, "muse-spark-1.3");
-    const expected = costEstimate({ inputTokens: 1_053_100, outputTokens: 147_400, reasoningTokens: 75_700 }, "muse-spark-1.3");
-    assert.ok(expected !== null && Math.abs((run.cost?.usd ?? 0) - expected) < 1e-9);
+    // 1,053,100 in at $1.25 and 147,400 out at $4.25 per million, with no cache: worked by hand, not through costEstimate.
+    assert.ok(Math.abs((run.cost?.usd ?? 0) - 1.942825) < 1e-9);
     assert.equal(costEstimate({ inputTokens: 1000 }, "no-such-model"), null);
     assert.equal(costEstimate({ inputTokens: 1000 }, null), null);
   });
@@ -613,7 +614,7 @@ describe("usage latch and reconnect", () => {
     assert.deepEqual(live.crew.runs["wf"]?.children["a:1"]?.usage, { inputTokens: 48_333, outputTokens: 4_004, reasoningTokens: 3_409 });
     const run = crewView(live, SESSION, S(4, 0)).runs[0] as RunVM;
     assert.deepEqual(agent(run, "a").tokens, { inputTokens: 48_333, outputTokens: 4_004, reasoningTokens: 3_409 });
-    assert.deepEqual(run.tokens, { total: 55_746, reported: 1, of: 1 });
+    assert.deepEqual(run.tokens, { total: 52_337, reported: 1, of: 1 });
     // A capped page that starts after the usage revision still shows the tokens the live stream latched.
     const load: TranscriptLoad = {
       session: null, msp: null, truncated: true, readOnly: false, readOnlyReason: null, pending: { approvals: [], userInputs: [] },
@@ -670,10 +671,11 @@ describe("completion", () => {
     assert.ok(report);
     assert.equal(report.headline, "All ten landed.");
     assert.equal(report.factLine, "Every phase reached its end · 1 agent needed 3 attempts");
-    assert.deepEqual(report.stats.map((stat) => stat.label), ["agents", "wall clock", "tokens, reported by Muse", "estimate at list price"]);
+    // One agent landed on attempt 3, and Muse does not say a retry's usage covers the attempts before it.
+    assert.deepEqual(report.stats.map((stat) => stat.label), ["agents", "wall clock", "tokens, reported by Muse · latest attempt of each agent", "estimate at list price"]);
     assert.equal(report.stats[0]?.value, "10");
     assert.equal(report.stats[1]?.value, "45m 06s");
-    assert.equal(report.stats[2]?.value, "1.5M");
+    assert.equal(report.stats[2]?.value, "1.4M");
     assert.equal(report.sheen, true);
     assert.equal(report.excerpt, "Recommend the CRDT ledger.\nIt resolved every case in the conflict corpus.\nThe op-log design is simpler.");
     assert.deepEqual(run.report?.handoffs, [{ agent: "design:crdt-ledger", description: "ledger design doc" }]);
@@ -685,8 +687,8 @@ describe("completion", () => {
     assert.ok(report);
     assert.deepEqual(report.highlights.map((h) => [h.icon, h.text, h.aside]), [
       ["Timer", "Longest agent judge:perf · 18m 36s", null],
-      // The retried agent counts its newest report only, so the run holds 1.47M and not 1.53M.
-      ["Database", "Most tokens research:field-notes · 288k", "20% of the run"],
+      // The retried agent counts its newest report only, so the run holds 1,382,000 (1.4M) and not 1,440,500.
+      ["Database", "Most tokens research:field-notes · 270k", "20% of the run"],
       ["ArrowCounterClockwise", "Retried design:conflict-ledger · landed on attempt 3", "after 2 failed attempts"],
       ["ShieldWarning", "Waited on you 1m 40s", null],
     ]);
@@ -706,7 +708,7 @@ describe("completion", () => {
     assert.deepEqual(report.highlights.map((h) => h.text), [
       "1 agent failed design:conflict-ledger",
       "Longest agent judge:perf · 18m 36s",
-      "Most tokens research:field-notes · 288k",
+      "Most tokens research:field-notes · 270k",
       "Peak concurrency 4 agents",
     ]);
     assert.equal(report.highlights[0]?.aside, "after 2 attempts");
@@ -720,6 +722,7 @@ describe("completion", () => {
     assert.equal(headline(counts(8, 10, { failed: 2 }), "finished-with-failures", 0), "Eight of ten landed, two failed.");
     assert.equal(headline(counts(7, 10, { skipped: 1, failed: 2 }), "finished-with-failures", 0), "Seven of ten landed, one skipped, two failed.");
     assert.equal(headline(counts(4, 10, { unknown: 6 }), "stopped", 12 * MIN + 10_000), "Stopped by you after 12m; four of ten had landed.");
+    assert.equal(headline(counts(4, 10, { unknown: 6 }), "stopped", 12 * MIN + 10_000, true), "Interrupted after 12m; four of ten had landed.");
     assert.equal(headline(counts(2, 10, { unknown: 8 }), "failed", 3 * MIN), "The run failed after 3m; two of ten had landed.");
     assert.equal(headline(counts(198, 240, { failed: 4, unknown: 38 }), "finished-with-failures", 0), "198 of 240 landed, four failed, 38 not reported.");
     assert.equal(headline(counts(1, 1), "finished", 0), "The agent landed.");
@@ -877,7 +880,7 @@ describe("sidebar, activity and the window title", () => {
     assert.deepEqual(activity.working.map((item) => [item.kind, item.text, item.sub]), [["run", "offline-sync-research-design", "Judge · 6 of 10"]]);
     assert.deepEqual(activity.stopAll, { runs: 1, tasks: 0 });
     assert.equal(activity.note, "Open a thread to load its agent activity. Disconnected threads show their last known state.");
-    assert.equal(activity.foot, "1 running in 1 thread · 1.3M tokens today");
+    assert.equal(activity.foot, "1 running in 1 thread · 1.2M tokens in current runs");
     assert.equal(windowTitleCount(s), 1);
     const quiet = activityView(state({}, {}), NOW);
     assert.equal(quiet.empty, true);

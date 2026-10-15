@@ -18,6 +18,7 @@ import { AncillaController, type Platform } from "../model/controller.js";
 import type { Notifier } from "../model/notify.js";
 import type { AppUpdater } from "../model/updates.js";
 import { windowTitleCount } from "../model/crew.js";
+import { startPlanSync } from "../model/plan.js";
 import { zoomStepFromKey, type ZoomStep } from "../model/zoom-shortcut.js";
 import { ControllerProvider, useApp, useController } from "./context.js";
 import { FrameProvider, FrameStrip, WindowControls, type WindowFrame } from "./frame.js";
@@ -64,6 +65,7 @@ export function AncillaApp(props: AncillaAppProps) {
           <GlobalShortcuts />
           <WindowTitleSync />
           <AwaySync />
+          <PlanSync />
           <Shell />
           <DeviceLoginModal />
           <ActivityDrawerHost />
@@ -235,6 +237,16 @@ function AwaySync() {
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [controller]);
+  return null;
+}
+
+/**
+ * Keeps the sidebar's plan meter current wherever the person is. Only the Usage page used to re-read it, so the pill
+ * went to a dash after 30 idle minutes even though one free read brings it back. The rules live in `startPlanSync`.
+ */
+function PlanSync() {
+  const controller = useController();
+  useEffect(() => startPlanSync(controller, document), [controller]);
   return null;
 }
 

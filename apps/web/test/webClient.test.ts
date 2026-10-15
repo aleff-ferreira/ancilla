@@ -251,6 +251,79 @@ describe("web client", () => {
     assert.deepEqual(JSON.parse(String(patch?.init?.body)), { enabled: true });
   });
 
+  it("asks for a model list by thread, by account, or for the default login's", async () => {
+    const world = browser();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
+
+    await client.listModels();
+    await client.listModels("s1");
+    await client.listModels(undefined, "work");
+    await client.listModels(undefined, null);
+    await client.listModels("s 2", "a/b");
+    assert.deepEqual(world.calls.map((entry) => entry.url), [
+      "/api/models",
+      "/api/models?sessionId=s1",
+      "/api/models?accountId=work",
+      "/api/models",
+      "/api/models?sessionId=s%202&accountId=a%2Fb",
+    ]);
+  });
+
+  it("reads a model list with what the host says about it", async () => {
+    browser();
+    const { WebAncillaClient } = await freshClient();
+    const body = {
+      models: { source: "bundledCatalog", providerId: "meta", profileId: "tbh", models: [{ modelId: "muse-wonder-1.0", variants: ["minimal", "max"] }] },
+      hostVersion: "1.4.0",
+    };
+    const fetcher = mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
+    try {
+      const client = new WebAncillaClient();
+      const catalog = await client.listModelCatalog(undefined, "work");
+      assert.deepEqual(catalog.models.map((m) => [m.modelId, m.efforts]), [["muse-wonder-1.0", ["minimal", "max"]]]);
+      assert.equal(catalog.source, "bundledCatalog");
+      assert.equal(catalog.profileId, "tbh");
+      assert.equal(catalog.hostVersion, "1.4.0");
+      assert.deepEqual((await client.listModels()).map((m) => m.modelId), ["muse-wonder-1.0"], "the plain call still returns just the rows");
+    } finally {
+      fetcher.mock.restore();
+    }
+  });
+
+  it("restarts Muse through the hosts route", async () => {
+    const world = browser();
+    const { WebAncillaClient } = await freshClient();
+    await new WebAncillaClient().restartHosts();
+    assert.equal(world.calls.at(-1)?.url, "/api/hosts/restart");
+    assert.equal(world.calls.at(-1)?.init?.method, "POST");
+  });
+
+  it("sends the browser's time zone with a usage request, and none when it cannot say", async () => {
+    const world = browser();
+    const { WebAncillaClient } = await freshClient();
+    const client = new WebAncillaClient();
+
+    await client.usage(7);
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    assert.ok(zone, "the test machine has a zone");
+    assert.equal(world.calls.at(-1)?.url, `/api/usage?days=7&tz=${encodeURIComponent(zone)}`);
+    await client.usage();
+    assert.equal(world.calls.at(-1)?.url, `/api/usage?tz=${encodeURIComponent(zone)}`);
+
+    const broken = mock.method(Intl, "DateTimeFormat", () => {
+      throw new Error("no Intl here");
+    });
+    try {
+      await client.usage(30);
+      assert.equal(world.calls.at(-1)?.url, "/api/usage?days=30");
+      await client.usage();
+      assert.equal(world.calls.at(-1)?.url, "/api/usage");
+    } finally {
+      broken.mock.restore();
+    }
+  });
+
   it("rebuilds a stream that has gone quiet", async () => {
     browser();
     const { WebAncillaClient } = await freshClient();

@@ -1,34 +1,35 @@
 import { Popover } from "radix-ui";
 import { shallowEqual, useApp } from "../../app/context.js";
-import { formatTokens, modelDisplayName } from "../../model/format.js";
-import { formatCost } from "../../model/pricing.js";
+import { modelDisplayName } from "../../model/format.js";
+import { formatCost, priceOf } from "../../model/pricing.js";
 import { sessionUsage } from "../../model/usage.js";
+import { costNotes, costRows, costTip, modelRateCaption, subagentLine, usageCostLabel, type TokenRow } from "../../model/usage-labels.js";
 import { Tip, FLOATING } from "../ui/overlays.js";
 
 /** What this thread would have cost on API billing, beside the context meter. */
 export function CostMeter(props: { sessionId: string }) {
   const total = useApp((s) => {
-    const fold = s.threads[props.sessionId]?.fold;
-    if (!fold) {
+    const thread = s.threads[props.sessionId];
+    if (!thread?.fold) {
       return null;
     }
-    const usage = sessionUsage(fold, s.models);
-    return usage.cost === null ? null : { cost: usage.cost, currency: usage.currency, complete: usage.costComplete };
+    const usage = sessionUsage(thread.fold, s.models, thread.truncated);
+    const label = usageCostLabel(usage);
+    return label === null || !usage.cost || usage.cost <= 0 ? null : { label, tip: costTip(usage) };
   }, shallowEqual);
-  if (!total || total.cost <= 0) {
+  if (!total) {
     return null;
   }
   return (
     <Popover.Root>
-      <Tip label="What this thread would cost at API rates">
+      <Tip label={total.tip}>
         <Popover.Trigger asChild>
           <button
             type="button"
-            aria-label={`Thread cost ${formatCost(total.cost, total.currency ?? undefined)}`}
+            aria-label={`Thread cost ${total.label}`}
             className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-2xs text-subtle tabular-nums transition-colors hover:bg-hover hover:text-fg data-[state=open]:bg-hover data-[state=open]:text-fg"
           >
-            {formatCost(total.cost, total.currency ?? undefined)}
-            {total.complete ? null : <span aria-hidden="true">+</span>}
+            {total.label}
           </button>
         </Popover.Trigger>
       </Tip>
@@ -49,44 +50,41 @@ export function CostMeter(props: { sessionId: string }) {
 
 /** Mounted only while the popover is open, so a streaming thread does not recompute it. */
 function CostPanel(props: { sessionId: string }) {
+  const truncated = useApp((s) => s.threads[props.sessionId]?.truncated ?? false);
   const usage = useApp((s) => {
     const fold = s.threads[props.sessionId]?.fold;
-    return fold ? sessionUsage(fold, s.models) : null;
+    return fold ? sessionUsage(fold, s.models, truncated) : null;
   });
   const prices = useApp((s) => s.models);
   if (!usage) {
     return null;
   }
   const currency = usage.currency ?? undefined;
-  const fresh = Math.max(0, usage.promptTokens - usage.cacheReadTokens - usage.cachedTokens);
-  const cached = Math.min(usage.promptTokens, usage.cacheReadTokens || usage.cachedTokens);
-  const rate = (modelId: string) => prices.find((m) => m.modelId === modelId)?.cost ?? null;
   return (
     <div className="flex flex-col gap-3 p-3.5">
       <div>
         <p className="text-sm font-semibold text-fg">
-          {formatCost(usage.cost ?? 0, currency)} <span className="font-normal text-subtle">at API rates</span>
+          {usageCostLabel(usage) ?? formatCost(0, currency)} <span className="font-normal text-subtle">at API rates</span>
         </p>
-        <p className="mt-0.5 text-xs text-muted">
-          {usage.costComplete
-            ? "What these tokens would have cost billed per token, not what you were charged."
-            : "Part of this thread ran on a model with no published price, so the total is a floor."}
-        </p>
+        {costNotes(usage).map((note) => (
+          <p key={note} className="mt-0.5 text-xs text-muted">
+            {note}
+          </p>
+        ))}
       </div>
 
       <dl className="flex flex-col gap-1 text-xs">
-        <Row label="Input" tokens={fresh} />
-        <Row label="Cached input" tokens={cached} />
-        <Row label="Output" tokens={usage.outputTokens} />
-        {usage.reasoningTokens > 0 ? <Row label="of that, reasoning" tokens={usage.reasoningTokens} muted /> : null}
-        <Row label="Model calls" tokens={usage.calls} raw />
+        {costRows(usage).map((row) => (
+          <Row key={row.id} {...row} />
+        ))}
       </dl>
+      {usage.excludesSubagents ? <p className="text-xs text-muted">{subagentLine(usage.subagentTokens)}</p> : null}
 
       {usage.models.length > 0 ? (
         <div className="flex flex-col gap-1.5 border-t border-line pt-3">
           {usage.models.map((model) => {
             const option = prices.find((m) => m.modelId === model.modelId);
-            const price = option?.cost ?? rate(model.modelId);
+            const price = priceOf(model.modelId, prices);
             return (
               <div key={model.modelId} className="flex items-baseline justify-between gap-3 text-xs">
                 <div className="min-w-0">
@@ -96,11 +94,7 @@ function CostPanel(props: { sessionId: string }) {
                       <span className="ml-1.5 rounded bg-active px-1 py-px align-middle text-2xs font-medium text-muted">contributor</span>
                     ) : null}
                   </p>
-                  <p className="text-2xs text-subtle tabular-nums">
-                    {price
-                      ? `${formatCost(price.input, currency)}/M in · ${formatCost(price.cached, currency)}/M cached · ${formatCost(price.output, currency)}/M out`
-                      : "no published price"}
-                  </p>
+                  <p className="text-2xs text-subtle tabular-nums">{modelRateCaption(model.modelId, price)}</p>
                 </div>
                 <span className="shrink-0 tabular-nums text-muted">{model.cost === null ? "—" : formatCost(model.cost, currency)}</span>
               </div>
@@ -112,11 +106,11 @@ function CostPanel(props: { sessionId: string }) {
   );
 }
 
-function Row(props: { label: string; tokens: number; muted?: boolean; raw?: boolean }) {
+function Row(props: TokenRow) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <dt className={props.muted ? "text-subtle" : "text-muted"}>{props.label}</dt>
-      <dd className="tabular-nums text-fg">{props.raw ? props.tokens : formatTokens(props.tokens)}</dd>
+      <dd className="tabular-nums text-fg">{props.value}</dd>
     </div>
   );
 }

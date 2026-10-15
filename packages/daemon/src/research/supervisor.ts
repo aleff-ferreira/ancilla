@@ -9,7 +9,7 @@
  */
 
 import { RESEARCH_LIMITS } from "./config.js";
-import { assignCodes, normalizeUrl } from "./citations.js";
+import { assignCodes, evidenceRank, normalizeUrl } from "./citations.js";
 import { RunContext, RunCancelled, hasFindings, shouldSalvage } from "./context.js";
 import { capNote, capText } from "./notes.js";
 import { parseDecision, type ParsedDecision, type ParsedDelegation } from "./parse.js";
@@ -21,6 +21,7 @@ import {
   addUsage,
   type Delegation,
   type ObservedToolCall,
+  type SourceEntry,
   type SupervisorRound,
   type SupervisorVerdict,
   type WorkerBudgets,
@@ -56,12 +57,18 @@ function lastRound(ctx: RunContext): SupervisorRound | null {
   return rounds.length > 0 ? (rounds[rounds.length - 1] as SupervisorRound) : null;
 }
 
+/** Why the research window is over, when it is: upstream's round-level rule, windowMax plus one minute. */
+function windowExit(ctx: RunContext): string | null {
+  const elapsed = ctx.elapsedMinutes();
+  return elapsed >= ctx.config.windowMaxMinutes + 1 ? `research window elapsed (${elapsed.toFixed(1)} of ${ctx.config.windowMaxMinutes} min)` : null;
+}
+
 /** The exits that are checked before a decision is asked for; they are attributed to the previous round. */
 function preDecisionExit(ctx: RunContext): string | null {
   const { state, config } = ctx;
   if (state.rounds.length >= config.maxRounds) return `round cap reached (${config.maxRounds})`;
-  const elapsed = ctx.elapsedMinutes();
-  if (elapsed >= config.windowMaxMinutes + 1) return `research window elapsed (${elapsed.toFixed(1)} of ${config.windowMaxMinutes} min)`;
+  const window = windowExit(ctx);
+  if (window) return window;
   if (config.tokenSoftCap !== null && state.usage.totalTokens >= config.tokenSoftCap) {
     return `token soft cap passed (${state.usage.totalTokens} of ${config.tokenSoftCap})`;
   }
@@ -151,7 +158,25 @@ function failureNote(delegation: Delegation, error: string): string {
   return `Worker A${delegation.agentId} on ${delegation.topic} failed: ${error}`;
 }
 
-/** Folds one finished worker into the run: notes, codes, registry, curated sources and usage. */
+/** What a note says about one saved source: how this worker's own calls reached it. */
+function evidenceMark(entry: SourceEntry): string {
+  switch (entry.provenance) {
+    case "retrieved":
+      return "opened";
+    case "search_only":
+      return "search result only";
+    case "attempted":
+      return entry.verified ? "fetch did not complete (it was in a search result)" : "fetch did not complete";
+    default:
+      return "never seen by this worker";
+  }
+}
+
+/**
+ * Folds one finished worker into the run: notes, codes, registry, curated sources and usage. What a worker's
+ * curated row, count and note say about a source is read off the worker's own entry, never off the shared registry
+ * entry another worker may have made: a worker that never saw a page does not inherit the credit of one that did.
+ */
 function mergeResult(ctx: RunContext, round: SupervisorRound, delegation: Delegation, result: WorkerResult): { verified: number } {
   const { state } = ctx;
   state.usage = addUsage(state.usage, result.usage);
@@ -163,12 +188,13 @@ function mergeResult(ctx: RunContext, round: SupervisorRound, delegation: Delega
     const key = normalizeUrl(entry.url);
     // Two workers reading the same page share one code, as upstream's identifier map does.
     const existing = known.get(key);
-    const effective = existing ?? entry;
     if (!existing) {
       state.registry.push(entry);
       known.set(key, entry);
-    } else if (entry.verified && !existing.verified) {
-      existing.verified = true;
+    } else if (evidenceRank(entry) > evidenceRank(existing)) {
+      // The shared entry takes the strongest evidence, verified and provenance together.
+      existing.verified = entry.verified;
+      existing.provenance = entry.provenance;
     }
     const saved = (result.saved ?? []).find((s) => typeof s.url === "string" && normalizeUrl(s.url) === key);
     state.curated.push({
@@ -178,12 +204,13 @@ function mergeResult(ctx: RunContext, round: SupervisorRound, delegation: Delega
       excerpt: saved?.excerpt ?? null,
       agentId: delegation.agentId,
       round: round.round,
-      verified: effective.verified,
+      verified: entry.verified,
+      ...(entry.provenance ? { provenance: entry.provenance } : {}),
     });
-    if (effective.verified) verified += 1;
+    if (entry.verified) verified += 1;
     const title = entry.title?.trim() || "Untitled";
-    const mark = effective.verified ? "verified" : "UNVERIFIED (never fetched or found in a search; cannot be cited)";
-    lines.push(`[${effective.code}] ${title} (${entry.url}) - ${mark}${saved?.reason ? ` - ${saved.reason}` : ""}`);
+    const label = entry.verified ? `[${(existing ?? entry).code}]` : "[not citable]";
+    lines.push(`${label} ${title} (${entry.url}) - ${evidenceMark(entry)}${saved?.reason ? ` - ${saved.reason}` : ""}`);
   }
   const findings = (result.findings ?? "").trim();
   const kind = delegation.discovery ? "discovery" : "research";
@@ -326,6 +353,24 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
       delegations = toDelegations(ctx, previous.delegations.map((d) => ({ topic: d.topic, discovery: d.discovery, maxReads: d.maxReads })));
     } else {
       const decided = await decide(ctx, roundNumber, notice);
+      // A decision can take minutes (two attempts, each up to the supervisor's call timeout), and the window the
+      // loop checked before asking may be over by the time the answer is in: whatever it delegates is not run. The
+      // workers' own wall time is not clamped to the window, so a worker already running is left to finish.
+      // A window that passed during a decision that failed is no clean exit: with findings the run is salvaged and
+      // ends partial, without any there is nothing to write from, and default delegations are not run past the window.
+      const late = windowExit(ctx);
+      if (late && decided.ok && hasFindings(state)) {
+        const reason = `${late} while the supervisor was deciding`;
+        if (previous && previous.exit === null) previous.exit = reason;
+        ctx.log(`research ends: ${reason}`);
+        return { kind: "write", reason, salvage: false };
+      }
+      if (late && !hasFindings(state)) {
+        state.aborted = true;
+        state.abortReason = `${late} while the supervisor was deciding, with no findings to write from`;
+        ctx.log(`research ends: ${state.abortReason}`);
+        return { kind: "aborted", reason: state.abortReason };
+      }
       if (!decided.ok) {
         // Upstream ends research gracefully when the supervisor fails twice; writing from nothing is not graceful.
         // Only real findings count: failure notes and unverified sources are notes too, but not evidence.
@@ -411,7 +456,7 @@ export async function runSupervisorLoop(ctx: RunContext): Promise<LoopExit> {
       // Upstream's denoise: research calls in the same decision win over ResearchComplete.
       ctx.log(`round ${roundNumber}: RESEARCH_COMPLETE ignored because ${delegations.length} delegation(s) were listed`);
     }
-    await ctx.checkpoint();
+    await ctx.checkpoint({ beforeDispatch: true });
 
     round.results = await mapWithLimit(delegations, config.maxParallel, (delegation) => runWorker(ctx, round, delegation));
     if (ctx.signal.aborted) {

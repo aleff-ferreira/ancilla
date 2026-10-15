@@ -104,9 +104,21 @@ The server reads an optional `runtime.json` from its data directory when it star
 | `musePath` | an explicit `muse` binary path, as the chosen runtime sees it; a Linux path is checked in that distribution |
 | `syncSessionNames` | `true` shares thread titles with Muse; see [above](#local-thread-titles) |
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
+| `allowHosts` | host names the server answers besides `127.0.0.1`, `localhost` and `::1`, as `["ancilla.example"]`; see [Reaching the server by another name](#reaching-the-server-by-another-name) |
+| `hostStartTimeoutMs` | how long a Muse host may take to answer its start before it is given up on, in whole milliseconds; the default is five minutes and `0` turns the limit off. `ANCILLA_HOST_START_TIMEOUT_MS` sets it too and wins over the file |
+
+A host start that passes `hostStartTimeoutMs` ends with a 504 that names the setting, and its Muse process is closed
+without waiting for it; the next request for that folder tries again at once. The limit applies to every start, a
+thread you open included. A host whose connection ends while its process is still running is closed and replaced the
+same way, and restarting the hosts or quitting waits only a few seconds for a start that is still open. A start that is
+still open after those three seconds, when a settings change restarts the hosts, is abandoned: the request waiting on it
+answers 503 ("The Muse host was restarted while it was starting. Try again."), its Muse process is closed, and one that
+answers late is closed instead of registered.
 
 Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `ANCILLA_MUSE_RUNTIME` overrides its
-`runtime`. For example, for Muse inside WSL:
+`runtime`. `ANCILLA_RESEARCH_STARTUP_MS` sets how long a research run waits for Muse to open a session (whole
+milliseconds, 1000 or more; the default is two minutes, three on Windows with Muse in WSL or not yet detected). For
+example, for Muse inside WSL:
 
 ```json
 {
@@ -134,8 +146,27 @@ Never put API keys or other secrets in `runtime.json`.
 
 The file is read once at startup, so restart Ancilla after changing it. It may be UTF-8 with or without a byte order
 mark, or UTF-16, which is what Windows PowerShell writes. A file that is not a JSON object is ignored as a whole, and a
-field of the wrong type or an unusable `wslEnv` entry is ignored on its own; each is one line in the server log, and
-the server starts either way.
+field of the wrong type or an unusable `wslEnv` or `allowHosts` entry is ignored on its own; each is one line in the
+server log, and the server starts either way.
+
+### Reaching the server by another name
+
+The server answers a request only when its `Host` header names `127.0.0.1`, `localhost` or `::1` (any port), so a web
+page that was pointed at your own machine under some other name cannot use it. A proxy, tunnel or alias that forwards
+the public name gets `403` with `"kind": "host"` and a message naming the host it refused. Fix that by listing the name:
+`--allow-host ancilla.example` on the command line (repeatable), or `"allowHosts": ["ancilla.example"]` in
+`runtime.json`, which is how desktop users add one. The hosts of the `--allow-origin` URLs are allowed as well. The
+refusal is also logged to the server's stderr (the desktop app's `server.log`), once for each different host and for at
+most five of them. The log line and the message offer an `--allow-host` command only for a real name or address, never
+for a header that is not one. A client that sends the server's
+token as `Authorization: Bearer <token>` is not asked for a listed host; the event stream and images cannot send that
+header, so a browser behind a proxy still needs the name listed. A server bound to one specific loopback address
+(`--host 127.0.0.2`) trusts that address as a `Host` too, besides the three names above.
+
+The count of refused requests is kept as well, since the log stops after five different hosts: `/api/health` shows
+`diagnostics.hostRefusals` (every request refused for its `Host`) and `diagnostics.lastRefusedHost` (the most recent
+refused name that could be listed, lower case and without the port, or `null`), so a proxy that was set up wrongly can
+still be found once the log has gone quiet.
 
 ## Verifying it
 
@@ -155,12 +186,68 @@ yourself:
 3. The server's `/api/health` shows how long each session's feed has been quiet (`diagnostics.sessions`). For the web
    server on its default port that is `http://127.0.0.1:3127/api/health`; if you started it with `--token`, the
    endpoint needs that token like the rest of the API (sign in on that address first, or send
-   `Authorization: Bearer <token>`). The desktop app's server picks its own port and keeps it in the `server-port`
+   `Authorization: Bearer <token>`); address it as `127.0.0.1` or `localhost`, since another name is refused unless it
+   was listed with `--allow-host`. The desktop app's server picks its own port and keeps it in the `server-port`
    file in the app's [data directory](#runtime-configuration).
 4. When the run finishes, the notice disappears and the turn shows its real outcome. The thread holds one copy of your
    prompt, and Muse's own session history shows no extra turn.
 
 These are smoke tests, not a guarantee against provider outages or arbitrarily long runs.
+
+## The event stream
+
+The event stream itself is bounded. A client that stops reading `/api/events` (a suspended webview, a proxy that
+stopped forwarding) is disconnected once more than 4 MiB of frames are still waiting behind the one being sent at the
+end of the turn of the event loop, or once it has completed no write for 90 seconds. A slow client stays as long as
+it finishes a batch of writes within that time. Node sends what is queued behind a write in flight as one batch and
+reports it done only when all of it has gone, and nothing readable shows bytes moving inside a batch, so a client taking
+the batch more slowly than its size over 90 seconds (about 46 KB/s for a backlog at the 4 MiB limit) is cut even
+though it is still reading. The browser reconnects, the server says hello, and the app rereads the lists and the open
+thread, which is the whole recovery. Nothing is replayed and no prompt is ever sent again. The counters are under `diagnostics.sse` in
+`/api/health`: `clients`, `overflowDisconnects`, `stallDisconnects`, `backlogHighWaterBytes`, `serializationFailures`
+and `researchFramesSkipped`, next to the two limits (`maxBacklogBytes`, `stallMs`). A research run's own sessions are
+not sent to the browser at all; their progress arrives as `research-run`.
+
+`/api/health` also reports counts for research runs (`research`: `live`, the runs a job is running; `queued`, runs
+accepted whose row does not say `running` yet, which is normally 0; and `interruptedAtBoot`, the runs the start-up
+sweep marked interrupted) and for Muse hosts that exited on their own (`diagnostics.hostExits`: `count` and
+`lastExitAt`), and whether the server has begun to close (`closing`, see the next section). The route is public, so
+these are numbers and flags only.
+
+## When the server stops
+
+The command-line server closes on SIGINT, SIGTERM and SIGHUP on every system, and on Windows on SIGBREAK too. SIGHUP is
+what a terminal sends the server it ran when the terminal closes, and what a closed Windows console sends; it is
+handled like SIGTERM. `nohup` does not change that: Node resets the signal dispositions it inherits, so it never kept
+a Node process from ending on a hangup, and without the handler the server would end at once, with no close at all.
+Research runs go first and are marked interrupted, so that Resume can take them up. Then the registered Muse hosts, the
+host starts still open, the title worker and the `!` commands still running are waited for all at once, and the
+database is closed last. While it closes the server answers 503 ("Ancilla is shutting down.") to every request but
+`GET /api/health`, which keeps answering and says `closing: true`, so a supervisor can tell a server that is winding
+down from one that is up. Nothing new is started and no research row is left behind. The command line gives up on a host
+that is slow to close after 11.5 seconds and exits at 20 seconds whatever is still waiting, with exit code 1; a second
+signal exits at once. The 11.5 seconds also bound the close of a host that a settings change restarts (it was 40
+there), so a host that takes longer than that to finish the turn it is draining is let go and that turn is recorded as
+failed. On Windows a closed console gives the process only about ten seconds before the system ends it, which is why the
+research runs are closed out first (within about seven seconds at the most, whatever the hosts do): their rows are
+written by then, and what is still open after that is marked at the next start. A process that is killed instead of
+signalled skips all of this, and what it left in flight is marked at the next start.
+
+A `!` command whose answer is still pending when the server stops, when its deadline passes, or when its process exits
+normally, is stopped together with what it started: the polite stop first (SIGTERM to its process group; on Windows the
+command itself), a second and a half to finish, then SIGKILL. Another server in the same process does not touch it, and
+it does not touch theirs. A command that has already answered is not stopped: one that left a background process behind
+(`! some-server &`) leaves it running, and what the process writes afterwards is read and thrown away, so it is never
+killed by a closed pipe and does not keep the server from exiting.
+
+Three cases are not covered. A server that is killed outright (SIGKILL, or the desktop app quitting, which kills its
+sidecar until the single-owner work lands) runs none of this: a `!` command still pending keeps running, in its own
+session, until it ends by itself, and what the server left in flight is marked at the next start. The same holds for an
+embedder that runs the server in a process of its own and lets an unhandled signal end that process: only the command-line
+program handles the signals. And a Muse host that ignores both the end of its input and SIGTERM can outlive a server that
+exits at its deadline, or a host start that was abandoned (macOS and Linux): the SDK gives no process to signal. On
+Windows with Muse in WSL, closing a host ends the `wsl.exe` process, which may leave the Linux Muse behind; a start that
+timed out and was retried can leave one each time. Stop it from inside WSL if it is in the way.
 
 ## Limits
 

@@ -32,7 +32,7 @@ const VIEW: ActivityVM = {
   working: [run, task],
   finishedToday: [done],
   stopAll: { runs: 1, tasks: 1 },
-  foot: "2 running in 1 thread · 1.1M tokens today",
+  foot: "2 running in 1 thread · 1.1M tokens in current runs",
   empty: false,
   note: NOTE,
 };
@@ -131,7 +131,7 @@ describe("ActivityDrawer", () => {
     assert.match(text(markup), /Stop everything stops 1 run and 1 task in this thread\. Approvals stay open\. Stop everything/);
     const calm = render({ view: { ...VIEW, stopAll: null } });
     assert.doesNotMatch(calm, /Stop everything/);
-    assert.match(text(calm), /2 running in 1 thread · 1\.1M tokens today/);
+    assert.match(text(calm), /2 running in 1 thread · 1\.1M tokens in current runs/);
     assert.equal(stopAllText({ runs: 2, tasks: 0 }), "Stop everything stops 2 runs in this thread. Approvals stay open.");
     assert.equal(stopAllQuestion({ runs: 2, tasks: 1 }), "Stop everything? Stops 2 runs and 1 task. Approvals stay open.");
     assert.equal(stopAllText({ runs: 0, tasks: 0, agents: 1 }), "Stop everything stops 1 native agent in this thread. Approvals stay open.");

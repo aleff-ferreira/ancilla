@@ -31,7 +31,9 @@ into `+N more`.
 
 **Expanded** (click the line, or `Enter` on it), the card shows:
 
-- a head with the run's name and a sub line (`Workflow · started 14:02 · 10 agents · 1.1M tokens · ~$4.18 est.`);
+- a head with the run's name and a sub line (`Workflow · started 14:02 · 9 agents · 1 planned · 1.2M tokens so far
+  (8 of 9 reported) · ~$1.94 est.`): the total says `so far` while the run goes and says how many agents have sent
+  usage while some have not, because the estimate is built from the same agents;
 - the **phase rail**, an accordion of the run's phases (`Research 4 of 4 · Design 2 of 3 · Judge 0 of 2 ·
   Synthesize 1 planned`) with exactly one phase open at a time, the current one by default;
 - the **attention list**: agents that are waiting on you, then failed, then quiet, each as a two-line row with the
@@ -54,7 +56,8 @@ appears. It breathes while the agent works and holds still under reduced motion.
 
 **When the run ends** the card becomes a short report: a headline that says exactly what happened (`All ten
 landed.`, `Nine of ten landed, one skipped.`, `Stopped by you after 12m; four of ten had landed.`), a fact line
-(`Every phase reached its end · 1 agent needed 3 attempts`), the counts, wall time, tokens and estimated cost, at
+(`Every phase reached its end · 1 agent needed 3 attempts`), the counts, wall time, tokens (labelled `tokens,
+reported by Muse`, and `latest attempt of each agent` when one was retried) and estimated cost, at
 most four highlights (what did not land first, then the longest agent, the most tokens or tool calls, and the time
 the run waited on you or its peak concurrency), a "Where the time went" picture with one lane per agent, and the
 first lines of the report Muse attached. The strip gets one sheen, once, only when every scheduled agent landed;
@@ -79,11 +82,13 @@ From the top:
 - the run's name, a status pill (`Running`, `Finished`, `Stopped`, `Failed`) and `Stop run`;
 - a summary sentence: `6 of 10 done · Judge · 1 needs you · 1 failed · 1 no update`, or `7 done · 3 working ·
   more may start` when the plan is not known;
-- a **KPI strip** of six cells: agents (`9 +1 planned / 2 working now`), tokens so far (`1.1M / 5 of 9
-  reported`), estimated cost (always labelled `at list price`), slots (`2 of 16 / launch policy`, only when the
+- a **KPI strip** of six cells: agents (`9 +1 planned / 2 working now`), tokens so far (`1.2M / 8 of 9
+  reported`), estimated cost (always labelled `at list price`, with `· 8 of 9 reported` while some agents have sent
+  no usage), slots (`2 of 16 / launch policy`, only when the
   launch reported a policy), a pulse sparkline of events per minute over the last ten minutes, and the elapsed
-  time. A missing value renders as `—` with the reason under it. A finished run shows wall time, agent time
-  across all agents and the peak concurrency instead;
+  time. A missing value renders as `—` with the reason under it (a missing cost says `no usage reported yet`,
+  `Mixed models`, `no list price for muse-wonder-full-1.0` or `model not resolved`). A finished run shows wall time,
+  agent time across all agents and the peak concurrency instead;
 - the **Timeline**: one lane per agent under phase bands, retries as new segments on the same lane, a hatched
   tail from the moment an agent went quiet, a dashed placeholder for an agent the script plans but Muse has not
   scheduled, an amber marker on the axis for a request raised during the run, and a `now` line that moves once a
@@ -113,7 +118,11 @@ number of live runs, background tasks and pending requests; the badge turns ambe
 drawer slides over the sidebar with three sections, `Needs you`, `Working` and `Finished today`, each item with
 the thread it belongs to, `Open` and `Stop`. `Stop everything` confirms with what it will stop (`Stop
 everything? Stops 2 runs and 1 task. Approvals stay open.`), is hidden when there is nothing to stop, and never
-answers a request for you. When nothing runs and nothing waits, the drawer says `All quiet.`
+answers a request for you. When nothing runs and nothing waits, the drawer says `All quiet.` While something runs,
+the footer adds the tokens of the runs the drawer holds (`2 running in 1 thread · 1.1M tokens in current runs`).
+That is not the day's total: for an ordinary prompt the drawer holds the latest turn only, since a history page
+carries no time per call. The Usage page has the figure per day, and it counts the lead agent's model calls only:
+the spend of workflow agents and subagents is in no figure there.
 
 In this release the drawer lists every thread's pending requests, and the runs and tasks of the threads this
 window has opened. Other threads keep their word in the sidebar and a note says so: `Other threads appear here
@@ -170,9 +179,23 @@ The rules that follow from that:
   was in the background, every clock stops at the last moment Ancilla heard from it, cells lose their accent,
   spinners stop, no agent is promoted to no update, and the line reads `Last known · 41m 16s · at 14:43`. See
   [muse-recovery.md](muse-recovery.md) for how a thread keeps reading saved progress meanwhile.
+- **Tokens are input plus output.** Reasoning is part of the output (Muse's own total is prompt plus output), so a
+  total never adds it again and the estimate prices the output once; the inspector says `incl. reasoning 5.7k`.
+  A lead turn's total is the counted-once figure Muse sends with each call, while an agent's is the raw input plus
+  output Muse reports for it. Muse does not say whether a retried agent's usage covers its earlier attempts, so
+  the newest report stands for the agent and the report says `latest attempt of each agent`.
 - **Cost is an estimate.** Muse does not send an agent's model or a price, so the panel multiplies the tokens
-  Muse reported by the list price of the session's model and says so: `~$4.18 · at list price`. The composer's
-  cost still counts the lead only.
+  Muse reported by the list price of one model and says so: `~$4.18 · at list price`. A finished run is priced at
+  the model its launching turn used (the one every call of that turn names), so a later `/model` does not change
+  it; while it runs, or when no call of that turn names a model, the thread's current model stands in. A DeepResearch
+  run adds up its brief, supervisor, worker and writer calls, and each role runs on the model the config names or
+  else the thread's model: it is priced only when all three resolve to the same model, and reads `Mixed models`
+  otherwise. A research run belongs to no turn, so it cannot be priced at a launching turn's model: a role the
+  config leaves open follows the thread's current model, even after the run finished, and a later `/model` moves
+  the estimate. (Fixing that needs the server to send the model it resolved at launch.) The composer's cost still
+  counts the lead only, and says so: once a workflow agent or subagent reports usage the cost reads as a floor
+  (`≥ $1.20`), the popover adds `Subagents and workflow agents, not priced: 520k tokens` and
+  `This thread's cost covers the lead agent only; workflow agents and subagents are in the run card.`
 - **Nothing is inferred from time.** No progress bar grows with the clock, there is no ETA and no percentage;
   counts include only scheduled agents, planned ones are labelled planned, and the pulse counts real revisions.
 - **Native subagents** that Muse surfaces as `subagent_spawn` and `subagent_wait` tool calls appear as rows
@@ -201,7 +224,7 @@ These need a wire field or server work Ancilla does not have yet. Each shows its
 | Strips, badge counts and drawer items for threads this window has not opened | the sidebar's word for the thread; the drawer's note |
 | An Activity tab in the inspector with a subagent's tool calls | the Overview note: `Muse does not stream a workflow agent's tool calls to this thread.` |
 | An agent's own result | `Muse does not share a workflow agent's result. The run's report cites it.` |
-| The crew's tokens in the composer's cost | the composer counts the lead only, with a tooltip `excludes agents` |
+| The crew's tokens in the composer's cost | the composer counts the lead only: a `≥` floor, a `Subagents and workflow agents, not priced` line and the note `This thread's cost covers the lead agent only; workflow agents and subagents are in the run card.` |
 | `Load earlier history` past the capped read | the partial-history notice without the button |
 | A sigil in the approval panel | the panel unchanged |
 
@@ -210,7 +233,10 @@ These need a wire field or server work Ancilla does not have yet. Each shows its
 The model has unit tests in `packages/ui/test/crew.test.ts` (phases, counts, the no-update threshold, retries
 and the optimistic pending flags, run-level requests, partial history, a stale feed, the completion report, the
 plan read from a script, sigils, announcements, the sidebar summary, the drawer) and `fold.test.ts` (the
-transition times and the latched usage), and `crew.bench.test.ts` builds a 2000-agent run over a hundred
+transition times and the latched usage), `crew-totals.test.ts` (what a total counts, the lead's own total, the model
+a finished run is priced at, the drawer footer), `crew-coverage.test.ts` (the coverage and the reasons a cost is
+missing, a research run's model) and `fold-calls.test.ts` (a model call counted once across the live stream, history
+and a reload), and `crew.bench.test.ts` builds a 2000-agent run over a hundred
 revisions and holds each recompute under budget. The surfaces have SSR tests beside them, and
 `apps/web/test/demo-seed.test.ts` folds every demo scenario through the same model.
 
