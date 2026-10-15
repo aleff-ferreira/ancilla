@@ -1,0 +1,187 @@
+{
+  "release": {
+    "assets": [
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla-0.20.3-1.x86_64.rpm",
+        "created_at": "2026-09-29T07:30:54Z",
+        "digest": "sha256:255ce766dd255d37434a1548830e2b326d31a746b50ad0b21758ec1c17ace63f",
+        "id": 597579667,
+        "name": "Ancilla-0.20.3-1.x86_64.rpm",
+        "size": 55438670,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:30:56Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla-0.20.3-1.x86_64.rpm.sig",
+        "created_at": "2026-09-29T07:30:57Z",
+        "digest": "sha256:731b7f79ed541e274b02e53cdccfd8a39e15175749da73ca971cc1c26091d541",
+        "id": 597579725,
+        "name": "Ancilla-0.20.3-1.x86_64.rpm.sig",
+        "size": 436,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:30:57Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.AppImage",
+        "created_at": "2026-09-29T07:32:03Z",
+        "digest": "sha256:7cdc7d9bef55366397062f8764fc2a5bbf04e026a5b3a346b87e5ba3eeb6ec76",
+        "id": 597581553,
+        "name": "Ancilla_0.20.3_amd64.AppImage",
+        "size": 128391672,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:32:06Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.AppImage.sig",
+        "created_at": "2026-09-29T07:32:03Z",
+        "digest": "sha256:67e357783788accb7dea5e1efe593fae30fbb5a5209d5dba78393a397f693c8f",
+        "id": 597581552,
+        "name": "Ancilla_0.20.3_amd64.AppImage.sig",
+        "size": 420,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:32:03Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.deb",
+        "created_at": "2026-09-29T07:30:52Z",
+        "digest": "sha256:1ab52067394376423ed780137e2aff420fe08929d892861e0823a6a61c76ffc6",
+        "id": 597579607,
+        "name": "Ancilla_0.20.3_amd64.deb",
+        "size": 55443190,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:30:54Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.deb.sig",
+        "created_at": "2026-09-29T07:30:54Z",
+        "digest": "sha256:48bff3f62eafb7dbb50af5e94ac8688f7eabe8c23e2c7d8ff72c9e8e2af64d40",
+        "id": 597579658,
+        "name": "Ancilla_0.20.3_amd64.deb.sig",
+        "size": 432,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:30:54Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_universal.dmg",
+        "created_at": "2026-09-29T07:17:40Z",
+        "digest": "sha256:55f43d9fc056bba22146f5e6b288be4e2be174fba7169f5df874e952536b78a9",
+        "id": 597555018,
+        "name": "Ancilla_0.20.3_universal.dmg",
+        "size": 89552234,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:17:44Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_x64-setup.exe",
+        "created_at": "2026-09-29T07:08:15Z",
+        "digest": "sha256:3dc76919312583ff3f03dce5e41f23f8ae70b19b5a2d49917c5c28b2df1ea46d",
+        "id": 597538024,
+        "name": "Ancilla_0.20.3_x64-setup.exe",
+        "size": 28338164,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:08:16Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_x64-setup.exe.sig",
+        "created_at": "2026-09-29T07:08:17Z",
+        "digest": "sha256:658000333230c67b50816929c1d2c14dab740444abe707212b95bed239c42585",
+        "id": 597538079,
+        "name": "Ancilla_0.20.3_x64-setup.exe.sig",
+        "size": 440,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:08:17Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz",
+        "created_at": "2026-09-29T07:17:44Z",
+        "digest": "sha256:6505eecd1267d4e170dd9fd52c4c716594753babaf85322b3aca34891f8a0910",
+        "id": 597555161,
+        "name": "Ancilla_universal.app.tar.gz",
+        "size": 92024753,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:17:48Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz.sig",
+        "created_at": "2026-09-29T07:17:48Z",
+        "digest": "sha256:9596922df747e6db05e3db0ad8f1348730661a3e189a6d6677d5e3081e0cfdfa",
+        "id": 597555251,
+        "name": "Ancilla_universal.app.tar.gz.sig",
+        "size": 424,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:17:48Z"
+      },
+      {
+        "browser_download_url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/latest.json",
+        "created_at": "2026-09-29T07:32:03Z",
+        "digest": "sha256:2df53a723add7808e42d3e21630d89bf60f2a7c1bef5d8a217f979908c3ed047",
+        "id": 597581554,
+        "name": "latest.json",
+        "size": 9854,
+        "state": "uploaded",
+        "updated_at": "2026-09-29T07:32:03Z"
+      }
+    ],
+    "created_at": "2026-09-29T06:44:04Z",
+    "draft": false,
+    "id": 398896151,
+    "prerelease": false,
+    "published_at": "2026-09-29T07:08:14Z",
+    "tag_name": "v0.20.3",
+    "target_commitish": "756d15b73e087f8962c793c0fa1c5b579730adaa"
+  },
+  "latest": {
+    "version": "0.20.3",
+    "notes": "Ancilla v0.20.3 \u2014 Deep research. Agents in view.\n\nAn open-source desktop and web workspace for Muse Code by AMAZONIA WORKS, available on Windows, macOS and Linux.\n\n**Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.\n\n**New in 0.20.3**\n- Linux **.deb and .rpm installers** add Ancilla to your application menu and install its system dependencies. Node.js remains private to the app.\n- **Install Muse Code inside Ancilla**, follow any browser approval, sign in with your Meta subscription, then choose a project folder. Setup includes progress, cancellation and retry.\n- **Fix for the Linux UnsafePath thread-start error:** Ancilla safely prepares the selected account's Muse data-folder permissions before starting work, preserving login, history and deletion records.\n- **Fresh subscription limits from Meta:** supported Muse browser logins refresh five-hour and weekly quota without a model call. Account selection stays fixed; missing or expired readings show as unknown.\n- Optional **desktop shortcuts**, plus one-click AppImage installation to a permanent location with an application-menu icon.\n- Muse is detected after installation even when the desktop PATH omits it. Package installations use package updates; AppImages retain signed automatic updates.\n\nRead [what changed in this release](https://github.com/aleff-ferreira/ancilla/blob/v0.20.3/docs/CHANGELOG.md) or [explore the interface](https://github.com/aleff-ferreira/ancilla/blob/v0.20.3/README.md).\n\n**What you need.** Ancilla bundles Node.js. On Linux, choose **Install Muse Code** in the app if needed. On Windows and macOS, setup provides Meta's installation command. Then choose **Sign in with Meta** and approve access using the account that owns your Muse Code plan. An existing Muse login is reused. Windows supports native Muse or Muse inside WSL2.\n\n**Which file.** Windows: `x64-setup.exe`. macOS, Apple Silicon and Intel: `universal.dmg`. Linux x86_64: **amd64.deb** for Ubuntu/Debian/Mint or **x86_64.rpm** for Fedora and compatible distributions; open it with your software installer, then launch Ancilla from the application menu. For a portable copy, use **amd64.AppImage**, allow executing it in your file manager, and open it; setup can install its launcher. If FUSE is unavailable, run it with `--appimage-extract-and-run`. Desktop shortcuts are available in **Settings \u2192 Linux setup**; some desktops require right-clicking the shortcut and choosing **Allow Launching**.\n\n**Updates.** Windows, macOS and AppImage builds accept only updates signed with Ancilla's key. For `.deb` and `.rpm`, download and open the next package; Settings links to the latest release.\n\n**Unsigned installers.** The Windows installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app: choose More info, then Run anyway. The macOS app is not notarized by Apple yet, so its first launch needs a right-click on the app, then Open.\n\n**Licenses.** Ancilla is free software under the [GNU AGPL v3](https://github.com/aleff-ferreira/ancilla/blob/v0.20.3/LICENSE). Portions derive from Helicon, Copyright (c) 2026 Harjot Singh Rana and contributors, under the MIT License; its notice is kept in [LICENSE-HELICON](https://github.com/aleff-ferreira/ancilla/blob/v0.20.3/LICENSE-HELICON). The third-party software each build bundles, Node.js among it, is listed with its licenses in [THIRD_PARTY_NOTICES.md](https://github.com/aleff-ferreira/ancilla/blob/v0.20.3/THIRD_PARTY_NOTICES.md), which also ships inside the app.",
+    "pub_date": "2026-09-29T07:31:01.757Z",
+    "platforms": {
+      "windows-x86_64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZElLZWRMNXI0UHFnWUgyTjQ1ZEtiZEJHajJlWXJ4Vko0aUJmbzd1T1h0eWdIaXVmbWJXU05JWmFaTGpoN0ZNU01MNVRhdFpDa1FpRnpUYmNVM2N3Vnd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY1NjkzCWZpbGU6QW5jaWxsYV8wLjIwLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMjAuMwpZK0RWekE3T3RWRkZyWnNwSDRVbFpOQWRydHVhNUxneVhHejRWZkM4SjBkUFlzV3gxZFpvSVdwQjhhMXJnamJUK3J3Ym85VTExY1hYdnI4OSs1VitBdz09Cg==",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_x64-setup.exe"
+      },
+      "windows-x86_64-nsis": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZElLZWRMNXI0UHFnWUgyTjQ1ZEtiZEJHajJlWXJ4Vko0aUJmbzd1T1h0eWdIaXVmbWJXU05JWmFaTGpoN0ZNU01MNVRhdFpDa1FpRnpUYmNVM2N3Vnd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY1NjkzCWZpbGU6QW5jaWxsYV8wLjIwLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMjAuMwpZK0RWekE3T3RWRkZyWnNwSDRVbFpOQWRydHVhNUxneVhHejRWZkM4SjBkUFlzV3gxZFpvSVdwQjhhMXJnamJUK3J3Ym85VTExY1hYdnI4OSs1VitBdz09Cg==",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_x64-setup.exe"
+      },
+      "darwin-aarch64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9FcVdkWktLWmRxQ0dBTlQrZjVqYTNvNm83RGkrZUJiUXYzTFJ5cmNLZVNNVVIwcHNZSDQ2UkEyb1piUk5WL3huT0hFZXppL0pEb2s2THcxT1hNc0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY2MjU5CWZpbGU6QW5jaWxsYS5hcHAudGFyLmd6CXZlcnNpb246MC4yMC4zCkYyN3ByQU9yNC9GVzNIL1I4ME4yWWU3SzVvMnc3OVhJRVp4eFhzY08xbzlrdXBnQ2pZc3YxTlVJOElJQlRZYVRJcmtSUjUvcnhZL3E3bktXQmQ1Z0JRPT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz"
+      },
+      "darwin-x86_64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9FcVdkWktLWmRxQ0dBTlQrZjVqYTNvNm83RGkrZUJiUXYzTFJ5cmNLZVNNVVIwcHNZSDQ2UkEyb1piUk5WL3huT0hFZXppL0pEb2s2THcxT1hNc0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY2MjU5CWZpbGU6QW5jaWxsYS5hcHAudGFyLmd6CXZlcnNpb246MC4yMC4zCkYyN3ByQU9yNC9GVzNIL1I4ME4yWWU3SzVvMnc3OVhJRVp4eFhzY08xbzlrdXBnQ2pZc3YxTlVJOElJQlRZYVRJcmtSUjUvcnhZL3E3bktXQmQ1Z0JRPT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz"
+      },
+      "darwin-aarch64-app": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9FcVdkWktLWmRxQ0dBTlQrZjVqYTNvNm83RGkrZUJiUXYzTFJ5cmNLZVNNVVIwcHNZSDQ2UkEyb1piUk5WL3huT0hFZXppL0pEb2s2THcxT1hNc0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY2MjU5CWZpbGU6QW5jaWxsYS5hcHAudGFyLmd6CXZlcnNpb246MC4yMC4zCkYyN3ByQU9yNC9GVzNIL1I4ME4yWWU3SzVvMnc3OVhJRVp4eFhzY08xbzlrdXBnQ2pZc3YxTlVJOElJQlRZYVRJcmtSUjUvcnhZL3E3bktXQmQ1Z0JRPT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz"
+      },
+      "darwin-x86_64-app": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9FcVdkWktLWmRxQ0dBTlQrZjVqYTNvNm83RGkrZUJiUXYzTFJ5cmNLZVNNVVIwcHNZSDQ2UkEyb1piUk5WL3huT0hFZXppL0pEb2s2THcxT1hNc0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY2MjU5CWZpbGU6QW5jaWxsYS5hcHAudGFyLmd6CXZlcnNpb246MC4yMC4zCkYyN3ByQU9yNC9GVzNIL1I4ME4yWWU3SzVvMnc3OVhJRVp4eFhzY08xbzlrdXBnQ2pZc3YxTlVJOElJQlRZYVRJcmtSUjUvcnhZL3E3bktXQmQ1Z0JRPT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_universal.app.tar.gz"
+      },
+      "linux-x86_64": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZEFWNzRLTDREb3NiaGVQeVV1SFBaNlNvOC9zVnZrdk5FeUdLTUw5WjVnc3BZaVlhNVlLV3lLOGZ3Yk9wcDdLOS9Iei9zTXhBWnRrVlRqTW9Cby9UYUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MTIxCWZpbGU6QW5jaWxsYV8wLjIwLjNfYW1kNjQuQXBwSW1hZ2UKK0lHcm1ZTlRNK0dDSFk4UytIZVJDeElYZENDUk5xRzhVa3FDa0prRjlHam9MWTRsbC9BaG51eVhZV3A2dml2c0VXNzJGQjJEdjd3enRqRTI4L2wxQ2c9PQo=",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.AppImage"
+      },
+      "linux-x86_64-appimage": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZEFWNzRLTDREb3NiaGVQeVV1SFBaNlNvOC9zVnZrdk5FeUdLTUw5WjVnc3BZaVlhNVlLV3lLOGZ3Yk9wcDdLOS9Iei9zTXhBWnRrVlRqTW9Cby9UYUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MTIxCWZpbGU6QW5jaWxsYV8wLjIwLjNfYW1kNjQuQXBwSW1hZ2UKK0lHcm1ZTlRNK0dDSFk4UytIZVJDeElYZENDUk5xRzhVa3FDa0prRjlHam9MWTRsbC9BaG51eVhZV3A2dml2c0VXNzJGQjJEdjd3enRqRTI4L2wxQ2c9PQo=",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.AppImage"
+      },
+      "linux-x86_64-deb": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZEZjeVRiZTlrQlpxT0o3ZlozQmtWaHNxVGpYWldLWnBjbllkMkVFcEpsa1FNWHV3eFFwTXhqc2xhdU00cVhtQ0kva1dFMEVaT1c2cEZIa0hWRXFRY1FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MDUxCWZpbGU6QW5jaWxsYV8wLjIwLjNfYW1kNjQuZGViCXZlcnNpb246MC4yMC4zCkU2VmJ2b2YyZWJnODViVFcrUXI3U0N5VUFTSkVHMjRRNGhuVEVqdVVWSWFMKzlvbkZQZmEwb3ZjSjlLWG53Wi8vRllwWlhYWUZhQkdHYkY2THppOEF3PT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla_0.20.3_amd64.deb"
+      },
+      "linux-x86_64-rpm": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9OdGJTTHVhVkFzTmt3VHdLVTluWmtMUkg3aFQrUG9ka0s2cTNMTmk4RXJkeGoxVldBTTdBN0lNbmhMN01GcnV6cUhyYlNYVGIxQnd3NHR1VmtRSGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MDUxCWZpbGU6QW5jaWxsYS0wLjIwLjMtMS54ODZfNjQucnBtCXZlcnNpb246MC4yMC4zCnZ2bzZadTVkRnZlWU96UVFHbzhPYmlHYU1ZMktkQVhaUjJaQ2xtS2NibmNXODJwUUtyWGJ1NFNyMzdKYlpuKzdTVW9td2VXRFJodk9nVERweHlVUUNBPT0K",
+        "url": "https://github.com/aleff-ferreira/ancilla/releases/download/v0.20.3/Ancilla-0.20.3-1.x86_64.rpm"
+      }
+    }
+  },
+  "sigs": {
+    "Ancilla-0.20.3-1.x86_64.rpm.sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9OdGJTTHVhVkFzTmt3VHdLVTluWmtMUkg3aFQrUG9ka0s2cTNMTmk4RXJkeGoxVldBTTdBN0lNbmhMN01GcnV6cUhyYlNYVGIxQnd3NHR1VmtRSGdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MDUxCWZpbGU6QW5jaWxsYS0wLjIwLjMtMS54ODZfNjQucnBtCXZlcnNpb246MC4yMC4zCnZ2bzZadTVkRnZlWU96UVFHbzhPYmlHYU1ZMktkQVhaUjJaQ2xtS2NibmNXODJwUUtyWGJ1NFNyMzdKYlpuKzdTVW9td2VXRFJodk9nVERweHlVUUNBPT0K",
+    "Ancilla_0.20.3_amd64.AppImage.sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZEFWNzRLTDREb3NiaGVQeVV1SFBaNlNvOC9zVnZrdk5FeUdLTUw5WjVnc3BZaVlhNVlLV3lLOGZ3Yk9wcDdLOS9Iei9zTXhBWnRrVlRqTW9Cby9UYUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MTIxCWZpbGU6QW5jaWxsYV8wLjIwLjNfYW1kNjQuQXBwSW1hZ2UKK0lHcm1ZTlRNK0dDSFk4UytIZVJDeElYZENDUk5xRzhVa3FDa0prRjlHam9MWTRsbC9BaG51eVhZV3A2dml2c0VXNzJGQjJEdjd3enRqRTI4L2wxQ2c9PQo=",
+    "Ancilla_0.20.3_amd64.deb.sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZEZjeVRiZTlrQlpxT0o3ZlozQmtWaHNxVGpYWldLWnBjbllkMkVFcEpsa1FNWHV3eFFwTXhqc2xhdU00cVhtQ0kva1dFMEVaT1c2cEZIa0hWRXFRY1FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY3MDUxCWZpbGU6QW5jaWxsYV8wLjIwLjNfYW1kNjQuZGViCXZlcnNpb246MC4yMC4zCkU2VmJ2b2YyZWJnODViVFcrUXI3U0N5VUFTSkVHMjRRNGhuVEVqdVVWSWFMKzlvbkZQZmEwb3ZjSjlLWG53Wi8vRllwWlhYWUZhQkdHYkY2THppOEF3PT0K",
+    "Ancilla_0.20.3_x64-setup.exe.sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZElLZWRMNXI0UHFnWUgyTjQ1ZEtiZEJHajJlWXJ4Vko0aUJmbzd1T1h0eWdIaXVmbWJXU05JWmFaTGpoN0ZNU01MNVRhdFpDa1FpRnpUYmNVM2N3Vnd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY1NjkzCWZpbGU6QW5jaWxsYV8wLjIwLjNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMjAuMwpZK0RWekE3T3RWRkZyWnNwSDRVbFpOQWRydHVhNUxneVhHejRWZkM4SjBkUFlzV3gxZFpvSVdwQjhhMXJnamJUK3J3Ym85VTExY1hYdnI4OSs1VitBdz09Cg==",
+    "Ancilla_universal.app.tar.gz.sig": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSN1RMV1lCNmRMZE9FcVdkWktLWmRxQ0dBTlQrZjVqYTNvNm83RGkrZUJiUXYzTFJ5cmNLZVNNVVIwcHNZSDQ2UkEyb1piUk5WL3huT0hFZXppL0pEb2s2THcxT1hNc0FFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjY2MjU5CWZpbGU6QW5jaWxsYS5hcHAudGFyLmd6CXZlcnNpb246MC4yMC4zCkYyN3ByQU9yNC9GVzNIL1I4ME4yWWU3SzVvMnc3OVhJRVp4eFhzY08xbzlrdXBnQ2pZc3YxTlVJOElJQlRZYVRJcmtSUjUvcnhZL3E3bktXQmQ1Z0JRPT0K"
+  }
+}

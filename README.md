@@ -238,8 +238,10 @@ A local `tauri build` signs update artifacts, so it needs `TAURI_SIGNING_PRIVATE
 for a build you only run yourself.
 
 Releases ride on tags: pushing `vX.Y.Z` runs the Release workflow, which builds the Windows installer, then the universal
-macOS build, then the Linux AppImage, and attaches them to a GitHub Release with the updater's `latest.json`. Releases
-must not be marked prerelease, or the updater will not see them.
+macOS build, then the Linux packages and AppImage, into a private draft release with the updater's `latest.json`. A last
+job checks the whole draft, every signature against its file, and publishes it; a tag that already has a published
+release is never built again. A published release must not be marked prerelease, or the updater will not see it.
+[Releasing](docs/RELEASING.md) has the steps, the rehearsal and what to do when something goes wrong.
 
 ## Remote daemon
 
@@ -255,15 +257,42 @@ Then load the page, go to `#/connect`, and give it the address and the token. Bo
 than in the URL: the token is exchanged once for an `HttpOnly` cookie, which is what the event stream authenticates
 with, since `EventSource` cannot carry a header.
 
-Two things fail closed deliberately:
+Several things fail closed deliberately:
 
+- The server refuses to listen on anything but a loopback address (`127.0.0.1`, `localhost`, `::1`) unless `--token` is
+  given, and `--token` with no value is an error rather than "no token".
 - An origin that was never passed to `--allow-origin` gets no CORS headers and no answer at all.
 - A token in the query string counts only for requests carrying no other site's origin, so a copied link hands over
   nothing.
+- On a loopback bind the `Host` header must name `127.0.0.1`, `localhost` or `::1`, and `--allow-host` turns the same
+  check on for a bind to another address. Anything else gets `403` with `"kind": "host"`. A request that carries the
+  token as `Authorization: Bearer` skips this check; a cookie or a token in the URL does not.
+- With no `--allow-origin`, the API refuses requests that a browser marks as started by another site
+  (`Sec-Fetch-Site` of `cross-site` or `same-site`), except page navigations.
 
 Browsers only accept cross-site cookies over HTTPS, so a server reached from another origin needs TLS or a tunnel in
-front of it. On the same machine none of this applies: `#/connect` with an empty address uses the server that served
-the page, and no token is needed unless one was set.
+front of it. A proxy or tunnel that forwards its public name to a loopback server needs that name listed, because the
+event stream and images cannot send an `Authorization` header:
+
+```bash
+node packages/server/dist/src/cli.js --port 3127 \
+  --token "$(openssl rand -hex 24)" --allow-host ancilla.example
+```
+
+```caddyfile
+ancilla.example {
+  reverse_proxy 127.0.0.1:3127
+}
+```
+
+`--allow-host` repeats, and the hosts of the `--allow-origin` URLs are allowed too. Those are the hosts of the pages that
+load the UI, not the daemon's own name: with the UI on a different origin from the daemon, also list the name the daemon
+is reached at with `--allow-host`. The desktop app takes no flags: list
+the names under `allowHosts` in [`runtime.json`](docs/muse-recovery.md#reaching-the-server-by-another-name) instead.
+On the same machine none of this applies: `#/connect` with an empty address uses the server that served the page, and
+no token is needed unless one was set. Starting without a token still works on a loopback address but now logs a
+warning: a later release will need one. See [SECURITY.md](SECURITY.md) for what the token and the Host check do and do
+not protect.
 
 ## Architecture
 

@@ -1,11 +1,25 @@
 name: Release
 
+# Draft first. Each build job puts what it makes into a private draft release, and nothing reaches the address that
+# installed copies read (releases/latest/download/latest.json) until the publish job has checked the whole draft:
+# its assets, latest.json, and every signature against the installers' bytes (docs/RELEASING.md). A tag is made once:
+# one that already has a published release is never built again.
 on:
   push:
     tags: ["v*"]
-  # Rebuilds and republishes an existing tag: `gh workflow run release.yml --ref vX.Y.Z`. It runs the workflow file as
-  # it is at that tag, so it works for tags made after this line was added.
+  # Builds a tag by hand, as `gh workflow run release.yml --repo aleff-ferreira/ancilla --ref vX.Y.Z`, or rehearses the
+  # whole pipeline from any branch with dry_run. It runs the workflow file as it is at that ref, so a tag made before
+  # this file went draft-first still runs the old workflow.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rehearse: build and check everything into a throwaway prerelease draft, publish nothing, then delete the draft"
+        type: boolean
+        default: false
+      rotate_key:
+        description: "Allow a new updater public key in this release; signatures are still checked against the old key"
+        type: boolean
+        default: false
 
 # Every job merges its platform into the release's latest.json, so two runs for one tag would clobber each other.
 # A second run waits for the first rather than cancelling it half-published.
@@ -14,6 +28,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The tag the release is made under. A rehearsal never uses a real tag: dry-run-<run id> names a draft that is
+  # deleted at the end and could not be mistaken for a version.
+  RELEASE_TAG: ${{ inputs.dry_run && format('dry-run-{0}', github.run_id) || github.ref_name }}
+  # A rehearsal's draft is a prerelease, so that even a mistake that published it could never make it the latest release.
+  RELEASE_PRERELEASE: ${{ inputs.dry_run && 'true' || 'false' }}
   # The GitHub release page. tauri-action also copies it into latest.json as the update's notes.
   RELEASE_BODY: |
     Ancilla ${{ github.ref_name }} — Deep research. Agents in view.
@@ -46,7 +65,14 @@ jobs:
   desktop-windows:
     permissions:
       contents: write
-    runs-on: windows-latest
+    # The image windows-latest resolved to when 0.20.3 was released (run 36533903301, 2026-09-29), pinned so that a runner
+    # migration cannot change the toolchain under the signing step. Moving to a newer image is a change made on purpose,
+    # in a rehearsal (dry_run) first.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    outputs:
+      release_id: ${{ steps.tauri.outputs.releaseId }}
+      started_at: ${{ steps.started.outputs.at }}
     steps:
       # First, so a missing key fails in seconds instead of after a full build that could not be signed.
       - name: Check the updater signing key
@@ -58,22 +84,63 @@ jobs:
             echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
             exit 1
           fi
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      # Early, because the publish job refuses any asset uploaded before this moment: that is how a leftover of an
+      # earlier attempt would show.
+      - name: Note when this run started
+        id: started
+        shell: bash
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
       # The tag names the release, and the files decide the version the updater compares, so they must agree.
-      # Only here: the other jobs wait for this one.
+      # Only here: the other jobs wait for this one. A rehearsal may start from a branch, where the files only have
+      # to agree with each other.
       - name: Check the tag matches the version
         shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
-            echo "::error title=Not a tag::Run this workflow on a vX.Y.Z tag (gh workflow run release.yml --ref vX.Y.Z), not on $GITHUB_REF_NAME."
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
+          elif [ "$DRY_RUN" = "true" ]; then
+            node scripts/bump-version.mjs --check
+          else
+            echo "::error title=Not a tag::Run this workflow on a vX.Y.Z tag (gh workflow run release.yml --ref vX.Y.Z), or with dry_run to rehearse, not on $GITHUB_REF_NAME."
             exit 1
           fi
-          node scripts/bump-version.mjs --check "$GITHUB_REF_NAME"
-      - uses: dtolnay/rust-toolchain@stable
+      # tauri-action finds a release by its tag, published or not, and writes into it. So a tag that already has a
+      # published release stops here, and a draft an earlier attempt left is deleted: its assets and its latest.json
+      # entries would be merged into this release.
+      - name: Refuse a published tag and delete stale drafts
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release-draft.mjs prepare --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+      # The key installed copies trust is the one the newest published release had (docs/RELEASING.md). The Linux job
+      # and the publish job read it again, and fail when it cannot be read: this finds that out now, in seconds, and
+      # not after the Windows and macOS builds, for a repository that has no published release yet or a tag that cannot
+      # be fetched. It also makes the comparison with that release which the publish job makes, so that a config whose
+      # key, update endpoints, identifier or version is wrong fails here and not after the builds. A replaced key needs
+      # a manual run with rotate_key; a pushed tag never gets it.
+      - name: Check there is a trusted updater key to verify against
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ROTATE_KEY: ${{ inputs.rotate_key }}
+        run: |
+          rotate=()
+          if [ "$ROTATE_KEY" = "true" ]; then
+            rotate=(--allow-key-rotation)
+          fi
+          node scripts/check-release-draft.mjs trusted-conf --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/trusted-tauri.conf.json" --conf apps/desktop/src-tauri/tauri.conf.json "${rotate[@]}"
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
       - run: npm ci
       # The first check only sees that the key is there. This one signs a scratch file the way the build signs the
       # installer, so a damaged key, or one that needs a password the secrets do not give, fails here within a
@@ -89,7 +156,8 @@ jobs:
         run: node scripts/check-signing-key.mjs
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      - id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
           ANCILLA_NODE_TARGET: x86_64-pc-windows-msvc
@@ -101,12 +169,14 @@ jobs:
           # because CI is set, as on every runner (tauri-cli's sign_updaters). Set the secret only for a key with one.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Ancilla ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "Ancilla ${{ env.RELEASE_TAG }}"
           releaseBody: ${{ env.RELEASE_BODY }}
-          releaseDraft: false
-          # A full release, so the updater's releases/latest/download/latest.json always points at it.
-          prerelease: false
+          # A draft: private until the publish job has checked it and says otherwise.
+          releaseDraft: true
+          # Never a prerelease for a real release, so the updater's releases/latest/download/latest.json points at it
+          # once it is published. A rehearsal's draft is one.
+          prerelease: ${{ env.RELEASE_PRERELEASE }}
           # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
           retryAttempts: 3
           args: --target x86_64-pc-windows-msvc
@@ -118,7 +188,11 @@ jobs:
     # which is a read-modify-write that concurrent jobs could clobber, silently dropping a platform
     # from auto-update.
     needs: desktop-windows
-    runs-on: macos-latest
+    # The image macos-latest resolved to when 0.20.3 was released (Apple Silicon, run 36533903301).
+    runs-on: macos-26
+    timeout-minutes: 75
+    outputs:
+      release_id: ${{ steps.tauri.outputs.releaseId }}
     steps:
       - name: Check the updater signing key
         shell: bash
@@ -129,19 +203,23 @@ jobs:
             echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
             exit 1
           fi
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
+          toolchain: stable
           # universal-apple-darwin needs both halves installed; aarch64 is already the runner default.
           targets: x86_64-apple-darwin
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      - id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
           ANCILLA_NODE_TARGET: universal-apple-darwin
@@ -151,22 +229,41 @@ jobs:
           # Empty unless the key has a password; see the Windows job.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Ancilla ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "Ancilla ${{ env.RELEASE_TAG }}"
           releaseBody: ${{ env.RELEASE_BODY }}
-          releaseDraft: false
-          # A full release, so the updater's releases/latest/download/latest.json always points at it.
-          prerelease: false
+          # A draft: private until the publish job has checked it and says otherwise.
+          releaseDraft: true
+          # Never a prerelease for a real release; see the Windows job.
+          prerelease: ${{ env.RELEASE_PRERELEASE }}
           # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
           retryAttempts: 3
           # One universal binary for Apple Silicon and Intel; the macOS bundles come from tauri.macos.conf.json.
           args: --target universal-apple-darwin
+      # A second draft for this tag, or a published release, would split the release in two: stop if this job's
+      # upload did not go to the draft the Windows job made.
+      - name: Check this job found the same draft
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+          EXPECTED_ID: ${{ needs.desktop-windows.outputs.release_id }}
+        run: |
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" != "$EXPECTED_ID" ]; then
+            echo "::error title=Two releases for one tag::This job uploaded to release '$RELEASE_ID', but the Windows job made '$EXPECTED_ID'."
+            exit 1
+          fi
 
   desktop-linux:
     permissions:
       contents: write
-    needs: desktop-macos
+    needs: [desktop-windows, desktop-macos]
+    # Not on 24.04 yet: the AppImage carries this image's glibc as its floor, so a newer image would stop it starting
+    # on older distributions. GitHub is retiring the 22.04 image (unsupported from 2027-04-17), so this has to be
+    # decided before then (docs/RELEASING.md, follow-ups). Unlike the other jobs it was pinned already.
     runs-on: ubuntu-22.04
+    timeout-minutes: 75
+    outputs:
+      appimage_sha256: ${{ steps.sign.outputs.sha256 }}
     steps:
       - name: Check the updater signing key
         shell: bash
@@ -177,18 +274,23 @@ jobs:
             echo "::error title=TAURI_SIGNING_PRIVATE_KEY is not set::Add the updater's private key as the repository secret TAURI_SIGNING_PRIVATE_KEY (docs/RELEASING.md, one-time setup), then run this again. Without it nothing can be signed, and installed copies refuse an unsigned update."
             exit 1
           fi
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
       - name: Install Tauri Linux dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools rpm libarchive-tools desktop-file-utils xvfb
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
-      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+      - id: tauri
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           # Which Node.js sidecar beforeBuildCommand bundles (apps/desktop/scripts/fetch-node.mjs).
           ANCILLA_NODE_TARGET: x86_64-unknown-linux-gnu
@@ -198,25 +300,58 @@ jobs:
           # Empty unless the key has a password; see the Windows job.
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Ancilla ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "Ancilla ${{ env.RELEASE_TAG }}"
           releaseBody: ${{ env.RELEASE_BODY }}
-          releaseDraft: false
-          # A full release, so the updater's releases/latest/download/latest.json always points at it.
-          prerelease: false
+          # A draft: private until the publish job has checked it and says otherwise.
+          releaseDraft: true
+          # Never a prerelease for a real release; see the Windows job.
+          prerelease: ${{ env.RELEASE_PRERELEASE }}
           # GitHub sometimes refuses a large asset upload ("Error saving asset"); retrying saves a manual job rerun.
           retryAttempts: 3
           args: --target x86_64-unknown-linux-gnu
+      - name: Check this job found the same draft
+        shell: bash
+        env:
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+          EXPECTED_ID: ${{ needs.desktop-windows.outputs.release_id }}
+        run: |
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" != "$EXPECTED_ID" ]; then
+            echo "::error title=Two releases for one tag::This job uploaded to release '$RELEASE_ID', but the Windows job made '$EXPECTED_ID'."
+            exit 1
+          fi
       - name: Check every Linux installer contains its runtime and application-menu icon
         run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
-      # linuxdeploy bundles Ubuntu 22.04's libwayland-*. Newer host Mesa fails EGL init
-      # against the stale copy, so WebKitGTK aborts with EGL_BAD_ALLOC before the window
-      # opens (tauri-apps/tauri#15665). Repack without those libraries so the AppImage
-      # uses the host ones, then re-sign and republish it.
-      - name: Strip bundled Wayland libraries from AppImage
+      # The package a user installs with apt, started from /usr/bin/ancilla, as the installer smoke test does.
+      - name: Install the Debian package and launch it from its system path
+        run: |
+          set -euo pipefail
+          debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
+          sudo apt-get install -y "${debs[0]}"
+          bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+      # linuxdeploy bundles Ubuntu 22.04's libwayland-*. Newer host Mesa fails EGL init against the stale copy, so
+      # WebKitGTK aborts with EGL_BAD_ALLOC before the window opens (tauri-apps/tauri#15665). The AppImage the bundler
+      # just built is repacked without those libraries, here on the runner and not after a download of what is
+      # already public, and it is signed again below.
+      - name: Strip the bundled Wayland libraries from the AppImage
+        id: repack
+        shell: bash
+        run: |
+          set -euo pipefail
+          images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          [ "${#images[@]}" -eq 1 ]
+          bash apps/desktop/scripts/repack-appimage.sh "${images[0]}" "$RUNNER_TEMP/appimage"
+          echo "path=$RUNNER_TEMP/appimage/$(basename "${images[0]}")" >> "$GITHUB_OUTPUT"
+      # What users get, not what the bundler made: the repack is the step that can break an AppImage.
+      - name: Launch the repacked AppImage without requiring FUSE
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPIMAGE: ${{ steps.repack.outputs.path }}
+        run: bash apps/desktop/scripts/smoke-linux.sh "$APPIMAGE" --appimage-extract-and-run
+      - name: Sign the repacked AppImage
+        id: sign
+        shell: bash
+        env:
+          APPIMAGE: ${{ steps.repack.outputs.path }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
@@ -224,40 +359,142 @@ jobs:
           # `tauri signer sign` reads an unset password as "ask on the terminal", which CI does not have, and fails.
           # Set but empty is what opens a key made without a password.
           export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
-          work="$(mktemp -d)"
-          trap 'rm -rf "$work"' EXIT
-          cd "$work"
-          # gh infers the repository from the git remote, and $work is not a checkout.
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "*.AppImage" --clobber
-          shopt -s nullglob
-          found=(Ancilla_*_amd64.AppImage)
-          if [ "${#found[@]}" -ne 1 ]; then
-            echo "::error::Expected one Ancilla_*_amd64.AppImage in the $RELEASE_TAG release, found ${#found[@]}: $(ls)"
-            exit 1
+          rm -f "$APPIMAGE.sig"
+          "$GITHUB_WORKSPACE/node_modules/.bin/tauri" signer sign "$APPIMAGE"
+          test -s "$APPIMAGE.sig"
+          echo "sha256=$(sha256sum "$APPIMAGE" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # The check an installed copy makes, against the key it trusts: plugins.updater.pubkey as the newest published
+      # release had it, not as it is in the tree being built. A release that replaces the key carries the new one but is
+      # signed with the old one on purpose (docs/RELEASING.md), and only this reading accepts it. If that file cannot
+      # be read, the job fails.
+      - name: Verify the signature as installed copies will
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPIMAGE: ${{ steps.repack.outputs.path }}
+        run: |
+          set -euo pipefail
+          node scripts/check-release-draft.mjs trusted-conf --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/trusted-tauri.conf.json"
+          node scripts/verify-updater-signature.mjs --conf "$RUNNER_TEMP/trusted-tauri.conf.json" "$APPIMAGE"
+      # Into the private draft, by its id (a draft cannot be found by its tag), and latest.json last. Nothing here is
+      # public: the publish job is what makes it so.
+      - name: Replace the AppImage in the draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPIMAGE: ${{ steps.repack.outputs.path }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: node scripts/check-release-draft.mjs replace-appimage --repo "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" --tag "$RELEASE_TAG" --appimage "$APPIMAGE"
+
+  # The only job that can make a release public, and the only one that does so, and it holds no signing key: it
+  # reads the draft, checks all of it against the installers' bytes, and only then publishes. A tag, never a rehearsal.
+  # Approve it in the repository's "release" environment (docs/RELEASING.md).
+  publish:
+    if: github.ref_type == 'tag' && !inputs.dry_run
+    needs: [desktop-windows, desktop-macos, desktop-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write
+    # Two tags pushed close together publish one at a time, in the order they arrive.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+      # plugins.updater.pubkey as the newest published release had it: the key installed copies trust.
+      - name: Fetch the trusted updater key
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release-draft.mjs trusted-conf --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/trusted-tauri.conf.json"
+      - name: Check the draft and publish it
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.desktop-windows.outputs.release_id }}
+          STARTED_AT: ${{ needs.desktop-windows.outputs.started_at }}
+          APPIMAGE_SHA256: ${{ needs.desktop-linux.outputs.appimage_sha256 }}
+          ROTATE_KEY: ${{ inputs.rotate_key }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          rotate=()
+          if [ "$ROTATE_KEY" = "true" ]; then
+            rotate=(--allow-key-rotation)
           fi
-          appimage="${found[0]}"
-          # A downloaded release asset does not keep its executable bit.
-          chmod +x "$appimage"
-          "./$appimage" --appimage-extract
-          rm -f squashfs-root/usr/lib/libwayland-client.so.0 squashfs-root/usr/lib/libwayland-cursor.so.0 \
-            squashfs-root/usr/lib/libwayland-egl.so.1 squashfs-root/usr/lib/libwayland-server.so.0
-          curl -sSL --fail -o appimagetool https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum --check
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool --appimage-extract-and-run squashfs-root "$appimage"
-          bash "$GITHUB_WORKSPACE/apps/desktop/scripts/smoke-linux.sh" "$work/$appimage" --appimage-extract-and-run
-          "${{ github.workspace }}/node_modules/.bin/tauri" signer sign "$appimage"
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "latest.json" --clobber
-          SIG_FILE="$appimage.sig" node -e '
-            const fs = require("fs");
-            const latest = JSON.parse(fs.readFileSync("latest.json", "utf8"));
-            const signature = fs.readFileSync(process.env.SIG_FILE, "utf8").trim();
-            for (const platform of ["linux-x86_64", "linux-x86_64-appimage"]) {
-              if (!latest.platforms[platform]?.url.endsWith(".AppImage")) {
-                throw new Error(`Expected an AppImage updater URL for ${platform}`);
-              }
-              latest.platforms[platform].signature = signature;
-            }
-            fs.writeFileSync("latest.json", JSON.stringify(latest, null, 2));
-          '
-          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$appimage" "$appimage.sig" latest.json --clobber
+          node scripts/check-release-draft.mjs publish \
+            --repo "$GITHUB_REPOSITORY" \
+            --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" \
+            --conf apps/desktop/src-tauri/tauri.conf.json \
+            --trusted-conf "$RUNNER_TEMP/trusted-tauri.conf.json" \
+            --started-at "$STARTED_AT" \
+            --expect-sha256 "Ancilla_${version}_amd64.AppImage=$APPIMAGE_SHA256" \
+            "${rotate[@]}"
+      # Only a look: a CDN that is slow must never undo a release that passed every check.
+      - name: Look at the public latest.json (a warning only)
+        continue-on-error: true
+        shell: bash
+        run: node scripts/check-release-draft.mjs poll --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
+  # Where a rehearsal ends: the checks the publish job would run, without publishing, and then the throwaway draft is
+  # deleted, also when a build failed or the run was cancelled.
+  dry-run:
+    if: ${{ always() && inputs.dry_run }}
+    needs: [desktop-windows, desktop-macos, desktop-linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+      - name: Fetch the trusted updater key
+        if: needs.desktop-linux.result == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release-draft.mjs trusted-conf --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/trusted-tauri.conf.json"
+      - name: Run the publish checks, without publishing
+        if: needs.desktop-linux.result == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.desktop-windows.outputs.release_id }}
+          STARTED_AT: ${{ needs.desktop-windows.outputs.started_at }}
+          APPIMAGE_SHA256: ${{ needs.desktop-linux.outputs.appimage_sha256 }}
+          ROTATE_KEY: ${{ inputs.rotate_key }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          rotate=()
+          if [ "$ROTATE_KEY" = "true" ]; then
+            rotate=(--allow-key-rotation)
+          fi
+          node scripts/check-release-draft.mjs check \
+            --dry-run \
+            --repo "$GITHUB_REPOSITORY" \
+            --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" \
+            --conf apps/desktop/src-tauri/tauri.conf.json \
+            --trusted-conf "$RUNNER_TEMP/trusted-tauri.conf.json" \
+            --started-at "$STARTED_AT" \
+            --expect-sha256 "Ancilla_${version}_amd64.AppImage=$APPIMAGE_SHA256" \
+            "${rotate[@]}"
+      - name: Delete the rehearsal's draft
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release-draft.mjs discard --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"

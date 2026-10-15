@@ -4,6 +4,7 @@ import { constants, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import type { Readable } from "node:stream";
 import {
@@ -52,11 +53,13 @@ import {
   type SubscriptionUsage,
   type TurnImage,
 } from "@ancilla/daemon";
+import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
 import { attachmentHeaders, normalizeMediaType } from "./attachments.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
 import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { wslSpawnEnv } from "./runtimeConfig.js";
+import { SseBroadcaster } from "./sse.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { replayUsageAt, turnStartTimes } from "./usageTime.js";
 import { dayBucketer, usageWindow } from "./usageWindow.js";
@@ -154,6 +157,8 @@ export interface ServerOptions {
   token?: string | null;
   /** Browser origins allowed to reach this daemon from another site. Empty means same-origin only. */
   allowOrigins?: string[];
+  /** Host names the daemon answers besides the loopback ones; see `admission.ts`. */
+  allowHosts?: string[];
   platform?: string;
   distro?: string;
   musePath?: string | null;
@@ -200,6 +205,16 @@ export interface ServerOptions {
    * was saved under. The real one refuses links and never replaces a file; a test replaces it to see where it is aimed.
    */
   attachmentWriter?: AttachmentWriter;
+  /**
+   * The most unsent bytes the event stream holds for one client behind the frame being added. A client over it is
+   * disconnected and reloads what it missed when its stream reconnects. Four mebibytes by default.
+   */
+  sseMaxBacklogBytes?: number;
+  /**
+   * How long a client may go without finishing a write, once the event stream could not hand it a frame, before it
+   * is disconnected. Ninety seconds by default; zero turns the deadline off.
+   */
+  sseStallMs?: number;
 }
 
 interface ManagedHost {
@@ -308,7 +323,10 @@ function goalOf(value: unknown): GoalBlock | null | undefined {
   };
 }
 
-type SseSink = (event: string, data: unknown) => void;
+/** Session ids whose research origin is remembered, so a frame on the event stream does not ask the store each time. */
+const RESEARCH_ORIGIN_CACHE_LIMIT = 4096;
+/** How long a session the store has no row for stays unasked about; its row is written moments after its first frames. */
+const RESEARCH_MISS_MS = 1_000;
 
 const MAX_HISTORY_PAGES = 4;
 const HISTORY_PAGE_SIZE = 1000;
@@ -341,6 +359,12 @@ class HttpError extends Error {
   ) {
     super(message);
   }
+}
+
+/** One request header as text; a repeated header counts as absent. */
+function headerText(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return typeof value === "string" ? value : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -770,6 +794,18 @@ const MAX_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 const MAX_BODY_BYTES = 96 * 1024 * 1024;
 /**
+ * The handshake carries one token; a body past its room is not one, and is refused before anything is compared. The
+ * room is this much at least, and for a longer token six bytes a character (the most JSON spends on one, as `\u00xx`)
+ * plus the braces and key, so no token can lock itself out.
+ */
+const MIN_AUTH_BODY_BYTES = 4 * 1024;
+/** How many different refused hosts are written to the log in a process's lifetime. */
+const MAX_REFUSED_HOSTS_LOGGED = 5;
+/** The longest a host name can be (DNS); a longer Host header is described as unusable and never offered as a name to list. */
+const MAX_HOST_NAME_LENGTH = 253;
+/** What the JSON answers and the page itself say about being framed: only by this same origin (the PDF preview). */
+const FRAME_HEADERS = { "content-security-policy": "frame-ancestors 'self'", "x-frame-options": "SAMEORIGIN" } as const;
+/**
  * A file written for a send that Muse then did not take stays this long as the one a retry of the same file uses,
  * instead of leaving a second copy. The retry the controller makes after resuming a session comes within seconds.
  */
@@ -787,6 +823,15 @@ interface PreparedAttachment {
 
 export class AncillaServer {
   private readonly server: Server;
+  /** Host names the daemon answers; see `admission.ts`. */
+  private readonly trustedHosts: ReadonlySet<string>;
+  /** Whether the Host check runs: on a loopback bind, or when `--allow-host` was given. */
+  private readonly enforceHost: boolean;
+  /** The refused hosts already written to the log, capped at `MAX_REFUSED_HOSTS_LOGGED`. */
+  private readonly refusedHostsLogged = new Set<string>();
+  /** Every request refused for its Host, logged or not, and the last such name that could have been listed. */
+  private hostRefusals = 0;
+  private lastRefusedHost: string | null = null;
   private readonly store: AncillaStore;
   private readonly aonia: Aonia;
   private readonly linuxInstaller: LinuxMuseInstaller;
@@ -795,7 +840,12 @@ export class AncillaServer {
   /** Restarts queued by a settings flip, oldest first. Hosts are only acquired past the tail. */
   private restartChain: Promise<void> = Promise.resolve();
   private readonly fingerprints = new Map<string, unknown>();
-  private readonly sinks = new Set<SseSink>();
+  /** The clients of `/api/events`, with the bounds that keep one that stopped reading from costing memory. */
+  private readonly sse: SseBroadcaster;
+  /** Whether each session is a research run's own, as the event stream last learned it; see `isResearchFrame`. */
+  private readonly researchOrigins = new Map<string, boolean>();
+  /** Sessions the store had no row for, to the monotonic reading until which that is not asked again. */
+  private readonly researchMisses = new Map<string, number>();
   private readonly live = new Map<string, LiveState>();
   private readonly sessionHosts = new Map<string, string>();
   /**
@@ -878,6 +928,8 @@ export class AncillaServer {
       | "researchMaxWorkers"
       | "researchStartupMs"
       | "attachmentWriter"
+      | "sseMaxBacklogBytes"
+      | "sseStallMs"
     >
   > &
     Pick<ServerOptions, "staticDir" | "token" | "findNativeMuse"> & {
@@ -917,6 +969,7 @@ export class AncillaServer {
       staticDir: options.staticDir ? resolve(options.staticDir) : null,
       token: options.token ?? null,
       allowOrigins: options.allowOrigins ?? [],
+      allowHosts: options.allowHosts ?? [],
       platform: options.platform ?? process.platform,
       distro: options.distro,
       musePath: options.musePath,
@@ -932,6 +985,8 @@ export class AncillaServer {
       shellRunner: options.shellRunner ?? ((command, args) => runCapture(command, args, undefined, SHELL_TIMEOUT_MS)),
       loginSpawn: options.loginSpawn ?? defaultLoginSpawn,
     };
+    this.trustedHosts = trustedHostSet(this.options.allowHosts, this.options.allowOrigins, this.options.host);
+    this.enforceHost = isLoopbackBind(this.options.host) || parseAllowHosts(this.options.allowHosts).hosts.length > 0;
     const startupEnv = process.env["ANCILLA_RESEARCH_STARTUP_MS"];
     this.researchStartupOverride = { option: options.researchStartupMs, env: startupEnv };
     if (startupEnv !== undefined && startupEnv.trim() !== "" && startupEnvMs(startupEnv) === null) {
@@ -940,6 +995,7 @@ export class AncillaServer {
       );
     }
     this.opener = options.opener ?? defaultOpener(this.options.platform);
+    this.sse = new SseBroadcaster({ maxBacklogBytes: options.sseMaxBacklogBytes, stallMs: options.sseStallMs });
     this.attachmentWriter = options.attachmentWriter ?? writeAttachment;
     // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
     importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
@@ -1003,6 +1059,13 @@ export class AncillaServer {
   }
 
   async listen(): Promise<{ port: number; host: string }> {
+    // This server can run commands in the user's projects. Reaching it from the network takes a credential, and
+    // nothing here would notice a missing one later, so the refusal comes before anything is bound.
+    if (!this.options.token && !isLoopbackBind(this.options.host)) {
+      throw new Error(
+        `Refusing to listen on ${this.options.host || "every interface"}: that address can be reached from other machines, and this server can run commands in your projects. Pass --token <value> (a long random string), or leave --host out to listen on 127.0.0.1 only.`,
+      );
+    }
     await new Promise<void>((resolve) => this.server.listen(this.options.port, this.options.host, resolve));
     const address = this.server.address();
     const port = typeof address === "object" && address ? address.port : this.options.port;
@@ -1030,9 +1093,7 @@ export class AncillaServer {
     this.titleQueue.length = 0;
     // Research jobs go first: their workers still need the hosts to take the interrupts.
     await this.researchJobs.close();
-    for (const sink of [...this.sinks]) {
-      this.sinks.delete(sink);
-    }
+    this.sse.close();
     for (const pending of this.starting.values()) {
       await pending.catch(() => undefined);
     }
@@ -1046,20 +1107,112 @@ export class AncillaServer {
     this.hosts.clear();
     this.server.closeAllConnections?.();
     await new Promise<void>((resolve, reject) =>
-      this.server.close((error) => (error ? reject(error) : resolve())),
+      // A server that refused to listen has nothing to close.
+      this.server.close((error) => (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve())),
     );
     await this.titleWorker?.catch(() => undefined);
     this.store.close();
   }
 
+  /**
+   * One event to every client of the stream, serialised once and shared. Nothing here merges or drops an event for a
+   * client that keeps up, `session-status` and the lifecycle edges above all; what the stream sheds is a client that
+   * does not (see `SseBroadcaster`), and a research run's own sessions, which no client has any use for.
+   */
   private emit(type: string, data: unknown): void {
-    for (const sink of this.sinks) {
-      try {
-        sink(type, data);
-      } catch {
-        /* drop broken sinks on next write */
+    if (this.sse.size === 0) {
+      return;
+    }
+    if (this.isResearchFrame(type, data)) {
+      this.sse.countSkipped();
+      return;
+    }
+    let frame: string;
+    try {
+      const body = JSON.stringify(data);
+      if (typeof body !== "string") {
+        throw new TypeError("the event has no JSON form");
+      }
+      frame = `event: ${type}\ndata: ${body}\n\n`;
+    } catch (error) {
+      // An event that cannot be written is not worth a client's stream, nor a crash: this runs from timers and
+      // from inside the host's read loop.
+      this.sse.countSerializationFailure();
+      this.log(`event stream: could not serialise a ${type} event: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    this.sse.publish(frame);
+  }
+
+  /**
+   * Whether an event belongs to one of a research run's own sessions: its frames, its tool output (fetched web text
+   * among it) and its status. The run reads them through its own listeners and its progress reaches the browser as
+   * `research-run`, so no client needs them, and an unlisted `session-status` only makes every client refresh its
+   * lists. Decided here and not in `forward`, which still records their usage and hands them to those listeners.
+   */
+  private isResearchFrame(type: string, data: unknown): boolean {
+    if (type !== "ancilla" || typeof data !== "object" || data === null) {
+      return false;
+    }
+    const event = data as { type?: unknown; sessionId?: unknown };
+    if ((event.type !== "msp" && event.type !== "session-status") || typeof event.sessionId !== "string") {
+      return false;
+    }
+    return this.knownResearchSession(event.sessionId);
+  }
+
+  /**
+   * `isResearchSession`, remembered: this runs for every frame of every session. A session is looked up until the
+   * store has it, so a frame that beats the row into the store (it is written when Muse answers the start) is
+   * broadcast and never cached as ordinary; `openResearchSession` records its own at once. A session with no row is
+   * asked about again after `RESEARCH_MISS_MS`, not for every frame in between.
+   */
+  private knownResearchSession(sessionId: string): boolean {
+    const known = this.researchOrigins.get(sessionId);
+    if (known !== undefined) {
+      return known;
+    }
+    const missUntil = this.researchMisses.get(sessionId);
+    if (missUntil !== undefined) {
+      if (performance.now() < missUntil) {
+        return false;
+      }
+      this.researchMisses.delete(sessionId);
+    }
+    let found: boolean;
+    try {
+      const record = this.store.getSession(sessionId);
+      if (record === null) {
+        this.rememberResearchMiss(sessionId);
+        return false;
+      }
+      found = record.origin === "research-worker";
+    } catch {
+      return false;
+    }
+    this.rememberResearchOrigin(sessionId, found);
+    return found;
+  }
+
+  private rememberResearchMiss(sessionId: string): void {
+    this.researchMisses.delete(sessionId);
+    if (this.researchMisses.size >= RESEARCH_ORIGIN_CACHE_LIMIT) {
+      const oldest = this.researchMisses.keys().next();
+      if (!oldest.done) {
+        this.researchMisses.delete(oldest.value);
       }
     }
+    this.researchMisses.set(sessionId, performance.now() + RESEARCH_MISS_MS);
+  }
+
+  private rememberResearchOrigin(sessionId: string, research: boolean): void {
+    if (this.researchOrigins.size >= RESEARCH_ORIGIN_CACHE_LIMIT) {
+      const oldest = this.researchOrigins.keys().next();
+      if (!oldest.done) {
+        this.researchOrigins.delete(oldest.value);
+      }
+    }
+    this.researchOrigins.set(sessionId, research);
   }
 
   /** Coalesce bursts (discovery, title backfill) into one sidebar refresh. */
@@ -1102,7 +1255,8 @@ export class AncillaServer {
     for (const part of raw.split(";")) {
       const [key, ...rest] = part.trim().split("=");
       if (key === name) {
-        return decodeURIComponent(rest.join("="));
+        // A cookie with a broken escape is no credential, not a crash.
+        return safeDecode(rest.join("="));
       }
     }
     return null;
@@ -1128,17 +1282,26 @@ export class AncillaServer {
     return true;
   }
 
+  /** Whether the request carries the token in an `Authorization: Bearer` header; a page does not hold the token, so it cannot send a valid one. */
+  private bearerValid(req: IncomingMessage): boolean {
+    const token = this.options.token;
+    const header = req.headers["authorization"];
+    return !!token && typeof header === "string" && header.startsWith("Bearer ") && safeEqual(header.slice("Bearer ".length), token);
+  }
+
   private authorized(req: IncomingMessage): boolean {
-    if (!this.options.token) {
+    const token = this.options.token;
+    if (!token) {
       return true;
     }
-    if (
-      this.cookie(req, AncillaServer.AUTH_COOKIE) === this.options.token ||
-      this.cookie(req, AncillaServer.LEGACY_AUTH_COOKIE) === this.options.token
-    ) {
+    const held = (name: string) => {
+      const value = this.cookie(req, name);
+      return value !== null && safeEqual(value, token);
+    };
+    if (held(AncillaServer.AUTH_COOKIE) || held(AncillaServer.LEGACY_AUTH_COOKIE)) {
       return true;
     }
-    if (req.headers["authorization"] === `Bearer ${this.options.token}`) {
+    if (this.bearerValid(req)) {
       return true;
     }
     // A token in the URL leaks through history, server logs and any shared link, so it counts only
@@ -1147,13 +1310,66 @@ export class AncillaServer {
       return false;
     }
     const url = new URL(req.url ?? "/", "http://localhost");
-    return url.searchParams.get("token") === this.options.token;
+    const given = url.searchParams.get("token");
+    return given !== null && safeEqual(given, token);
   }
 
   private json(res: ServerResponse, status: number, body: unknown): void {
     const text = JSON.stringify(body);
-    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...FRAME_HEADERS });
     res.end(text);
+  }
+
+  /** A path segment as the person's text: a malformed escape is a bad request, not a server error. */
+  private segment(raw: string): string {
+    const decoded = safeDecode(raw);
+    if (decoded === null) {
+      throw new HttpError(400, "That address is not valid.");
+    }
+    return decoded;
+  }
+
+  /** The 403 for a request that names a host this daemon was not told to answer, and the one line saying so. */
+  private refuseHost(req: IncomingMessage, res: ServerResponse): void {
+    const raw = req.headers["host"];
+    const shown = typeof raw === "string" && raw.trim() ? raw.trim().slice(0, 100).replace(/[^\x21-\x7e]/g, "?") : "";
+    // The header is the other side's text. A command to copy is built only from a name or address that
+    // `--allow-host` would take (without port or brackets); anything else is described, never repeated as a command.
+    // No host name is longer than 253 characters, so a longer one is not a name, whatever its letters.
+    const parsed = typeof raw === "string" ? normalizeHost(raw) : null;
+    const name = parsed !== null && parsed.length <= MAX_HOST_NAME_LENGTH ? parsed : null;
+    const hint = name === null ? null : `--allow-host ${name}`;
+    // Counted for every refusal, whatever the log has stopped saying, so a wrong proxy setting is visible in the
+    // diagnostics after five other names used up the log. Only a name that passed the checks above is kept.
+    this.hostRefusals += 1;
+    if (name !== null) {
+      this.lastRefusedHost = name;
+    }
+    // Each distinct host is logged once, and only the first few: a page that tries many made-up names must not be
+    // able to fill the log.
+    const key = name ?? (shown || "(none)");
+    if (!this.refusedHostsLogged.has(key) && this.refusedHostsLogged.size < MAX_REFUSED_HOSTS_LOGGED) {
+      this.refusedHostsLogged.add(key);
+      const last = this.refusedHostsLogged.size === MAX_REFUSED_HOSTS_LOGGED ? " No more refused hosts will be logged." : "";
+      let line: string;
+      if (hint !== null) {
+        line = `refused a request for host ${JSON.stringify(shown)}; if this is your own proxy or tunnel, add ${hint} (or "allowHosts" in runtime.json).`;
+      } else if (shown) {
+        line = `refused a request for an unusable host name (${JSON.stringify(shown)}); it is not a name or address that could be allowed.`;
+      } else {
+        line = "refused a request that names no host.";
+      }
+      this.log(line + last);
+    }
+    let message: string;
+    if (hint !== null) {
+      message = `This daemon does not answer requests for the host "${shown}". If it is behind a proxy or a tunnel, start the server with ${hint}, or list that name under "allowHosts" in runtime.json.`;
+    } else if (shown) {
+      message = `This daemon does not answer requests for an unusable host name (${JSON.stringify(shown)}). A host name is letters, digits, dots and hyphens, or an IP address.`;
+    } else {
+      message = `This request names no host, which this daemon does not answer. Send a Host header, or start the server with --allow-host <name> (or "allowHosts" in runtime.json).`;
+    }
+    this.fail(res, 403, message, "host");
   }
 
   private fail(res: ServerResponse, status: number, message: string, kind: string | null = null): void {
@@ -1164,12 +1380,17 @@ export class AncillaServer {
     }
   }
 
-  private async readBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  private async readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<Record<string, unknown>> {
+    // A body that says up front it is too large is refused without reading any of it.
+    const declared = Number(req.headers["content-length"]);
+    if (Number.isFinite(declared) && declared > limit) {
+      throw new HttpError(413, "That request is too large.");
+    }
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
       size += (chunk as Buffer).length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         throw new HttpError(413, "That request is too large.");
       }
       chunks.push(chunk as Buffer);
@@ -1182,9 +1403,34 @@ export class AncillaServer {
   }
 
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://localhost");
+    // First, for every request: the API, the page, a preflight. A page that was rebound to this address still names
+    // its own host. A valid Bearer token is the one thing that skips it, because a page does not hold the token and
+    // so cannot send a valid Bearer: that keeps a loopback server behind a proxy or tunnel reachable for clients that
+    // hold the token. A cookie or a token in the URL does not count: the browser, not the page's author, decides when
+    // those are sent.
+    if (this.enforceHost && !trustedHost(req.headers["host"], this.trustedHosts) && !this.bearerValid(req)) {
+      this.refuseHost(req, res);
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(req.url ?? "/", "http://localhost");
+    } catch {
+      this.fail(res, 400, "That address is not valid.");
+      return;
+    }
     const path = url.pathname;
     const method = (req.method ?? "GET").toUpperCase();
+    // With no origin listed, nothing but this server's own pages should be asking, and a browser says when one is
+    // not. With origins listed, a page there may legitimately load an image or a frame: its credential and the origin
+    // list still decide, and the cross-site answer to a plain GET is opaque to it.
+    if (
+      this.options.allowOrigins.length === 0 &&
+      crossSiteApiRequest(headerText(req, "sec-fetch-site"), headerText(req, "sec-fetch-mode"), path)
+    ) {
+      this.fail(res, 403, "This daemon does not answer requests started by another site.", "fetchMetadata");
+      return;
+    }
     if (!this.cors(req, res)) {
       this.fail(res, 403, "This daemon does not answer that origin.");
       return;
@@ -1228,13 +1474,14 @@ export class AncillaServer {
     res: ServerResponse,
   ): Promise<boolean> {
     if (method === "POST" && path === "/api/auth") {
-      const body = await this.readBody(req);
+      const body = await this.readBody(req, Math.max(MIN_AUTH_BODY_BYTES, (this.options.token ?? "").length * 6 + 256));
       if (!this.options.token) {
         // Nothing to prove: a daemon started without a token answers whoever can reach it.
         this.json(res, 200, { ok: true, required: false });
         return true;
       }
-      if (str(body["token"]) !== this.options.token) {
+      const given = str(body["token"]);
+      if (given === null || !safeEqual(given, this.options.token)) {
         throw new HttpError(401, "That token does not match this daemon.");
       }
       // The stream cannot carry a header, so the cookie is what it authenticates with. Cross-site
@@ -1272,6 +1519,12 @@ export class AncillaServer {
           lastProtocolError: this.lastProtocolError,
           forwardFailures: this.forwardFailures,
           lastForwardFailure: this.lastForwardFailure,
+          // Counts only: this route is public. Clients cut for not reading, frames that could not be written.
+          sse: this.sse.stats(),
+          // Requests refused for their Host header, and the last refused name that could have been listed; the
+          // log reports only the first few different ones.
+          hostRefusals: this.hostRefusals,
+          lastRefusedHost: this.lastRefusedHost,
           unroutedByMethod: Object.fromEntries(this.unroutedByMethod),
           sessions: Object.fromEntries(
             [...this.notifyStats].map(([id, stats]) => [
@@ -1513,7 +1766,7 @@ export class AncillaServer {
 
     const proxyMatch = path.match(/^\/api\/sessions\/([^/]+)\/shell-proxy$/);
     if (method === "POST" && proxyMatch) {
-      const sessionId = decodeURIComponent(proxyMatch[1] as string);
+      const sessionId = this.segment(proxyMatch[1] as string);
       const body = await this.readBody(req);
       const command = str(body["command"])?.trim();
       if (!command) {
@@ -1542,7 +1795,7 @@ export class AncillaServer {
 
     const outputMatch = path.match(/^\/api\/sessions\/([^/]+)\/output$/);
     if (method === "GET" && outputMatch) {
-      const sessionId = decodeURIComponent(outputMatch[1] as string);
+      const sessionId = this.segment(outputMatch[1] as string);
       const itemId = url.searchParams.get("itemId");
       const outputRef = url.searchParams.get("outputRef");
       if (!itemId || !outputRef) {
@@ -1561,7 +1814,7 @@ export class AncillaServer {
 
     const sessionMatch = path.match(/^\/api\/sessions\/([^/]+)(?:\/(resume|model|approval-mode|compact|shell|fork|effort|goal|subagent|tasks|workflow))?$/);
     if (sessionMatch) {
-      const sessionId = decodeURIComponent(sessionMatch[1] as string);
+      const sessionId = this.segment(sessionMatch[1] as string);
       const action = sessionMatch[2];
       if (method === "PATCH" && !action) {
         const body = await this.readBody(req);
@@ -1882,7 +2135,7 @@ export class AncillaServer {
     }
     const accountLoginMatch = /^\/api\/accounts\/([^/]+)\/login$/.exec(path);
     if (path === "/api/login" || accountLoginMatch) {
-      const id = accountLoginMatch ? decodeURIComponent(accountLoginMatch[1] as string) : null;
+      const id = accountLoginMatch ? this.segment(accountLoginMatch[1] as string) : null;
       const key = id ?? "";
       if (method === "GET" || method === "DELETE") {
         const attempt = this.loginAttempts.get(key);
@@ -1913,7 +2166,7 @@ export class AncillaServer {
       }
     }
     if (method === "PATCH" && path.startsWith("/api/accounts/")) {
-      const id = decodeURIComponent(path.slice("/api/accounts/".length));
+      const id = this.segment(path.slice("/api/accounts/".length));
       const body = await this.readBody(req);
       const name = str(body["name"]);
       if (!name) {
@@ -1928,7 +2181,7 @@ export class AncillaServer {
       return true;
     }
     if (method === "DELETE" && path.startsWith("/api/accounts/")) {
-      const id = decodeURIComponent(path.slice("/api/accounts/".length));
+      const id = this.segment(path.slice("/api/accounts/".length));
       try {
         await this.aonia.removeProfile(id);
         // A project must not keep naming an account that is gone: a new thread there would fail on it.
@@ -2297,31 +2550,12 @@ export class AncillaServer {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
+      // A reverse proxy in front of a remote daemon would otherwise hold frames back until its buffer fills.
+      "x-accel-buffering": "no",
     });
-    const sink: SseSink = (event, data) => {
-      if (res.writableEnded) {
-        this.sinks.delete(sink);
-        return;
-      }
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
-    this.sinks.add(sink);
-    sink("ancilla", { type: "hello", version: ANCILLA_VERSION });
-    const heartbeat = setInterval(() => {
-      if (res.writableEnded) {
-        clearInterval(heartbeat);
-        this.sinks.delete(sink);
-        return;
-      }
-      // A named event rather than a comment: EventSource never surfaces comments to a listener, so a client
-      // holding a stream whose upstream died behind a proxy cannot tell it from a quiet one. This is what
-      // the client's watchdog listens for.
-      res.write(`event: ping\ndata: ${Date.now()}\n\n`);
-    }, 25000);
-    res.on("close", () => {
-      clearInterval(heartbeat);
-      this.sinks.delete(sink);
-    });
+    // Heartbeats, the backlog cap and the stall deadline are the broadcaster's: a client that stops reading is
+    // destroyed, and its EventSource reconnects and rereads, so nothing needs replaying.
+    this.sse.add(res, `event: ancilla\ndata: ${JSON.stringify({ type: "hello", version: ANCILLA_VERSION })}\n\n`);
   }
 
   private async serveStatic(path: string, res: ServerResponse): Promise<boolean> {
@@ -2342,6 +2576,7 @@ export class AncillaServer {
       res.writeHead(200, {
         "content-type": MIME[extname(file)] ?? "application/octet-stream",
         "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+        ...FRAME_HEADERS,
       });
       res.end(body);
       return true;
@@ -4066,6 +4301,7 @@ export class AncillaServer {
       accountId: thread.accountId,
     });
     this.store.updateSession(started.sessionId, { archived: true });
+    this.rememberResearchOrigin(started.sessionId, true);
     this.sessionHosts.set(started.sessionId, host.key);
     this.liveFor(started.sessionId);
     return { sessionId: started.sessionId, manager: host.manager };
@@ -4212,13 +4448,13 @@ export class AncillaServer {
     }
     const exportMatch = path.match(/^\/api\/research\/([^/]+)\/export(?:\/([^/]+))?$/);
     if (exportMatch) {
-      return this.routeResearchExport(method, decodeURIComponent(exportMatch[1] as string), exportMatch[2] ?? null, req, res);
+      return this.routeResearchExport(method, this.segment(exportMatch[1] as string), exportMatch[2] ?? null, req, res);
     }
     const runMatch = path.match(/^\/api\/research\/([^/]+)(?:\/(events|stop|resume))?$/);
     if (!runMatch) {
       return false;
     }
-    const runId = decodeURIComponent(runMatch[1] as string);
+    const runId = this.segment(runMatch[1] as string);
     const action = runMatch[2];
     const record = this.store.getResearchRun(runId);
     if (!record) {
@@ -4859,7 +5095,10 @@ export class AncillaServer {
           }
         }
         changed = true;
-        this.sessionsChanged();
+        // A research run's own session is hidden: the sidebar has no row for it, so a refresh would find nothing new.
+        if (!this.isResearchSession(sessionId)) {
+          this.sessionsChanged();
+        }
         break;
       }
       case "session/viewHealthChanged": {

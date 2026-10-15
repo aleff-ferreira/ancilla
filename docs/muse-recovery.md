@@ -104,6 +104,7 @@ The server reads an optional `runtime.json` from its data directory when it star
 | `musePath` | an explicit `muse` binary path, as the chosen runtime sees it; a Linux path is checked in that distribution |
 | `syncSessionNames` | `true` shares thread titles with Muse; see [above](#local-thread-titles) |
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
+| `allowHosts` | host names the server answers besides `127.0.0.1`, `localhost` and `::1`, as `["ancilla.example"]`; see [Reaching the server by another name](#reaching-the-server-by-another-name) |
 
 Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `ANCILLA_MUSE_RUNTIME` overrides its
 `runtime`. `ANCILLA_RESEARCH_STARTUP_MS` sets how long a research run waits for Muse to open a session (whole
@@ -136,8 +137,27 @@ Never put API keys or other secrets in `runtime.json`.
 
 The file is read once at startup, so restart Ancilla after changing it. It may be UTF-8 with or without a byte order
 mark, or UTF-16, which is what Windows PowerShell writes. A file that is not a JSON object is ignored as a whole, and a
-field of the wrong type or an unusable `wslEnv` entry is ignored on its own; each is one line in the server log, and
-the server starts either way.
+field of the wrong type or an unusable `wslEnv` or `allowHosts` entry is ignored on its own; each is one line in the
+server log, and the server starts either way.
+
+### Reaching the server by another name
+
+The server answers a request only when its `Host` header names `127.0.0.1`, `localhost` or `::1` (any port), so a web
+page that was pointed at your own machine under some other name cannot use it. A proxy, tunnel or alias that forwards
+the public name gets `403` with `"kind": "host"` and a message naming the host it refused. Fix that by listing the name:
+`--allow-host ancilla.example` on the command line (repeatable), or `"allowHosts": ["ancilla.example"]` in
+`runtime.json`, which is how desktop users add one. The hosts of the `--allow-origin` URLs are allowed as well. The
+refusal is also logged to the server's stderr (the desktop app's `server.log`), once for each different host and for at
+most five of them. The log line and the message offer an `--allow-host` command only for a real name or address, never
+for a header that is not one. A client that sends the server's
+token as `Authorization: Bearer <token>` is not asked for a listed host; the event stream and images cannot send that
+header, so a browser behind a proxy still needs the name listed. A server bound to one specific loopback address
+(`--host 127.0.0.2`) trusts that address as a `Host` too, besides the three names above.
+
+The count of refused requests is kept as well, since the log stops after five different hosts: `/api/health` shows
+`diagnostics.hostRefusals` (every request refused for its `Host`) and `diagnostics.lastRefusedHost` (the most recent
+refused name that could be listed, lower case and without the port, or `null`), so a proxy that was set up wrongly can
+still be found once the log has gone quiet.
 
 ## Verifying it
 
@@ -157,12 +177,27 @@ yourself:
 3. The server's `/api/health` shows how long each session's feed has been quiet (`diagnostics.sessions`). For the web
    server on its default port that is `http://127.0.0.1:3127/api/health`; if you started it with `--token`, the
    endpoint needs that token like the rest of the API (sign in on that address first, or send
-   `Authorization: Bearer <token>`). The desktop app's server picks its own port and keeps it in the `server-port`
+   `Authorization: Bearer <token>`); address it as `127.0.0.1` or `localhost`, since another name is refused unless it
+   was listed with `--allow-host`. The desktop app's server picks its own port and keeps it in the `server-port`
    file in the app's [data directory](#runtime-configuration).
 4. When the run finishes, the notice disappears and the turn shows its real outcome. The thread holds one copy of your
    prompt, and Muse's own session history shows no extra turn.
 
 These are smoke tests, not a guarantee against provider outages or arbitrarily long runs.
+
+## The event stream
+
+The event stream itself is bounded. A client that stops reading `/api/events` (a suspended webview, a proxy that
+stopped forwarding) is disconnected once more than 4 MiB of frames are still waiting behind the one being sent at the
+end of the turn of the event loop, or once it has completed no write for 90 seconds. A slow client stays as long as
+it finishes a batch of writes within that time. Node sends what is queued behind a write in flight as one batch and
+reports it done only when all of it has gone, and nothing readable shows bytes moving inside a batch, so a client taking
+the batch more slowly than its size over 90 seconds (about 46 KB/s for a backlog at the 4 MiB limit) is cut even
+though it is still reading. The browser reconnects, the server says hello, and the app rereads the lists and the open
+thread, which is the whole recovery. Nothing is replayed and no prompt is ever sent again. The counters are under `diagnostics.sse` in
+`/api/health`: `clients`, `overflowDisconnects`, `stallDisconnects`, `backlogHighWaterBytes`, `serializationFailures`
+and `researchFramesSkipped`, next to the two limits (`maxBacklogBytes`, `stallMs`). A research run's own sessions are
+not sent to the browser at all; their progress arrives as `research-run`.
 
 ## Limits
 

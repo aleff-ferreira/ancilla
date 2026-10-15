@@ -183,6 +183,8 @@ export class WebAncillaClient implements AncillaClient {
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   /** The handshake is awaited before the stream opens; this stops a second subscriber racing it. */
   private connecting = false;
+  /** Whether the app was already told the stream is down, so a browser's retries do not tell it again. */
+  private lostReported = false;
 
   probeEnvironment(refresh = false): Promise<EnvironmentStatus> {
     return call<EnvironmentStatus>("GET", `/api/env${refresh ? "?refresh=1" : ""}`);
@@ -576,6 +578,7 @@ export class WebAncillaClient implements AncillaClient {
         this.stopWatchdog();
         this.source?.close();
         this.source = null;
+        this.lostReported = false;
       }
     };
   }
@@ -602,16 +605,25 @@ export class WebAncillaClient implements AncillaClient {
     const source = new EventSource(url("/api/events"), { withCredentials: Boolean(daemon.base) });
     source.addEventListener("ancilla", (message) => {
       this.touch();
+      this.lostReported = false;
+      let event: AncillaEvent;
       try {
-        this.dispatch(JSON.parse((message as MessageEvent<string>).data) as AncillaEvent);
+        event = JSON.parse((message as MessageEvent<string>).data) as AncillaEvent;
       } catch {
         /* ignore malformed frames */
+        return;
       }
+      // Kept apart from the parse above: a handler that throws is not a frame that could not be read.
+      this.dispatch(event);
     });
     // The server's heartbeat: proof the stream is still carrying, and nothing else.
     source.addEventListener("ping", () => this.touch());
-    source.addEventListener("open", () => this.touch());
-    source.addEventListener("error", () => this.dispatch({ type: "connection", state: "lost" }));
+    source.addEventListener("open", () => {
+      this.touch();
+      this.lostReported = false;
+    });
+    // The browser retries a dropped stream by itself and reports every failed attempt: say it is lost once.
+    source.addEventListener("error", () => this.reportLost());
     this.source = source;
     this.touch();
   }
@@ -638,15 +650,32 @@ export class WebAncillaClient implements AncillaClient {
     this.stopWatchdog();
     this.source?.close();
     this.source = null;
-    this.dispatch({ type: "connection", state: "lost" });
+    this.reportLost();
     if (this.handlers.size > 0) {
       void this.connect();
     }
   }
 
+  /** Tells the app the stream is down, once until it is heard from again. */
+  private reportLost(): void {
+    if (this.lostReported) {
+      return;
+    }
+    this.lostReported = true;
+    this.dispatch({ type: "connection", state: "lost" });
+  }
+
+  /**
+   * One handler that throws must not cost the others the event, nor end the stream: it is logged, and the app's own
+   * controller, which is the handler that matters, shows it to the user.
+   */
   private dispatch(event: AncillaEvent): void {
     for (const handler of [...this.handlers]) {
-      handler(event);
+      try {
+        handler(event);
+      } catch (error) {
+        console.error(`Ancilla: an event handler failed on a ${event.type} event`, error);
+      }
     }
   }
 }

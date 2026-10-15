@@ -13,6 +13,7 @@ import type {
   MspItem,
   OutgoingAttachment,
   OutputRange,
+  ProjectView,
   ReasoningEffort,
   ResearchConfig,
   ResearchExportFormat,
@@ -108,7 +109,7 @@ import {
   type ThreadState,
   type Toast,
 } from "./store.js";
-import { NotificationManager, type Notifier } from "./notify.js";
+import { NotificationManager, type NotifyEvent, type Notifier } from "./notify.js";
 import { UpdateManager, type AppUpdater } from "./updates.js";
 import { saveBrowserFile, type FileSaver } from "./fileSave.js";
 
@@ -333,6 +334,22 @@ const QUIET_TURN_MS = 90_000;
 const STALE_RELOAD_LIMIT = 2;
 /** After the first attempts, continue read-only recovery slowly instead of leaving a permanent spinner. */
 const STALE_BACKOFF_MS = 120_000;
+/**
+ * The least time between two full rereads after the stream comes back. A stream that keeps dropping (a slow client
+ * the server cuts, a flaky link) would otherwise reread the lists and the open thread on every reconnect; one that
+ * comes back inside the gap rereads once, when it is over.
+ */
+const RESYNC_GAP_MS = 15_000;
+/**
+ * Threads one watchdog tick may start rereading. After a sleep every running turn looks quiet at once, and reading
+ * them all in the same moment is a burst the server and the next sleep's wake would have to take again. The open
+ * thread goes first; the rest wait for the next tick, which is seconds away.
+ */
+const WATCHDOG_RELOADS_PER_TICK = 2;
+/** The least time between two notices that the app failed to handle an event, which would otherwise repeat per event. */
+const LISTENER_ERROR_TOAST_MS = 60_000;
+/** Turns that ended while the stream was down are named one by one up to this many; past it, one summary says them all. */
+const CATCH_UP_NAMED_LIMIT = 1;
 /** A retry Muse scheduled postpones the quiet-turn clock by its delay, up to this much: the wait is expected silence. */
 const RETRY_PAUSE_MAX_MS = 15 * 60_000;
 /**
@@ -625,6 +642,17 @@ export class AncillaController {
   private planUsageLoad: Promise<void> | null = null;
   private planUsageEventRevision = 0;
   private refreshQueued = false;
+  /** When the lists and the open thread were last reread after the stream came back; see `RESYNC_GAP_MS`. */
+  private lastResyncAt = Number.NEGATIVE_INFINITY;
+  private resyncHandle: unknown = null;
+  /**
+   * What each thread's live state was when the stream came back, held until the next list read says what it is now.
+   * The difference is what happened while the app was not listening, and nothing else would announce it.
+   */
+  private catchUpBase: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
+  /** The base the list read now under way will be compared with; kept in step with live status like `catchUpBase`. */
+  private catchUpReading: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
+  private lastListenerErrorAt = Number.NEGATIVE_INFINITY;
   private toastSeq = 0;
   /** Bumped by every title-settings request, so only the latest completion or rollback lands. */
   private titleSettingsRev = 0;
@@ -707,7 +735,7 @@ export class AncillaController {
   start(): () => void {
     // React's development StrictMode mounts, cleans up and starts the same controller again.
     this.disposed = false;
-    this.disposers.push(this.client.subscribe((event) => this.onEvent(event)));
+    this.disposers.push(this.client.subscribe((event) => this.hear(event)));
     this.disposers.push(
       this.platform.onHashChange(() => {
         const hash = this.platform.readHash();
@@ -805,12 +833,13 @@ export class AncillaController {
     for (const dispose of this.disposers.splice(0)) {
       dispose();
     }
-    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
+    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.resyncHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
       if (handle !== null) {
         this.platform.cancel(handle);
       }
     }
     this.staleHandle = null;
+    this.resyncHandle = null;
     this.loginPollHandle = null;
     this.linuxSetupPollHandle = null;
     for (const handle of this.modelTimers) {
@@ -1011,12 +1040,35 @@ export class AncillaController {
   }
 
   private async loadLists(): Promise<void> {
-    const [projects, sessions] = await Promise.all([this.client.listProjects(), this.client.listSessions()]);
+    // Taken before the read starts: a read already under way began before the stream came back and says nothing
+    // about it, so only one that starts now may be compared with what the app knew.
+    const catchUp = this.catchUpBase;
+    this.catchUpBase = null;
+    this.catchUpReading = catchUp;
+    let projects: ProjectView[];
+    let sessions: SessionSummary[];
+    try {
+      [projects, sessions] = await Promise.all([this.client.listProjects(), this.client.listSessions()]);
+    } catch (error) {
+      this.catchUpBase ??= catchUp;
+      throw error;
+    } finally {
+      this.catchUpReading = null;
+    }
     const byId: Record<string, SessionSummary> = {};
     for (const session of sessions) {
       byId[session.sessionId] = session;
     }
     this.update((s) => ({ ...s, projects, sessions: byId, sessionsLoaded: true }));
+    if (catchUp) {
+      this.catchUp(catchUp);
+      // A second drop while this read was in flight took its base from what the app showed before this read landed,
+      // so the reread it scheduled would say again what was just said. Everything up to this read has been said:
+      // what that reread may add is only what it finds after it.
+      if (this.catchUpBase !== null) {
+        this.catchUpBase = this.catchUpSnapshot();
+      }
+    }
     for (const id of Object.keys(this.state.threads)) {
       if (!this.listed(id)) {
         this.forget(id);
@@ -1746,35 +1798,128 @@ export class AncillaController {
 
   // ---------------------------------------------------------------- events
 
+  /**
+   * What the client hands each event to. A handler that throws would otherwise be swallowed by the stream, or end
+   * it: the event is lost either way and nobody is told. It is logged and shown once a minute instead, and the
+   * stream, which has nothing to do with it, carries on.
+   */
+  private hear(event: AncillaEvent): void {
+    try {
+      this.onEvent(event);
+    } catch (error) {
+      console.error(`Ancilla: handling a ${event.type} event failed`, error);
+      const now = this.platform.now();
+      if (now - this.lastListenerErrorAt >= LISTENER_ERROR_TOAST_MS) {
+        this.lastListenerErrorAt = now;
+        this.toast("error", "Something went wrong updating the view", `${errorMessage(error)} Reopen the thread if it looks out of date.`);
+      }
+    }
+  }
+
+  /**
+   * The stream is back after a drop. Nothing replays what it carried while it was down, so the lists and the open
+   * thread are read again, and every other thread shows what it has as last known until it is opened. Reading is
+   * all this does: a prompt is never sent from here. The reread is not repeated inside `RESYNC_GAP_MS` however often
+   * the stream drops and returns; a reconnect inside the gap schedules the one reread that was held back.
+   */
+  private resyncAfterLost(): void {
+    // Goals could have moved while the stream was down, and only the open thread is reloaded. Let every other
+    // thread take the server's goal again rather than the last one it saw streamed.
+    for (const id of Object.keys(this.state.threads)) {
+      this.patchFold(id, (f) => (f.meta.goalSeen ? { ...f, meta: { ...f.meta, goalSeen: false } } : f));
+    }
+    this.markOthersStale();
+    this.catchUpBase ??= this.catchUpSnapshot();
+    const now = this.platform.now();
+    // A clock set back puts the last reread in the future: that is a gap long past, not one still to wait out, and
+    // without this the wait would be as long as the step.
+    if (this.lastResyncAt > now) {
+      this.lastResyncAt = Number.NEGATIVE_INFINITY;
+    }
+    const wait = this.lastResyncAt + RESYNC_GAP_MS - now;
+    if (wait > 0) {
+      if (this.resyncHandle === null) {
+        this.resyncHandle = this.platform.schedule(() => {
+          this.resyncHandle = null;
+          if (!this.disposed) {
+            this.markOthersStale();
+            this.rereadAfterLost();
+          }
+        }, wait);
+      }
+      return;
+    }
+    this.rereadAfterLost();
+  }
+
+  /** What the app knows of each session's status right now: the base a later reread is compared with. */
+  private catchUpSnapshot(): Map<string, { title: string; live: SessionSummary["live"] }> {
+    return new Map(Object.values(this.state.sessions).map((s) => [s.sessionId, { title: s.title, live: s.live }] as const));
+  }
+
+  private rereadAfterLost(): void {
+    this.lastResyncAt = this.platform.now();
+    void this.refresh();
+    const route = this.state.route;
+    if (route.kind === "thread") {
+      void this.loadThread(route.sessionId);
+    }
+  }
+
+  /** Every loaded thread but the open one shows what it has as last known; it is read again when opened. */
+  private markOthersStale(): void {
+    const route = this.state.route;
+    const routed = route.kind === "thread" ? route.sessionId : null;
+    this.update((s) => {
+      const threads = { ...s.threads };
+      for (const [id, thread] of Object.entries(threads)) {
+        if (id !== routed && !thread.stale) {
+          threads[id] = { ...thread, stale: true };
+        }
+      }
+      return { ...s, threads };
+    });
+  }
+
+  /**
+   * Says what happened while the stream was down: an approval or a question that came up, a goal that stopped, a turn
+   * that ended. The status events that would have said so were never heard. Several turns that ended are one notice.
+   */
+  private catchUp(before: Map<string, { title: string; live: SessionSummary["live"] }>): void {
+    const manager = this.notifications;
+    if (!manager) {
+      return;
+    }
+    const finished: Extract<NotifyEvent, { kind: "finished" }>[] = [];
+    for (const session of Object.values(this.state.sessions)) {
+      const prior = before.get(session.sessionId);
+      if (!prior) {
+        continue;
+      }
+      for (const note of this.liveEdges(session.sessionId, session.title, prior.live, session.live)) {
+        if (note.kind === "finished") {
+          finished.push(note);
+        } else {
+          void manager.announce(note);
+        }
+      }
+    }
+    if (finished.length > CATCH_UP_NAMED_LIMIT) {
+      void manager.announce({ kind: "finishedMany", count: finished.length, failed: finished.filter((note) => note.failed).length });
+    } else {
+      for (const note of finished) {
+        void manager.announce(note);
+      }
+    }
+  }
+
   private onEvent(event: AncillaEvent): void {
     switch (event.type) {
       case "hello": {
         const wasLost = this.state.connection === "lost";
         this.update((s) => ({ ...s, connection: "open" }));
         if (wasLost && this.state.boot === "ready") {
-          // Goals could have moved while the stream was down, and only the open thread is reloaded. Let every
-          // other thread take the server's goal again rather than the last one it saw streamed.
-          for (const id of Object.keys(this.state.threads)) {
-            this.patchFold(id, (f) => (f.meta.goalSeen ? { ...f, meta: { ...f.meta, goalSeen: false } } : f));
-          }
-          void this.refresh();
-          const route = this.state.route;
-          const routed = route.kind === "thread" ? route.sessionId : null;
-          // Nothing replays what the stream carried while it was down: a turn or a background agent that finished
-          // meanwhile would go on showing as working. The open thread reloads now; every other one shows what it
-          // has as last known until it is opened and read again.
-          this.update((s) => {
-            const threads = { ...s.threads };
-            for (const [id, thread] of Object.entries(threads)) {
-              if (id !== routed && !thread.stale) {
-                threads[id] = { ...thread, stale: true };
-              }
-            }
-            return { ...s, threads };
-          });
-          if (routed) {
-            void this.loadThread(routed);
-          }
+          this.resyncAfterLost();
         }
         break;
       }
@@ -1821,6 +1966,12 @@ export class AncillaController {
           return current ? { ...s, sessions: { ...s.sessions, [event.sessionId]: { ...current, live: event.live } } } : s;
         });
         this.announce(event.sessionId, known.title, before, event.live);
+        // Said live, so the reread that follows a reconnect must not say it again from an older reading.
+        for (const base of [this.catchUpBase, this.catchUpReading]) {
+          if (base?.has(event.sessionId)) {
+            base.set(event.sessionId, { title: known.title, live: event.live });
+          }
+        }
         if (before?.viewHealth?.status === "unavailable" && event.live?.viewHealth?.status !== "unavailable") {
           this.viewRecovered(event.sessionId);
         }
@@ -2006,7 +2157,12 @@ export class AncillaController {
       this.scheduleStaleCheck();
     }
     const now = this.platform.now();
-    for (const [id, thread] of Object.entries(this.state.threads)) {
+    const route = this.state.route;
+    const openId = route.kind === "thread" ? route.sessionId : null;
+    // The open thread is looked at first, and only so many others are started this tick: see `WATCHDOG_RELOADS_PER_TICK`.
+    const threads = Object.entries(this.state.threads).sort(([a], [b]) => Number(b === openId) - Number(a === openId));
+    let started = 0;
+    for (const [id, thread] of threads) {
       if (!this.listed(id)) {
         // Archived, or in a project taken out of the sidebar: nobody can see it, so nothing reads it until it is
         // opened again. Its stream events still land, as they do for any loaded thread.
@@ -2047,12 +2203,15 @@ export class AncillaController {
         }
         continue;
       }
-      const selected = this.state.route.kind === "thread" && this.state.route.sessionId === id;
+      const selected = id === openId;
       const historyInterval = selected ? HISTORY_SYNC_MS : STALE_BACKOFF_MS;
       if (thread.historySync && this.readableHistory.has(id) && !thread.error) {
         // Measure request cadence from its start. Response latency must not turn every
         // 15-second check into a 30-second interval on the shared watchdog timer.
         if (now - (this.recoveryAt.get(id) ?? thread.historySync.checkedAt) < historyInterval) continue;
+        // Over this tick's share: nothing is recorded, so the next tick finds it just as due.
+        if (!selected && started >= WATCHDOG_RELOADS_PER_TICK) continue;
+        started += 1;
         const spent = this.staleReloads.get(id);
         this.staleReloads.set(id, { turnId, count: spent?.turnId === turnId ? spent.count + 1 : 1 });
         this.recoveryAt.set(id, now);
@@ -2078,6 +2237,10 @@ export class AncillaController {
       if ((count >= STALE_RELOAD_LIMIT || unavailable || thread.error) && now - (this.recoveryAt.get(id) ?? applied) < delay) {
         continue;
       }
+      if (!selected && started >= WATCHDOG_RELOADS_PER_TICK) {
+        continue;
+      }
+      started += 1;
       this.recoveryAt.set(id, now);
       this.staleReloads.set(id, { turnId, count: count + 1 });
       void this.loadThread(id);
@@ -2660,9 +2823,25 @@ export class AncillaController {
     after: SessionSummary["live"],
   ): void {
     const manager = this.notifications;
-    if (!manager || !after) {
+    if (!manager) {
       return;
     }
+    for (const note of this.liveEdges(sessionId, thread, before, after)) {
+      void manager.announce(note);
+    }
+  }
+
+  /** The edges between two readings of a thread's live state that are worth saying, in the order they are said. */
+  private liveEdges(
+    sessionId: string,
+    thread: string,
+    before: SessionSummary["live"],
+    after: SessionSummary["live"],
+  ): NotifyEvent[] {
+    if (!after) {
+      return [];
+    }
+    const notes: NotifyEvent[] = [];
     // An armed thread answers its own approvals, so "needs you" would be a lie told a second before the
     // bypass lands. But a rule-only request offers the bypass nothing to click, so it is left for the
     // user exactly as `autoAllow` leaves it: that one still needs the announcement.
@@ -2671,19 +2850,20 @@ export class AncillaController {
       (before?.pendingApprovals ?? 0) === 0 &&
       (!this.bypassArmed(sessionId) || this.hasUnanswerableApproval(sessionId))
     ) {
-      void manager.announce({ kind: "approval", sessionId, thread });
+      notes.push({ kind: "approval", sessionId, thread });
     }
     if ((after.pendingInputs ?? 0) > 0 && (before?.pendingInputs ?? 0) === 0) {
-      void manager.announce({ kind: "question", sessionId, thread });
+      notes.push({ kind: "question", sessionId, thread });
     }
     if (after.activeTurnId === null && before?.activeTurnId != null && after.lastTerminal) {
       const failed = Boolean(after.lastError) || after.lastTerminal === "failed";
-      void manager.announce({ kind: "finished", sessionId, thread, failed });
+      notes.push({ kind: "finished", sessionId, thread, failed });
     }
     const status = after.goal?.status ?? null;
     if (status && status !== "active" && status !== (before?.goal?.status ?? null)) {
-      void manager.announce({ kind: "goal", sessionId, thread, status });
+      notes.push({ kind: "goal", sessionId, thread, status });
     }
+    return notes;
   }
 
   /** Opens a thread only so the bypass can reach its approvals, and answers them once it is there. */
