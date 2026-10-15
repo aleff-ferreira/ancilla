@@ -464,13 +464,133 @@ function toAttachment(row: Row): AttachmentRecord {
   };
 }
 
+/**
+ * How long opening the database waits for another connection's write lock (the previous process still closing, a
+ * second server starting): the schema and the migrations are one write transaction, so this is the most boot waits
+ * for it, well inside the desktop shell's start-up deadline.
+ */
+export const BOOT_BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * How long a write waits for a lock once the store is open. SQLite waits by blocking the thread, so every
+ * millisecond here is a millisecond the event loop stands still: it only has to bridge another connection's
+ * momentary write, and a caller that needs more (a research checkpoint) retries on its own, between ticks.
+ */
+export const STEADY_BUSY_TIMEOUT_MS = 100;
+
+export interface AncillaStoreOptions {
+  /** Overrides `BOOT_BUSY_TIMEOUT_MS`; tests use a short one. */
+  bootBusyTimeoutMs?: number;
+  /** Overrides `STEADY_BUSY_TIMEOUT_MS`. */
+  busyTimeoutMs?: number;
+}
+
+/**
+ * Whether an error is SQLite saying the database is locked by another connection (SQLITE_BUSY or SQLITE_LOCKED,
+ * extended codes included). Such a write can be tried again; any other failure will not change by waiting.
+ */
+export function isStoreBusy(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const code = (error as { errcode?: unknown }).errcode;
+  if (typeof code === "number") {
+    const primary = code & 0xff;
+    return primary === 5 || primary === 6;
+  }
+  return /database (table )?is locked/i.test(error instanceof Error ? error.message : "");
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+}
+
 export class AncillaStore {
   private readonly db: DatabaseSync;
+  /** How deep `transaction` is nested right now: the outermost is a transaction, the rest are savepoints. */
+  private transactionDepth = 0;
 
-  constructor(path = ":memory:") {
-    this.db = new DatabaseSync(path);
-    this.db.exec(SCHEMA);
-    this.migrate();
+  constructor(path = ":memory:", options: AncillaStoreOptions = {}) {
+    this.db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    try {
+      // Before the schema, so that a lock held by another connection is waited for instead of failing the boot.
+      this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.bootBusyTimeoutMs ?? BOOT_BUSY_TIMEOUT_MS))}`);
+      this.assertForeignKeys();
+      // One write transaction for the whole of it: the wait for the lock is the boot timeout once, not once per statement.
+      this.transaction(() => {
+        this.db.exec(SCHEMA);
+        this.migrate();
+      });
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs ?? STEADY_BUSY_TIMEOUT_MS))}`);
+  }
+
+  /** The connection's own settings, for a test or a diagnostic to read back. */
+  connectionInfo(): { foreignKeys: boolean; busyTimeoutMs: number } {
+    const fk = this.db.prepare("PRAGMA foreign_keys").get() as Row | undefined;
+    const wait = this.db.prepare("PRAGMA busy_timeout").get() as Row | undefined;
+    return { foreignKeys: Number(fk?.["foreign_keys"] ?? 0) === 1, busyTimeoutMs: Number(wait?.["timeout"] ?? 0) };
+  }
+
+  /** Foreign keys are on by the option above; a runtime that did not honour it is found out here, not by a missing check. */
+  private assertForeignKeys(): void {
+    if (!this.connectionInfo().foreignKeys) {
+      this.db.exec("PRAGMA foreign_keys = ON");
+    }
+    if (!this.connectionInfo().foreignKeys) {
+      throw new Error("AncillaStore: SQLite would not turn foreign key checks on.");
+    }
+  }
+
+  /**
+   * Runs `fn` as one atomic unit: `BEGIN IMMEDIATE` for the outermost call (it takes the write lock at once, so it
+   * fails at the start rather than half way) and a savepoint for each one nested in it. An error rolls back to the
+   * start of its own call and is rethrown; a commit that fails (a reader can make it, under the rollback journal)
+   * is rolled back too, so the connection is never left inside a transaction. `fn` must be synchronous: the
+   * transaction would be over before an awaited step, so a function that returns a promise is rolled back and refused.
+   */
+  transaction<T>(fn: () => T): T {
+    const outermost = this.transactionDepth === 0;
+    const savepoint = `ancilla_tx_${this.transactionDepth}`;
+    this.db.exec(outermost ? "BEGIN IMMEDIATE" : `SAVEPOINT ${savepoint}`);
+    this.transactionDepth += 1;
+    let result: T;
+    try {
+      result = fn();
+      if (isThenable(result)) {
+        // Its rejection, if any, would otherwise surface as one nobody handled.
+        Promise.resolve(result).catch(() => undefined);
+        throw new TypeError("AncillaStore.transaction needs a synchronous function: a transaction ends before an awaited step, so this one was rolled back.");
+      }
+    } catch (error) {
+      this.transactionDepth -= 1;
+      this.rollback(outermost, savepoint);
+      throw error;
+    }
+    this.transactionDepth -= 1;
+    try {
+      this.db.exec(outermost ? "COMMIT" : `RELEASE ${savepoint}`);
+    } catch (error) {
+      this.rollback(outermost, savepoint);
+      throw error;
+    }
+    return result;
+  }
+
+  private rollback(outermost: boolean, savepoint: string): void {
+    try {
+      if (outermost) {
+        this.db.exec("ROLLBACK");
+      } else {
+        this.db.exec(`ROLLBACK TO ${savepoint}`);
+        this.db.exec(`RELEASE ${savepoint}`);
+      }
+    } catch {
+      /* SQLite ended the transaction itself (it does for some errors); there is nothing left to undo */
+    }
   }
 
   private migrate(): void {
@@ -633,6 +753,16 @@ export class AncillaStore {
   }
 
   updateResearchRun(id: string, patch: ResearchRunPatch): ResearchRunRecord | null {
+    const { sets, values } = this.researchRunSets(patch);
+    if (sets.length > 0) {
+      values.push(id);
+      this.db.prepare(`UPDATE research_runs SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    }
+    return this.getResearchRun(id);
+  }
+
+  /** The `SET` clauses and values a run patch asks for. */
+  private researchRunSets(patch: ResearchRunPatch): { sets: string[]; values: (string | number | null)[] } {
     const sets: string[] = [];
     const values: (string | number | null)[] = [];
     if (patch.status !== undefined) {
@@ -663,11 +793,39 @@ export class AncillaStore {
       sets.push("ended_at = ?");
       values.push(patch.endedAt);
     }
-    if (sets.length > 0) {
-      values.push(id);
-      this.db.prepare(`UPDATE research_runs SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+    return { sets, values };
+  }
+
+  /**
+   * `updateResearchRun`, but only while the run's status is one of `from`, decided by the statement itself so that
+   * nothing racing it (another process, a late write) can be overwritten. Returns the row after the change, or null
+   * when it was not in one of those statuses (or is gone); nothing is written then.
+   */
+  updateResearchRunIf(id: string, from: ResearchStatus[], patch: ResearchRunPatch): ResearchRunRecord | null {
+    const { sets, values } = this.researchRunSets(patch);
+    if (from.length === 0 || sets.length === 0) {
+      return null;
     }
-    return this.getResearchRun(id);
+    const marks = from.map(() => "?").join(", ");
+    const result = this.db.prepare(`UPDATE research_runs SET ${sets.join(", ")} WHERE id = ? AND status IN (${marks})`).run(...values, id, ...from);
+    return Number(result.changes) > 0 ? this.getResearchRun(id) : null;
+  }
+
+  /** Rows of a run's worker table still `working` close as `cancelled`: their sessions went with the process. Returns how many. */
+  closeResearchWorkers(runId: string): number {
+    const result = this.db.prepare(`UPDATE research_workers SET status = 'cancelled' WHERE run_id = ? AND status = 'working'`).run(runId);
+    return Number(result.changes);
+  }
+
+  /**
+   * When the run's last event of a kind not in `excluded` was written, or null when it has none. A host-made
+   * `run_interrupted` is not a sign the run was alive, so a sweep asks for the last event without it.
+   */
+  lastResearchEventAt(runId: string, excluded: string[]): string | null {
+    const marks = excluded.map(() => "?").join(", ");
+    const sql = `SELECT at FROM research_events WHERE run_id = ?${excluded.length > 0 ? ` AND type NOT IN (${marks})` : ""} ORDER BY seq DESC LIMIT 1`;
+    const row = this.db.prepare(sql).get(runId, ...excluded) as Row | undefined;
+    return row ? String(row["at"]) : null;
   }
 
   getResearchRun(id: string): ResearchRunRecord | null {
@@ -1319,27 +1477,92 @@ export class AncillaStore {
     return rows.map((row) => this.toSession(row));
   }
 
-  recordTurn(id: string, sessionId: string): TurnRecord {
+  /**
+   * A turn has started: it is a running row, once. Registering it again (a replayed `turn/started`, the
+   * acknowledgement of the same prompt) changes nothing, and in particular never reopens a turn that has finished.
+   * Not counted: a turn counts when it finishes.
+   */
+  registerTurn(id: string, sessionId: string): TurnRecord {
     const now = nowIso();
     this.db
       .prepare(
         `INSERT INTO turns (id, session_id, status, created_at, updated_at)
          VALUES (?, ?, 'running', ?, ?)
-         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`,
+         ON CONFLICT(id) DO NOTHING`,
       )
       .run(id, sessionId, now, now);
-    this.db
-      .prepare(
-        `UPDATE sessions SET turn_count = turn_count + 1, updated_at = ?, activity_at = ? WHERE id = ?`,
-      )
-      .run(now, now, sessionId);
     return this.getTurn(id);
+  }
+
+  /**
+   * A turn has ended with `status` (`completed`, `failed`, `cancelled`, ...). The status is the last one written, so
+   * a second word on a turn is heard. The thread's turn counter moves by one, and only on the turn's first
+   * terminal transition, which is decided from the row's previous status inside the same transaction: absent,
+   * running, or unknown (a turn a restart lost sight of) counts; a replay does not. The counter is only ever moved
+   * up from where it stands, because a thread Muse reported at 50 turns must read 53 after three more, not 3.
+   * The row, the counter and the thread's activity stamp are written together or not at all. A turn stays with the
+   * thread it was first seen on: another thread's word on the same id changes nothing and counts nothing.
+   */
+  finishTurn(id: string, sessionId: string, status: string): TurnRecord {
+    return this.transaction(() => {
+      const now = nowIso();
+      const previous = this.db.prepare(`SELECT session_id, status FROM turns WHERE id = ?`).get(id) as Row | undefined;
+      if (previous && String(previous["session_id"]) !== sessionId) {
+        return this.getTurn(id);
+      }
+      const before = previous ? String(previous["status"]) : null;
+      const counts = (before === null || before === "running" || before === "unknown") && status !== "running" && status !== "unknown";
+      this.db
+        .prepare(
+          `INSERT INTO turns (id, session_id, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+        )
+        .run(id, sessionId, status, now, now);
+      if (counts) {
+        this.db.prepare(`UPDATE sessions SET turn_count = turn_count + 1, updated_at = ?, activity_at = ? WHERE id = ?`).run(now, now, sessionId);
+      }
+      return this.getTurn(id);
+    });
+  }
+
+  /** The turn as it was always recorded: one that has happened, counted once. Kept for callers of the old name. */
+  recordTurn(id: string, sessionId: string): TurnRecord {
+    return this.finishTurn(id, sessionId, "completed");
   }
 
   updateTurnStatus(id: string, status: string): void {
     this.db
       .prepare(`UPDATE turns SET status = ?, updated_at = ? WHERE id = ?`)
       .run(status, nowIso(), id);
+  }
+
+  /**
+   * At boot, the turns the last process left running are of unknown fate: the process that was running them is
+   * gone, and nothing here reads Muse to find out. They become `unknown`, and a real completion later still
+   * overwrites that and counts. Returns how many there were.
+   */
+  markRunningTurnsUnknown(): number {
+    const result = this.db.prepare(`UPDATE turns SET status = 'unknown', updated_at = ? WHERE status = 'running'`).run(nowIso());
+    return Number(result.changes);
+  }
+
+  /** What the ledger says of one turn of a thread, or null when it has not seen it. */
+  turnStatus(id: string, sessionId: string): string | null {
+    const row = this.db.prepare(`SELECT status FROM turns WHERE id = ? AND session_id = ?`).get(id, sessionId) as Row | undefined;
+    return row ? String(row["status"]) : null;
+  }
+
+  /** The turns this server has observed on a thread, by id. Observed here, not a ledger of what Muse ran. */
+  listTurns(sessionId: string): TurnRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM turns WHERE session_id = ? ORDER BY id`).all(sessionId) as Row[];
+    return rows.map((row) => ({
+      id: String(row["id"]),
+      sessionId: String(row["session_id"]),
+      status: String(row["status"]),
+      createdAt: String(row["created_at"]),
+      updatedAt: String(row["updated_at"]),
+    }));
   }
 
   close(): void {

@@ -105,6 +105,15 @@ The server reads an optional `runtime.json` from its data directory when it star
 | `syncSessionNames` | `true` shares thread titles with Muse; see [above](#local-thread-titles) |
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
 | `allowHosts` | host names the server answers besides `127.0.0.1`, `localhost` and `::1`, as `["ancilla.example"]`; see [Reaching the server by another name](#reaching-the-server-by-another-name) |
+| `hostStartTimeoutMs` | how long a Muse host may take to answer its start before it is given up on, in whole milliseconds; the default is five minutes and `0` turns the limit off. `ANCILLA_HOST_START_TIMEOUT_MS` sets it too and wins over the file |
+
+A host start that passes `hostStartTimeoutMs` ends with a 504 that names the setting, and its Muse process is closed
+without waiting for it; the next request for that folder tries again at once. The limit applies to every start, a
+thread you open included. A host whose connection ends while its process is still running is closed and replaced the
+same way, and restarting the hosts or quitting waits only a few seconds for a start that is still open. A start that is
+still open after those three seconds, when a settings change restarts the hosts, is abandoned: the request waiting on it
+answers 503 ("The Muse host was restarted while it was starting. Try again."), its Muse process is closed, and one that
+answers late is closed instead of registered.
 
 Command-line flags (`--runtime`, `--distro`, `--muse`) override the file, and `ANCILLA_MUSE_RUNTIME` overrides its
 `runtime`. `ANCILLA_RESEARCH_STARTUP_MS` sets how long a research run waits for Muse to open a session (whole
@@ -198,6 +207,47 @@ thread, which is the whole recovery. Nothing is replayed and no prompt is ever s
 `/api/health`: `clients`, `overflowDisconnects`, `stallDisconnects`, `backlogHighWaterBytes`, `serializationFailures`
 and `researchFramesSkipped`, next to the two limits (`maxBacklogBytes`, `stallMs`). A research run's own sessions are
 not sent to the browser at all; their progress arrives as `research-run`.
+
+`/api/health` also reports counts for research runs (`research`: `live`, the runs a job is running; `queued`, runs
+accepted whose row does not say `running` yet, which is normally 0; and `interruptedAtBoot`, the runs the start-up
+sweep marked interrupted) and for Muse hosts that exited on their own (`diagnostics.hostExits`: `count` and
+`lastExitAt`), and whether the server has begun to close (`closing`, see the next section). The route is public, so
+these are numbers and flags only.
+
+## When the server stops
+
+The command-line server closes on SIGINT, SIGTERM and SIGHUP on every system, and on Windows on SIGBREAK too. SIGHUP is
+what a terminal sends the server it ran when the terminal closes, and what a closed Windows console sends; it is
+handled like SIGTERM. `nohup` does not change that: Node resets the signal dispositions it inherits, so it never kept
+a Node process from ending on a hangup, and without the handler the server would end at once, with no close at all.
+Research runs go first and are marked interrupted, so that Resume can take them up. Then the registered Muse hosts, the
+host starts still open, the title worker and the `!` commands still running are waited for all at once, and the
+database is closed last. While it closes the server answers 503 ("Ancilla is shutting down.") to every request but
+`GET /api/health`, which keeps answering and says `closing: true`, so a supervisor can tell a server that is winding
+down from one that is up. Nothing new is started and no research row is left behind. The command line gives up on a host
+that is slow to close after 11.5 seconds and exits at 20 seconds whatever is still waiting, with exit code 1; a second
+signal exits at once. The 11.5 seconds also bound the close of a host that a settings change restarts (it was 40
+there), so a host that takes longer than that to finish the turn it is draining is let go and that turn is recorded as
+failed. On Windows a closed console gives the process only about ten seconds before the system ends it, which is why the
+research runs are closed out first (within about seven seconds at the most, whatever the hosts do): their rows are
+written by then, and what is still open after that is marked at the next start. A process that is killed instead of
+signalled skips all of this, and what it left in flight is marked at the next start.
+
+A `!` command whose answer is still pending when the server stops, when its deadline passes, or when its process exits
+normally, is stopped together with what it started: the polite stop first (SIGTERM to its process group; on Windows the
+command itself), a second and a half to finish, then SIGKILL. Another server in the same process does not touch it, and
+it does not touch theirs. A command that has already answered is not stopped: one that left a background process behind
+(`! some-server &`) leaves it running, and what the process writes afterwards is read and thrown away, so it is never
+killed by a closed pipe and does not keep the server from exiting.
+
+Three cases are not covered. A server that is killed outright (SIGKILL, or the desktop app quitting, which kills its
+sidecar until the single-owner work lands) runs none of this: a `!` command still pending keeps running, in its own
+session, until it ends by itself, and what the server left in flight is marked at the next start. The same holds for an
+embedder that runs the server in a process of its own and lets an unhandled signal end that process: only the command-line
+program handles the signals. And a Muse host that ignores both the end of its input and SIGTERM can outlive a server that
+exits at its deadline, or a host start that was abandoned (macOS and Linux): the SDK gives no process to signal. On
+Windows with Muse in WSL, closing a host ends the `wsl.exe` process, which may leave the Linux Muse behind; a start that
+timed out and was retried can leave one each time. Stop it from inside WSL if it is in the way.
 
 ## Limits
 

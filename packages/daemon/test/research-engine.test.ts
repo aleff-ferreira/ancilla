@@ -69,8 +69,9 @@ describe("runResearch", () => {
     const registryBlock = /^<SOURCE REGISTRY>\n([\s\S]*?)^<\/SOURCE REGISTRY>/m.exec(writerPrompt)?.[1] ?? "";
     assert.match(registryBlock, /\[A1-S1\] Seen \(https:\/\/seen.org\/p\)/);
     assert.doesNotMatch(registryBlock, /Claimed/);
-    // The worker's note still names the source, flagged so the writer knows it cannot be cited.
-    assert.match(writerPrompt, /\[A1-S2\] Claimed \(https:\/\/claimed.org\/p\) - UNVERIFIED/);
+    // The worker's note still names the source, flagged so the writer knows it cannot be cited, and without a code to cite it by.
+    assert.match(writerPrompt, /\[not citable\] Claimed \(https:\/\/claimed.org\/p\) - never seen by this worker/);
+    assert.doesNotMatch(writerPrompt, /A1-S2/);
     const savedEvent = harness.events.find((e) => e.type === "source_saved");
     assert.deepEqual(savedEvent?.payload, { count: 2, verified: 1 });
   });
@@ -186,7 +187,7 @@ describe("runResearch", () => {
     assert.equal(outcome.status, "partial");
     assert.equal(outcome.report, null);
     assert.match(outcome.failure ?? "", /after two attempts: report is identical to the initial draft/);
-    assert.match(outcome.failure ?? "", /Collected: a draft, 1 worker note\(s\), 1 verified source\(s\)/);
+    assert.match(outcome.failure ?? "", /Collected: a draft, 1 worker note\(s\), 1 citable source\(s\)/);
     assert.equal(model.counts.writer, 2);
     assert.equal(model.counts.draft, 1);
     assert.match(model.calls[model.calls.length - 1]?.prompt ?? "", /not a copy of the initial draft or outline/);
@@ -247,7 +248,9 @@ describe("runResearch", () => {
     assert.match(model.calls[1]?.prompt ?? "", /did not contain a valid fenced JSON object/);
     const scoped = harness.events.find((e) => e.type === "scope_completed");
     assert.equal(scoped?.payload.fallback, true);
-    assert.equal(outcome.status, "completed");
+    // Nothing was researched, so nothing can be cited: the report stands, and the run says it ended without sources.
+    assert.equal(outcome.status, "partial");
+    assert.equal(outcome.state.noCitableSources, true);
     assert.equal(outcome.report, "# Report\n\nNothing cited.");
   });
 

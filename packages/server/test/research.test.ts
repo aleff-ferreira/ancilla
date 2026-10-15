@@ -152,7 +152,7 @@ describe("research routes", () => {
     assert.equal(full.reportAvailable, true);
     assert.match(full.report, /^# What is SQLite\?/);
     assert.equal(full.reportPath, `.ancilla/research/${runId}/report.md`);
-    assert.deepEqual(full.sources, { registry: 2, verified: 1, curated: 1 });
+    assert.deepEqual(full.sources, { registry: 2, verified: 1, curated: 1, opened: 0, searchOnly: 0, attempted: 0, listedEarlier: 1, evidence: 10 }, "a row from before provenance is listed by an earlier version, not opened");
     assert.equal(full.usage.totalTokens, 15);
     assert.ok(full.startedAt && full.endedAt, "started and ended stamps");
     assert.equal(await readFile(join(cwd, ".ancilla", "research", runId, "report.md"), "utf8"), full.report);
@@ -1112,12 +1112,12 @@ describe("url extraction", () => {
     assert.deepEqual(extractUrls("https://example.org/x, https://example.org/x"), ["https://example.org/x"]);
   });
 
-  it("takes fetch URLs from the parsed arguments first and falls back to the text", () => {
+  it("takes fetch URLs from the structured URL arguments only, never from the text around them", () => {
     assert.deepEqual(argUrlsOf(JSON.stringify({ url: "https://en.wikipedia.org/wiki/Foo_(bar)." })), ["https://en.wikipedia.org/wiki/Foo_(bar)."]);
     assert.deepEqual(argUrlsOf(JSON.stringify({ urls: ["https://a.example/1", "https://a.example/2", "https://a.example/1"] })), ["https://a.example/1", "https://a.example/2"]);
     assert.deepEqual(argUrlsOf(JSON.stringify({ href: "https://a.example/h", note: "ignore https://a.example/inline" })), ["https://a.example/h"]);
     assert.deepEqual(argUrlsOf(JSON.stringify({ query: "no url here" })), []);
-    assert.deepEqual(argUrlsOf("fetch https://a.example/plain) now"), ["https://a.example/plain"]);
+    assert.deepEqual(argUrlsOf("fetch https://a.example/plain) now"), []);
     assert.deepEqual(argUrlsOf(null), []);
   });
 
@@ -1458,7 +1458,9 @@ describe("ResearchJobManager stops and bookkeeping", () => {
     await rigged.manager.close();
     assert.ok(Date.now() - t0 < 4000, "close did not wait out its timeout");
     assert.equal(rigged.writerSignal()?.aborted, true);
-    assert.equal(store.getResearchRun(run.id)?.status, "cancelled", "the outcome was persisted before close returned");
+    // The shutdown cut the user's stop-and-write short, so the run is left to be finished later, not shown cancelled.
+    assert.equal(store.getResearchRun(run.id)?.status, "interrupted", "the outcome was persisted before close returned");
+    assert.equal(store.getResearchRun(run.id)?.state?.phase, "writing");
     assert.throws(() => rigged.manager.start(run, thread("s1")), /closed/);
   });
 
@@ -1546,7 +1548,7 @@ describe("ResearchJobManager stops and bookkeeping", () => {
     const view = runView(broken, [], { withReport: false });
     assert.equal(view.phase, "scoping");
     assert.equal(view.round, 0);
-    assert.deepEqual(view.sources, { registry: 0, verified: 0, curated: 0 });
+    assert.deepEqual(view.sources, { registry: 0, verified: 0, curated: 0, opened: 0, searchOnly: 0, attempted: 0, listedEarlier: 0, evidence: 0 });
     assert.equal(view.usage.totalTokens, 0);
     assert.equal(view.researchDeadlineAt, null);
     const manager = new ResearchJobManager({ store, engine: completingEngine, createModelClient: () => ({ complete: async () => ({ text: "", usage: null, modelId: null }) }), createWorkerRunner: () => ({ run: async () => ({ status: "failed", findings: "", saved: [], observed: [], usage: null, error: "unused" }) }), broadcast: () => undefined, writeReport: async () => null });

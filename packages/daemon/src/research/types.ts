@@ -99,15 +99,29 @@ export interface WorkerBudgets {
   wallTimeMs: number;
 }
 
+/**
+ * How a tool call ended, as the runtime reported it: `ok` (completed), `failed` (failed, rejected, timed out, or
+ * completed while carrying a failure), `cancelled`, or `unreported` (the turn ended, or the status was not one the
+ * host knows, before the call said it was done).
+ */
+export type ToolCallOutcome = "ok" | "failed" | "cancelled" | "unreported";
+
 /** A tool call the runtime made on the worker's behalf, as the host observed it. Ground truth for provenance. */
 export interface ObservedToolCall {
   tool: string;
   kind: "search" | "fetch" | "other";
   query: string | null;
-  /** URLs named in the call's arguments (fetches) or returned by it (searches). */
+  /**
+   * URLs named in a fetch's structured arguments, or returned by a search that ended ok. A call of the `other`
+   * kind carries none: only the two web kinds can show where a source came from.
+   */
   urls: string[];
   results: { url: string; title: string | null }[];
   at: string;
+  /** How the call ended. Absent on a call from a host that does not report it, which reads as `ok`. */
+  outcome?: ToolCallOutcome;
+  /** The size of the call's output when the host knows it, in the unit it measured (characters or bytes); null when it does not. */
+  outputSize?: number | null;
 }
 
 export interface WorkerProgress {
@@ -193,6 +207,14 @@ export type ResearchPhase = "scoping" | "drafting" | "researching" | "writing" |
 
 export type ResearchStatus = "queued" | "running" | "completed" | "partial" | "failed" | "cancelled" | "interrupted";
 
+/**
+ * How the observed tool calls reached a source: `retrieved` (a fetch of it ended ok with output), `search_only`
+ * (it appeared in a completed search result), `attempted` (a fetch of it failed or did not finish; it wins over
+ * `search_only` so the failure stays visible), `unobserved` (no call saw it). Advisory: `verified` alone decides
+ * what can be cited, and rows written before this field existed have none.
+ */
+export type SourceProvenance = "retrieved" | "search_only" | "attempted" | "unobserved";
+
 export interface SourceEntry {
   /** `A{agentId}-S{n}` while research runs; `finalizeCitations` renumbers cited ones to `[1..N]`. */
   code: string;
@@ -200,14 +222,17 @@ export interface SourceEntry {
   title: string | null;
   agentId: number;
   round: number;
-  /** True when the worker's observed searches or fetches contain the URL. Only verified sources can be cited. */
+  /** True when the worker's own observed calls make the URL citable (see `provenanceByUrl`). Only verified sources can be cited. */
   verified: boolean;
+  /** How the observed calls reached the URL; absent on rows from before it existed. */
+  provenance?: SourceProvenance;
 }
 
 export interface CuratedSource extends SavedSource {
   agentId: number;
   round: number;
   verified: boolean;
+  provenance?: SourceProvenance;
 }
 
 export type SupervisorVerdict = "CONTINUE_RESEARCH" | "RESEARCH_COMPLETE";
@@ -224,6 +249,7 @@ export interface WorkerOutcomeSummary {
   status: WorkerStatus;
   findingsChars: number;
   savedCount: number;
+  /** How many of the worker's saved sources are citable on its own evidence (the name predates `provenance`). */
   verifiedCount: number;
   observedCount: number;
   usage: TokenUsage | null;
@@ -275,6 +301,8 @@ export interface ResearchRunState {
    * whether it is writing a salvage report (`partial`) or a finished one. Absent until the loop has ended.
    */
   loopExit?: { salvage: boolean; reason: string | null };
+  /** Set when the report was written with no citable source at all; absent otherwise, and on runs from before it existed. */
+  noCitableSources?: true;
 }
 
 export interface ResearchOutcome {
@@ -296,12 +324,22 @@ export interface ResearchInput {
   stopWritesReport?: boolean;
 }
 
+/** What a checkpoint says about itself, for a host that treats some of them as more important than others. */
+export interface CheckpointOptions {
+  /**
+   * Set on the checkpoint taken just before a round's workers are dispatched: the round, with its delegations, has
+   * to be saved before work that costs money and time starts on it. A host that cannot save it may stop the run
+   * there by throwing.
+   */
+  beforeDispatch?: boolean;
+}
+
 export interface ResearchDeps {
   model: ModelClient;
   worker: WorkerRunner;
   events: EventSink;
   /** Persist the state; called after each phase and each round. Awaited, so a slow store slows the run, not events. */
-  checkpoint(state: ResearchRunState): Promise<void> | void;
+  checkpoint(state: ResearchRunState, options?: CheckpointOptions): Promise<void> | void;
   now(): number;
   log?(message: string): void;
   /**

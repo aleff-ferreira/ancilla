@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { emptyFold } from "../src/model/fold.js";
 import {
   activityView,
+  announcements,
   completionView,
   researchAgentId,
   researchCounters,
@@ -232,6 +233,42 @@ describe("crewView with a research run", () => {
     const dropped = runOf(runningResearch({ status: "cancelled", phase: "done", endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } }));
     assert.equal(dropped.report?.summary, "No sources were saved\nNo report was written.");
     assert.match(completionView(dropped)?.headline ?? "", /^Stopped by you after 5m; one of three had landed\.$/);
+  });
+
+  it("does not say the user stopped a run the server's shutdown or restart interrupted", () => {
+    const over = { phase: "done" as const, endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } };
+    const interrupted = runOf(runningResearch({ ...over, status: "interrupted", failure: "interrupted: the server shut down while the run was in flight." }));
+    assert.equal(interrupted.status, "stopped", "every other consumer still reads it as stopped");
+    assert.match(completionView(interrupted)?.headline ?? "", /^Interrupted after 5m; one of three had landed\.$/);
+    const cancelled = runOf(runningResearch({ ...over, status: "cancelled" }));
+    assert.match(completionView(cancelled)?.headline ?? "", /^Stopped by you after 5m; one of three had landed\.$/);
+    assert.equal(summaryLine(interrupted).progress, summaryLine(cancelled).progress, "the rail and the roster say the same for both");
+  });
+
+  it("gives an interrupted run's reason as a sentence in the fact line, not as the server stored it", () => {
+    const over = { phase: "done" as const, endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } };
+    const shutdown = completionView(runOf(runningResearch({ ...over, status: "interrupted", failure: "interrupted: the server shut down while the run was in flight." })));
+    assert.match(shutdown?.factLine ?? "", /^The server shut down while the run was in flight\. · /);
+    assert.doesNotMatch(shutdown?.factLine ?? "", /interrupted:/i);
+    const store = completionView(runOf(runningResearch({ ...over, status: "interrupted", failure: "interrupted: the run's progress could not be saved: database is locked" })));
+    assert.match(store?.factLine ?? "", /^The run's progress could not be saved: database is locked\. · /);
+    // Every other status keeps the text the daemon sent, and an interrupted run with no reason keeps the stopped line.
+    const failed = completionView(runOf(runningResearch({ ...over, status: "failed", failure: "the model refused the request" })));
+    assert.match(failed?.factLine ?? "", /^the model refused the request · /);
+    const partial = completionView(runOf(runningResearch({ ...over, status: "partial", reportAvailable: true, failure: "interrupted: not a prefix a partial run has" })));
+    assert.match(partial?.factLine ?? "", /^interrupted: not a prefix a partial run has · /);
+    const silent = completionView(runOf(runningResearch({ ...over, status: "interrupted", failure: null })));
+    assert.match(silent?.factLine ?? "", /^(?:Nothing was|1 agent was) still working/);
+  });
+
+  it("announces an interrupted run as interrupted, never as stopped by you", () => {
+    const live = viewOf([runningResearch()]);
+    const gone = viewOf([runningResearch({ status: "interrupted", phase: "done", endedAt: iso(rs(5, 0)), failure: "interrupted: the server shut down while the run was in flight." })]);
+    const said = announcements(live, gone);
+    assert.ok(said.includes("Interrupted after 5m; one of three had landed."), said.join(" | "));
+    assert.ok(!said.some((line) => /Stopped by you/.test(line)), "the run was not stopped by the user");
+    const cancelled = viewOf([runningResearch({ status: "cancelled", phase: "done", endedAt: iso(rs(5, 0)) })]);
+    assert.ok(announcements(live, cancelled).includes("Stopped by you after 5m; one of three had landed."));
   });
 
   it("says the thread is busy while a run is out, and lists it in the sidebar row and the Activity drawer", () => {

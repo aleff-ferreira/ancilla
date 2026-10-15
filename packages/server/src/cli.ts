@@ -80,6 +80,9 @@ async function main(): Promise<void> {
   // The desktop shell reads the first stdout line and closes its end of the pipe. A write that finds the pipe closed
   // is not a reason to stop serving.
   process.stdout.on("error", () => undefined);
+  // After a hangup the terminal is gone, and every line the close writes (the shutdown's, the server's and the host's all
+  // go to stderr) would end the process with an uncaught error before the close had run.
+  process.stderr.on("error", () => undefined);
   const argv = process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(usage() + "\n");
@@ -118,7 +121,14 @@ async function main(): Promise<void> {
       }
     }
   }
+  const { HOST_START_TIMEOUT_ENV, resolveHostStartTimeoutMs } = await import("./hostBounds.js");
+  const { CLI_HOST_WAITS } = await import("./hostBounds.js");
+  const { createShutdown, shutdownSignals } = await import("./shutdown.js");
   const server = new AncillaServer({
+    // Short enough that the worst case of a close ends before the shutdown deadline; see `worstCaseCloseMs`.
+    hostWaits: CLI_HOST_WAITS,
+    // The environment outranks the file; either one that cannot be read is left out with a line in the log.
+    hostStartTimeoutMs: resolveHostStartTimeoutMs({ env: process.env[HOST_START_TIMEOUT_ENV], file: local.hostStartTimeoutMs, warn: log }),
     port: portRaw ? Number.parseInt(portRaw, 10) : 3127,
     host: flagValue(argv, "--host") ?? "127.0.0.1",
     dataDir,
@@ -140,11 +150,11 @@ async function main(): Promise<void> {
     );
   }
   process.stdout.write(`ancilla-server listening on http://${bound.host}:${bound.port}\n`);
-  const shutdown = () => {
-    void server.close().then(() => process.exit(0));
-  };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  // A close that waits on a stuck host does not hold the process, and a second signal ends it at once.
+  const shutdown = createShutdown({ close: () => server.close(), exit: (code) => process.exit(code), log });
+  for (const signal of shutdownSignals()) {
+    process.on(signal, () => shutdown(signal));
+  }
 }
 
 void main().catch((error) => {

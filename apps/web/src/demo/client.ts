@@ -1198,7 +1198,7 @@ export class DemoAncillaClient implements AncillaClient {
       endedAt: null,
       researchDeadlineAt: null,
       workers: [],
-      sources: { registry: 0, verified: 0, curated: 0 },
+      sources: { registry: 0, verified: 0, curated: 0, opened: 0, searchOnly: 0, attempted: 0, listedEarlier: 0, evidence: 0 },
       usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, totalTokens: 0 },
       failure: null,
       reportAvailable: false,
@@ -1244,7 +1244,7 @@ export class DemoAncillaClient implements AncillaClient {
             report: this.researchReportFor(run, true),
             reportPath: `${this.threads.get(run.sessionId)?.summary.cwd ?? HOME}/.ancilla/research/${runId}/report.md`,
           }
-        : { ...run, status: "cancelled", phase: "done", endedAt: iso(at), workers, failure: writeReport ? "stopped before any worker had verified a source" : null };
+        : { ...run, status: "cancelled", phase: "done", endedAt: iso(at), workers, failure: writeReport ? "stopped before any worker had a source to cite" : null };
     this.setResearch(next);
     return this.researchSummary(next);
   }
@@ -1402,7 +1402,10 @@ export class DemoAncillaClient implements AncillaClient {
       sources = { ...sources, registry: sources.registry + 3 };
     } else if (worker.reads < reads) {
       next = { ...worker, reads: worker.reads + 1, toolCalls: worker.toolCalls + 1 };
-      sources = { ...sources, verified: Math.min(sources.registry, sources.verified + 1) };
+      // A demo read always works, so every page it reads is opened and citable.
+      if (sources.verified < sources.registry) {
+        sources = { ...sources, verified: sources.verified + 1, opened: (sources.opened ?? 0) + 1, evidence: (sources.evidence ?? 0) + 13 };
+      }
     } else if (worker.saved < saves) {
       next = { ...worker, saved: worker.saved + 1, toolCalls: worker.toolCalls + 1 };
     } else {
@@ -1440,7 +1443,7 @@ export class DemoAncillaClient implements AncillaClient {
       "",
       "## What a real report looks like",
       "",
-      `Each claim carries a marker like this one [^1], and the marker points at a page one of the workers actually opened, never at something the model remembered. The supervisor sent ${run.workers.length} workers over ${run.round} ${run.round === 1 ? "round" : "rounds"}; ${run.sources.verified} of the ${run.sources.registry} pages they turned up were read and verified, and the writer cites only those [^2].`,
+      `Each claim carries a marker like this one [^1], and the marker points at a page one of the workers opened or found in its search results, never at something the model remembered. Ancilla checks where a source came from, not that it supports the claim. The supervisor sent ${run.workers.length} workers over ${run.round} ${run.round === 1 ? "round" : "rounds"}; ${run.sources.verified} of the ${run.sources.registry} pages they turned up could be cited, and the writer cites only those [^2].`,
       "",
       "Muse ran every search and every read here on your plan, so the tokens above are the run's real cost and appear on the Usage page under this thread.",
       "",

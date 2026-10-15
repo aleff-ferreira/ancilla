@@ -604,7 +604,7 @@ export function SettingsPage() {
         <Section title="Deep research">
           <Row
             label="Deep research"
-            description="A research trigger in the composer and /research: parallel Muse workers search the web and read what they find, and a writer turns their notes into a report whose citations only name pages a worker opened. Every model call and search runs through Muse on your plan."
+            description="A research trigger in the composer and /research: parallel Muse workers search the web and read what they find, and a writer turns their notes into a report whose citations name pages a worker opened or found in its search results. Ancilla checks where a source came from, not that it supports a claim. Every model call and search runs through Muse on your plan."
           >
             {researchSettings ? (
               <Toggle checked={researchSettings.enabled} label="Deep research" onChange={(on) => void controller.setResearchSettings({ enabled: on })} />

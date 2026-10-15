@@ -4,6 +4,7 @@ import {
   type ResearchModelIds,
   type SavedSource,
   type SessionManager,
+  type ToolCallOutcome,
   type WorkerBudgets,
   type WorkerResult,
   type WorkerRunner,
@@ -87,8 +88,18 @@ export interface MuseSessionWorkerRunnerOptions {
   startupMs?: number | (() => number);
 }
 
+/**
+ * Muse's own workspace tools whose names say "search". Its text search over files is named plain `search` (arguments
+ * pattern, paths and output_mode), and what it prints is workspace text, which can hold any URL. These are no web
+ * tools: they open no page, return no search results and are not approved for a worker.
+ */
+const LOCAL_SEARCH_TOOL = /^(?:search|(?:files?|code|codebase|workspace|project|repo|repository|text|symbols?|local|memory|skills?)[_\s-]?search|search[_\s-]?(?:files?|code|codebase|workspace|project|repo|repository|text|symbols?|local|memory|skills?))$/i;
+
 /** Muse's tool names are not pinned, so kinds are read off the name; unknown web-ish names count as `other`. */
 export function classifyTool(tool: string): ObservedToolCall["kind"] {
+  if (LOCAL_SEARCH_TOOL.test(tool.trim())) {
+    return "other";
+  }
   if (/search/i.test(tool)) {
     return "search";
   }
@@ -188,29 +199,96 @@ export function queryOf(args: string | null | undefined): string | null {
   return null;
 }
 
+/** The keys a web tool is given the page to open under. A URL anywhere else in the arguments (a prompt, a command, a body) names no source. */
+const URL_ARGUMENT_KEYS = ["url", "urls", "href", "uri", "link"];
+
+/** The keys a batch fetch lists its requests under. Any other object is options for the tool, not a page to open. */
+const URL_BATCH_KEYS = ["requests", "pages", "items", "fetches", "calls", "targets", "inputs", "documents", "sources"];
+
+/** How deep into the arguments a URL key is looked for: a batch fetch nests its requests one or two levels down. */
+const URL_ARGUMENT_DEPTH = 3;
+
 /**
- * The URLs a fetch was asked for: the `url`, `urls` or `href` fields of its JSON arguments when they parse, so a
- * URL with parentheses or trailing punctuation is taken exactly as the tool got it; the regex is the fallback
- * for arguments that are not JSON.
+ * The URLs a fetch was asked for: the values of the `url`, `urls`, `href`, `uri` and `link` keys of its JSON
+ * arguments, taken exactly as the tool got them, so a URL with parentheses or trailing punctuation stays whole. A
+ * batch fetch's requests count too, when they sit in an array or under one of the batch keys; a URL in an options
+ * object, in any other field, or in arguments that are not JSON at all, is not one the call opened. Arguments that
+ * are almost JSON are read for the same keys only, never for a URL anywhere in the text.
  */
 export function argUrlsOf(args: string | null | undefined): string[] {
-  const parsed = recordOf(parseJson(args));
-  if (parsed) {
-    const urls: string[] = [];
-    for (const key of ["url", "urls", "href"]) {
-      const value = parsed[key];
-      const list = Array.isArray(value) ? value : [value];
-      for (const entry of list) {
-        if (typeof entry === "string" && /^https?:\/\//.test(entry.trim()) && !urls.includes(entry.trim())) {
-          urls.push(entry.trim());
-        }
+  if (!args) {
+    return [];
+  }
+  const urls: string[] = [];
+  const add = (value: unknown): void => {
+    for (const entry of Array.isArray(value) ? value : [value]) {
+      const url = typeof entry === "string" ? entry.trim() : "";
+      if (/^https?:\/\//i.test(url) && !urls.includes(url)) {
+        urls.push(url);
       }
     }
-    if (urls.length > 0) {
-      return urls;
+  };
+  const walk = (value: unknown, depth: number): void => {
+    if (depth > URL_ARGUMENT_DEPTH || value === null || typeof value !== "object") {
+      return;
     }
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        walk(entry, depth + 1);
+      }
+      return;
+    }
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (URL_ARGUMENT_KEYS.includes(key)) {
+        add(entry);
+      } else if (URL_BATCH_KEYS.includes(key)) {
+        walk(entry, depth + 1);
+      }
+    }
+  };
+  const parsed = parseJson(args);
+  if (parsed !== null && typeof parsed === "object") {
+    walk(parsed, 0);
+    return urls;
   }
-  return args ? extractUrls(args) : [];
+  for (const match of args.matchAll(/["']?(?:url|href|uri|link)["']?\s*[:=]\s*["'](https?:\/\/[^"'\s]+)["']/gi)) {
+    add(match[1]);
+  }
+  return urls;
+}
+
+/** The terminal status Muse reported for a tool call, and what it says about how the call went. */
+export function outcomeOfItem(item: Record<string, unknown>): ToolCallOutcome {
+  const status = typeof item["status"] === "string" ? item["status"] : "";
+  const named = (value: unknown): boolean => typeof value === "string" && value.trim().length > 0;
+  switch (status) {
+    case "completed":
+      // A call that completed while carrying a failure class or reason is a failure: the reason is the truth.
+      return named(item["failureKind"]) || named(item["failureReason"]) ? "failed" : "ok";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+    case "rejected":
+    case "timedOut":
+      return "failed";
+    default:
+      // `inProgress`, nothing, or a status this build does not know: not a success it can vouch for.
+      return "unreported";
+  }
+}
+
+/** The size of a call's output when the item says: its visible text, else its stored output's byte length; null when it does not. */
+export function outputSizeOf(item: Record<string, unknown>): number | null {
+  const visible = typeof item["visibleOutput"] === "string" ? item["visibleOutput"] : null;
+  if (visible !== null && visible.length > 0) {
+    return visible.length;
+  }
+  const ref = recordOf(item["outputRef"]);
+  const stored = ref && typeof ref["byteLen"] === "number" && Number.isFinite(ref["byteLen"]) && ref["byteLen"] >= 0 ? ref["byteLen"] : null;
+  if (stored !== null) {
+    return stored;
+  }
+  return visible !== null ? 0 : null;
 }
 
 /** Results (url and title) named in a tool's output: JSON objects with both, Markdown links, or bare URLs. */
@@ -315,8 +393,13 @@ interface SeenCall {
   tool: string;
   kind: ObservedToolCall["kind"];
   query: string | null;
+  /** The URLs a fetch was asked for; empty for every other kind. */
   argUrls: string[];
+  /** Whether a call of the `other` kind was given a URL under one of the structured keys: a web tool this build does not know. */
+  hasUrlArgument: boolean;
   at: string;
+  /** The last terminal-looking sighting from `item/started` or `item/updated`: provisional until `item/completed` says it. */
+  provisional: Record<string, unknown> | null;
   reported: boolean;
 }
 
@@ -330,6 +413,9 @@ interface SeenCall {
  * worker that has read one page too many.
  */
 export class MuseSessionWorkerRunner implements WorkerRunner {
+  /** Tool names already warned about as possible web tools this build does not classify, so each is logged once. */
+  private readonly warnedTools = new Set<string>();
+
   constructor(private readonly options: MuseSessionWorkerRunnerOptions) {}
 
   private startupMs(): number {
@@ -403,15 +489,32 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
       });
     };
 
-    const noteCall = (item: Record<string, unknown>, at: string, control: TurnControl): void => {
+    const noteCall = (item: Record<string, unknown>, at: string, control: TurnControl): SeenCall | undefined => {
       const itemId = typeof item["itemId"] === "string" ? item["itemId"] : null;
-      if (!itemId || seen.has(itemId)) {
-        return;
+      if (!itemId) {
+        return undefined;
+      }
+      const known = seen.get(itemId);
+      if (known) {
+        return known;
       }
       const tool = typeof item["tool"] === "string" ? item["tool"] : "unknown";
       const kind = classifyTool(tool);
       const args = typeof item["args"] === "string" ? item["args"] : null;
-      seen.set(itemId, { itemId, tool, kind, query: queryOf(args), argUrls: argUrlsOf(args), at, reported: false });
+      // Only a fetch is credited with the URLs it was asked for; no other kind of call shows where a source came from.
+      const urlArguments = kind === "search" ? [] : argUrlsOf(args);
+      const call: SeenCall = {
+        itemId,
+        tool,
+        kind,
+        query: queryOf(args),
+        argUrls: kind === "fetch" ? urlArguments : [],
+        hasUrlArgument: kind === "other" && urlArguments.length > 0,
+        at,
+        provisional: null,
+        reported: false,
+      };
+      seen.set(itemId, call);
       counts.toolCalls += 1;
       if (kind === "search") {
         counts.searches += 1;
@@ -434,26 +537,34 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
         // A budget breach still counts as a completed worker: whatever it wrote so far is its answer.
         control.stop("completed", "budget exhausted");
       }
+      return call;
     };
 
-    const completeCall = (item: Record<string, unknown>, control: TurnControl): void => {
-      const itemId = typeof item["itemId"] === "string" ? item["itemId"] : null;
-      const call = itemId ? seen.get(itemId) : undefined;
-      if (!call || call.reported) {
-        return;
+    /**
+     * Records one call from the item that ended it: how it ended, what its output was worth and the URLs it
+     * credits. `item` is `item/completed`'s object (authoritative), the last terminal-looking update when the turn
+     * ended before `item/completed` came (provisional), or null when the call never said it was done. Only a search
+     * that ended ok lists results, only a fetch is credited with the URLs it was asked for, and a failed call
+     * credits what it named and nothing it returned.
+     */
+    const observeCall = async (call: SeenCall, item: Record<string, unknown> | null, readStored: boolean, provisional: boolean): Promise<void> => {
+      const outputSize = item ? outputSizeOf(item) : null;
+      let outcome: ToolCallOutcome = item ? outcomeOfItem(item) : "unreported";
+      if (provisional && outcome === "ok" && outputSize === null) {
+        // A completed status on a start or an update, with no output behind it, is not proof that anything was read.
+        outcome = "unreported";
       }
-      call.reported = true;
-      const visible = typeof item["visibleOutput"] === "string" ? item["visibleOutput"] : null;
-      const truncated = item["truncated"] === true;
-      const ref = recordOf(item["outputRef"]);
+      const visible = item && typeof item["visibleOutput"] === "string" ? item["visibleOutput"] : null;
+      const truncated = item?.["truncated"] === true;
+      const ref = item ? recordOf(item["outputRef"]) : null;
       const refId = ref && typeof ref["id"] === "string" ? ref["id"] : ref && typeof ref["uri"] === "string" ? ref["uri"] : null;
-      control.defer(async () => {
-        let results: { url: string; title: string | null }[] = [];
+      let results: { url: string; title: string | null }[] = [];
+      if (call.kind === "search" && outcome === "ok") {
         if (visible && !truncated) {
           results = resultsOf(visible);
-        } else if (call.kind === "search" && refId && itemId) {
+        } else if (refId && readStored) {
           try {
-            const range = await manager.readItemOutput(sessionId, itemId, refId, { offsetBytes: 0, lengthBytes: 256 * 1024 });
+            const range = await manager.readItemOutput(sessionId, call.itemId, refId, { offsetBytes: 0, lengthBytes: 256 * 1024 });
             results = resultsOf(range.content);
           } catch (error) {
             log(`could not read a search output: ${error instanceof Error ? error.message : String(error)}`);
@@ -462,18 +573,36 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
         } else if (visible) {
           results = resultsOf(visible);
         }
-        const urls = call.kind === "search" ? results.map((r) => r.url) : [...new Set([...call.argUrls, ...results.map((r) => r.url)])];
-        const observedCall: ObservedToolCall = {
-          tool: call.tool,
-          kind: call.kind,
-          query: call.query,
-          urls: call.kind === "search" ? urls : call.argUrls.length > 0 ? call.argUrls : urls,
-          results: call.kind === "search" ? results : [],
-          at: call.at,
-        };
-        observed.push(observedCall);
-        sink.onToolCall(observedCall);
-      });
+      }
+      if (call.kind !== "other") {
+        const status = item && typeof item["status"] === "string" ? item["status"] : "none";
+        const failureKind = item && typeof item["failureKind"] === "string" && item["failureKind"] ? `, ${item["failureKind"]}` : "";
+        log(`${call.tool} ${outcome} (${status}${failureKind}), output ${outputSize ?? "unknown"}.`);
+      } else if (outcome === "ok" && call.hasUrlArgument && !this.warnedTools.has(call.tool)) {
+        this.warnedTools.add(call.tool);
+        log(`unclassified web tool "${call.tool}" finished ok with a URL argument; it counts as no web tool, so what it opened cites nothing. Add it to classifyTool if it is one.`);
+      }
+      const observedCall: ObservedToolCall = {
+        tool: call.tool,
+        kind: call.kind,
+        query: call.query,
+        urls: call.kind === "search" ? results.map((r) => r.url) : call.argUrls,
+        results,
+        at: call.at,
+        outcome,
+        outputSize,
+      };
+      observed.push(observedCall);
+      sink.onToolCall(observedCall);
+    };
+
+    /** `item/completed` is the authority on how a call ended; the work of reading its output is queued behind the turn. */
+    const completeCall = (call: SeenCall, item: Record<string, unknown>, control: TurnControl): void => {
+      if (call.reported) {
+        return;
+      }
+      call.reported = true;
+      control.defer(() => observeCall(call, item, true, false));
     };
 
     const decide = (params: Record<string, unknown>, control: TurnControl): void => {
@@ -526,9 +655,13 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
         case "item/completed": {
           const item = recordOf(params["item"]);
           if (item && item["kind"] === "toolCall") {
-            noteCall(item, new Date(now()).toISOString(), control);
-            if (method === "item/completed" || (typeof item["status"] === "string" && item["status"] !== "inProgress")) {
-              completeCall(item, control);
+            const call = noteCall(item, new Date(now()).toISOString(), control);
+            if (call && method === "item/completed") {
+              completeCall(call, item, control);
+            } else if (call && typeof item["status"] === "string" && item["status"] !== "inProgress") {
+              // A terminal status seen on a start or an update is a sighting, not the verdict: the object that
+              // `item/completed` carries may hold the output (and a different status) this one does not yet.
+              call.provisional = item;
             }
           }
           return;
@@ -560,6 +693,18 @@ export class MuseSessionWorkerRunner implements WorkerRunner {
         log: (message) => this.options.host.log?.(message),
       },
     );
+    // A turn can end before Muse said `item/completed` for every call (a stop, a budget interrupt, a host that went
+    // quiet). Those calls are finalized now from their last terminal sighting, or as unreported when they never
+    // reached one, so the record holds every call the worker made and says which ones it cannot vouch for.
+    for (const call of seen.values()) {
+      if (call.reported) {
+        continue;
+      }
+      call.reported = true;
+      await observeCall(call, call.provisional, turn.status === "completed" && !signal.aborted, true).catch((error: unknown) => {
+        log(`could not record ${call.tool}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
     const endedAt = new Date(now()).toISOString();
     if (turn.startFailed) {
       // A turn that never started because the run was stopped is a cancelled worker, not a failed one.

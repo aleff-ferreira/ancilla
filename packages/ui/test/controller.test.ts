@@ -2717,7 +2717,7 @@ describe("AncillaController", () => {
       client.transcript = async () => load({ researchRuns: [fakeResearchRun({ runId: "r-third", status: "cancelled", phase: "done" })] });
       await controller.loadThread("s1");
       assert.equal(stopping()["r-third"], undefined);
-      assert.equal(runs()[0]?.status, "cancelled");
+      assert.equal(runs().find((run) => run.runId === "r-third")?.status, "cancelled");
       stop();
     });
 

@@ -9,6 +9,8 @@ import { parseLoginOutput } from "@harjjotsinghh/aonia";
 const INSTALLER_URL = "https://dev.meta.ai/install.sh";
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 16 * 1024;
+/** How long a cancelled installer gets to end after the polite stop before its whole group is killed. */
+export const INSTALLER_KILL_GRACE_MS = 2000;
 
 export interface LinuxInstallState {
   status: "idle" | "installing" | "installed" | "error" | "cancelled";
@@ -68,7 +70,7 @@ const runInstaller: LinuxInstallerRunner = (script, options) => new Promise((res
   };
   const cancel = () => {
     signalChild("SIGTERM");
-    forceStop = setTimeout(() => signalChild("SIGKILL"), 2000);
+    forceStop = setTimeout(() => signalChild("SIGKILL"), INSTALLER_KILL_GRACE_MS);
     forceStop.unref();
   };
   const cleanup = () => {

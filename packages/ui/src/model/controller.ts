@@ -31,7 +31,8 @@ import { describeTool, modelDisplayName } from "./format.js";
 import { canStopAgent, pendingKey, researchRunIdOf, turnIdOf, runLive, crewBusy, crewView, type AgentVM } from "./crew.js";
 import { fileKey, fileTarget, type LineRange } from "./files.js";
 import { goalPrompt } from "./goal.js";
-import { EMPTY_RESEARCH_CONFIG, mintCommandId, researchEnded, researchLive, researchSnapshotCurrent, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
+import { EMPTY_RESEARCH_CONFIG, mintCommandId, reconcileResearchRuns, researchLive, settleStopping, type ResearchStopAction, type ResearchTyped, researchThreadTitle } from "./research.js";
+import { unionById } from "./union.js";
 import { projectForCwd } from "./status.js";
 import { contextualPlanAccountId, legacyPlanAccounts, mergePlanAccounts, samePlanUsage } from "./plan.js";
 import {
@@ -652,6 +653,12 @@ export class AncillaController {
   private catchUpBase: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
   /** The base the list read now under way will be compared with; kept in step with live status like `catchUpBase`. */
   private catchUpReading: Map<string, { title: string; live: SessionSummary["live"] }> | null = null;
+  /**
+   * How many status events the stream has delivered per session. A list or a transcript read takes the count when
+   * it is asked for: if it moved by the time the answer lands, the stream spoke after the question was put, and
+   * the answer may name a turn as running that the stream has already ended (see `heardStatus`).
+   */
+  private statusHeard = new Map<string, number>();
   private lastListenerErrorAt = Number.NEGATIVE_INFINITY;
   private toastSeq = 0;
   /** Bumped by every title-settings request, so only the latest completion or rollback lands. */
@@ -1045,6 +1052,7 @@ export class AncillaController {
     const catchUp = this.catchUpBase;
     this.catchUpBase = null;
     this.catchUpReading = catchUp;
+    const asked = new Map(this.statusHeard);
     let projects: ProjectView[];
     let sessions: SessionSummary[];
     try {
@@ -1059,7 +1067,18 @@ export class AncillaController {
     for (const session of sessions) {
       byId[session.sessionId] = session;
     }
-    this.update((s) => ({ ...s, projects, sessions: byId, sessionsLoaded: true }));
+    this.update((s) => {
+      for (const [id, session] of Object.entries(byId)) {
+        byId[id] = this.heardStatus(session, s.sessions[id], asked.get(id) ?? 0);
+      }
+      return { ...s, projects, sessions: byId, sessionsLoaded: true };
+    });
+    // A session that left the list is counted no more: one that comes back starts again from nothing.
+    for (const id of [...this.statusHeard.keys()]) {
+      if (!(id in byId)) {
+        this.statusHeard.delete(id);
+      }
+    }
     if (catchUp) {
       this.catchUp(catchUp);
       // A second drop while this read was in flight took its base from what the app showed before this read landed,
@@ -1074,6 +1093,22 @@ export class AncillaController {
         this.forget(id);
       }
     }
+  }
+
+  /**
+   * A session as a list or a transcript read answered it, unless the answer is older than the stream: the stream
+   * gave the session a status after the read was asked for (`asked` is the count then), and the answer names a
+   * different active turn than the stream's status does, a turn that has since ended or none for one that has since
+   * begun. The answer is the older picture, so the stream's live status stands, in both directions. An answer that
+   * names the same turn, or none while the stream has none either, is believed whole: it may carry what the stream
+   * has not told yet, such as a new approval. Anything else the answer says is taken. A turn id is assumed never to
+   * be reused by Muse for the same session; nothing in this repository guarantees it.
+   */
+  private heardStatus(answer: SessionSummary, local: SessionSummary | undefined, asked: number): SessionSummary {
+    if (!local || (this.statusHeard.get(answer.sessionId) ?? 0) === asked) {
+      return answer;
+    }
+    return (answer.live?.activeTurnId ?? null) === (local.live?.activeTurnId ?? null) ? answer : { ...answer, live: local.live };
   }
 
   private scheduleRefresh(): void {
@@ -1682,6 +1717,7 @@ export class AncillaController {
 
   private async reloadThread(sessionId: string, resume = false, read = false): Promise<void> {
     const readStartedAt = this.platform.now();
+    const heardAtAsk = this.statusHeard.get(sessionId) ?? 0;
     const existing = this.state.threads[sessionId];
     // A read does not ask to resume: a fresh browser has no fold yet, but the server may already own a running turn,
     // and a read never resumes into one. What happened to recover the thread before says nothing about whether it is
@@ -1730,6 +1766,10 @@ export class AncillaController {
       // An idle session has nothing left to recover; a later turn starts from a clean slate.
       if (historySync) this.recoveryAt.set(sessionId, readStartedAt);
       else if (!active) this.recoveryAt.delete(sessionId);
+      // The snapshot may be older than what the stream delivered while the read was out: it is reconciled with what
+      // the thread holds now (read after the await, with nothing between this and the update) and never replaces it.
+      const held = this.state.threads[sessionId];
+      const researchRuns = reconcileResearchRuns(held?.researchRuns ?? [], load.researchRuns ?? []);
       this.update((s) => ({
         ...s,
         threads: {
@@ -1741,9 +1781,9 @@ export class AncillaController {
             readOnlyReason: unexplained ? current?.readOnlyReason ?? null : load.readOnlyReason,
             truncated: load.truncated,
             fold,
-            attachments: (load.attachments ?? []).map((file) => this.stamp(file)),
-            shellRuns: load.shellRuns ?? [],
-            researchRuns: load.researchRuns ?? [],
+            attachments: unionById(held?.attachments ?? [], (load.attachments ?? []).map((file) => this.stamp(file))),
+            shellRuns: unionById(held?.shellRuns ?? [], load.shellRuns ?? []),
+            researchRuns,
             // Saved progress is useful even when the live projection remains unavailable.
             // Keep that distinction in historySync instead of claiming the stream recovered.
             stalled,
@@ -1752,10 +1792,10 @@ export class AncillaController {
         },
         // A read that was in flight when the thread was archived or left the list must not put it back.
         sessions: load.session && !load.session.archived && (!s.sessionsLoaded || s.sessions[sessionId])
-          ? { ...s.sessions, [sessionId]: load.session }
+          ? { ...s.sessions, [sessionId]: this.heardStatus(load.session, s.sessions[sessionId], heardAtAsk) }
           : s.sessions,
         // A stop the stream never answered, because the connection dropped, is answered by the reload.
-        researchStopping: settleStopping(s.researchStopping, load.researchRuns ?? []),
+        researchStopping: settleStopping(s.researchStopping, researchRuns),
       }));
       // Whatever was already waiting when the thread opened counts too, not only what arrives next.
       this.autoAllow([sessionId]);
@@ -1861,8 +1901,38 @@ export class AncillaController {
     this.lastResyncAt = this.platform.now();
     void this.refresh();
     const route = this.state.route;
-    if (route.kind === "thread") {
-      void this.loadThread(route.sessionId);
+    const open = route.kind === "thread" ? route.sessionId : null;
+    // A load already in flight is joined, not restarted: that read was asked for before the loss and may predate it.
+    const joined = open !== null && this.inflightLoads.has(open);
+    if (open !== null) {
+      void this.loadThread(open);
+    }
+    this.healResearchAfterLost(joined ? null : open);
+  }
+
+  /**
+   * A run's ending, or a resume done in another window, can have happened while the stream was down, and nothing
+   * replays it. The open thread is read again with its transcript (`skip` names it, unless that read was only
+   * joined to one already out); every other thread that shows a run still going, or one that was interrupted, gets
+   * one read of its research list, reconciled like any snapshot. A thread with nothing live, or one that left the
+   * sidebar, is not asked about, and a read that fails is not an event: the thread keeps what it has. Only the
+   * list is read: no thread is loaded, no prompt sent, no run resumed from here.
+   */
+  private healResearchAfterLost(skip: string | null): void {
+    for (const [sessionId, thread] of Object.entries(this.state.threads)) {
+      if (sessionId === skip || !this.listed(sessionId) || !thread.researchRuns.some((run) => researchLive(run) || run.status === "interrupted")) {
+        continue;
+      }
+      void Promise.resolve()
+        .then(() => this.client.listResearch(sessionId))
+        .then(
+          (runs) => {
+            if (!this.disposed) {
+              this.applyResearchRuns(sessionId, Array.isArray(runs) ? runs : []);
+            }
+          },
+          () => undefined,
+        );
     }
   }
 
@@ -1959,6 +2029,7 @@ export class AncillaController {
           this.scheduleRefresh();
           break;
         }
+        this.statusHeard.set(event.sessionId, (this.statusHeard.get(event.sessionId) ?? 0) + 1);
         // Held onto before the update overwrites it: what changed is the entire question.
         const before = known.live;
         this.update((s) => {
@@ -1985,7 +2056,7 @@ export class AncillaController {
         this.addShellRun(event.sessionId, event.run);
         break;
       case "research-run":
-        this.mergeResearchRun(event.sessionId, event.run);
+        this.applyResearchRuns(event.sessionId, [event.run]);
         break;
       case "sessions-changed":
         this.scheduleRefresh();
@@ -3930,6 +4001,12 @@ export class AncillaController {
     if (!current) {
       return;
     }
+    // The server refuses to archive a thread whose research run is in flight (archiving would not stop the run), so
+    // the thread is kept, with the reason, before the optimistic removal below takes it out of the sidebar.
+    if (this.state.threads[sessionId]?.researchRuns.some(researchLive)) {
+      this.toast("error", "Could not archive the thread", "A research run is in progress on this thread. Stop it, or wait for it to finish, then archive the thread.");
+      return;
+    }
     this.update((s) => {
       const sessions = { ...s.sessions };
       delete sessions[sessionId];
@@ -3956,6 +4033,11 @@ export class AncillaController {
   async setSettled(sessionId: string, settled: boolean): Promise<void> {
     const current = this.state.sessions[sessionId];
     if (!current || current.settled === settled) {
+      return;
+    }
+    // Shelving a thread does not stop its research run, so the server refuses it; the reason is given before the thread moves.
+    if (settled && this.state.threads[sessionId]?.researchRuns.some(researchLive)) {
+      this.toast("error", "Could not settle the thread", "A research run is in progress on this thread. Stop it, or wait for it to finish, then settle the thread.");
       return;
     }
     const now = new Date(this.platform.now()).toISOString();
@@ -4399,18 +4481,17 @@ export class AncillaController {
       config: { ...defaults, ...(config ?? {}), models: { ...defaults.models, ...(config?.models ?? {}) } },
     };
     this.setBusy(key, true);
-    this.mergeResearchRun(sessionId, optimistic);
+    this.applyResearchRuns(sessionId, [optimistic]);
     try {
       const run = await this.client.startResearch(sessionId, trimmed, config, commandId);
-      this.dropResearchRun(sessionId, placeholder);
-      this.mergeResearchRun(sessionId, run);
+      this.applyResearchRuns(sessionId, [run], placeholder);
       // The question went out; the next thing typed is a message again.
       if (this.state.researchMode) {
         this.update((s) => ({ ...s, researchMode: false }));
       }
       return true;
     } catch (error) {
-      this.dropResearchRun(sessionId, placeholder);
+      this.applyResearchRuns(sessionId, [], placeholder);
       this.toast("error", "Could not start the research run", errorMessage(error));
       return false;
     } finally {
@@ -4433,7 +4514,7 @@ export class AncillaController {
     this.setResearchStopping(runId, writeReport ? "write" : "now");
     try {
       const run = await this.client.stopResearch(runId, writeReport);
-      this.mergeResearchRun(run.sessionId, run);
+      this.applyResearchRuns(run.sessionId, [run]);
       return true;
     } catch (error) {
       this.setResearchStopping(runId, null);
@@ -4468,7 +4549,7 @@ export class AncillaController {
     this.setBusy(key, true);
     try {
       const run = await this.client.getResearch(runId);
-      this.mergeResearchRun(run.sessionId, run);
+      this.applyResearchRuns(run.sessionId, [run]);
       return true;
     } catch (error) {
       this.toast("error", "Could not read the report", errorMessage(error));
@@ -4592,37 +4673,26 @@ export class AncillaController {
   }
 
   /**
-   * Keeps the newest state of a run in its thread, by `runId`. Newest is not last to arrive: the answer to a stop
-   * or a read is a snapshot that can land after the stream has moved on, so a run that has ended is never taken
-   * back to running, and between two pictures of a live run the more advanced one stays. The stream's summaries
-   * carry no report, so a report already read stays on the run as long as the server still says one is available.
-   * A run for a thread this app has not opened is dropped: the thread reads its runs with its transcript when it
-   * is opened. Once a run has ended, a stop waiting on it is answered.
+   * Reconciles snapshots of a thread's runs with what it holds, by `runId`: the one way a run reaches a thread
+   * (the stream, the answer to a start, a stop or a read, a research list read after a reconnect; a transcript
+   * reload does the same through `reloadThread`). Newest is not last to arrive, so `reconcileResearchRuns` says
+   * which picture of a run stands and never drops a run a snapshot does not mention. `replacing` names the
+   * placeholder row of a start, swapped out in the same update. A run for a thread this app has not opened is
+   * dropped: the thread reads its runs with its transcript when it is opened. Once a run has ended, a stop
+   * waiting on it is answered.
    */
-  private mergeResearchRun(sessionId: string, run: ResearchRunView): void {
+  private applyResearchRuns(sessionId: string, incoming: readonly ResearchRunView[], replacing?: string): void {
     this.update((s) => {
       const thread = s.threads[sessionId];
       if (!thread) {
         return s;
       }
-      const index = thread.researchRuns.findIndex((existing) => existing.runId === run.runId);
-      const previous = index >= 0 ? thread.researchRuns[index] : undefined;
-      if (previous && (researchEnded(previous) ? researchLive(run) : !researchSnapshotCurrent(previous, run))) {
+      const researchRuns = reconcileResearchRuns(thread.researchRuns, incoming, replacing);
+      const researchStopping = settleStopping(s.researchStopping, researchRuns);
+      if (researchRuns === thread.researchRuns && researchStopping === s.researchStopping) {
         return s;
       }
-      const kept = run.report === null && run.reportAvailable && previous?.report ? { ...run, report: previous.report } : run;
-      const researchRuns = index >= 0 ? thread.researchRuns.map((existing, i) => (i === index ? kept : existing)) : [...thread.researchRuns, kept];
-      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } }, researchStopping: settleStopping(s.researchStopping, [kept]) };
-    });
-  }
-
-  private dropResearchRun(sessionId: string, runId: string): void {
-    this.update((s) => {
-      const thread = s.threads[sessionId];
-      if (!thread || !thread.researchRuns.some((run) => run.runId === runId)) {
-        return s;
-      }
-      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns: thread.researchRuns.filter((run) => run.runId !== runId) } } };
+      return { ...s, threads: { ...s.threads, [sessionId]: { ...thread, researchRuns } }, researchStopping };
     });
   }
 

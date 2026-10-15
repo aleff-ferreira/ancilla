@@ -143,7 +143,7 @@ export function CompletionReport(props: CompletionReportProps) {
   const bodyId = useId();
   const landed = run.status === "finished";
   const elapsed = run.elapsedApprox ? (completion.stats[1]?.value ?? durationText(run.elapsedMs)) : durationText(run.elapsedMs);
-  const word = run.status === "stopped" ? "Stopped" : run.status === "failed" ? "Failed" : landed ? "Done" : "Finished";
+  const word = run.status === "stopped" ? (run.research?.status === "interrupted" ? "Interrupted" : "Stopped") : run.status === "failed" ? "Failed" : landed ? "Done" : "Finished";
   const started = run.startedAt !== null ? formatClock(run.startedAt, run.clockAt) : null;
   const finished = run.endedAt !== null ? formatClock(run.endedAt, run.clockAt) : null;
   const subLong = [runKindWord(run), started ? `started ${started}` : null, finished ? `finished ${finished}` : null].filter(Boolean).join(" · ");

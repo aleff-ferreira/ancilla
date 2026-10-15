@@ -78,6 +78,58 @@ export function createRunState(input: ResearchInput, config: ResearchConfig, now
   };
 }
 
+const PHASES: readonly string[] = ["scoping", "drafting", "researching", "writing", "done"];
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isCount = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value);
+const isDate = (value: unknown): boolean => typeof value === "string" && Number.isFinite(Date.parse(value));
+
+/**
+ * What is wrong with a stored state, as a short phrase naming the first thing found, or null when the engine can
+ * go on from it. The store only vouches for the outer shape (version one, its four lists); the engine reads far
+ * more of it (every round, delegation and result, the token counts, the dates), and a state damaged inside
+ * would otherwise throw somewhere in the middle of the run.
+ */
+export function researchRunStateDamage(saved: unknown): string | null {
+  if (!isObject(saved)) return "it is not an object";
+  if (saved["version"] !== 1) return "its version is not 1";
+  if (typeof saved["runId"] !== "string") return "it has no run id";
+  if (typeof saved["question"] !== "string") return "its question is not text";
+  if (!isObject(saved["config"])) return "its settings are missing";
+  if (typeof saved["phase"] !== "string" || !PHASES.includes(saved["phase"])) return "its phase is not one the engine knows";
+  if (!isDate(saved["startedAt"])) return "its start is not a date";
+  if (!isDate(saved["researchDeadlineAt"])) return "its research deadline is not a date";
+  if (!isCount(saved["nextAgentId"])) return "its agent counter is missing";
+  if (!isCount(saved["consecutiveFailures"])) return "its failure counter is missing";
+  const usage = saved["usage"];
+  if (usage !== undefined && usage !== null) {
+    if (!isObject(usage) || !["inputTokens", "outputTokens", "cachedInputTokens", "totalTokens"].every((key) => isCount(usage[key]))) {
+      return "its token counts are not numbers";
+    }
+  }
+  for (const key of ["rounds", "registry", "curated", "notes"] as const) {
+    if (!Array.isArray(saved[key])) return `its ${key} are not a list`;
+  }
+  if (!(saved["notes"] as unknown[]).every((note) => typeof note === "string")) return "a note is not text";
+  for (const key of ["registry", "curated"] as const) {
+    if (!(saved[key] as unknown[]).every((entry) => isObject(entry) && typeof entry["url"] === "string")) return `an entry of its ${key} is not a source`;
+  }
+  for (const [index, round] of (saved["rounds"] as unknown[]).entries()) {
+    const where = `round ${index + 1}`;
+    if (!isObject(round)) return `${where} is not an object`;
+    if (!isCount(round["round"])) return `${where} has no number`;
+    if (typeof round["reflection"] !== "string") return `${where} has no reflection`;
+    if (round["endedAt"] !== null && typeof round["endedAt"] !== "string") return `${where} has no end`;
+    if (!Array.isArray(round["delegations"])) return `${where} has no delegations list`;
+    if (!round["delegations"].every((d) => isObject(d) && isCount(d["agentId"]) && typeof d["topic"] === "string")) return `a delegation of ${where} is damaged`;
+    if (!Array.isArray(round["results"])) return `${where} has no results list`;
+    if (!round["results"].every((r) => isObject(r) && isCount(r["agentId"]) && typeof r["status"] === "string" && isCount(r["findingsChars"]) && isCount(r["savedCount"]))) {
+      return `a result of ${where} is damaged`;
+    }
+  }
+  return null;
+}
+
 /** A resumable copy of a checkpointed state: unfinished last round dropped, missing fields defaulted. */
 function restoreState(saved: ResearchRunState): ResearchRunState {
   const state: ResearchRunState = JSON.parse(JSON.stringify(saved));
@@ -149,7 +201,13 @@ async function draft(ctx: RunContext): Promise<void> {
   ctx.emit("draft_completed", { chars: state.draft?.length ?? 0, fallback: state.draft === null });
 }
 
-type WriteResult = { ok: true; report: string } | { ok: false; error: string };
+/**
+ * Decision D17: how a run ends when its report was written but no source could be cited. `partial` says the report
+ * stands on findings with nothing to check them against; `completed` would not. Flip it here and nowhere else.
+ */
+export const ZERO_CITABLE_STATUS: "completed" | "partial" = "partial";
+
+type WriteResult = { ok: true; report: string; citable: number } | { ok: false; error: string };
 
 /**
  * Two attempts with upstream's rejection rules, then the deterministic citation pass. A rejected answer gets the
@@ -205,7 +263,7 @@ async function write(ctx: RunContext, salvage: boolean): Promise<WriteResult> {
           reportChars: finalized.report.length,
           attempt,
         });
-        return { ok: true, report: finalized.report };
+        return { ok: true, report: finalized.report, citable: registry.length };
       }
       reason = `after citation cleanup: ${reason}`;
     }
@@ -217,8 +275,8 @@ async function write(ctx: RunContext, salvage: boolean): Promise<WriteResult> {
 
 function whatExists(state: ResearchRunState): string {
   const notes = state.rounds.reduce((n, round) => n + round.results.filter((r) => r.status === "completed").length, 0);
-  const verified = state.registry.filter((entry) => entry.verified).length;
-  return `Collected: ${state.draft ? "a draft" : "no draft"}, ${notes} worker note(s), ${verified} verified source(s).`;
+  const citable = state.registry.filter((entry) => entry.verified).length;
+  return `Collected: ${state.draft ? "a draft" : "no draft"}, ${notes} worker note(s), ${citable} citable source(s).`;
 }
 
 async function finish(ctx: RunContext, outcome: ResearchOutcome): Promise<ResearchOutcome> {
@@ -240,7 +298,13 @@ async function writeAndFinish(ctx: RunContext, salvage: boolean, why: string | n
   const { state } = ctx;
   const written = await write(ctx, salvage);
   if (written.ok) {
-    return finish(ctx, { status: salvage ? "partial" : "completed", report: written.report, state, failure: salvage ? why : null });
+    // A report with nothing citable behind it is recorded as such on the run; the report itself is left as written.
+    // A resumed run that now cites a source drops a flag its earlier writing left.
+    if (written.citable === 0) state.noCitableSources = true;
+    else delete state.noCitableSources;
+    if (salvage) return finish(ctx, { status: "partial", report: written.report, state, failure: why });
+    if (written.citable === 0) return finish(ctx, { status: ZERO_CITABLE_STATUS, report: written.report, state, failure: null });
+    return finish(ctx, { status: "completed", report: written.report, state, failure: null });
   }
   if (state.draft || hasFindings(state)) {
     return finish(ctx, { status: "partial", report: null, state, failure: `${written.error} ${whatExists(state)}` });
@@ -265,6 +329,8 @@ async function cancel(ctx: RunContext): Promise<ResearchOutcome> {
   // `hardStop` (a second stop, or a shutdown) ends it early when one is given.
   const salvageSignal = new AbortController().signal;
   ctx.writeSignal = ctx.deps.hardStop ? AbortSignal.any([ctx.deps.hardStop, salvageSignal]) : salvageSignal;
+  // Recorded before the checkpoint, as the loop's own exit is: a run continued from this state writes a salvage report.
+  state.loopExit = { salvage: true, reason: "cancelled; report written from the findings collected so far" };
   state.phase = "writing";
   await ctx.checkpoint();
   try {
@@ -295,6 +361,23 @@ export async function runResearch(
   signal: AbortSignal,
   resumeFrom?: ResearchRunState,
 ): Promise<ResearchOutcome> {
+  const damage = resumeFrom ? researchRunStateDamage(resumeFrom) : null;
+  if (resumeFrom && damage) {
+    // Nothing is written over it and no model is asked: the run ends with the reason, for whoever reads it to see.
+    const failure = `The saved state of this run is damaged (${damage}), so it cannot be continued.`;
+    const last = (resumeFrom as { eventSeq?: unknown }).eventSeq;
+    deps.events.emit({
+      type: "run_failed",
+      runId: input.runId,
+      seq: typeof last === "number" && Number.isFinite(last) ? last + 1 : 1,
+      at: iso(deps.now()),
+      phase: null,
+      round: null,
+      agentId: null,
+      payload: { reason: failure },
+    });
+    return { status: "failed", report: null, state: resumeFrom, failure };
+  }
   const state = resumeFrom ? restoreState(resumeFrom) : createRunState(input, config, deps.now());
   const ctx = new RunContext(state, deps, input, signal);
   try {

@@ -6,11 +6,43 @@
  * `deep_research/multi_agent_supervisor.py` L481-491 and L694-715, at commit `fc7981a`. Everything here is pure
  * string logic: the model never writes a URL, and the `## Sources` section is always built in code.
  *
- * One rule is stricter than upstream: a source a worker claims but never fetched or saw in a search result is
+ * One rule is stricter than upstream: a source a worker claims but never opened or saw in a search result is
  * `verified: false`, and unverified sources never reach the writer's registry, so they cannot be cited.
+ * What the worker's calls prove is recorded as a `provenance` per URL (see `provenanceByUrl`); `verified` stays the
+ * only gate on citing, and `provenance` explains it.
  */
 
-import type { CuratedSource, ObservedToolCall, SavedSource, SourceEntry } from "./types.js";
+import type { CuratedSource, ObservedToolCall, SavedSource, SourceEntry, SourceProvenance } from "./types.js";
+
+/**
+ * Decision D5: whether a URL that only appeared in a completed search result may be cited. True until real Muse
+ * fixtures (a search, a fetch, a 404, a DNS failure, a redirect) say how reliable a result's URL is; flipping it
+ * makes only an opened page citable, and changes nothing else in the code, but it makes the copy below false, so
+ * change it with the constant: README.md ("Reports with traceable sources"), packages/ui/src/components/composer/
+ * Composer.tsx (the research tooltip), packages/ui/src/components/settings/SettingsPage.tsx (the research setting's
+ * description), apps/web/src/demo/client.ts (the demo report's text about where a marker points),
+ * docs/deep-research-plan.md (section 12, and the lines on how the engine marks `verified` and on what a
+ * citation resolves to), packages/daemon/src/research/UPSTREAM.md (the `citations.ts` row), and
+ * packages/daemon/src/research/prompts/worker.ts (the save instructions, which tell a worker it may save a URL
+ * it saw in its search results).
+ */
+export const SEARCH_ONLY_CITABLE = true;
+
+/** What the observed calls say about one URL: how it was reached, and whether that is enough to cite it. */
+export interface UrlEvidence {
+  provenance: SourceProvenance;
+  citable: boolean;
+}
+
+/** How much a provenance shows, strongest first: an attempt that failed outranks a search hit so the failure stays visible. */
+const PROVENANCE_RANK: Record<SourceProvenance, number> = { retrieved: 3, attempted: 2, search_only: 1, unobserved: 0 };
+
+/** The strength of a source's evidence, for choosing between two rows that name the same URL: citable first, then provenance. */
+export function evidenceRank(source: { verified: boolean; provenance?: SourceProvenance | undefined }): number {
+  // A provenance this build does not know (a later build wrote it, or the state is damaged) is worth nothing, so the
+  // total stays a number: a NaN would go out as null, and a client cannot compare null.
+  return (source.verified ? 10 : 0) + (PROVENANCE_RANK[source.provenance ?? "unobserved"] ?? 0);
+}
 
 /** A registry entry as the writer sees it: the code plus whatever the worker said about the source. */
 export interface FinalRegistryEntry extends SourceEntry {
@@ -43,27 +75,62 @@ export function normalizeUrl(url: string): string {
   }
 }
 
-/** Every URL a worker's observed tool calls named or returned, normalised. */
-export function observedUrls(observed: ObservedToolCall[]): Set<string> {
-  const seen = new Set<string>();
+/** A fetch ended ok with output, or with an output whose size the host did not report. A known empty output is no page. */
+function fetchedPage(call: ObservedToolCall): boolean {
+  const outcome = call.outcome ?? "ok";
+  const size = call.outputSize;
+  return outcome === "ok" && !(typeof size === "number" && size <= 0);
+}
+
+/** A search whose result list can be trusted: it ended ok. A search that failed or never finished lists nothing. */
+function completedSearch(call: ObservedToolCall): boolean {
+  return (call.outcome ?? "ok") === "ok";
+}
+
+function urlsIn(urls: unknown): string[] {
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string" && url.trim().length > 0) : [];
+}
+
+/**
+ * What one worker's observed tool calls say about each URL they touched, keyed by the normalised URL. A fetch that
+ * ended ok with output makes it `retrieved`, whatever failed before or after; a fetch that failed, was cancelled or
+ * never reported makes it `attempted`, which is also what a search hit shows once a fetch of it failed; a URL only
+ * in a completed search result is `search_only`. A call of the `other` kind says nothing, whatever it names, and a
+ * search that did not end ok lists nothing. Citable means retrieved, or search-only while `SEARCH_ONLY_CITABLE`
+ * holds, so a failed fetch of a URL no search returned is not citable, and a failed fetch of a search hit is. A URL
+ * no call touched has no entry: read it as `unobserved`.
+ */
+export function provenanceByUrl(observed: ObservedToolCall[], searchOnlyCitable: boolean = SEARCH_ONLY_CITABLE): Map<string, UrlEvidence> {
+  const retrieved = new Set<string>();
+  const attempted = new Set<string>();
+  const found = new Set<string>();
   for (const call of observed) {
-    for (const url of call.urls ?? []) {
-      if (typeof url === "string" && url.trim()) seen.add(normalizeUrl(url));
-    }
-    for (const result of call.results ?? []) {
-      if (result && typeof result.url === "string" && result.url.trim()) seen.add(normalizeUrl(result.url));
+    if (call.kind === "fetch") {
+      for (const url of urlsIn(call.urls)) {
+        (fetchedPage(call) ? retrieved : attempted).add(normalizeUrl(url));
+      }
+    } else if (call.kind === "search" && completedSearch(call)) {
+      for (const url of urlsIn(call.urls)) found.add(normalizeUrl(url));
+      for (const result of call.results ?? []) {
+        if (result && typeof result.url === "string" && result.url.trim()) found.add(normalizeUrl(result.url));
+      }
     }
   }
-  return seen;
+  const evidence = new Map<string, UrlEvidence>();
+  for (const key of new Set([...retrieved, ...attempted, ...found])) {
+    const provenance: SourceProvenance = retrieved.has(key) ? "retrieved" : attempted.has(key) ? "attempted" : "search_only";
+    evidence.set(key, { provenance, citable: retrieved.has(key) || (searchOnlyCitable && found.has(key)) });
+  }
+  return evidence;
 }
 
 /**
  * Gives one worker's saved sources their global codes `A{agentId}-S{n}`, the same shape upstream's supervisor
  * stamps on sub-agent registries. Duplicate URLs within one worker share the first entry; a source is verified
- * only when the worker's observed searches or fetches contain its URL.
+ * only when the worker's own observed calls make its URL citable, and carries the provenance they gave it.
  */
-export function assignCodes(agentId: number, saved: SavedSource[], observed: ObservedToolCall[], round = 0): SourceEntry[] {
-  const known = observedUrls(observed);
+export function assignCodes(agentId: number, saved: SavedSource[], observed: ObservedToolCall[], round = 0, searchOnlyCitable: boolean = SEARCH_ONLY_CITABLE): SourceEntry[] {
+  const evidence = provenanceByUrl(observed, searchOnlyCitable);
   const entries: SourceEntry[] = [];
   const seen = new Set<string>();
   for (const source of saved) {
@@ -72,13 +139,15 @@ export function assignCodes(agentId: number, saved: SavedSource[], observed: Obs
     const key = normalizeUrl(url);
     if (seen.has(key)) continue;
     seen.add(key);
+    const found = evidence.get(key);
     entries.push({
       code: `A${agentId}-S${entries.length + 1}`,
       url,
       title: source.title ?? null,
       agentId,
       round,
-      verified: known.has(key),
+      verified: found?.citable ?? false,
+      provenance: found?.provenance ?? "unobserved",
     });
   }
   return entries;
@@ -87,7 +156,9 @@ export function assignCodes(agentId: number, saved: SavedSource[], observed: Obs
 /**
  * The registry the final writer may cite from. Registry entries come first and keep their codes; curated
  * sources that the registry does not already hold get fresh `C{n}` codes, as upstream does. Entries are
- * deduplicated by normalised URL, and unverified ones are left out on both sides.
+ * deduplicated by normalised URL, and unverified ones are left out on both sides. When several workers saved the
+ * same URL the writer gets the row with the strongest evidence (the worker that opened the page, not one that
+ * only named it); rows of equal strength keep the first.
  */
 export function buildFinalRegistry(registry: SourceEntry[], curated: CuratedSource[]): FinalRegistryEntry[] {
   const merged: FinalRegistryEntry[] = [];
@@ -97,7 +168,8 @@ export function buildFinalRegistry(registry: SourceEntry[], curated: CuratedSour
     const url = typeof source.url === "string" ? source.url.trim() : "";
     if (!url) continue;
     const key = normalizeUrl(url);
-    if (!curatedByUrl.has(key)) curatedByUrl.set(key, source);
+    const held = curatedByUrl.get(key);
+    if (!held || evidenceRank(source) > evidenceRank(held)) curatedByUrl.set(key, source);
   }
   for (const entry of registry) {
     const url = typeof entry.url === "string" ? entry.url.trim() : "";
@@ -130,6 +202,7 @@ export function buildFinalRegistry(registry: SourceEntry[], curated: CuratedSour
       agentId: source.agentId,
       round: source.round,
       verified: true,
+      ...(source.provenance ? { provenance: source.provenance } : {}),
       reason: source.reason || null,
       excerpt: source.excerpt ?? null,
     });

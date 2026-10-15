@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { normalizeAllowHost } from "./admission.js";
+import { parseHostStartTimeoutMs } from "./hostBounds.js";
 
 /**
  * `runtime.json` in the data dir: the machine's runtime, WSL distro, Muse path, title sharing, the host names the server
@@ -14,6 +15,8 @@ export interface RuntimeConfig {
   syncSessionNames?: boolean;
   /** Host names the server answers besides the loopback ones, for a proxy or tunnel in front of it. */
   allowHosts?: string[];
+  /** How long a Muse host may take to answer its start, in milliseconds; 0 turns the limit off. */
+  hostStartTimeoutMs?: number;
   /** Environment variables for Muse inside WSL, never set on the server itself. */
   wslEnv: Record<string, string>;
 }
@@ -97,6 +100,14 @@ export function parseRuntimeConfig(bytes: Buffer): { config: RuntimeConfig | nul
         }
       }
       if (kept.length > 0) config.allowHosts = kept;
+    }
+  }
+  if (raw["hostStartTimeoutMs"] !== undefined) {
+    const ms = parseHostStartTimeoutMs(raw["hostStartTimeoutMs"]);
+    if (ms !== null) {
+      config.hostStartTimeoutMs = ms;
+    } else {
+      warnings.push(`"hostStartTimeoutMs" was ignored: it must be whole milliseconds (0 turns the limit off), not ${describe(raw["hostStartTimeoutMs"])}`);
     }
   }
   const env = raw["wslEnv"];

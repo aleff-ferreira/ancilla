@@ -88,7 +88,7 @@ ${common}
 <Strategy>
 ${common}
 - READ BROADLY FIRST: while budget remains, keep reading the most promising unread results. Do NOT stop reading just because you have already read a few items.
-- SAVE NEAR THE END: your saved sources go in the closing findings block of your final message. Select your BEST items then. Save an item only if you actually read it and it contributes to the topic - not every item needs saving.
+- SAVE NEAR THE END: your saved sources go in the closing findings block of your final message. Select your BEST items then. Save an item only if it contributes to the topic and you either read it with the page-fetch tool or saw it in your search results - not every item needs saving. A page whose fetch failed is not one you read.
 - You MAY search again mid-run if you need a fresh angle AND the search budget remains. Do not re-search once searches are capped.
 - Stop when you can answer confidently - don't keep searching for perfection. Stop immediately when you can answer the question comprehensively, when you have 4+ relevant sources for the question, or when your last 2 searches returned similar information.
 - If search tools are consistently returning irrelevant or no results, write up what you have and finish rather than burning budget.
@@ -111,7 +111,7 @@ function findingsFormat(discovery: boolean, maxSaves: number): string {
 Your FINAL message is the deliverable. It must END with one fenced JSON block, the findings block, and nothing after it:
 ${FINDINGS_JSON_CONTRACT}
 - "findings": your complete findings as Markdown. It may be long; it is okay if this is extensive, comprehensiveness is wanted. Every factual statement, data point or claim MUST carry an inline citation to a saved source's URL. Write it in the target language.
-- "saved": the sources you read and chose to keep, at most ${maxSaves}. Only list URLs you actually fetched or that appeared in your search results; copy them exactly. Sources you never saw are discarded and cannot be cited in the final report. Give each a specific reason and the most important excerpt.
+- "saved": the sources you read and chose to keep, at most ${maxSaves}. Only list URLs you read with the page-fetch tool or that appeared in your search results, and copy them exactly; prefer the ones you read. Sources you never saw are discarded and cannot be cited in the final report, and a URL that only a failed fetch ever named counts as unseen. Give each a specific reason and the most important excerpt.
 ${shape}
 Do not edit files, do not write the findings anywhere but your final message, and do not stop before the block is written.
 </Findings Block>`.trim();

@@ -722,6 +722,7 @@ describe("completion", () => {
     assert.equal(headline(counts(8, 10, { failed: 2 }), "finished-with-failures", 0), "Eight of ten landed, two failed.");
     assert.equal(headline(counts(7, 10, { skipped: 1, failed: 2 }), "finished-with-failures", 0), "Seven of ten landed, one skipped, two failed.");
     assert.equal(headline(counts(4, 10, { unknown: 6 }), "stopped", 12 * MIN + 10_000), "Stopped by you after 12m; four of ten had landed.");
+    assert.equal(headline(counts(4, 10, { unknown: 6 }), "stopped", 12 * MIN + 10_000, true), "Interrupted after 12m; four of ten had landed.");
     assert.equal(headline(counts(2, 10, { unknown: 8 }), "failed", 3 * MIN), "The run failed after 3m; two of ten had landed.");
     assert.equal(headline(counts(198, 240, { failed: 4, unknown: 38 }), "finished-with-failures", 0), "198 of 240 landed, four failed, 38 not reported.");
     assert.equal(headline(counts(1, 1), "finished", 0), "The agent landed.");

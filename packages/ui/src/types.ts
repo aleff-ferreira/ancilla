@@ -479,6 +479,25 @@ export interface ResearchWorkerView {
   endedAt: string | null;
 }
 
+/**
+ * The source counts of a run: `verified` is how many can be cited. The four after `curated` say how the sources
+ * were reached (opened, seen in search results only, a fetch that failed or was cut off, or listed by an earlier version that did not
+ * record how) and are absent from a server that does not know provenance. `searchOnly`, `attempted` and
+ * `listedEarlier` can fall while a run goes (a source seen in a search result and opened later changes count);
+ * `evidence` is the one number that only grows while a run goes, the sum of how strong each source's evidence is,
+ * and is absent from a server that predates it.
+ */
+export interface ResearchSourceCounts {
+  registry: number;
+  verified: number;
+  curated: number;
+  opened?: number;
+  searchOnly?: number;
+  attempted?: number;
+  listedEarlier?: number;
+  evidence?: number;
+}
+
 /** A DeepResearch run as the server reports it; `report` is only filled by `getResearch`. */
 export interface ResearchRunView {
   runId: string;
@@ -494,14 +513,18 @@ export interface ResearchRunView {
   endedAt: string | null;
   researchDeadlineAt: string | null;
   workers: ResearchWorkerView[];
-  sources: { registry: number; verified: number; curated: number };
+  sources: ResearchSourceCounts;
   usage: ResearchUsage;
   failure: string | null;
+  /** How many times the run was resumed after an interruption; missing (an older server) reads as 0. */
+  resumes?: number;
   reportAvailable: boolean;
   report: string | null;
   reportPath: string | null;
   /** Why the report has no file, when the project would not take it; the report itself is still in Ancilla. */
   reportWriteError?: string | null;
+  /** True when the report was written with no citable source at all. */
+  noCitableSources?: boolean;
   config: ResearchConfig;
 }
 

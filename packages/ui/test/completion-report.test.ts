@@ -6,7 +6,11 @@ import { TooltipProvider } from "../src/components/ui/overlays.js";
 import { CompletionReport, emphasized, reportMeta, type CompletionReportProps } from "../src/components/crew/CompletionReport.js";
 import { SinceYouLeft, recapText } from "../src/components/crew/SinceYouLeft.js";
 import { CrewCard } from "../src/components/crew/CrewCard.js";
-import { completionView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
+import { completionView, crewView, sinceYouLeft, type CompletionVM, type RunVM } from "../src/model/crew.js";
+import { emptyFold } from "../src/model/fold.js";
+import type { ResearchRunView } from "../src/types.js";
+import { session } from "./crew-fixtures.js";
+import { RESEARCH_NOW, iso, rs, runningResearch } from "./fixtures/research.js";
 import { S, finishedFeed, finishedRun, flatten, mkAgent, mkRun, mkTask, referenceAgents, textOf as text, view } from "./fixtures/lantern.js";
 
 const noop = () => {};
@@ -137,5 +141,28 @@ describe("emphasized", () => {
   it("wraps the strong part once and leaves a line without it alone", () => {
     assert.equal(renderToStaticMarkup(createElement("span", null, emphasized("Waited on you 1m 40s", "1m 40s"))), "<span>Waited on you <b>1m 40s</b></span>");
     assert.equal(renderToStaticMarkup(createElement("span", null, emphasized("Peak concurrency 4 agents", "nothing"))), "<span>Peak concurrency 4 agents</span>");
+  });
+});
+
+describe("CompletionReport for a research run the server interrupted", () => {
+  const ending = { phase: "done" as const, endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } };
+  const research = (over: Partial<ResearchRunView>): RunVM => {
+    const view = crewView(emptyFold(), session("s1", "Research", { modelId: "muse-spark-1.3" }), RESEARCH_NOW, { researchRuns: [runningResearch({ ...ending, ...over })] });
+    return view.runs[0] as RunVM;
+  };
+  const pill = (markup: string): string => /<span class="crew-el[^"]*">(?:<svg[\s\S]*?<\/svg>)?([^<]*)</.exec(markup)?.[1] ?? "";
+
+  it("says Interrupted in its head, not Stopped, beside the headline that says so", () => {
+    const run = research({ status: "interrupted", failure: "interrupted: the server shut down while the run was in flight." });
+    assert.equal(run.status, "stopped", "the run status other consumers read is unchanged");
+    const { markup } = render(run);
+    assert.match(pill(markup), /^Interrupted · 4m 59s$/);
+    assert.match(markup, /<h2>Interrupted after 5m; one of three had landed\.<\/h2>/);
+    assert.match(markup, /class="sub">The server shut down while the run was in flight\. · /);
+  });
+
+  it("keeps Stopped for a run the user stopped, and Failed for one that failed", () => {
+    assert.match(pill(render(research({ status: "cancelled" })).markup), /^Stopped · 4m 59s$/);
+    assert.match(pill(render(research({ status: "failed", failure: "the model refused" })).markup), /^Failed · 4m 59s$/);
   });
 });

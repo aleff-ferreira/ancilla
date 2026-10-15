@@ -107,7 +107,7 @@ function outcomeOf(round: SupervisorRound, agentId: number): string {
   const result = round.results.find((r) => r.agentId === agentId);
   return result
     ? result.status === "completed"
-      ? `completed, ${result.savedCount} saved source(s), ${result.verifiedCount} verified`
+      ? `completed, ${result.savedCount} saved source(s), ${result.verifiedCount} citable`
       : `${result.status}${result.error ? `: ${result.error}` : ""}`
     : "not run";
 }

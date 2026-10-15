@@ -6,7 +6,7 @@ import { agentNumbers, type AgentNumbers } from "./agents.js";
 import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold, type TurnInfo } from "./fold.js";
 import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
 import { costOf, formatCost, priceOf } from "./pricing.js";
-import { phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
+import { interruptedLine, phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
 import { projectForCwd } from "./status.js";
 import type { AppState, ThreadState } from "./store.js";
 import { TERMINAL_FAILURES, reconciled } from "./workflow.js";
@@ -52,6 +52,8 @@ export interface ResearchRunInfo {
   maxRounds: number;
   question: string;
   sources: ResearchRunView["sources"];
+  /** The report was written with no source to cite; absent otherwise. */
+  noCitableSources?: true;
   /** When the window routes the run to writing; null once it has ended or before it started. */
   deadlineAt: number | null;
   /** The run wrote a report, which the transcript row shows. */
@@ -2020,6 +2022,7 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
       maxRounds: run.maxRounds,
       question: run.question,
       sources: run.sources,
+      ...(run.noCitableSources ? { noCitableSources: true as const } : {}),
       deadlineAt: ended ? null : isoMs(run.researchDeadlineAt),
       reportAvailable: run.reportAvailable,
     },
@@ -2050,7 +2053,8 @@ function researchRunView(run: ResearchRunView, ctx: RunContext): RunVM {
     peakConcurrency: peakOf(agents, clock),
     waitedOnYouMs: null,
     retried: 0,
-    report: ended ? { summary, failure: run.failure, handoffs: [] } : null,
+    // An interrupted run's stored reason is a sentence in lower case after a prefix; the card says it as the row does.
+    report: ended ? { summary, failure: run.status === "interrupted" && run.failure ? interruptedLine(run.failure) : run.failure, handoffs: [] } : null,
     stale: ctx.stale,
     staleAt: ctx.stale ? ctx.staleAt : null,
     clockAt: clock,
@@ -2339,12 +2343,16 @@ function shortDuration(ms: number | null): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** "All ten landed." and its variants, from the counts of the agents that were scheduled. */
-export function headline(counts: Counts, status: RunStatus, elapsedMs: number | null): string {
+/**
+ * "All ten landed." and its variants, from the counts of the agents that were scheduled. A stopped run says the
+ * user stopped it, unless it was interrupted: the server shutting down or restarting under a research run is not
+ * something the user did.
+ */
+export function headline(counts: Counts, status: RunStatus, elapsedMs: number | null, interrupted = false): string {
   const total = counts.total - counts.planned;
   const landed = counts.done;
   const had = `${numberWord(landed)} of ${numberWord(total)} had landed.`;
-  if (status === "stopped") return `Stopped by you after ${shortDuration(elapsedMs)}; ${had}`;
+  if (status === "stopped") return `${interrupted ? "Interrupted" : "Stopped by you"} after ${shortDuration(elapsedMs)}; ${had}`;
   if (status === "failed") return `The run failed after ${shortDuration(elapsedMs)}; ${had}`;
   if (total === 0) return "Nothing was scheduled.";
   if (landed === total) return total === 1 ? "The agent landed." : `All ${numberWord(total)} landed.`;
@@ -2368,6 +2376,9 @@ function factLine(run: RunVM): string {
     facts.push(unknown.length > 0 ? `${plural(unknown.length, "agent was", "agents were")} still working` : "Nothing was still working");
   } else if (run.status === "failed") {
     facts.push(run.report?.failure ?? "Muse has not reported a reason");
+  } else if (run.research?.noCitableSources) {
+    // The run wrote its report but had nothing to cite, which is why it is partial; the daemon sends no failure text.
+    facts.push("No source could be cited for this report");
   } else if (run.research && run.status === "finished-with-failures") {
     facts.push("The run ended before every round was done");
   } else if (skipped.length === 0 && failed.length === 0 && unknown.length === 0) {
@@ -2514,7 +2525,7 @@ export function completionView(run: RunVM): CompletionVM | null {
   ];
   if (run.cost) stats.push({ value: `~${formatCost(run.cost.usd)}`, label: "estimate at list price" });
   return {
-    headline: run.kind === "turn" ? run.status === "failed" ? "Turn failed" : run.status === "stopped" ? "Turn stopped" : run.agents[0]?.state === "done" ? "Turn finished" : "Turn ended" : headline(run.counts, run.status, run.elapsedMs),
+    headline: run.kind === "turn" ? run.status === "failed" ? "Turn failed" : run.status === "stopped" ? "Turn stopped" : run.agents[0]?.state === "done" ? "Turn finished" : "Turn ended" : headline(run.counts, run.status, run.elapsedMs, run.research?.status === "interrupted"),
     factLine: run.kind === "turn" ? `${plural(run.agents.filter((agent) => agent.kind === "task" && agent.state === "done").length, "tool")} completed${run.counts.failed > 0 ? ` · ${run.counts.failed} failed` : ""}${run.counts.unknown > 0 ? ` · ${plural(run.counts.unknown, "outcome")} not reported` : ""}` : factLine(run),
     stats,
     highlights: highlightsOf(run),
@@ -2568,7 +2579,7 @@ export function announcements(prev: CrewVM | null, next: CrewVM): string[] {
       }
     }
     if (before && runLive(before) && !runLive(run)) {
-      out.push(headline(run.counts, run.status, run.elapsedMs));
+      out.push(headline(run.counts, run.status, run.elapsedMs, run.research?.status === "interrupted"));
     }
     if (before && !before.stale && run.stale) {
       out.push("Connection stale; showing last known state.");

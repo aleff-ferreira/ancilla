@@ -242,7 +242,7 @@ describe("supervisor loop workers", () => {
     const note = run.state.notes[0] ?? "";
     assert.ok(note.length <= NOTE_CHAR_CAP, `the note is ${note.length} chars`);
     assert.match(note, /^## Worker A1 \(round 1, research\): Long\n\nxxx/);
-    assert.match(note, /…\[truncated\]\n\nSources saved by this worker:\n\[A1-S1\] Long source \(https:\/\/example.org\/long\) - verified - supports it$/);
+    assert.match(note, /…\[truncated\]\n\nSources saved by this worker:\n\[A1-S1\] Long source \(https:\/\/example.org\/long\) - opened - supports it$/);
     // A failure note is capped the same way.
     const clock2 = new FakeClock();
     const failing = new FakeWorker(() => failedResult(`other: ${"e".repeat(20_000)}`));

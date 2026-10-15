@@ -46,9 +46,14 @@ reads run through Muse; no separate model or search API key is needed.
 
 ### Reports with traceable sources
 
-Ancilla builds the citation registry from URLs observed in the workers' searches and page reads, deduplicates sources,
-and turns registered citations into linked footnotes. This checks source provenance; it does not independently
-verify every claim in the report.
+Ancilla builds the citation registry from URLs observed in the workers' tool calls, deduplicates sources, and turns
+registered citations into linked footnotes. A source can be cited when a worker opened the page (a page fetch that
+succeeded) or when the URL appeared in a completed search result. A URL that only appeared in a prompt, a shell
+command or another tool's text cannot, and neither can a page whose fetch failed unless a search result also listed
+it; the run shows how many sources were opened, found in search results only, or had a fetch that failed or was cut
+off. A source counts in at most one of those three; a source that no worker call saw is in none of them and cannot be
+cited. This checks where a source came from; it does not verify that a source supports a claim, and Ancilla cannot
+confirm one. When no source could be cited at all, the run ends as a partial report and says so.
 
 ![A completed research report with linked citations and document export controls](docs/assets/research-report.png)
 
@@ -144,6 +149,8 @@ signature-checked by Ancilla's built-in updater before they install.
 Install Muse Code for Windows with `irm https://dev.meta.ai/install.ps1 | iex` in PowerShell. Already run Muse inside
 WSL2? Ancilla uses it when native Muse is not installed; set `ANCILLA_MUSE_RUNTIME=wsl`, or `"runtime": "wsl"` in
 [`runtime.json`](docs/muse-recovery.md#runtime-configuration), to keep WSL when both are.
+
+`ANCILLA_HOST_START_TIMEOUT_MS`, or `"hostStartTimeoutMs"` in `runtime.json`, sets how long a Muse host may take to answer its start before Ancilla gives up on it (whole milliseconds, 0 to 2147483647; the default is `300000`, and `0` turns the limit off; the variable wins over the file, and a value that is not a whole number of milliseconds is ignored with a line in the log).
 
 **macOS:** open `Ancilla_<version>_universal.dmg`; one build runs on Apple Silicon and Intel. The app is not
 Apple-notarized yet, so the first launch needs a right-click on the app, then **Open** (on recent macOS, **System

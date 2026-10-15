@@ -1012,7 +1012,7 @@ function ResearchTrigger(props: { sessionId: string | null; side: PickerSide; di
             <BinocularsIcon size={14} className="text-muted" />
             <span className="text-sm font-semibold text-fg">Deep research</span>
             <span className="flex-1" />
-            <Tip label="Muse workers search the web in parallel, read what they find, and a writer turns their notes into a report whose citations only name pages a worker actually opened. Every model call and search runs through Muse on your plan.">
+            <Tip label="Muse workers search the web in parallel, read what they find, and a writer turns their notes into a report whose citations name pages a worker opened or found in its search results. Ancilla checks where a source came from, not that it supports a claim. Every model call and search runs through Muse on your plan.">
               <button type="button" aria-label="What deep research does" className="-m-1 rounded-full p-1 text-subtle transition-colors duration-100 hover:text-fg">
                 <QuestionIcon size={15} />
               </button>

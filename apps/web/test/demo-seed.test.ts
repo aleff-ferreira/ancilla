@@ -115,7 +115,7 @@ describe("the demo seed", () => {
     assert.deepEqual(running.attention.map((agent) => agent.name), ["A3 · Material 3 tonal palettes"]);
     assert.equal(running.tokens?.total, 91_420);
     assert.equal(completionView(done)?.headline, "All five landed.");
-    assert.equal(completionView(done)?.excerpt, "14 sources · 11 verified · 4 curated\nThe report is in the transcript.");
+    assert.equal(completionView(done)?.excerpt, "14 sources · 9 opened · 2 search only · 1 fetch failed or cut off · 11 citable · 4 curated\nThe report is in the transcript.");
     assert.equal(sidebarCrewSummary(fold, thread.summary.live, NOW, { researchRuns: seeded.research })?.text, "2 done · 2 working");
   });
 
@@ -512,6 +512,9 @@ describe("the demo client", () => {
     assert.equal(final.phase, "done");
     assert.ok(final.workers.every((worker) => worker.state !== "working" && worker.state !== "queued"));
     assert.match(final.report ?? "", /## Sources/);
+    assert.doesNotMatch(final.report ?? "", /actually opened|read and verified/, "the report does not claim more than the checks show");
+    assert.match(final.report ?? "", /opened or found in its search results/);
+    assert.ok((final.sources.opened ?? 0) > 5 && (final.sources.opened ?? 0) <= final.sources.verified, "reads add to the opened count, which never passes the citable one");
     assert.ok(events.some((event) => event.runId === RESEARCH_RUNS.running && event.phase === "writing"), "the writing phase was broadcast");
     assert.ok(events.every((event) => event.report === null), "the stream never carries the report");
     // A run started from the composer walks the same phases; a second one in the thread is refused; stopping keeps what it has.

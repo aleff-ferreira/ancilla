@@ -80,6 +80,12 @@ export function buildWriterPrompt(input: WriterPromptInput): string {
   const notes = material.notes;
   const draft = input.draft?.trim() ? input.draft.trim() : "(no draft was written)";
   const reflection = input.lastReflection?.trim() ? input.lastReflection.trim() : "(no supervisor reflection is available)";
+  // One line, in the prompt and not in the report: a report with no source to cite is the only case where the rules
+  // below ask for something that cannot be done, and the writer says so in the report's own language.
+  const noSourcesRule =
+    input.registry.length === 0
+      ? `\n- NO SOURCE COULD BE CITED for this report: the source registry is empty, and this overrides the citation density rule below. Write no citation codes and no URLs, present nothing as sourced, and say once, near the top and in ${lang}, that no source could be cited.`
+      : "";
   const salvageNote = input.salvage
     ? "\nNOTE: Research was stopped before the supervisor concluded. Write from the findings that exist, caveat inline where evidence is thin, and never invent what was not found.\n"
     : "";
@@ -192,7 +198,7 @@ Ensure your report excels across these dimensions:
 - Keep sentences under ~30 words where possible. If a sentence requires re-reading to parse, restructure it.
 </Quality Pillars>
 
-<Citation Rules>
+<Citation Rules>${noSourcesRule}
 - The <SOURCE REGISTRY> below is the ONLY authoritative list of sources for this report.
 - Cite facts and claims inline using the exact bracket code from the registry, e.g. [A4-S2] or [C1], immediately after the fact or claim. Combine codes like [A4-S2][C1] when multiple sources support the same point.
 - NEVER write a URL anywhere in the report body.
