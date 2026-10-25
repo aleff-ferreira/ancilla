@@ -525,7 +525,7 @@ pub fn session_bus_likely() -> bool {
 /// The address is set by the session that started the bus; without it, systemd's user bus is the socket `bus`
 /// under the runtime directory. Neither is there under a bare xvfb or a WSLg session without systemd.
 pub fn session_bus_likely_in(address: Option<&std::ffi::OsStr>, runtime_dir: Option<&Path>) -> bool {
-    runtime_dir.is_some_and(|dir| dir.join("bus").exists())
+    address.is_some_and(|value| !value.is_empty()) || runtime_dir.is_some_and(|dir| dir.join("bus").exists())
 }
 
 #[cfg(test)]
