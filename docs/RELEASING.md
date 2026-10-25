@@ -177,7 +177,26 @@ The publish job's checks cannot see a build that is signed correctly but does no
 
 None of this is automated yet, and none of it should be invented in a hurry; a gate that is skipped is worse than one that is plainly manual.
 
-For 0.21.0, the release that makes the desktop app stop its server gracefully and refuse a second copy over one data folder, the dogfood on Windows means in particular: quit and open the app five times and compare `server-port` after each (it must not change, and the theme and the automatic-update setting must still be there); end `Ancilla.exe` in Task Manager and open the app again at once (the server is gone within a couple of seconds, and the app comes up on the same port, not on the "already open" page); open the app a second time while it runs (the window is focused, nothing else starts); and let the previous release update to this one, which is the one time the old shell's plain kill and the new shell's wait before the installer both run. The same quit path on macOS and on a Linux desktop with a session bus has no machine here; until one is borrowed, that is a known gap, written down rather than assumed.
+### The 0.21.0 checklist
+
+0.21.0 is the release that makes the desktop app stop its server gracefully and refuse a second copy over one data folder, so the three gates are run for it as follows, and what was seen is written down with the release.
+
+1. **Installer launch on every system**, from the draft's own installers. Windows: run the setup program, then launch. macOS: open the disk image, launch with the right-click Open. Linux: install the `.deb` and launch `ancilla` from the system path, then launch the AppImage with FUSE and with `--appimage-extract-and-run`. On each, a window opens and the app signs in against its own server, and closing the window ends the app within a few seconds with no `node` process left behind (Task Manager, Activity Monitor, `ps`).
+2. **The update from 0.20.4 to 0.21.0.** Serve a `latest.json` for the new build locally, build the new version with its updater endpoint overridden by `--config`, install 0.20.4, let it find the update, and take both ways in: install on close (quit, the installer runs, open the app again) and Restart to update. This is the one time the old shell's plain kill and the new shell's wait before the installer both run: no file-in-use error from the installer, the first start on the same port, no "already open" page, no `ancilla.owner` left by the old copy. Do it on Windows, macOS and the AppImage.
+3. **The dogfood on Windows with a project in WSL**, the eleven items:
+   1. Launch, quit and launch again five times: `server-port` is byte-identical after each, and the theme and the automatic-update setting are still there.
+   2. Quit with a WSL project open and a Muse host live: `server.log` shows the `stdin EOF received` line and the close ends within a few seconds; `ps` inside the distro says whether `muse serve` exited with it (the S5 answer).
+   3. End `Ancilla.exe` in Task Manager: `node.exe` is gone within about two seconds, and launching again at once gives a window on the same port, not the "already open" page.
+   4. End `node.exe` in Task Manager while the app runs, then quit and launch again: the record left with a dead pid is taken over at once.
+   5. Launch a second time while the app runs: the existing window is focused, no second process appears, `server-port` is unchanged.
+   6. Double-click the app again within a second or two of a quit: one fresh window afterwards, one process in Task Manager.
+   7. Install on close and Restart to update from 0.20.4 to the 0.21.0 draft, or to a build served by a local `latest.json` (gate 2, on this machine).
+   8. A command-line `ancilla-server --data-dir` pointed at the desktop app's AppData folder while the app runs: exit code 75 and the one line on stderr. The reverse, the app launched while that server runs: the "already open" page, with a link that opens the running copy.
+   9. A command-line `--data-dir` on a `\\wsl.localhost\...` folder launched twice from Windows: the second is refused (exclusive creation on the 9P client, S5).
+   10. Sleep for ten minutes with the app open, wake, quit: still graceful, within the grace (S9).
+   11. Nothing above covers macOS (the Quit menu, the updater's relaunch, the single-instance plugin) or a Linux desktop with a real session bus and focus under WSLg. Until a machine is borrowed, those are gaps written down with the release, not assumed.
+
+The Linux installer smoke (`linux-appimage.yml`, on every pull request that touches the desktop app or the server) covers the quit path by machine for the `.deb` and the AppImage, each once without a session bus and once under `dbus-run-session`: the window is closed the way a window manager does it, the server is gone within the 25 seconds the app gives it, `server-port` is byte-identical before and after, `server.log` has the `stdin EOF received` line, `ancilla.owner` is gone, no process of the app's XDG tree survives, a second copy started a second after the window closes comes up on the same port, and under the bus a second launch while the first runs is forwarded to it with one app process remaining. It cannot see focus, the updater, the Windows installer or the end of a Windows pipe, which is what the gates above are for.
 
 ## What users see
 
