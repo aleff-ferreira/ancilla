@@ -83,8 +83,11 @@ impl Sidecar {
 
 struct ServerChild(Arc<Mutex<Option<Sidecar>>>);
 
-/// Stops the local server when Tauri clears its resources, which happens on every exit and when the updater
-/// quits the app to run the installer; a normal quit has already stopped it from the window's Destroyed handler.
+/// Stops the local server, killed and waited for, when Tauri clears its resources (`cleanup_before_exit`): on
+/// every exit, and right before the updater quits the app to run the installer, since the updater builder the
+/// plugin's `check` command uses registers that cleanup as its `on_before_exit` (tauri-plugin-updater 2.11,
+/// `updater_builder`); the plugin offers no other hook. The wait is what lets the NSIS installer replace
+/// node.exe. A normal quit has already stopped the server from the window's Destroyed handler, and finds nothing.
 struct ServerGuard(Arc<Mutex<Option<Sidecar>>>);
 
 impl tauri::Resource for ServerGuard {}
@@ -231,23 +234,6 @@ fn single_instance_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             let _ = window.set_focus();
         }
     })
-}
-
-/// The updater quits the app itself after this callback to run the installer: the sidecar is killed and waited
-/// for first, so the NSIS installer finds node.exe closed, and the app's own cleanup runs as it would on any exit.
-fn updater_plugin(sidecar: Arc<Mutex<Option<Sidecar>>>, app: Arc<Mutex<Option<tauri::AppHandle>>>) -> tauri::plugin::TauriPlugin<tauri::Wry> {
-    tauri_plugin_updater::Builder::new()
-        .on_before_exit(move || {
-            let taken = locked(&sidecar).take();
-            if let Some(running) = taken {
-                running.kill_and_wait();
-            }
-            let handle = locked(&app).clone();
-            if let Some(handle) = handle {
-                handle.cleanup_before_exit();
-            }
-        })
-        .build()
 }
 
 /// Windows gets Ancilla's own title bar, drawn by the UI; macOS keeps the native traffic
@@ -893,8 +879,6 @@ fn is_external_link(url: &Url) -> bool {
 }
 
 fn main() {
-    let server_child: Arc<Mutex<Option<Sidecar>>> = Arc::new(Mutex::new(None));
-    let app_handle: Arc<Mutex<Option<tauri::AppHandle>>> = Arc::new(Mutex::new(None));
     // The single-instance plugin goes first, as its documentation asks, so a second launch is forwarded before
     // anything else of this copy starts. On Linux it needs the session bus; without one it is left out and the
     // server's own data folder lock is what keeps two copies apart.
@@ -911,12 +895,12 @@ fn main() {
     // replace only an AppImage, and is unavailable altogether in Debian/RPM installations.
     #[cfg(target_os = "linux")]
     let builder = if linux_desktop::installation_kind() == "appimage" {
-        builder.plugin(updater_plugin(server_child.clone(), app_handle.clone()))
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
     } else {
         builder
     };
     #[cfg(not(target_os = "linux"))]
-    let builder = builder.plugin(updater_plugin(server_child.clone(), app_handle.clone()));
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(target_os = "linux")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         linux_desktop::linux_installation_status,
@@ -929,10 +913,9 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(ServerChild(server_child))
+        .manage(ServerChild(Arc::new(Mutex::new(None))))
         .manage(Quit::default())
-        .setup(move |app| {
-            *locked(&app_handle) = Some(app.handle().clone());
+        .setup(|app| {
             #[cfg(target_os = "macos")]
             install_zoom_menu(app)?;
             // Open the window at once on a splash page; the server can take a few seconds to probe WSL.
