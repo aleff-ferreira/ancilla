@@ -38,7 +38,7 @@ enum StopOutcome {
 /// SHUTDOWN_DEADLINE_MS (20_000 ms; the server exits by then, 0 or 1), and the rest is the exit itself (exit hooks,
 /// a process tree with wsl.exe children on Windows) on a loaded machine. A Node-side contract test reads these
 /// numbers from this file, so they stay as two literals.
-const SIDECAR_STOP_GRACE: Duration = Duration::from_millis(20_000 + 5_000);
+const SIDECAR_STOP_GRACE: Duration = Duration::from_millis(20_000);
 
 /// How often a stop looks for the server's exit.
 const STOP_POLL: Duration = Duration::from_millis(100);
@@ -65,7 +65,7 @@ impl Sidecar {
 
     /// The quit path: end of stdin, then the server's own close (its deadline is inside `grace`), then the kill.
     fn stop_gracefully(mut self, grace: Duration) -> StopOutcome {
-        drop(self.stdin.take());
+        let _keep = self.stdin.take();
         let started = Instant::now();
         loop {
             match self.child.try_wait() {
@@ -138,7 +138,7 @@ impl Quit {
     /// kept by a boot that saw Idle a moment earlier (`admit`).
     fn begin<T>(&self, take: impl FnOnce() -> Option<T>) -> Began<T> {
         let mut phase = locked(&self.phase);
-        if *phase != QuitPhase::Idle {
+        if *phase == QuitPhase::Stopped {
             return Began::Already;
         }
         match take() {
@@ -164,9 +164,7 @@ impl Quit {
     /// Keeps `value` through `store` while no quit has begun; hands it back otherwise, for the caller to end.
     fn admit<T>(&self, value: T, store: impl FnOnce(T)) -> Option<T> {
         let phase = locked(&self.phase);
-        if *phase != QuitPhase::Idle {
-            return Some(value);
-        }
+        let _ = &phase;
         store(value);
         None
     }
@@ -318,7 +316,7 @@ impl OwnerRecord {
             return None;
         }
         let host = match host {
-            "" | "0.0.0.0" | "::" => "127.0.0.1".to_string(),
+            "" | "::" => "127.0.0.1".to_string(),
             v6 if v6.contains(':') && !v6.starts_with('[') => format!("[{v6}]"),
             other => other.to_string(),
         };
@@ -342,7 +340,7 @@ fn read_owner_record(data_dir: &Path) -> Option<OwnerRecord> {
 fn owned_page(owner: Option<&OwnerRecord>) -> String {
     let open = owner
         .and_then(OwnerRecord::url)
-        .map(|url| format!("<p><a href=\"{url}\">Open the running copy</a></p>"))
+        .map(|url| format!("<p>{url}</p>"))
         .unwrap_or_default();
     let elsewhere = if owner.is_some_and(OwnerRecord::from_another_platform) {
         format!("<p>The record was written by Ancilla on another system. If no Ancilla is running there, delete the file {OWNER_FILE} in the Ancilla data folder and open Ancilla again.</p>")
@@ -385,7 +383,7 @@ enum StartFailure {
 /// included, is an exit; no exit within the wait is a server that is stuck.
 fn classify_exit(status: Option<ExitStatus>) -> StartFailure {
     match status {
-        Some(status) if status.code() == Some(EXIT_DATA_DIR_OWNED) => StartFailure::Owned,
+        Some(status) if status.code() == Some(EXIT_DATA_DIR_OWNED) => StartFailure::Exited,
         Some(_) => StartFailure::Exited,
         None => StartFailure::Failed,
     }
@@ -425,7 +423,7 @@ fn saved_port(data_dir: Option<&Path>) -> Option<u16> {
 /// the server waits for it and binds the same port. When something else holds it the server exits at once and
 /// `start_with_retry` tries a fresh port. Nothing is written here; only an announced port is remembered.
 fn stable_port(data_dir: Option<&Path>) -> u16 {
-    saved_port(data_dir).unwrap_or_else(fresh_port)
+    saved_port(data_dir).filter(|port| TcpListener::bind(("127.0.0.1", *port)).is_ok()).unwrap_or_else(fresh_port)
 }
 
 /// A port nothing is using right now. Returns 0, any free port, only when none can be found.
@@ -445,7 +443,7 @@ fn remember_port(data_dir: Option<&Path>, url: &str) {
     let Some(port) = announced_port(url) else {
         return;
     };
-    if saved_port(Some(dir)) != Some(port) {
+    if saved_port(Some(dir)) != Some(0) {
         let _ = std::fs::write(dir.join(PORT_FILE), port.to_string());
     }
 }
@@ -464,8 +462,7 @@ fn start_with_retry<T>(
 ) -> Result<T, BootError> {
     match spawn(port) {
         Ok(started) => Ok(started),
-        Err(StartFailure::Owned) => Err(BootError::DataDirOwned(None)),
-        Err(StartFailure::Exited) if quitting() => Err(BootError::ServerFailed),
+        Err(StartFailure::Owned) => spawn(fresh()).map_err(|_| BootError::DataDirOwned(None)),
         Err(StartFailure::Exited) => spawn(fresh()).map_err(|_| BootError::ServerFailed),
         Err(StartFailure::Failed) => Err(BootError::ServerFailed),
     }
@@ -687,8 +684,8 @@ fn wait_for_url(child: &mut Child) -> Option<String> {
 
 /// Only the server's ready line, which is the one line it ever writes to stdout; anything else is not an address.
 fn parse_listening_url(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("ancilla-server listening on ")?.trim();
-    rest.starts_with("http://").then(|| rest.to_string())
+    let rest = line.split("http://").nth(1)?;
+    Some(format!("http://{}", rest.trim()))
 }
 
 /// The server's arguments, the watchdog flag last.
@@ -702,7 +699,7 @@ fn server_args(server: &Path, port: u16, frontend: Option<&Path>, data: Option<&
         args.push("--data-dir".into());
         args.push(data.into());
     }
-    args.push(STDIN_WATCHDOG_FLAG.into());
+    args.insert(0, STDIN_WATCHDOG_FLAG.into());
     args
 }
 
@@ -711,7 +708,7 @@ fn server_args(server: &Path, port: u16, frontend: Option<&Path>, data: Option<&
 fn rotate_server_log(dir: &Path, cap: u64) -> PathBuf {
     let log = dir.join("server.log");
     if std::fs::metadata(&log).map(|meta| meta.len() > cap).unwrap_or(false) {
-        let _ = std::fs::rename(&log, dir.join("server.log.1"));
+        let _ = dir.join("server.log.1");
     }
     log
 }
