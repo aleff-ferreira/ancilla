@@ -503,24 +503,29 @@ pub fn relaunch_installed_linux(app: tauri::AppHandle) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // Free the stable server port before the new copy starts, preserving the UI's storage origin.
-    if let Some(state) = app.try_state::<crate::ServerChild>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-    if let Err(error) = command.spawn() {
-        // A failed exec leaves the current app usable, with the same server port and preferences.
-        let _ = crate::boot_server(&app);
-        return Err(format!(
-            "Could not reopen Ancilla. Open it from the application menu: {error}"
-        ));
-    }
+    // The installed copy starts from the Exit event, once this process has killed and waited for its server (the
+    // stable port is free, preserving the UI's storage origin) and the single-instance plugin has let go of its
+    // name; started any earlier, the new copy would forward itself to this one and exit. The exit is immediate:
+    // the user asked for a reopen, not a quit.
+    let quit = app.state::<crate::Quit>();
+    quit.remember_relaunch(command);
+    quit.exit_at_once();
     app.exit(0);
     Ok(())
+}
+
+/// Whether a D-Bus session bus is likely reachable, which the single-instance plugin needs on Linux.
+pub fn session_bus_likely() -> bool {
+    session_bus_likely_in(
+        std::env::var_os("DBUS_SESSION_BUS_ADDRESS").as_deref(),
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).as_deref(),
+    )
+}
+
+/// The address is set by the session that started the bus; without it, systemd's user bus is the socket `bus`
+/// under the runtime directory. Neither is there under a bare xvfb or a WSLg session without systemd.
+pub fn session_bus_likely_in(address: Option<&std::ffi::OsStr>, runtime_dir: Option<&Path>) -> bool {
+    address.is_some_and(|value| !value.is_empty()) || runtime_dir.is_some_and(|dir| dir.join("bus").exists())
 }
 
 #[cfg(test)]
@@ -724,6 +729,20 @@ mod tests {
             "\"/tmp/\\\\$value\\\\`x\\\\`\\\\\\\\file\\\\\"%%u\""
         );
         assert!(exec_argument(Path::new("/tmp/a\nExec=bad")).is_err());
+    }
+
+    #[test]
+    fn session_bus_detection() {
+        use std::ffi::OsStr;
+        let fixture = Fixture::new();
+        let runtime = fixture.root.join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        assert!(session_bus_likely_in(Some(OsStr::new("unix:path=/run/user/1000/bus")), None));
+        assert!(!session_bus_likely_in(Some(OsStr::new("")), None));
+        assert!(!session_bus_likely_in(None, Some(&runtime)), "no bus socket under the runtime directory");
+        fs::write(runtime.join("bus"), "").unwrap();
+        assert!(session_bus_likely_in(None, Some(&runtime)));
+        assert!(!session_bus_likely_in(None, None));
     }
 
     #[test]

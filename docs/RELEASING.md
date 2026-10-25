@@ -177,6 +177,8 @@ The publish job's checks cannot see a build that is signed correctly but does no
 
 None of this is automated yet, and none of it should be invented in a hurry; a gate that is skipped is worse than one that is plainly manual.
 
+For 0.21.0, the release that makes the desktop app stop its server gracefully and refuse a second copy over one data folder, the dogfood on Windows means in particular: quit and open the app five times and compare `server-port` after each (it must not change, and the theme and the automatic-update setting must still be there); end `Ancilla.exe` in Task Manager and open the app again at once (the server is gone within a couple of seconds, and the app comes up on the same port, not on the "already open" page); open the app a second time while it runs (the window is focused, nothing else starts); and let the previous release update to this one, which is the one time the old shell's plain kill and the new shell's wait before the installer both run. The same quit path on macOS and on a Linux desktop with a session bus has no machine here; until one is borrowed, that is a known gap, written down rather than assumed.
+
 ## What users see
 
 - **Windows**: the installer is not Authenticode-signed yet, so SmartScreen may warn about an unrecognised app; More info, then Run anyway. Updates install in passive mode, with a small progress window and no questions.
