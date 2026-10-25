@@ -16,9 +16,9 @@ It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windo
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.20.3:** Linux `.deb` and `.rpm` installers with application-menu icons, guided Muse installation inside
-> Ancilla, optional desktop shortcuts, and a fix for the Linux `UnsafePath` thread-start error.
-> [Read the release notes](docs/CHANGELOG.md#0203).
+> **New in 0.20.4:** research runs survive a shutdown, citations say what was actually checked, Muse hosts and the
+> server's shutdown are bounded, attachments stay inside the project, and the server answers only its own hosts.
+> [Read the release notes](docs/CHANGELOG.md#0204).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
