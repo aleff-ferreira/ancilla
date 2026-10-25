@@ -10,8 +10,6 @@ name: Regenerate Cargo.lock and the notices
 #
 # Nothing is committed here: the files are reviewed and committed by hand.
 on:
-  push:
-    branches: [wp7b-rust]
   workflow_dispatch:
     inputs:
       package:
@@ -40,7 +38,7 @@ jobs:
       # Resolution reads the registry index and the manifests only; the native libraries Tauri links are not needed.
       - name: Resolve the crate into Cargo.lock
         env:
-          PACKAGE: ${{ inputs.package || 'tauri-plugin-single-instance' }}
+          PACKAGE: ${{ inputs.package }}
         run: |
           set -euo pipefail
           manifest=apps/desktop/src-tauri/Cargo.toml
