@@ -1,8 +1,9 @@
 name: Linux installer smoke tests
 
 # A packaged AppImage lays its files out differently from a `tauri build --no-bundle` tree, and that layout is
-# what decides whether the app finds its bundled Node.js at all. Building the desktop app takes minutes, so this
-# runs only when something that shapes the bundle changes.
+# what decides whether the app finds its bundled Node.js at all. The same packaged app is the only place the quit
+# path runs by machine: the window closed, the server gone within the app's grace, the port kept across a relaunch.
+# Building the desktop app takes minutes, so this runs only when something that shapes the bundle changes.
 on:
   pull_request:
     paths:
@@ -28,7 +29,7 @@ concurrency:
 jobs:
   appimage:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - name: Skip until Linux bundling lands
@@ -49,11 +50,14 @@ jobs:
         if: steps.guard.outputs.ready == 'true'
       - name: Install Tauri and test dependencies
         if: steps.guard.outputs.ready == 'true'
-        # xvfb stands in for a display; the webkit runtime is what the window needs once it opens.
+        # xvfb stands in for a display; the webkit runtime is what the window needs once it opens. The smoke finds the
+        # window with xdotool and closes it with an X client message (python3-xlib), and dbus-run-session gives one
+        # run of each installer the session bus that the single-instance plugin needs.
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev xvfb rpm libarchive-tools desktop-file-utils
+            libayatana-appindicator3-dev librsvg2-dev xvfb rpm libarchive-tools desktop-file-utils \
+            xdotool python3-xlib dbus
       - run: npm ci
         if: steps.guard.outputs.ready == 'true'
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
@@ -67,16 +71,28 @@ jobs:
       - name: Check runtimes, dependencies, menu entries and icons in every installer
         if: steps.guard.outputs.ready == 'true'
         run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+      # Each installer is launched, quit through its window and launched again while the first copy closes: once
+      # with no session bus, where the data folder lock alone keeps two copies apart, and once under a session bus,
+      # where the single-instance plugin forwards a second launch to the running copy.
       - name: Install the Debian package and launch it from its system path
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
           sudo apt-get install -y "${debs[0]}"
-          bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+      - name: Launch the installed package twice under a session bus
+        if: steps.guard.outputs.ready == 'true'
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus /usr/bin/ancilla
       - name: Launch the AppImage without requiring FUSE
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
-          bash apps/desktop/scripts/smoke-linux.sh "${images[0]}" --appimage-extract-and-run
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh "${images[0]}" --appimage-extract-and-run
+      - name: Launch the AppImage twice under a session bus
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus "${images[0]}" --appimage-extract-and-run
