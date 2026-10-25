@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SHELL_KILL_SETTLE_MS, SHELL_STOP_GRACE_MS } from "../src/runCapture.js";
 import type { AncillaServer, HostHandle } from "../src/server.js";
 import { FakeConnection, send, start } from "./harness.js";
 import { isRunning, killQuietly } from "./fakeMuse.js";
@@ -169,6 +170,13 @@ describe("AncillaServer.close and the `!` commands", () => {
       globalThis.setTimeout = realSetTimeout;
 
       assert.ok(delays.includes(SHELLS_MS), `the close did not wait ${SHELLS_MS} ms for the commands; it set timers of ${[...new Set(delays)].join(", ")} ms`);
+      // The number is the grace before the kill, not some other wait: it is set before the settle that follows the kill,
+      // and the default grace is not waited for on top of it.
+      assert.ok(
+        delays.indexOf(SHELLS_MS) < delays.indexOf(SHELL_KILL_SETTLE_MS),
+        `the ${SHELLS_MS} ms wait was not the grace before the kill, which the ${SHELL_KILL_SETTLE_MS} ms settle follows; the timers were ${delays.join(", ")} ms`,
+      );
+      assert.ok(!delays.includes(SHELL_STOP_GRACE_MS), `the close waited the default grace of ${SHELL_STOP_GRACE_MS} ms as well as the ${SHELLS_MS} ms it was configured with`);
       await gone(pid, "a command that ignores SIGTERM was left running by the close");
     } finally {
       globalThis.setTimeout = realSetTimeout;

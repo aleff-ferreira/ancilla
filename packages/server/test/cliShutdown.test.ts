@@ -1,7 +1,8 @@
 /**
  * The real `ancilla-server` process asked to stop while a Muse host is stuck starting: it ends instead of waiting for
  * the host, and a second signal ends it at once. The same for a hangup (a terminal that goes away sends SIGHUP) with a
- * `!` command still pending: the server closes, stops the command and exits 0, as it does on SIGTERM. Every wait is
+ * `!` command still pending and a research run in flight: the server closes, marks the run interrupted, stops the
+ * command and exits 0, as it does on SIGTERM. Every wait is
  * for an event (a pid file, a log line, an exit); the timeouts only keep a hung child from hanging the suite. The
  * stuck host and the command are scripts and the signals are POSIX ones, so this is POSIX only.
  */
@@ -79,9 +80,22 @@ async function serverWithStuckHost() {
   return { run, pid, request, cleanup };
 }
 
+/** How a research run stands in the store once the server is gone: its row's status and the type of its last event. */
+function researchRowAfterExit(dataDir: string, runId: string): { status: string | null; lastEvent: string | null } {
+  const store = new AncillaStore(join(dataDir, "ancilla.db"));
+  try {
+    return { status: store.getResearchRun(runId)?.status ?? null, lastEvent: store.listResearchEvents(runId).at(-1)?.type ?? null };
+  } finally {
+    store.close();
+  }
+}
+
 /**
- * A server over a data folder that already holds one thread (in a folder of the test's own), and a `!` command running
- * in it: it records its pid and sleeps. No host is needed, so the fake muse is only there to keep a real one out.
+ * A server over a data folder that already holds one thread (in a folder of the test's own), a research run in flight
+ * on it, and a `!` command running in it: it records its pid and sleeps. No host is needed, so the fake muse is only
+ * there to keep a real one out; its `muse exec` never answers, so the run stays where it started. Only a close marks
+ * that run interrupted: the exit hook that stops the command on any exit does nothing for it, which is what tells a
+ * signal that closed the server from one that only ended the process.
  */
 async function serverWithPendingCommand() {
   const dir = await mkdtemp(join(tmpdir(), "ancilla-cli-shutdown-"));
@@ -93,6 +107,18 @@ async function serverWithPendingCommand() {
   const muse = await writeFakeMuse(join(dir, "bin"));
   const run = startCli(["--port", "0", "--data-dir", dataDir, "--muse", muse.path], { ...muse.env, SHELL: "/bin/sh" });
   const base = await run.ready;
+  const started = await fetch(`${base}/api/research`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: "cmd-signal", sessionId: "s1", question: "What does a hangup do?" }),
+  });
+  const startedBody = await started.text();
+  assert.equal(started.status, 200, `the research run did not start: ${startedBody}`);
+  const runId = (JSON.parse(startedBody) as { run: { runId: string } }).run.runId;
+  await until(async () => {
+    const shown = (await (await fetch(`${base}/api/research/${runId}`)).json()) as { run: { status: string } };
+    return shown.run.status === "running";
+  }, "the research run to be running");
   const pidFile = join(dir, "command.pid");
   // The answer comes after the stop, as a result or as a refused connection; either way nothing here waits for it.
   void fetch(`${base}/api/sessions/s1/shell-proxy`, {
@@ -113,10 +139,16 @@ async function serverWithPendingCommand() {
   const pid = Number((await readFile(pidFile, "utf8")).trim());
   const cleanup = async () => {
     killQuietly(pid);
+    // The `muse exec` the run started, should the close have left it; the pid file holds the last muse started.
+    try {
+      killQuietly(Number((await readFile(muse.pidFile, "utf8")).trim()));
+    } catch {
+      /* no muse was started */
+    }
     if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill("SIGKILL");
     await rm(dir, { recursive: true, force: true });
   };
-  return { run, pid, cleanup };
+  return { run, pid, cleanup, researchRow: () => researchRowAfterExit(dataDir, runId) };
 }
 
 describe("ancilla-server on a signal with a `!` command pending", () => {
@@ -133,6 +165,8 @@ describe("ancilla-server on a signal with a `!` command pending", () => {
         assert.deepEqual(ended, { code: 0, signal: null }, `${signal} must end the server by a close, not by the signal; stderr:\n${pending.run.stderr()}`);
         assert.match(pending.run.stderr(), new RegExp(`${signal} received: closing the server`));
         await until(() => !isRunning(pending.pid), `the command to be stopped after ${signal}`);
+        // Only the close writes this; an exit that skipped it leaves the row running with its start as the last event.
+        assert.deepEqual(pending.researchRow(), { status: "interrupted", lastEvent: "run_interrupted" }, `${signal} ended the server without closing out the research run`);
       } finally {
         await pending.cleanup();
       }
@@ -149,6 +183,7 @@ describe("ancilla-server on a signal with a `!` command pending", () => {
       assert.notEqual(ended, null, `the server was still running ${HUNG} ms after SIGHUP`);
       assert.deepEqual(ended, { code: 0, signal: null }, "a write to a stderr that is gone ended the server before its close had run");
       await until(() => !isRunning(pending.pid), "the command to be stopped after SIGHUP");
+      assert.deepEqual(pending.researchRow(), { status: "interrupted", lastEvent: "run_interrupted" }, "SIGHUP ended the server without closing out the research run");
     } finally {
       await pending.cleanup();
     }

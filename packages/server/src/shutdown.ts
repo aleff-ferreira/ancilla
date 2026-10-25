@@ -47,10 +47,11 @@ export function worstCaseCloseMs(waits: HostWaits = {}): number {
  * `!` commands would run, and a command in its own session would be left running. `nohup` never protected a Node
  * process from that: Node resets every inherited signal disposition when it starts. The hangup is answered like
  * SIGTERM instead. On Windows a closed console gives the process only about ten seconds before the system ends it,
- * which is why the research runs are closed out first (within seven seconds at the most) and the 20 s deadline below is
- * never reached there. A server that is killed outright skips all of this (SIGKILL, or the desktop app quitting, which
- * kills the sidecar until the single-owner work lands): a `!` command still pending then keeps running, and what the
- * server left in flight is marked at the next start.
+ * which is why the research runs are closed out first: within five seconds (`CLOSE_TIMEOUT_MS`) on Windows, where the
+ * Linux installer never runs; on Linux the installer's stop can add `LINUX_INSTALLER_STOP_MS` (2.5 s) before them. The
+ * 20 s deadline below is never reached on Windows. A server that is killed outright skips all of this (SIGKILL, or the
+ * desktop app quitting, which kills the sidecar until the single-owner work lands): a `!` command still pending then
+ * keeps running, and what the server left in flight is marked at the next start.
  */
 export function shutdownSignals(platform: string = process.platform): NodeJS.Signals[] {
   return platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] : ["SIGINT", "SIGTERM", "SIGHUP"];

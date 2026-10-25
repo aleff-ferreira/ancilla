@@ -2303,7 +2303,7 @@ export function summaryLine(run: RunVM): { progress: string; chips: SummaryChip[
       progress = `Finished · ${counts.done} of ${total}`;
       break;
     case "stopped":
-      progress = `Stopped · ${counts.done} of ${total} had landed`;
+      progress = `${stoppedWord(run)} · ${counts.done} of ${total} had landed`;
       break;
     case "failed":
       progress = `Failed · ${counts.done} of ${total} had landed`;
@@ -2341,6 +2341,14 @@ function shortDuration(ms: number | null): string {
   if (minutes < 1) return `${Math.max(1, Math.round(ms / 1000))}s`;
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * The word for a stopped run on the rail and in the sidebar: "Interrupted" for a research run the server's shutdown
+ * or restart cut off, as the completion headline says, since nobody stopped it; "Stopped" for every other one.
+ */
+function stoppedWord(run: Pick<RunVM, "research">): "Interrupted" | "Stopped" {
+  return run.research?.status === "interrupted" ? "Interrupted" : "Stopped";
 }
 
 /**
@@ -2638,7 +2646,7 @@ export function sidebarCrewSummary(fold: ThreadFold | null, _live: LiveView | nu
   } else if (isLive) {
     text = run.plannedKnown ? `${run.currentPhase ?? "Finishing"} · ${counts.done}/${counts.total}` : `${counts.done} done · ${counts.working + counts.finishing + counts.noUpdate} working`;
   } else if (run.status === "stopped") {
-    text = `Stopped · ${counts.done} landed`;
+    text = `${stoppedWord(run)} · ${counts.done} landed`;
   } else if (run.kind === "turn" && run.agents[0]?.state === "unknown") {
     text = "Outcome not reported";
   } else {

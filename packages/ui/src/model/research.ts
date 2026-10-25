@@ -479,9 +479,10 @@ const INTERRUPTED_FALLBACK = "Ancilla restarted while the run was going, so it s
 /**
  * How a reason already ends, so no full stop is added to it: a full stop, an exclamation or question mark, an
  * ellipsis, their full-width forms and the CJK full stop (an operating system's own error text may use any of
- * them), and a colon, which says the text goes on and is not closed with a full stop either.
+ * them), and a colon, which says the text goes on and is not closed with a full stop either. A closing quote,
+ * parenthesis or bracket may follow the mark (`said "locked."`); a bracket with no mark inside still gets the stop.
  */
-const SENTENCE_END = /[.!?\u2026\u3002\uff01\uff1f:\uff1a]$/;
+const SENTENCE_END = /[.!?\u2026\u3002\uff01\uff1f:\uff1a]["'\u201d\u2019)\]]*$/;
 
 /**
  * Why an interrupted run stopped, as a sentence. The server stores the reason after an `interrupted: ` prefix, in

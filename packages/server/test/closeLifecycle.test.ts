@@ -166,6 +166,14 @@ describe("a server that is closing", () => {
     assert.notEqual(await within(closing, 5000), null, "close() did not finish once the host and the title worker did");
   });
 
+  it("gives up on a title worker that never finishes once hostWaits.startsMs has passed", async () => {
+    const connection = new FakeConnection();
+    const { server } = await start(connection, { hostWaits: { startsMs: 50 } });
+    // Never released: only the bound on the wait lets the close end.
+    server["titleWorker"] = new Promise<void>(() => undefined);
+    assert.notEqual(await within(server.close(), 5000), null, "close() waited on a title worker past startsMs");
+  });
+
   it("drops the frames of a host that outlives its close, instead of writing them to a closed store", async () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });

@@ -3,7 +3,7 @@
  * A copy of what `server.test.ts` declares privately, for the suites that live in other files.
  */
 import { after } from "node:test";
-import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpRequest, type IncomingHttpHeaders, type Server } from "node:http";
 import { connect as netConnect } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -92,8 +92,22 @@ export async function start(connection: FakeConnection, extra: Partial<Construct
     exec: async () => ({ stdout: "", exitCode: 127 }),
     ...extra,
   });
-  // A test that closes the server itself (to restart it on the same data) is not failed by closing it again.
-  after(async () => { await server.close().catch(() => undefined); await rm(fixtureHome, { recursive: true, force: true }); });
+  // A test that closes the server itself (to restart it on the same data) is not failed by closing it again. The close
+  // is given 10 s: a close that hangs then fails the file with a message instead of holding the job open until its
+  // cap, and its listener is shut here so the process can exit once the file has reported.
+  after(async () => {
+    let cap: ReturnType<typeof setTimeout> | undefined;
+    const capped = new Promise<boolean>((resolve) => { cap = setTimeout(() => resolve(false), 10_000); });
+    const closed = await Promise.race([server.close().then(() => true, () => true), capped]);
+    clearTimeout(cap);
+    await rm(fixtureHome, { recursive: true, force: true });
+    if (!closed) {
+      const listener = server["server"] as Server;
+      listener.closeAllConnections?.();
+      listener.close();
+      throw new Error("the server's close() did not finish within 10 s");
+    }
+  }, { timeout: 15_000 });
   const bound = await server.listen();
   return { server, base: `http://127.0.0.1:${bound.port}` };
 }

@@ -67,20 +67,24 @@ describe("sourcesLine with provenance", () => {
 });
 
 describe("the run row's sources line", () => {
-  const explained = (markup: string): { described: string | null; line: string | null } => {
+  /** The sources line, the text it is described by, and the attributes of the span that carries that text. */
+  const explained = (markup: string): { described: string | null; noteAttrs: string | null; line: string | null } => {
     const line = /<span([^>]*)>(\d+ sources? · [^<]*)<\/span>/.exec(markup);
     const by = /aria-describedby="([^"]+)"/.exec(line?.[1] ?? "")?.[1] ?? null;
-    const note = by === null ? null : new RegExp(`<span[^>]*id="${by.replace(/[^\w-]/g, "\\$&")}"[^>]*>([^<]*)</span>`).exec(markup)?.[1] ?? null;
-    return { described: note, line: line?.[2] ?? null };
+    const note = by === null ? null : new RegExp(`<span([^>]*)id="${by.replace(/[^\w-]/g, "\\$&")}"([^>]*)>([^<]*)</span>`).exec(markup);
+    return { described: note?.[3] ?? null, noteAttrs: note ? `${note[1]}${note[2]}` : null, line: line?.[2] ?? null };
   };
 
   it("explains the buckets to a keyboard or screen reader user, not on a title alone", () => {
     const markup = render(fakeResearchRun({ sources: { registry: 6, verified: 5, curated: 0, opened: 3, searchOnly: 2, attempted: 1, listedEarlier: 0 } }));
     const line = /<span([^>]*)>6 sources · 3 opened · 2 search only · 1 fetch failed or cut off · 5 citable<\/span>/.exec(markup);
     assert.ok(line, "the line is a span of its own");
-    assert.match(line[1] ?? "", /tabindex="0"/, "the line takes focus, so the tooltip opens from the keyboard and on touch");
+    assert.match(line[1] ?? "", /tabindex="0"/, "the line takes focus, so the tooltip opens from the keyboard");
+    assert.match(line[1] ?? "", /data-state="closed"/, "the line is the tooltip's trigger, so a sighted keyboard user sees the explanation on focus");
     assert.doesNotMatch(markup, /title="[^"]*(?:opened|search only)/, "no title attribute carries the explanation");
-    assert.equal(explained(markup).described, SOURCES_LINE_TITLE, "a hidden copy is what the line is described by");
+    const shown = explained(markup);
+    assert.equal(shown.described, SOURCES_LINE_TITLE, "a hidden copy is what the line is described by");
+    assert.match(shown.noteAttrs ?? "", /\bhidden\b/, "the copy is hidden: it is for screen readers, not printed in the counts line");
   });
 
   it("puts no explanation and no focus stop on the line that says there are no sources yet", () => {
@@ -111,6 +115,7 @@ describe("the run row's sources line", () => {
     const shown = explained(render(fakeResearchRun({ sources })));
     assert.equal(shown.line, line, "the row prints that line");
     assert.equal(shown.described, SOURCES_LINE_TITLE, "and describes it with that text");
+    assert.match(shown.noteAttrs ?? "", /\bhidden\b/, "which stays hidden");
   });
 });
 
@@ -164,6 +169,14 @@ describe("interruptedLine", () => {
   it("leaves a reason that ends in a colon as it is, rather than closing it with a full stop", () => {
     assert.equal(interruptedLine("interrupted: the store said:"), "The store said:");
     assert.equal(interruptedLine("interrupted: the store said："), "The store said：");
+  });
+
+  it("sees the end mark through a closing quote or bracket, and still closes a bracket that has none inside", () => {
+    assert.equal(interruptedLine('interrupted: said "locked."'), 'Said "locked."');
+    assert.equal(interruptedLine("interrupted: said 'locked.'"), "Said 'locked.'");
+    assert.equal(interruptedLine("interrupted: said “locked.”"), "Said “locked.”");
+    assert.equal(interruptedLine("interrupted: (locked.)"), "(locked.)");
+    assert.equal(interruptedLine("interrupted: [locked]"), "[locked].");
   });
 
   it("falls back to the restart sentence when nothing is left to say", () => {

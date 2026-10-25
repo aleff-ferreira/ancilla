@@ -242,7 +242,17 @@ describe("crewView with a research run", () => {
     assert.match(completionView(interrupted)?.headline ?? "", /^Interrupted after 5m; one of three had landed\.$/);
     const cancelled = runOf(runningResearch({ ...over, status: "cancelled" }));
     assert.match(completionView(cancelled)?.headline ?? "", /^Stopped by you after 5m; one of three had landed\.$/);
-    assert.equal(summaryLine(interrupted).progress, summaryLine(cancelled).progress, "the rail and the roster say the same for both");
+    assert.equal(summaryLine(interrupted).progress, "Interrupted · 1 of 3 had landed", "the rail says what the headline says");
+    assert.equal(summaryLine(cancelled).progress, "Stopped · 1 of 3 had landed", "and a run the user stopped keeps its word");
+  });
+
+  it("says Interrupted in the sidebar for a run the server interrupted, and Stopped for one the user stopped", () => {
+    const over = { phase: "done" as const, endedAt: iso(rs(5, 0)), reportAvailable: false, sources: { registry: 0, verified: 0, curated: 0 } };
+    const summaryOf = (run: ResearchRunView) => sidebarCrewSummary(emptyFold(), null, NOW, { sessionId: "s1", researchRuns: [run] });
+    const interrupted = summaryOf(runningResearch({ ...over, status: "interrupted", failure: "interrupted: the server shut down while the run was in flight." }));
+    assert.equal(interrupted?.text, "Interrupted · 1 landed");
+    assert.equal(interrupted?.live, false);
+    assert.equal(summaryOf(runningResearch({ ...over, status: "cancelled" }))?.text, "Stopped · 1 landed");
   });
 
   it("gives an interrupted run's reason as a sentence in the fact line, not as the server stored it", () => {

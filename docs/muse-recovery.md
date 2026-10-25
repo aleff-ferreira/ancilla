@@ -229,8 +229,9 @@ that is slow to close after 11.5 seconds and exits at 20 seconds whatever is sti
 signal exits at once. The 11.5 seconds also bound the close of a host that a settings change restarts (it was 40
 there), so a host that takes longer than that to finish the turn it is draining is let go and that turn is recorded as
 failed. On Windows a closed console gives the process only about ten seconds before the system ends it, which is why the
-research runs are closed out first (within about seven seconds at the most, whatever the hosts do): their rows are
-written by then, and what is still open after that is marked at the next start. A process that is killed instead of
+research runs are closed out first, within five seconds whatever the hosts do (the Linux installer, whose stop can add
+2.5 seconds before them, never runs on Windows): their rows are written by then, and what is still open after that is
+marked at the next start. A process that is killed instead of
 signalled skips all of this, and what it left in flight is marked at the next start.
 
 A `!` command whose answer is still pending when the server stops, when its deadline passes, or when its process exits
