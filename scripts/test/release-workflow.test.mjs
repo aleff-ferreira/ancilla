@@ -478,7 +478,10 @@ describe("the repack script", () => {
     assert.match(script, /^set -euo pipefail$/m);
     assert.match(script, /ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0/);
     assert.match(script, /sha256sum --check/);
-    assert.match(script, /-name 'libwayland-\*'.*-delete/);
+    // Every entry named like the libraries goes, the packages' doc directories included (a directory is pruned and
+    // removed whole); a type filter here once let usr/share/doc/libwayland-server0 through to the strict check below.
+    assert.match(script, /find squashfs-root -name 'libwayland-\*' -prune -print -exec rm -rf \{\} \+/);
+    assert.doesNotMatch(script, /-type f -o -type l/);
     assert.match(script, /--appimage-extract/);
     assert.match(script, /exit 1/);
   });

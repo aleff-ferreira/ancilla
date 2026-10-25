@@ -24,6 +24,12 @@ case "$1" in
     : > squashfs-root/usr/lib/deeper/still/libwayland-server.so.0
     : > squashfs-root/usr/lib/libwaylandish.so
     : > squashfs-root/usr/lib/libother.so.1
+    # The packages' documentation directories, which the bundler copies in beside the libraries (the real image
+    # holds usr/share/doc/libwayland-server0 and its siblings); the directories are named like the libraries.
+    mkdir -p squashfs-root/usr/share/doc/libwayland-server0 squashfs-root/usr/share/doc/libwaylandish
+    echo "copyright" > squashfs-root/usr/share/doc/libwayland-server0/copyright
+    : > squashfs-root/usr/share/doc/libwayland-server0/changelog.Debian.gz
+    echo "copyright" > squashfs-root/usr/share/doc/libwaylandish/copyright
     echo "the app" > squashfs-root/usr/bin/ancilla
     ;;
 esac
@@ -91,17 +97,18 @@ function rig() {
 }
 
 describe("the repack script", { skip }, () => {
-  test("removes every libwayland, files, links and nested ones, keeps the rest, and packs what is left", () => {
+  test("removes every libwayland, files, links, nested ones and the packages' doc directories, keeps the rest, and packs what is left", () => {
     const { dir, run, packed } = rig();
     const result = run();
     assert.equal(result.code, 0, result.err);
     const listing = packed();
     assert.doesNotMatch(listing, /libwayland-/);
     assert.match(listing, /libwaylandish\.so/, "only libwayland-* goes, not a library that merely starts alike");
+    assert.match(listing, /\.\/usr\/share\/doc\/libwaylandish\/copyright/, "nor a doc directory that merely starts alike");
     assert.match(listing, /\.\/usr\/lib\/libother\.so\.1/);
     assert.match(listing, /\.\/usr\/bin\/ancilla/);
     assert.match(listing, /arch=x86_64/);
-    for (const removed of ["libwayland-client.so.0.20.0", "libwayland-client.so.0", "libwayland-server.so.0"]) {
+    for (const removed of ["libwayland-client.so.0.20.0", "libwayland-client.so.0", "libwayland-server.so.0", "usr/share/doc/libwayland-server0"]) {
       assert.match(result.out, new RegExp(removed.replace(/\./g, "\\.")), `it says it removed ${removed}`);
     }
     const out = join(dir, "out", "Ancilla_0.20.4_amd64.AppImage");

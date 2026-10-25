@@ -27,7 +27,10 @@ cd "$work"
 cp "$input" "./$name"
 chmod +x "./$name"
 "./$name" --appimage-extract > /dev/null
-find squashfs-root \( -type f -o -type l \) -name 'libwayland-*' -print -delete
+# The libraries, their links, and the packages' documentation directories (usr/share/doc/libwayland-server0 and its
+# siblings), which are named like the libraries and would otherwise fail the check below. A matched directory is
+# pruned, so its contents go with it and are never looked at.
+find squashfs-root -name 'libwayland-*' -prune -print -exec rm -rf {} +
 
 curl -sSL --fail --retry 3 --retry-delay 5 -o appimagetool "$tool_url"
 echo "$tool_sha256  appimagetool" | sha256sum --check
