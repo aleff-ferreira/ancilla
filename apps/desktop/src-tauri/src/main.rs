@@ -179,6 +179,8 @@ impl Quit {
         locked(&self.relaunch).take()
     }
 
+    /// Only the Linux reopen asks for an exit without a graceful stop.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn exit_at_once(&self) {
         self.immediate.store(true, Ordering::SeqCst);
     }
