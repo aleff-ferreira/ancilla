@@ -17,6 +17,19 @@ import { SHELL_KILL_SETTLE_MS } from "./runCapture.js";
 export const SHUTDOWN_DEADLINE_MS = 20_000;
 
 /**
+ * The hidden flag the desktop shell passes as the last argument: close the server, as on SIGTERM, when stdin reaches
+ * its end. The shell keeps the write end of the pipe for the sidecar's whole life and drops it to quit; when the shell
+ * dies instead (Task Manager, a crash) the system closes it, so the same end arrives either way, on every system,
+ * which a signal does not (Windows delivers none to a process that is killed). It is never a default and is not in the
+ * usage text: stdin from `/dev/null`, a closed stdin and a parent that has exited all end at once, so an unconditional
+ * watchdog would stop every server under systemd, Docker without `-i`, nohup and cron the moment it started.
+ */
+export const STDIN_EOF_FLAG = "--close-on-stdin-eof";
+
+/** What the handler is called with when stdin ends; the log line names it like a signal. */
+export const STDIN_EOF_CAUSE = "stdin EOF";
+
+/**
  * What the install does after its group has been killed, before `AncillaServer.close()` has the answer: the child's
  * close event, then the removal of the folder the script was written to. Both are quick; this is what they may take.
  */
@@ -48,9 +61,10 @@ export function worstCaseCloseMs(waits: HostWaits = {}): number {
  * process from that: Node resets every inherited signal disposition when it starts. The hangup is answered like
  * SIGTERM instead. On Windows a closed console gives the process only about ten seconds before the system ends it,
  * which is why the research runs are closed out first (within seven seconds at the most) and the 20 s deadline below is
- * never reached there. A server that is killed outright skips all of this (SIGKILL, or the desktop app quitting, which
- * kills the sidecar until the single-owner work lands): a `!` command still pending then keeps running, and what the
- * server left in flight is marked at the next start.
+ * never reached there. The desktop app does not signal its sidecar: it closes the sidecar's stdin, which the
+ * `STDIN_EOF_FLAG` turns into the same close. A server that is killed outright skips all of this (SIGKILL, or the
+ * shell's kill once its own grace has passed): a `!` command still pending then keeps running, and what the server
+ * left in flight is marked at the next start.
  */
 export function shutdownSignals(platform: string = process.platform): NodeJS.Signals[] {
   return platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"] : ["SIGINT", "SIGTERM", "SIGHUP"];
@@ -62,15 +76,22 @@ export interface ShutdownTimers {
 }
 
 export interface ShutdownOptions {
-  close: () => Promise<unknown>;
+  /** Closes the server; `cause` is what the handler was called with (a signal's name, or `STDIN_EOF_CAUSE`). */
+  close: (cause: string) => Promise<unknown>;
   exit: (code: number) => void;
   log: (message: string) => void;
   deadlineMs?: number;
   timers?: ShutdownTimers;
 }
 
-/** The handler for a signal; call it with the signal's name each time one arrives. */
-export function createShutdown(options: ShutdownOptions): (signal: string) => void {
+/** The handler for a signal, called with the signal's name each time one arrives; `begun()` says whether one has. */
+export interface ShutdownHandler {
+  (cause: string): void;
+  /** Whether a close has begun: the command line writes its ready line only when none has. */
+  begun(): boolean;
+}
+
+export function createShutdown(options: ShutdownOptions): ShutdownHandler {
   const timers: ShutdownTimers = options.timers ?? { setTimeout: (run, ms) => setTimeout(run, ms), clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>) };
   const deadlineMs = options.deadlineMs ?? SHUTDOWN_DEADLINE_MS;
   let begun = false;
@@ -86,7 +107,7 @@ export function createShutdown(options: ShutdownOptions): (signal: string) => vo
     }
     options.exit(code);
   };
-  return (signal) => {
+  const handler = (signal: string): void => {
     if (begun) {
       options.log(`second signal (${signal}): exiting now, without waiting for the server to finish closing.`);
       end(1);
@@ -100,7 +121,7 @@ export function createShutdown(options: ShutdownOptions): (signal: string) => vo
     }, deadlineMs);
     let closing: Promise<unknown>;
     try {
-      closing = Promise.resolve(options.close());
+      closing = Promise.resolve(options.close(signal));
     } catch (error) {
       closing = Promise.reject(error);
     }
@@ -112,4 +133,5 @@ export function createShutdown(options: ShutdownOptions): (signal: string) => vo
       },
     );
   };
+  return Object.assign(handler, { begun: () => begun });
 }

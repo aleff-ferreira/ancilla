@@ -106,6 +106,7 @@ The server reads an optional `runtime.json` from its data directory when it star
 | `wslEnv` | Windows only: environment variables for Muse inside WSL, as `{"NAME": "value"}` |
 | `allowHosts` | host names the server answers besides `127.0.0.1`, `localhost` and `::1`, as `["ancilla.example"]`; see [Reaching the server by another name](#reaching-the-server-by-another-name) |
 | `hostStartTimeoutMs` | how long a Muse host may take to answer its start before it is given up on, in whole milliseconds; the default is five minutes and `0` turns the limit off. `ANCILLA_HOST_START_TIMEOUT_MS` sets it too and wins over the file |
+| `dataDirLock` | `false` turns off the lock that keeps one server per data folder; see [One server per data folder](#one-server-per-data-folder) |
 
 A host start that passes `hostStartTimeoutMs` ends with a 504 that names the setting, and its Muse process is closed
 without waiting for it; the next request for that folder tries again at once. The limit applies to every start, a
@@ -240,14 +241,57 @@ it does not touch theirs. A command that has already answered is not stopped: on
 (`! some-server &`) leaves it running, and what the process writes afterwards is read and thrown away, so it is never
 killed by a closed pipe and does not keep the server from exiting.
 
-Three cases are not covered. A server that is killed outright (SIGKILL, or the desktop app quitting, which kills its
-sidecar until the single-owner work lands) runs none of this: a `!` command still pending keeps running, in its own
-session, until it ends by itself, and what the server left in flight is marked at the next start. The same holds for an
-embedder that runs the server in a process of its own and lets an unhandled signal end that process: only the command-line
-program handles the signals. And a Muse host that ignores both the end of its input and SIGTERM can outlive a server that
-exits at its deadline, or a host start that was abandoned (macOS and Linux): the SDK gives no process to signal. On
-Windows with Muse in WSL, closing a host ends the `wsl.exe` process, which may leave the Linux Muse behind; a start that
-timed out and was retried can leave one each time. Stop it from inside WSL if it is in the way.
+The desktop app stops its server the same way, through the end of the server's stdin rather than a signal, which
+Windows cannot deliver. It starts the server with a hidden flag, `--close-on-stdin-eof`, and holds the write end of
+the server's stdin for as long as the window is open; closing the window closes that end, and the server runs the close
+above as it would on SIGTERM, except that it closes its listening socket first, so that the next launch can take the
+same port while the Muse hosts wind down. The app waits 25 seconds (the server's 20-second deadline and five more to
+exit) before it kills what is left. When the app itself is killed (Task Manager, a crash) the system closes the pipe
+and the server closes the same way. The flag is the app's: it is not in `--help` and is never a default, because stdin
+ends at once under systemd, Docker without `-i`, nohup and cron, and a server started that way must keep running.
+
+Three cases are not covered. A server that is killed outright (SIGKILL, or the desktop app's kill once its 25 seconds
+have passed) runs none of this: a `!` command still pending keeps running, in its own session, until it ends by itself,
+and what the server left in flight is marked at the next start. The same holds for an embedder that runs the server in
+a process of its own and lets an unhandled signal end that process: only the command-line program handles the signals.
+And a Muse host that ignores both the end of its input and SIGTERM can outlive a server that exits at its deadline, or
+a host start that was abandoned (macOS and Linux): the SDK gives no process to signal. On Windows with Muse in WSL,
+closing a host ends the `wsl.exe` process, which may leave the Linux Muse behind; a start that timed out and was retried
+can leave one each time. Stop it from inside WSL if it is in the way.
+
+## One server per data folder
+
+A data folder is served by one server at a time. When it starts, before it opens anything in the folder, the server
+writes `ancilla.owner` there: one JSON line with its instance id, pid, address, start time, version and system, with the
+port filled in once it is bound and `closingAt` once its close has begun:
+
+```json
+{"format":1,"instanceId":"5f6c...","pid":12345,"host":"127.0.0.1","port":3127,"startedAt":"2026-10-14T20:00:00.000Z","closingAt":null,"ancillaVersion":"0.21.0","platform":"win32"}
+```
+
+A second server over the same folder finds the record and asks the recorded port's `GET /api/health` whether that
+server is still there (`instanceId` in the answer is what it compares; an older build that answers 401 counts while its
+pid is alive). If it is, the second server exits with code 75 and one line on stderr, having opened nothing:
+
+```text
+ancilla-server: another Ancilla (pid 12345, started 2026-10-14T20:00:00.000Z, http://127.0.0.1:3127) owns the data folder C:\Users\me\AppData\Roaming\app.ancilla.desktop; close it first, or start this one with --data-dir <other folder>. (C:\Users\me\AppData\Roaming\app.ancilla.desktop\ancilla.owner holds the record)
+```
+
+The desktop app shows a page saying that Ancilla is already open instead of starting its server on another port, and
+leaves its `server-port` file as it was. A server that is closing, or one that has not bound its port yet, is waited for
+(up to ten seconds, and the port it held is tried again meanwhile); a record left by a server that was killed (its port
+dead, its pid gone) is taken over at once. The record is removed when the server closes, and by its process on any
+other normal exit. A record written on another system (a Windows desktop and a WSL command line over one folder) is
+refused outright, since neither can see the other's processes or loopback: delete `ancilla.owner` when no other Ancilla
+runs. On a folder where the file cannot be written or read the server says so once and runs without the lock.
+`"dataDirLock": false` in `runtime.json` turns the lock off, with a line that says what that costs; it is the way out
+on a network folder where the lock cannot be trusted. Older versions of Ancilla ignore the file. `GET /api/health`
+reports `instanceId` and `owner` (`lock` is `held`, `reentrant` for a second server in the same process, `unavailable`
+or `off`, with the pid, the start time and the file).
+
+A start can take longer than before when the folder's last server is still closing: the wait on the lock, the database's
+own wait for the previous process and the sweeps of what it left in flight are bounded together to twenty seconds, after
+which what is left is marked at the next start.
 
 ## Limits
 

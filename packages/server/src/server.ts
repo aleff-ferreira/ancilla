@@ -58,8 +58,9 @@ import {
 import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
 import { attachmentHeaders, normalizeMediaType } from "./attachments.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
-import { DEFAULT_HOST_WAITS, HOST_START_TIMEOUT_ENV, closeInBackground, resolveHostStartTimeoutMs, settledWithin, waitUnlessAborted, type HostWaits } from "./hostBounds.js";
+import { DEFAULT_HOST_WAITS, HOST_START_TIMEOUT_ENV, closeInBackground, resolveHostStartTimeoutMs, settledWithin, type HostWaits } from "./hostBounds.js";
 import { DB_FILE, envSetting, importLegacyDatabase } from "./legacy.js";
+import { BOOT_BUDGET_MS, OWNER_POLL_MS, claimOwnerLock, defaultOwnerLockDeps, type OwnerLock, type OwnerLockDeps } from "./ownerLock.js";
 import { PathError, createDirectory, listDirectory, resolveUserPath, type PathContext } from "./paths.js";
 import { SHELL_TIMEOUT_MS, runCapture, stopPendingCaptures, type PendingCaptures } from "./runCapture.js";
 import { wslSpawnEnv } from "./runtimeConfig.js";
@@ -229,6 +230,16 @@ export interface ServerOptions {
   hostWaits?: HostWaits;
   /** The waits between the tries of the sweeps at boot while another process holds the database locked; see `BOOT_SWEEP_RETRY_MS`. */
   bootSweepRetryMs?: readonly number[];
+  /**
+   * Whether the data folder is claimed with `ancilla.owner` (the default; never for `:memory:`): a second server over
+   * the folder is refused while this one lives, instead of migrating its database and sweeping its runs. False is
+   * for an embedder that owns the folder some other way; see `ownerLock.ts`.
+   */
+  dataDirLock?: boolean;
+  /** How the lock probes an owner, checks a pid, reads the clock and waits; the real ones by default, fakes in tests. */
+  ownerLock?: Partial<OwnerLockDeps>;
+  /** How long the start may take from the constructor to the ready line when every wait is spent; see `BOOT_BUDGET_MS`. */
+  bootBudgetMs?: number;
 }
 
 /** A host start in progress; see `startTokens`. */
@@ -816,7 +827,12 @@ export class AncillaServer {
   /** Every request refused for its Host, logged or not, and the last such name that could have been listed. */
   private hostRefusals = 0;
   private lastRefusedHost: string | null = null;
-  private readonly store: AncillaStore;
+  /**
+   * Opened by `openStore()`: in the constructor when the folder's lock was held, shared, unavailable or off, and only
+   * in `listen()`, once the lock is resolved, when another server's record was found at the claim. Nothing reads it
+   * before `listen()` except a test over a fresh folder, which takes the first path.
+   */
+  private store!: AncillaStore;
   private readonly aonia: Aonia;
   private readonly linuxInstaller: LinuxMuseInstaller;
   private readonly hosts = new Map<string, ManagedHost>();
@@ -907,6 +923,16 @@ export class AncillaServer {
   private closed = false;
   /** Set when `close()` begins, to cut short the waits of the sweeps at boot. */
   private readonly shutdownSignal = new AbortController();
+  /** This server's lock on the data folder; see `ownerLock.ts`. */
+  private readonly ownerLock: OwnerLock;
+  private readonly ownerDeps: OwnerLockDeps;
+  /** When the constructor ran, on the lock's clock, and what the start may take from there; see `BOOT_BUDGET_MS`. */
+  private readonly bootStartedAt: number;
+  private readonly bootBudgetMs: number;
+  /** Fires when the boot budget is spent, so the sweeps at boot stop waiting for a locked database. */
+  private readonly bootBudget = new AbortController();
+  /** What `/api/health` reports as `instanceId`, and what the lock's record carries: another launcher reads it there. */
+  readonly instanceId = randomUUID();
   /** Set once the store is closed: a frame that arrives after that (from a host that outlived its close) is dropped. */
   private storeClosed = false;
   /** The `!` commands this server started whose answer is pending; `close()` stops them. Never shared with another server. */
@@ -935,6 +961,9 @@ export class AncillaServer {
       | "sseStallMs"
       | "hostStartTimeoutMs"
       | "hostWaits"
+      | "dataDirLock"
+      | "ownerLock"
+      | "bootBudgetMs"
     >
   > &
     Pick<ServerOptions, "staticDir" | "token" | "findNativeMuse"> & {
@@ -950,7 +979,10 @@ export class AncillaServer {
   private readonly loginAttempts = new Map<string, { loginId: string; status: "waiting" | "done" | "error"; message?: string }>();
   /** Reserved before async setup, so a slow earlier POST cannot replace a newer account sign-in. */
   private readonly loginStartGenerations = new Map<string, number>();
-  private readonly researchJobs: ResearchJobManager;
+  /** Opened with the store, by `openStore()`. */
+  private researchJobs!: ResearchJobManager;
+  private readonly researchEngine: ResearchEngine;
+  private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
   private readonly researchStartupOverride: { option: number | undefined; env: string | undefined };
   /** Session starts per host key that a research run gave up on and the host has not yet answered. */
@@ -1010,20 +1042,56 @@ export class AncillaServer {
     this.opener = options.opener ?? defaultOpener(this.options.platform);
     this.sse = new SseBroadcaster({ maxBacklogBytes: options.sseMaxBacklogBytes, stallMs: options.sseStallMs });
     this.attachmentWriter = options.attachmentWriter ?? writeAttachment;
-    // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
-    importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
-    this.store = new AncillaStore(
-      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
-    );
     this.aonia = options.aonia ?? createAonia({ home: this.options.home,
       platform: this.options.platform === "win32" ? "win32" : this.options.platform === "darwin" ? "darwin" : "linux",
       ...(this.options.musePath ? { musePath: this.options.musePath } : {}) });
     this.linuxInstaller = options.linuxInstaller ?? new LinuxMuseInstaller({ platform: this.options.platform, home: this.options.home });
     this.subscriptionReader = options.subscriptionReader ?? new MuseSubscriptionReader();
+    this.researchEngine = options.researchEngine ?? runResearch;
+    this.researchMaxWorkers = options.researchMaxWorkers;
+    // The folder is claimed before anything in it is opened: a live owner's database is never migrated under it, and
+    // its runs are never swept, by a server that then exits. The platform is the process's own, not the Muse one the
+    // options may name: it says whose pids and whose loopback the record's are.
+    this.ownerDeps = { ...defaultOwnerLockDeps((line) => this.log(line)), ...(options.ownerLock ?? {}) };
+    this.bootStartedAt = this.ownerDeps.now();
+    this.bootBudgetMs = options.bootBudgetMs ?? BOOT_BUDGET_MS;
+    this.ownerLock = claimOwnerLock(
+      this.options.dataDir,
+      {
+        instanceId: this.instanceId,
+        pid: process.pid,
+        host: this.options.host,
+        startedAt: new Date(this.bootStartedAt).toISOString(),
+        ancillaVersion: ANCILLA_VERSION,
+        platform: process.platform,
+      },
+      this.ownerDeps,
+      { enabled: options.dataDirLock !== false },
+    );
+    if (this.ownerLock.state !== "contended") {
+      this.openStore();
+    }
+    // The runs the previous process left in flight are marked interrupted in `listen`, once the port is bound: a
+    // second server that cannot take the port must not rewrite the rows of the one that holds it.
+    this.server = createServer((req, res) => {
+      void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
+    });
+  }
+
+  /**
+   * Opens the database (from Helicon's when there is none yet) and the research job manager over it. Only once the
+   * data folder is this server's: held, shared with another server of this process, taken over, or not lockable.
+   */
+  private openStore(): void {
+    // A data dir with no database yet starts from Helicon's, when there is one; this never fails the start.
+    importLegacyDatabase(this.options.dataDir, this.options.home, (message) => this.log(message));
+    this.store = new AncillaStore(
+      this.options.dataDir === ":memory:" ? ":memory:" : join(this.options.dataDir, DB_FILE),
+    );
     this.researchJobs = new ResearchJobManager({
       store: this.store,
-      engine: options.researchEngine ?? runResearch,
-      globalWorkerCap: options.researchMaxWorkers,
+      engine: this.researchEngine,
+      globalWorkerCap: this.researchMaxWorkers,
       // `muse exec` while the prompt fits the command line, a turn in the run's control session when it does not.
       createModelClient: (run, thread) =>
         new MuseModelClient({
@@ -1064,45 +1132,46 @@ export class AncillaServer {
       writeReport: (thread, run, report, state) => this.writeResearchReport(thread, run, report, state),
       log: (message) => this.log(message),
     });
-    // The runs the previous process left in flight are marked interrupted in `listen`, once the port is bound: a
-    // second server that cannot take the port must not rewrite the rows of the one that holds it.
-    this.server = createServer((req, res) => {
-      void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
-    });
   }
 
   async listen(): Promise<{ port: number; host: string }> {
     // This server can run commands in the user's projects. Reaching it from the network takes a credential, and
-    // nothing here would notice a missing one later, so the refusal comes before anything is bound.
+    // nothing here would notice a missing one later, so the refusal comes before anything is bound, and before any
+    // wait on the folder's lock.
     if (!this.options.token && !isLoopbackBind(this.options.host)) {
       throw new Error(
         `Refusing to listen on ${this.options.host || "every interface"}: that address can be reached from other machines, and this server can run commands in your projects. Pass --token <value> (a long random string), or leave --host out to listen on 127.0.0.1 only.`,
       );
     }
-    await new Promise<void>((resolve, reject) => {
-      // A port that is taken is an error to report, not an uncaught event that ends the process after the fact.
-      const refused = (error: Error) => reject(error);
-      this.server.once("error", refused);
-      this.server.listen(this.options.port, this.options.host, () => {
-        this.server.off("error", refused);
-        resolve();
-      });
-    });
+    if (this.ownerLock.state === "contended") {
+      // Another server's record was there at the claim. A live owner ends this start here (`DataDirOwnedError`); one
+      // that is closing or booting is waited for, within the boot budget; a dead one is taken over. Only then is the
+      // store opened: nothing of the folder was touched so far.
+      await this.ownerLock.resolve({ signal: this.shutdownSignal.signal, budgetMs: Math.min(this.ownerDeps.waitMs, this.bootRemaining()) });
+      if (this.closed) {
+        throw new Error("the server was closed before it listened");
+      }
+      this.openStore();
+    }
+    await this.bind();
     const address = this.server.address();
     const port = typeof address === "object" && address ? address.port : this.options.port;
+    this.ownerLock.setPort(port);
     // Only now, holding the port, is this the server whose data this is: what the last process left in flight is
     // marked interrupted here (a Resume will act on them), and the turns it left running are of unknown fate.
     // Each sweep on its own, and each waits out a database another process has locked: one that cannot be done does not
     // take the other with it. The ready line waits for both, so with the database locked throughout that is about
-    // twice the sum of the waits whatever the number of rows (each sweep stops at the first row the lock refuses).
+    // twice the sum of the waits whatever the number of rows (each sweep stops at the first row the lock refuses),
+    // cut short when the boot budget is spent: what is left is marked at the next start.
+    const signal = AbortSignal.any([this.shutdownSignal.signal, this.bootBudget.signal]);
     try {
       this.researchInterruptedAtBoot = (
-        await this.researchJobs.sweepInterruptedOnBoot(this.options.bootSweepRetryMs, this.shutdownSignal.signal)
+        await this.researchJobs.sweepInterruptedOnBoot(this.options.bootSweepRetryMs, signal, (ms, cut) => this.bootWait(ms, cut))
       ).length;
     } catch (error) {
       this.log(`the research sweep at boot failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    await this.sweepTurnsAtBoot();
+    await this.sweepTurnsAtBoot(signal);
     // A server that was closed while it swept has nothing to schedule.
     if (!this.closed) {
       // No sweep at startup: which threads are busy in other Muse clients is only known after discovery.
@@ -1112,13 +1181,64 @@ export class AncillaServer {
     return { port, host: this.options.host };
   }
 
+  /** What is left of the boot budget, on the lock's clock. */
+  private bootRemaining(): number {
+    return Math.max(0, this.bootStartedAt + this.bootBudgetMs - this.ownerDeps.now());
+  }
+
+  /**
+   * A wait of the sweeps at boot: at most what is left of the budget, and once that is spent the budget's signal
+   * fires, so the sweep that asked stops at once and the other one never starts waiting.
+   */
+  private async bootWait(ms: number, signal?: AbortSignal): Promise<boolean> {
+    const slept = await this.ownerDeps.wait(Math.min(ms, this.bootRemaining()), signal);
+    if (this.bootRemaining() <= 0) {
+      this.bootBudget.abort();
+    }
+    return slept && !this.bootBudget.signal.aborted;
+  }
+
+  /**
+   * Binds the port. An address in use is an error to report, as today, except when the folder's lock was contended at
+   * the claim: the previous owner may hold the port for the tail of its close (the desktop shell passes the same port
+   * it saved), so the bind is tried again every `OWNER_POLL_MS` until the boot budget is spent.
+   */
+  private async bind(): Promise<void> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          // A port that is taken is an error to report, not an uncaught event that ends the process after the fact.
+          const refused = (error: Error) => reject(error);
+          this.server.once("error", refused);
+          this.server.listen(this.options.port, this.options.host, () => {
+            this.server.off("error", refused);
+            resolve();
+          });
+        });
+        return;
+      } catch (error) {
+        const remaining = this.bootRemaining();
+        if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE" || !this.ownerLock.wasContended || this.closed || remaining <= 0) {
+          throw error;
+        }
+        if (attempt === 0) {
+          this.ownerDeps.log(`port ${this.options.port} is still in use, most likely by the Ancilla that owned ${this.options.dataDir} until now: trying again until it is free.`);
+        }
+        if (!(await this.ownerDeps.wait(Math.min(OWNER_POLL_MS, remaining), this.shutdownSignal.signal))) {
+          throw error;
+        }
+      }
+    }
+  }
+
   /**
    * The turns the last process left running become of unknown fate; a database another process has locked is waited
-   * for. A close ends it at once, in the middle of a wait too: nothing here touches the store after that.
+   * for. A close ends it at once, in the middle of a wait too: nothing here touches the store after that. The boot
+   * budget ends it the same way.
    */
-  private async sweepTurnsAtBoot(): Promise<void> {
+  private async sweepTurnsAtBoot(signal: AbortSignal): Promise<void> {
     for (let attempt = 0; ; attempt += 1) {
-      if (this.closed) {
+      if (this.closed || signal.aborted) {
         return;
       }
       try {
@@ -1133,14 +1253,36 @@ export class AncillaServer {
           this.log(`the turn sweep at boot failed: ${error instanceof Error ? error.message : String(error)}`);
           return;
         }
-        await waitUnlessAborted(delay, this.shutdownSignal.signal);
+        if (!(await this.bootWait(delay, signal))) {
+          return;
+        }
       }
     }
   }
 
-  async close(): Promise<void> {
+  /** Stops accepting requests and ends the connections open; a server that never listened has nothing to close. */
+  private async closeListener(): Promise<void> {
+    this.server.closeAllConnections?.();
+    await new Promise<void>((resolve, reject) =>
+      this.server.close((error) => (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve())),
+    );
+  }
+
+  /**
+   * Closes everything, in the order the data needs: the research runs first, then the hosts and the rest at once,
+   * the listener, the store, and the folder's lock last. With `freePortFirst` the listener goes right away instead,
+   * before the hosts are waited for: the desktop shell's next launch then finds the port free while this one winds
+   * down (it waits on the lock, whose record says the close has begun). Requests get no 503 in that mode, which is why
+   * the command line's signals keep the default.
+   */
+  async close(options: { freePortFirst?: boolean } = {}): Promise<void> {
     this.closed = true;
+    // First of all: a launcher waiting on this folder reads the record, and keeps waiting instead of refusing.
+    this.ownerLock.markClosing();
     this.shutdownSignal.abort();
+    if (options.freePortFirst) {
+      await this.closeListener();
+    }
     this.wakeStartWaiters();
     this.subscriptionReader.close();
     await this.linuxInstaller.close();
@@ -1155,8 +1297,9 @@ export class AncillaServer {
       this.settleTimer = null;
     }
     this.titleQueue.length = 0;
-    // Research jobs go first: their workers still need the hosts to take the interrupts.
-    await this.researchJobs.close();
+    // Research jobs go first: their workers still need the hosts to take the interrupts. A server refused by the
+    // folder's lock never opened them, nor the store.
+    await this.researchJobs?.close();
     this.sse.close();
     // What is left waits on something that may never answer, so all of it waits at once and the longest wait bounds the
     // close (`worstCaseCloseMs` adds it up): the starts still open, each registered host, the title worker, and the `!`
@@ -1169,14 +1312,14 @@ export class AncillaServer {
       stopPendingCaptures(this.pendingCaptures, { graceMs: this.hostWaits.shellsMs }),
     ]);
     this.hosts.clear();
-    this.server.closeAllConnections?.();
-    await new Promise<void>((resolve, reject) =>
-      // A server that refused to listen has nothing to close.
-      this.server.close((error) => (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING" ? reject(error) : resolve())),
-    );
+    if (!options.freePortFirst) {
+      await this.closeListener();
+    }
     // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
     this.storeClosed = true;
-    this.store.close();
+    this.store?.close();
+    // After the store: the folder is another server's only once nothing here can write to it.
+    this.ownerLock.release();
   }
 
   /**
@@ -1609,6 +1752,9 @@ export class AncillaServer {
         // True once `close()` has begun: the route keeps answering while the server winds down, and a supervisor can tell.
         closing: this.closed,
         version: ANCILLA_VERSION,
+        // Which server this is, for the launcher that finds this one's record in the data folder; see `ownerLock.ts`.
+        instanceId: this.instanceId,
+        owner: { lock: this.ownerLock.healthLock(), pid: process.pid, startedAt: this.ownerLock.record.startedAt, file: this.ownerLock.file },
         hosts: [...this.hosts.values()].map((h) => ({
           key: h.key,
           serverVersion: h.serverVersion,

@@ -3,6 +3,9 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseRuntimePreference } from "@ancilla/daemon";
 import { parseAllowHosts } from "./admission.js";
+import { EXIT_DATA_DIR_OWNED } from "./exitCodes.js";
+import { DataDirOwnedError } from "./ownerLock.js";
+import { STDIN_EOF_CAUSE, STDIN_EOF_FLAG } from "./shutdown.js";
 
 function usage(): string {
   return [
@@ -121,6 +124,9 @@ async function main(): Promise<void> {
       }
     }
   }
+  if (local.dataDirLock === false) {
+    log(`runtime.json dataDirLock is false: ${dataDir} is not locked, so another Ancilla can open it while this one runs and each would rewrite the other's runs.`);
+  }
   const { HOST_START_TIMEOUT_ENV, resolveHostStartTimeoutMs } = await import("./hostBounds.js");
   const { CLI_HOST_WAITS } = await import("./hostBounds.js");
   const { createShutdown, shutdownSignals } = await import("./shutdown.js");
@@ -142,22 +148,56 @@ async function main(): Promise<void> {
     musePath: flagValue(argv, "--muse") ?? local.musePath,
     syncSessionNames: local.syncSessionNames,
     wslEnv: local.wslEnv,
+    // The documented way out of the lock, for a desktop user who cannot pass flags; the line above says what it costs.
+    dataDirLock: local.dataDirLock ?? true,
   });
-  const bound = await server.listen();
+  // Armed before the server listens: a signal, or the end of stdin, that arrives during the boot (a second or two,
+  // longer when the folder's last owner is still closing) ends in the same close. A close that waits on a stuck host
+  // does not hold the process, and a second signal ends it at once. The end of stdin closes the listener first, so
+  // the desktop shell's next launch can take the same port while the hosts wind down.
+  const shutdown = createShutdown({ close: (cause) => server.close({ freePortFirst: cause === STDIN_EOF_CAUSE }), exit: (code) => process.exit(code), log });
+  for (const signal of shutdownSignals()) {
+    process.on(signal, () => shutdown(signal));
+  }
+  if (argv.includes(STDIN_EOF_FLAG)) {
+    // Only with the flag: without it stdin is never touched, so a stdin that ends at once (systemd, Docker without
+    // -i, nohup, cron) or an inherited handle that cannot be read (a GUI parent) changes nothing.
+    process.stdin.on("end", () => shutdown(STDIN_EOF_CAUSE));
+    process.stdin.on("error", () => shutdown(STDIN_EOF_CAUSE));
+    process.stdin.resume();
+  }
+  let bound: { host: string; port: number };
+  try {
+    bound = await server.listen();
+  } catch (error) {
+    // A close that began during the boot may have taken the store from under the start; the close decides the exit.
+    if (shutdown.begun()) {
+      return;
+    }
+    throw error;
+  }
+  // One turn of the event loop before the ready line: a boot over an empty folder never waits on anything, so an end
+  // of stdin that was there all along (the shell died while this server booted) is only read now, and no ready line
+  // is written for a server that is closing.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  if (shutdown.begun()) {
+    return;
+  }
   if (!token) {
     log(
       `no --token was given: anything on this machine that can reach http://${bound.host}:${bound.port} can use this server. It will need a token in a later release; pass --token <value> to start using one now. If you use the desktop app you need do nothing yet: it cannot pass a token today.`,
     );
   }
   process.stdout.write(`ancilla-server listening on http://${bound.host}:${bound.port}\n`);
-  // A close that waits on a stuck host does not hold the process, and a second signal ends it at once.
-  const shutdown = createShutdown({ close: () => server.close(), exit: (code) => process.exit(code), log });
-  for (const signal of shutdownSignals()) {
-    process.on(signal, () => shutdown(signal));
-  }
 }
 
 void main().catch((error) => {
+  if (error instanceof DataDirOwnedError) {
+    // One line, on stderr only: the ready line is the only thing ever written to stdout, and the desktop shell reads
+    // the owner's address from the record file, not from here.
+    process.stderr.write(`ancilla-server: ${error.message}\n`);
+    process.exit(EXIT_DATA_DIR_OWNED);
+  }
   process.stderr.write(`ancilla-server failed: ${String(error)}\n`);
   process.exit(1);
 });

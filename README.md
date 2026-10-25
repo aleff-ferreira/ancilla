@@ -215,6 +215,11 @@ Projects, pins, thread titles and archive state persist in `~/.ancilla/ancilla.d
 move it, or `:memory:` for a throwaway run). The desktop app keeps the same files in its own app data directory. Threads
 you started from the `muse` terminal are discovered automatically and appear under their project.
 
+One server serves a data folder at a time: it writes `ancilla.owner` there, and a second server over the same folder
+exits with code 75 and one line on stderr naming the first, instead of opening the database under it. `"dataDirLock":
+false` in `runtime.json` turns that off. See
+[One server per data folder](docs/muse-recovery.md#one-server-per-data-folder).
+
 UI development with hot reload:
 
 ```bash

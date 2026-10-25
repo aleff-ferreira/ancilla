@@ -403,9 +403,14 @@ export class ResearchJobManager {
    * database is followed, after the next of `delaysMs`, by another over what is left, until a pass is clean or the
    * waits are spent. A failure that waiting would not change is not waited on. Rows that could not be written stay as
    * they were, for the next boot's sweep. A manager that is closing, or a `signal` that fires (the server's own close),
-   * ends the sweep at once, in the middle of a wait too, and nothing is read or written after that.
+   * ends the sweep at once, in the middle of a wait too, and nothing is read or written after that. `wait` is how
+   * each delay is waited out (the server's boot budget cuts it short).
    */
-  async sweepInterruptedOnBoot(delaysMs: readonly number[] = BOOT_SWEEP_RETRY_MS, signal?: AbortSignal): Promise<ResearchRunRecord[]> {
+  async sweepInterruptedOnBoot(
+    delaysMs: readonly number[] = BOOT_SWEEP_RETRY_MS,
+    signal?: AbortSignal,
+    wait: (ms: number, signal?: AbortSignal) => Promise<boolean> = waitUnlessAborted,
+  ): Promise<ResearchRunRecord[]> {
     const marked: ResearchRunRecord[] = [];
     for (let attempt = 0; ; attempt += 1) {
       if (signal?.aborted || this.closing || this.closed) {
@@ -428,7 +433,7 @@ export class ResearchJobManager {
         this.options.log?.("research: the database stayed locked; the runs left in flight will be marked interrupted at the next start.");
         return marked;
       }
-      await waitUnlessAborted(delay, signal);
+      await wait(delay, signal);
     }
   }
 
