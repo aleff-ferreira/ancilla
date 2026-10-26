@@ -32,7 +32,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1 as of 2026-10-14: the action's only tag is v1, which moves
         with:
           toolchain: stable
       # Resolution reads the registry index and the manifests only; the native libraries Tauri links are not needed.
