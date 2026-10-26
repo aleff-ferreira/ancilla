@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AncillaStore } from "@ancilla/daemon";
 import {
@@ -276,18 +276,30 @@ describe("Helicon database import", () => {
     const root = scratch();
     const dataDir = join(root, "data");
     seedHelicon(dataDir);
-    const stale = join(dataDir, ".ancilla.db.import-4242.tmp");
-    const live = join(dataDir, ".ancilla.db.import-4343.tmp");
+    // Under pids that are not this process's: a snapshot under the importer's own pid is its own leftover, which the
+    // import removes first (the next test). A fixed number is a lottery: the test process has been pid 4343 on a runner.
+    const stale = join(dataDir, `.ancilla.db.import-${process.pid + 1}.tmp`);
+    const live = join(dataDir, `.ancilla.db.import-${process.pid + 2}.tmp`);
     writeFileSync(stale, "half a copy");
     writeFileSync(live, "another Ancilla's copy in progress");
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(stale, old, old);
     assert.equal(importLegacyDatabase(dataDir, root, () => undefined), true);
     assertImported(dataDir);
-    assert.deepEqual(listing(dataDir), [".ancilla.db.import-4343.tmp", DB_FILE, LEGACY_DB_FILE]);
+    assert.deepEqual(listing(dataDir), [basename(live), DB_FILE, LEGACY_DB_FILE]);
     // Once that one stops changing, a later start clears it as well, although this data dir has started by now.
     utimesSync(live, old, old);
     assert.equal(importLegacyDatabase(dataDir, root, () => undefined), false);
+    assert.deepEqual(listing(dataDir), [DB_FILE, LEGACY_DB_FILE]);
+  });
+
+  it("removes a snapshot under its own pid before it starts, however fresh: only this process can have written it", () => {
+    const root = scratch();
+    const dataDir = join(root, "data");
+    seedHelicon(dataDir);
+    writeFileSync(join(dataDir, `.ancilla.db.import-${process.pid}.tmp`), "left by an earlier life of this pid");
+    assert.equal(importLegacyDatabase(dataDir, root, () => undefined), true);
+    assertImported(dataDir);
     assert.deepEqual(listing(dataDir), [DB_FILE, LEGACY_DB_FILE]);
   });
 
