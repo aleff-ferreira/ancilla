@@ -1534,10 +1534,8 @@ mod tests {
 
     #[test]
     fn stdin_eof_ends_a_listening_child_and_a_deaf_one_is_killed() {
-        if !super::node_runs(Path::new("node")) {
-            eprintln!("skipped: node is not on the PATH");
-            return;
-        }
+        // CI has node (setup-node); a machine without it must fail this guard, not pass it unrun.
+        assert!(super::node_runs(Path::new("node")), "node is not on the PATH: this test needs it to run a child");
         // A server with the watchdog: the end of stdin is its signal to close; it exits 0 on its own.
         let mut listening = super::command("node");
         listening
