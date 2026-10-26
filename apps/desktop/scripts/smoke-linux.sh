@@ -39,11 +39,12 @@ data="$work/data/app.ancilla.desktop"
 app=''
 launches=0
 
-# Every process of the app, its server and the webview's helpers included, inherits the tree's XDG_DATA_HOME.
+# Every process of the app, its server and the webview's helpers included, inherits the tree's XDG_DATA_HOME. Another
+# user's environ cannot be read; the redirect that fails is silenced before it is tried, or every such pid prints a line.
 tree_processes() {
   local pid
   for pid in $(ls /proc | grep -E '^[0-9]+$'); do
-    if tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qx "XDG_DATA_HOME=$work/data"; then
+    if tr '\0' '\n' 2>/dev/null < "/proc/$pid/environ" | grep -qx "XDG_DATA_HOME=$work/data"; then
       printf '%s %s\n' "$pid" "$(cat "/proc/$pid/comm" 2>/dev/null || true)"
     fi
   done

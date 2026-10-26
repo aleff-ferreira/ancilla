@@ -81,19 +81,19 @@ jobs:
           set -euo pipefail
           debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
           sudo apt-get install -y "${debs[0]}"
-          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/cli.js /usr/bin/ancilla
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js /usr/bin/ancilla
       - name: Launch the installed package twice under a session bus
         if: steps.guard.outputs.ready == 'true'
-        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/cli.js /usr/bin/ancilla
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js /usr/bin/ancilla
       - name: Launch the AppImage without requiring FUSE
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
-          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/cli.js "${images[0]}" --appimage-extract-and-run
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js "${images[0]}" --appimage-extract-and-run
       - name: Launch the AppImage twice under a session bus
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
-          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/cli.js "${images[0]}" --appimage-extract-and-run
+          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js "${images[0]}" --appimage-extract-and-run
