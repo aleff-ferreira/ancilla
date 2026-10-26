@@ -276,7 +276,7 @@ const SERVER_LOG_CAP: u64 = 8 * 1024 * 1024;
 const PAGE_STYLE: &str = "html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}";
 
 /// Shown the instant the window opens, while the local server starts. System colors follow the OS theme.
-const SPLASH_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:GrayText;font:13px system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}</style><body>Starting Ancilla</body>";
+const SPLASH_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:GrayText;font:13px system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}</style><body>Starting Ancilla</body>";
 
 const MISSING_NODE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla needs Node.js</h1><p>Ancilla could not start its local server because its bundled Node.js is missing and Node.js 22 or newer was not found on this computer. Reinstall Ancilla, or install Node.js 22 or newer, then open Ancilla again.</p></main>";
 
@@ -284,27 +284,48 @@ const MISSING_SERVER_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Anc
 
 const SERVER_FAILED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla could not start</h1><p>Its local server did not come up. The server log in the Ancilla app log folder has the details. Close Ancilla and open it again to retry.</p></main>";
 
-/// The scheme of the app's own that serves the error pages. They cannot be `data:` addresses like the splash:
+/// The scheme of the app's own that serves the splash and the error pages. None of them can be a `data:` address:
 /// the webview rebuilds the page's address as an http request for every message a page sends to the app, a
 /// plugin's start-up script sends one on load, and an address that is no http URI aborts the app (seen on
-/// Linux with the "already open" page). The splash sends none and is replaced within seconds.
+/// Linux with the "already open" page). The splash can stay up for the whole boot budget over a contended
+/// data folder, so it is served the same way.
 const PAGE_SCHEME: &str = "ancilla";
 
-/// Where the window finds the error page: Windows reaches an app scheme through a host of that name.
-fn error_page_url() -> String {
+/// The splash's path on the scheme.
+const SPLASH_PATH: &str = "/splash";
+
+/// The error page's path on the scheme.
+const ERROR_PATH: &str = "/error";
+
+/// Where the window finds a page of the app's own: Windows reaches an app scheme through a host of that name.
+fn page_url(path: &str) -> String {
     if cfg!(windows) {
-        format!("http://{PAGE_SCHEME}.localhost/error")
+        format!("http://{PAGE_SCHEME}.localhost{path}")
     } else {
-        format!("{PAGE_SCHEME}://localhost/error")
+        format!("{PAGE_SCHEME}://localhost{path}")
     }
+}
+
+fn splash_page_url() -> String {
+    page_url(SPLASH_PATH)
+}
+
+fn error_page_url() -> String {
+    page_url(ERROR_PATH)
 }
 
 /// The error page the window shows instead of the UI, set by the boot before it navigates there.
 #[derive(Default)]
 struct ErrorPage(Mutex<Option<String>>);
 
-/// The answer of the app scheme: the page that was set, or nothing before any was.
-fn error_page_response(page: Option<String>) -> tauri::http::Response<Vec<u8>> {
+/// The answer of the app scheme for `path`: the splash, the error page that was set, or nothing: before any
+/// error page was set, and for any other path.
+fn page_response(path: &str, error_page: Option<String>) -> tauri::http::Response<Vec<u8>> {
+    let page = match path {
+        SPLASH_PATH => Some(SPLASH_PAGE.to_string()),
+        ERROR_PATH => error_page,
+        _ => None,
+    };
     let (status, body): (u16, Vec<u8>) = match page {
         Some(html) => (200, html.into_bytes()),
         None => (404, Vec::new()),
@@ -903,8 +924,8 @@ fn install_zoom_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Web and mail links that belong in the user's browser or mail app. Ancilla's own local server, the inline
-/// splash and error pages, and Tauri's internal schemes stay in the window.
+/// Web and mail links that belong in the user's browser or mail app. Ancilla's own local server, the splash and
+/// error pages of its own scheme, and Tauri's internal schemes stay in the window.
 fn is_external_link(url: &Url) -> bool {
     match url.scheme() {
         "mailto" => true,
@@ -951,16 +972,17 @@ fn main() {
         .manage(ServerChild(Arc::new(Mutex::new(None))))
         .manage(Quit::default())
         .manage(ErrorPage::default())
-        .register_uri_scheme_protocol(PAGE_SCHEME, |context, _request| {
+        .register_uri_scheme_protocol(PAGE_SCHEME, |context, request| {
             let page = context.app_handle().state::<ErrorPage>();
-            let html = locked(&page.0).clone();
-            error_page_response(html)
+            let error_page = locked(&page.0).clone();
+            page_response(request.uri().path(), error_page)
         })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             install_zoom_menu(app)?;
-            // Open the window at once on a splash page; the server can take a few seconds to probe WSL.
-            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(SPLASH_PAGE.parse()?))
+            // Open the window at once on the splash; the server can take a few seconds to probe WSL, and longer
+            // over a data folder another copy is still releasing.
+            let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(splash_page_url().parse()?))
                 .title("Ancilla")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(880.0, 560.0)
@@ -1072,10 +1094,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_node, bundled_node_in, classify_exit, error_page_response, error_page_url, find_resource, fresh_port, owned_page,
-        parse_listening_url, plain_path, read_owner_record, remember_port, rotate_server_log, server_args, stable_port,
-        start_with_retry, Began, BootError, OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome, OWNER_FILE,
-        PORT_FILE, READY_LINE_DEADLINE, SIDECAR_STOP_GRACE, SPLASH_PAGE, STDIN_WATCHDOG_FLAG,
+        bundled_node, bundled_node_in, classify_exit, error_page_url, find_resource, fresh_port, owned_page, page_response,
+        parse_listening_url, plain_path, read_owner_record, remember_port, rotate_server_log, server_args, splash_page_url,
+        stable_port, start_with_retry, Began, BootError, OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome,
+        ERROR_PATH, OWNER_FILE, PORT_FILE, READY_LINE_DEADLINE, SIDECAR_STOP_GRACE, SPLASH_PAGE, SPLASH_PATH, STDIN_WATCHDOG_FLAG,
     };
     #[cfg(unix)]
     use super::{latest_nvm_node, prepend_to_path, select_probe_path, well_known_nodes_in};
@@ -1131,6 +1153,7 @@ mod tests {
         assert!(!external("ancilla://localhost/error"));
         assert!(!external("http://ancilla.localhost/error"));
         assert!(!external(&error_page_url()));
+        assert!(!external(&splash_page_url()));
     }
 
     #[test]
@@ -1155,24 +1178,33 @@ mod tests {
 
     #[test]
     fn inline_pages_are_valid_urls() {
-        assert!(SPLASH_PAGE.parse::<tauri::Url>().is_ok());
-        // The error pages stay open and get messages from the app's own scripts: their address has to be one the
-        // webview can rebuild as an http request, which a `data:` address is not (the app aborts on the first message).
-        let url = error_page_url();
-        assert!(url.parse::<tauri::Url>().is_ok(), "{url}");
-        assert!(url.parse::<tauri::http::Uri>().is_ok(), "{url}");
+        // The pages get messages from the app's own scripts: their address has to be one the webview can rebuild
+        // as an http request, which a `data:` address is not (the app aborts on the first message). The splash can
+        // stay up for the whole boot budget over a contended data folder, so it is no exception.
+        for url in [splash_page_url(), error_page_url()] {
+            assert!(url.parse::<tauri::Url>().is_ok(), "{url}");
+            assert!(url.parse::<tauri::http::Uri>().is_ok(), "{url}");
+            assert!(!url.starts_with("data:"), "{url}");
+        }
+        assert!(SPLASH_PAGE.starts_with("<!doctype html>"));
+        let splash = page_response(SPLASH_PATH, None);
+        assert_eq!(splash.status(), 200);
+        assert_eq!(splash.body().as_slice(), SPLASH_PAGE.as_bytes());
         let owner = OwnerRecord { host: Some("127.0.0.1".into()), port: Some(52314), platform: Some(super::NODE_PLATFORM.into()), ..OwnerRecord::default() };
         for error in [BootError::NodeMissing, BootError::ServerMissing, BootError::ServerFailed, BootError::DataDirOwned(None), BootError::DataDirOwned(Some(owner))] {
             let page = error.page();
             assert!(page.starts_with("<!doctype html>") && page.contains("<title>Ancilla</title>"), "{page}");
-            let response = error_page_response(Some(page.clone()));
+            let response = page_response(ERROR_PATH, Some(page.clone()));
             assert_eq!(response.status(), 200);
             assert_eq!(response.headers().get("content-type").and_then(|value| value.to_str().ok()), Some("text/html; charset=utf-8"));
             assert_eq!(response.body().as_slice(), page.as_bytes());
         }
-        let missing = error_page_response(None);
-        assert_eq!(missing.status(), 404);
-        assert!(missing.body().is_empty());
+        // Before any error page is set, and for any other path, the scheme answers nothing.
+        for (path, error_page) in [(ERROR_PATH, None), ("/elsewhere", Some(SPLASH_PAGE.to_string())), ("/", None)] {
+            let missing = page_response(path, error_page);
+            assert_eq!(missing.status(), 404, "{path}");
+            assert!(missing.body().is_empty());
+        }
         assert!(!owned_page(None).contains("href"));
         let linked = owned_page(Some(&OwnerRecord { host: Some("127.0.0.1".into()), port: Some(52314), ..OwnerRecord::default() }));
         assert!(linked.contains("href=\"http://127.0.0.1:52314/\""), "{linked}");
