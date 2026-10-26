@@ -278,11 +278,43 @@ const PAGE_STYLE: &str = "html{color-scheme:light dark;background:Canvas;color:C
 /// Shown the instant the window opens, while the local server starts. System colors follow the OS theme.
 const SPLASH_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:GrayText;font:13px system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}</style><body>Starting Ancilla</body>";
 
-const MISSING_NODE_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla needs Node.js</h1><p>Ancilla could not start its local server because its bundled Node.js is missing and Node.js 22 or newer was not found on this computer. Reinstall Ancilla, or install Node.js 22 or newer, then open Ancilla again.</p></main>";
+const MISSING_NODE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla needs Node.js</h1><p>Ancilla could not start its local server because its bundled Node.js is missing and Node.js 22 or newer was not found on this computer. Reinstall Ancilla, or install Node.js 22 or newer, then open Ancilla again.</p></main>";
 
-const MISSING_SERVER_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla is missing files</h1><p>The bundled Ancilla server was not found next to the app. Reinstall Ancilla to restore it.</p></main>";
+const MISSING_SERVER_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla is missing files</h1><p>The bundled Ancilla server was not found next to the app. Reinstall Ancilla to restore it.</p></main>";
 
-const SERVER_FAILED_PAGE: &str = "data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla could not start</h1><p>Its local server did not come up. The server log in the Ancilla app log folder has the details. Close Ancilla and open it again to retry.</p></main>";
+const SERVER_FAILED_PAGE: &str = "<!doctype html><meta charset=utf-8><title>Ancilla</title><style>html{color-scheme:light dark;background:Canvas;color:CanvasText;font:14px/1.5 system-ui,sans-serif}body{margin:0;height:100vh;display:grid;place-items:center}main{max-width:420px;padding:24px}p{color:GrayText}</style><main><h1 style=font-size:20px>Ancilla could not start</h1><p>Its local server did not come up. The server log in the Ancilla app log folder has the details. Close Ancilla and open it again to retry.</p></main>";
+
+/// The scheme of the app's own that serves the error pages. They cannot be `data:` addresses like the splash:
+/// the webview rebuilds the page's address as an http request for every message a page sends to the app, a
+/// plugin's start-up script sends one on load, and an address that is no http URI aborts the app (seen on
+/// Linux with the "already open" page). The splash sends none and is replaced within seconds.
+const PAGE_SCHEME: &str = "ancilla";
+
+/// Where the window finds the error page: Windows reaches an app scheme through a host of that name.
+fn error_page_url() -> String {
+    if cfg!(windows) {
+        format!("http://{PAGE_SCHEME}.localhost/error")
+    } else {
+        format!("{PAGE_SCHEME}://localhost/error")
+    }
+}
+
+/// The error page the window shows instead of the UI, set by the boot before it navigates there.
+#[derive(Default)]
+struct ErrorPage(Mutex<Option<String>>);
+
+/// The answer of the app scheme: the page that was set, or nothing before any was.
+fn error_page_response(page: Option<String>) -> tauri::http::Response<Vec<u8>> {
+    let (status, body): (u16, Vec<u8>) = match page {
+        Some(html) => (200, html.into_bytes()),
+        None => (404, Vec::new()),
+    };
+    tauri::http::Response::builder()
+        .status(status)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(body)
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
 
 /// The platform name the server writes into the owner record (Node's `process.platform`), for this build.
 const NODE_PLATFORM: &str = if cfg!(windows) {
@@ -351,7 +383,7 @@ fn owned_page(owner: Option<&OwnerRecord>) -> String {
     } else {
         String::new()
     };
-    format!("data:text/html,<!doctype html><meta charset=utf-8><title>Ancilla</title><style>{PAGE_STYLE}</style><main><h1 style=font-size:20px>Ancilla is already open</h1><p>Another copy of Ancilla is using your data folder: a window on another desktop, a copy that is still closing, or an ancilla-server started by hand. Close it, then open Ancilla again.</p>{open}{elsewhere}</main>")
+    format!("<!doctype html><meta charset=utf-8><title>Ancilla</title><style>{PAGE_STYLE}</style><main><h1 style=font-size:20px>Ancilla is already open</h1><p>Another copy of Ancilla is using your data folder: a window on another desktop, a copy that is still closing, or an ancilla-server started by hand. Close it, then open Ancilla again.</p>{open}{elsewhere}</main>")
 }
 
 enum BootError {
@@ -363,6 +395,7 @@ enum BootError {
 }
 
 impl BootError {
+    /// The page's HTML, served at `error_page_url`.
     fn page(&self) -> String {
         match self {
             BootError::NodeMissing => MISSING_NODE_PAGE.to_string(),
@@ -875,7 +908,7 @@ fn install_zoom_menu(app: &tauri::App) -> tauri::Result<()> {
 fn is_external_link(url: &Url) -> bool {
     match url.scheme() {
         "mailto" => true,
-        "http" | "https" => !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]" | "ipc.localhost" | "tauri.localhost")),
+        "http" | "https" => !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]" | "ipc.localhost" | "tauri.localhost" | "ancilla.localhost")),
         _ => false,
     }
 }
@@ -917,6 +950,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(ServerChild(Arc::new(Mutex::new(None))))
         .manage(Quit::default())
+        .manage(ErrorPage::default())
+        .register_uri_scheme_protocol(PAGE_SCHEME, |context, _request| {
+            let page = context.app_handle().state::<ErrorPage>();
+            let html = locked(&page.0).clone();
+            error_page_response(html)
+        })
         .setup(|app| {
             #[cfg(target_os = "macos")]
             install_zoom_menu(app)?;
@@ -972,7 +1011,9 @@ fn main() {
                         if CUSTOM_FRAME {
                             let _ = window.set_decorations(true);
                         }
-                        error.page()
+                        let page = handle.state::<ErrorPage>();
+                        *locked(&page.0) = Some(error.page());
+                        error_page_url()
                     }
                 };
                 if let Ok(url) = target.parse::<Url>() {
@@ -1031,10 +1072,10 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        bundled_node, bundled_node_in, classify_exit, find_resource, fresh_port, owned_page, parse_listening_url, plain_path,
-        read_owner_record, remember_port, rotate_server_log, server_args, stable_port, start_with_retry, Began, BootError,
-        OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome, OWNER_FILE, PORT_FILE, READY_LINE_DEADLINE,
-        SIDECAR_STOP_GRACE, SPLASH_PAGE, STDIN_WATCHDOG_FLAG,
+        bundled_node, bundled_node_in, classify_exit, error_page_response, error_page_url, find_resource, fresh_port, owned_page,
+        parse_listening_url, plain_path, read_owner_record, remember_port, rotate_server_log, server_args, stable_port,
+        start_with_retry, Began, BootError, OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome, OWNER_FILE,
+        PORT_FILE, READY_LINE_DEADLINE, SIDECAR_STOP_GRACE, SPLASH_PAGE, STDIN_WATCHDOG_FLAG,
     };
     #[cfg(unix)]
     use super::{latest_nvm_node, prepend_to_path, select_probe_path, well_known_nodes_in};
@@ -1087,6 +1128,9 @@ mod tests {
         assert!(!external("http://ipc.localhost/plugin"));
         assert!(!external("tauri://localhost/"));
         assert!(!external("data:text/html,hi"));
+        assert!(!external("ancilla://localhost/error"));
+        assert!(!external("http://ancilla.localhost/error"));
+        assert!(!external(&error_page_url()));
     }
 
     #[test]
@@ -1112,10 +1156,23 @@ mod tests {
     #[test]
     fn inline_pages_are_valid_urls() {
         assert!(SPLASH_PAGE.parse::<tauri::Url>().is_ok());
+        // The error pages stay open and get messages from the app's own scripts: their address has to be one the
+        // webview can rebuild as an http request, which a `data:` address is not (the app aborts on the first message).
+        let url = error_page_url();
+        assert!(url.parse::<tauri::Url>().is_ok(), "{url}");
+        assert!(url.parse::<tauri::http::Uri>().is_ok(), "{url}");
         let owner = OwnerRecord { host: Some("127.0.0.1".into()), port: Some(52314), platform: Some(super::NODE_PLATFORM.into()), ..OwnerRecord::default() };
         for error in [BootError::NodeMissing, BootError::ServerMissing, BootError::ServerFailed, BootError::DataDirOwned(None), BootError::DataDirOwned(Some(owner))] {
-            assert!(error.page().parse::<tauri::Url>().is_ok());
+            let page = error.page();
+            assert!(page.starts_with("<!doctype html>") && page.contains("<title>Ancilla</title>"), "{page}");
+            let response = error_page_response(Some(page.clone()));
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers().get("content-type").and_then(|value| value.to_str().ok()), Some("text/html; charset=utf-8"));
+            assert_eq!(response.body().as_slice(), page.as_bytes());
         }
+        let missing = error_page_response(None);
+        assert_eq!(missing.status(), 404);
+        assert!(missing.body().is_empty());
         assert!(!owned_page(None).contains("href"));
         let linked = owned_page(Some(&OwnerRecord { host: Some("127.0.0.1".into()), port: Some(52314), ..OwnerRecord::default() }));
         assert!(linked.contains("href=\"http://127.0.0.1:52314/\""), "{linked}");

@@ -71,28 +71,29 @@ jobs:
       - name: Check runtimes, dependencies, menu entries and icons in every installer
         if: steps.guard.outputs.ready == 'true'
         run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
-      # Each installer is launched, quit through its window and launched again while the first copy closes: once
-      # with no session bus, where the data folder lock alone keeps two copies apart, and once under a session bus,
-      # where the single-instance plugin forwards a second launch to the running copy.
+      # Each installer is launched, quit through its window, launched again while the first copy closes, and launched
+      # over a folder a server started by hand owns: once with no session bus, where the data folder lock alone keeps
+      # two copies apart, and once under a session bus, where the single-instance plugin forwards a second launch to
+      # the running copy.
       - name: Install the Debian package and launch it from its system path
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
           sudo apt-get install -y "${debs[0]}"
-          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/cli.js /usr/bin/ancilla
       - name: Launch the installed package twice under a session bus
         if: steps.guard.outputs.ready == 'true'
-        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus /usr/bin/ancilla
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/cli.js /usr/bin/ancilla
       - name: Launch the AppImage without requiring FUSE
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
-          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh "${images[0]}" --appimage-extract-and-run
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/cli.js "${images[0]}" --appimage-extract-and-run
       - name: Launch the AppImage twice under a session bus
         if: steps.guard.outputs.ready == 'true'
         run: |
           set -euo pipefail
           images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
-          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus "${images[0]}" --appimage-extract-and-run
+          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/cli.js "${images[0]}" --appimage-extract-and-run

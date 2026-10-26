@@ -6,18 +6,28 @@
 # provides the display (xvfb-run). With --bus the caller also provides a session bus (dbus-run-session): a second copy
 # started while the first runs is then forwarded to it and exits, and one started during the close is opened again by
 # the first once its server has stopped. Without --bus the app sees no bus, and the data folder lock alone keeps the
-# two copies apart.
+# two copies apart. With --server, the server's own command line (the built cli.js) is started by hand over the
+# app's data folder and the app launched over it: its server is refused, its window shows that Ancilla is already
+# open and stays, and closing it ends the app while the server started by hand keeps serving.
 #
-# usage: smoke-linux.sh [--bus] <app> [app arguments...]
+# usage: smoke-linux.sh [--bus] [--server <cli.js>] <app> [app arguments...]
 set -euo pipefail
 
 bus=false
-if [ "${1:-}" = "--bus" ]; then
-  bus=true
-  shift
-fi
+cli=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bus) bus=true; shift ;;
+    --server) cli="${2:-}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 cmd=("$@")
-[ "${#cmd[@]}" -gt 0 ] || { echo 'usage: smoke-linux.sh [--bus] <app> [app arguments...]' >&2; exit 2; }
+[ "${#cmd[@]}" -gt 0 ] || { echo 'usage: smoke-linux.sh [--bus] [--server <cli.js>] <app> [app arguments...]' >&2; exit 2; }
+if [ -n "$cli" ] && [ ! -f "$cli" ]; then
+  echo "--server needs the built server command line; $cli is not a file." >&2
+  exit 2
+fi
 [ -n "${DISPLAY:-}" ] || { echo 'DISPLAY is not set: run this under xvfb-run.' >&2; exit 2; }
 if $bus && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
   echo '--bus needs a session bus: run this under dbus-run-session.' >&2
@@ -53,6 +63,7 @@ cleanup() {
     [ -n "$entry" ] && kill "${entry%% *}" 2>/dev/null || true
   done < <(tree_processes)
   if [ -n "$app" ]; then kill -- "-$app" 2>/dev/null || true; fi
+  if [ -n "${cli_pid:-}" ]; then kill "$cli_pid" 2>/dev/null || true; fi
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -214,4 +225,52 @@ left="$(tree_processes)"
 [ "$(grep -c 'stdin EOF received' "$(server_log)")" = 2 ] || fail 'server.log does not show both servers closing on stdin EOF'
 cmp -s "$work/port-before" "$data/server-port" || fail 'server-port changed across the second quit'
 [ ! -e "$data/ancilla.owner" ] || fail 'ancilla.owner was left behind'
+
+# A server started by hand over the app's data folder, and the app launched over it: the app's own server is
+# refused, the window shows that Ancilla is already open and stays (an app that aborts on that page is gone within
+# seconds), nothing in the folder is touched, and closing the window ends the app alone. The server started by hand
+# runs outside the tree, so the tree's own checks do not count it.
+if [ -n "$cli" ]; then
+  node "$cli" --data-dir "$data" --port 0 > "$work/cli.log" 2>&1 < /dev/null &
+  cli_pid=$!
+  cli_port=''
+  for _ in $(seq 1 60); do
+    cli_port="$(sed -n 's#^ancilla-server listening on http://127\.0\.0\.1:\([0-9]*\)$#\1#p' "$work/cli.log")"
+    [ -n "$cli_port" ] && break
+    alive "$cli_pid" || fail 'the server started by hand over the data folder exited before it announced itself'
+    sleep 1
+  done
+  [ -n "$cli_port" ] || fail 'the server started by hand never announced itself'
+  answer="$(health "$cli_port")" || fail 'the server started by hand does not answer'
+  cli_instance="${answer#* }"
+  cp "$data/ancilla.owner" "$work/owner-before" || fail 'the server started by hand left no owner record'
+  launch "${cmd[@]}"
+  refused=$app
+  for _ in $(seq 1 60); do
+    grep -q 'owns the data folder' "$(server_log)" && break
+    alive "$refused" || fail 'the app launched over an owned folder exited before its server was refused'
+    sleep 1
+  done
+  grep -q 'owns the data folder' "$(server_log)" || fail "the app's server was not refused over the owned folder"
+  sleep 3
+  alive "$refused" || fail 'the app launched over an owned folder did not stay up on its page'
+  [ -n "$(xdotool search --onlyvisible --name 'Ancilla$' 2>/dev/null)" ] || fail 'the app launched over an owned folder shows no window'
+  cmp -s "$work/owner-before" "$data/ancilla.owner" || fail 'the refused launch touched the owner record'
+  cmp -s "$work/port-before" "$data/server-port" || fail 'the refused launch rewrote server-port'
+  answer="$(health "$cli_port")" || fail 'the server started by hand stopped answering while the app was refused'
+  [ "${answer#* }" = "$cli_instance" ] || fail 'the refused launch replaced the server started by hand'
+  [ -z "$(tree_processes | awk '$2 == "node"')" ] || fail "the refused launch left a server of its own: $(tree_processes)"
+  close_window
+  wait_gone "$refused" 10 > /dev/null || fail 'the app launched over an owned folder outlived its window by more than ten seconds'
+  answer="$(health "$cli_port")" || fail 'the server started by hand stopped answering after the app closed'
+  [ "${answer#* }" = "$cli_instance" ] || fail 'closing the refused app replaced the server started by hand'
+  cmp -s "$work/owner-before" "$data/ancilla.owner" || fail 'closing the refused app touched the owner record'
+  kill -TERM "$cli_pid"
+  wait "$cli_pid" || fail "the server started by hand exited with status $? on SIGTERM"
+  [ ! -e "$data/ancilla.owner" ] || fail 'the server started by hand left its owner record behind'
+  echo 'a launch over a folder owned by a server started by hand was refused, and its page stayed up'
+fi
+
+# A panic in any copy, whether or not the checks above saw its effect.
+! grep -q 'panicked at' "$work"/app-*.log || fail 'an app process panicked'
 echo "Ancilla $version quits cleanly and keeps port $port"
