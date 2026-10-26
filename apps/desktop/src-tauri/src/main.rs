@@ -123,10 +123,19 @@ enum Began<T> {
     Already,
 }
 
+/// What the Exit event does with the sidecar it finds: stop it gracefully (an exit that no window's close began),
+/// kill it and wait (an exit that asked for no graceful stop), or nothing (a stop already ran).
+enum AtExit<T> {
+    Stop(T),
+    Kill(T),
+    Nothing,
+}
+
 #[derive(Default)]
 struct Quit {
     phase: Mutex<QuitPhase>,
-    /// Set by the Linux reopen before `app.exit`: that exit is not a user quit and gets no graceful stop.
+    /// Set by the Linux reopen before `app.exit`, and by an exit with a code other than 0 (the updater's, a
+    /// restart's): those are not user quits and get no graceful stop.
     immediate: AtomicBool,
     /// A copy of Ancilla to start from the Exit event, once the sidecar is dead and the plugins have let go of
     /// their names: the Linux reopen, or a second launch that arrived while this one was quitting.
@@ -179,8 +188,22 @@ impl Quit {
         locked(&self.relaunch).take()
     }
 
-    /// Only the Linux reopen asks for an exit without a graceful stop.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// The Exit event's share of the quit. macOS ends a Dock Quit with `terminate:`, which tao delivers as the Exit
+    /// event alone, with no ExitRequested and no window close before it; no stop has begun then, and none is
+    /// coming, so it runs here (no window remains, and blocking the main thread is acceptable). An exit that asked
+    /// for no graceful stop kills the sidecar and waits for it instead. Either way the sidecar is gone before a
+    /// copy of Ancilla is started from this event.
+    fn at_exit<T>(&self, take: impl FnOnce() -> Option<T>) -> AtExit<T> {
+        if self.exits_at_once() {
+            return take().map_or(AtExit::Nothing, AtExit::Kill);
+        }
+        match self.begin(take) {
+            Began::Stop(running) => AtExit::Stop(running),
+            Began::Nothing | Began::Already => AtExit::Nothing,
+        }
+    }
+
+    /// An exit that is not a user quit: the Linux reopen, the updater's, a restart's.
     fn exit_at_once(&self) {
         self.immediate.store(true, Ordering::SeqCst);
     }
@@ -191,13 +214,14 @@ impl Quit {
 }
 
 /// Begins the graceful stop once, on its own thread; the window is already gone when this runs. Later calls do
-/// nothing: the stop thread ends the app itself when the server has closed or the grace has passed.
-fn begin_graceful_quit(app: &tauri::AppHandle) {
+/// nothing: the stop thread ends the app itself when the server has closed or the grace has passed. Answers
+/// whether a stop thread now owns the exit: with nothing to stop, nothing will end the app but the caller.
+fn begin_graceful_quit(app: &tauri::AppHandle) -> bool {
     let quit = app.state::<Quit>();
     let slot = app.state::<ServerChild>().0.clone();
     let sidecar = match quit.begin(|| locked(&slot).take()) {
         Began::Stop(sidecar) => sidecar,
-        Began::Nothing | Began::Already => return,
+        Began::Nothing | Began::Already => return false,
     };
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -205,6 +229,7 @@ fn begin_graceful_quit(app: &tauri::AppHandle) {
         handle.state::<Quit>().finish();
         handle.exit(0);
     });
+    true
 }
 
 /// This executable with the arguments it was started with: what a second launch that arrived mid-quit asked for.
@@ -1057,31 +1082,51 @@ fn main() {
             tauri::RunEvent::ExitRequested { code, api, .. } => {
                 let quit = app.state::<Quit>();
                 // A code other than 0 is the updater's or a restart's exit, not the user's; so is the Linux reopen.
-                if quit.exits_at_once() || code.is_some_and(|code| code != 0) {
+                if code.is_some_and(|code| code != 0) {
+                    quit.exit_at_once();
+                }
+                if quit.exits_at_once() {
                     return;
                 }
                 match quit.phase() {
-                    // Tauri's cleanup drops ServerGuard, which finds nothing left to kill after a graceful stop.
+                    // The stop has run: the Exit event finds nothing left to stop.
                     QuitPhase::Stopped => {}
                     // The stop thread exits the app when the server has closed.
                     QuitPhase::Stopping => api.prevent_exit(),
-                    QuitPhase::Idle => {
-                        api.prevent_exit();
-                        match app.get_webview_window("main") {
-                            // A quit from outside the window (the Dock's Quit): the window goes first, like a
-                            // close, and its Destroyed handler begins the stop.
-                            Some(window) => {
-                                let _ = window.close();
-                            }
-                            None => begin_graceful_quit(app),
+                    QuitPhase::Idle => match app.get_webview_window("main") {
+                        // A quit from outside the window (a menu's Quit that did not close it): the window goes
+                        // first, like a close, and its Destroyed handler begins the stop.
+                        Some(window) => {
+                            api.prevent_exit();
+                            let _ = window.close();
                         }
-                    }
+                        // No window to close: begin the stop here. With nothing to stop the exit goes ahead; held
+                        // open, an app with no window and no server would stay for nothing to end it.
+                        None => {
+                            if begin_graceful_quit(app) {
+                                api.prevent_exit();
+                            }
+                        }
+                    },
                 }
             }
             tauri::RunEvent::Exit => {
-                // Resources are cleared (the sidecar is dead) and the plugins have had their Exit (the single-instance
-                // plugin has released its name): only now may another copy start.
-                if let Some(mut command) = app.state::<Quit>().take_relaunch() {
+                // tauri runs `cleanup_before_exit` (which drops ServerGuard) after this callback, so whatever
+                // sidecar is left is ended here, before another copy is started: the Linux reopen and the updater's
+                // restart kill it and wait; a Dock Quit, which reaches this event alone, stops it gracefully.
+                let quit = app.state::<Quit>();
+                let slot = app.state::<ServerChild>().0.clone();
+                match quit.at_exit(|| locked(&slot).take()) {
+                    AtExit::Stop(sidecar) => {
+                        let _ = sidecar.stop_gracefully(SIDECAR_STOP_GRACE);
+                        quit.finish();
+                    }
+                    AtExit::Kill(sidecar) => sidecar.kill_and_wait(),
+                    AtExit::Nothing => {}
+                }
+                // The plugins have had their Exit (the single-instance plugin has released its name): only now
+                // may another copy start.
+                if let Some(mut command) = quit.take_relaunch() {
                     if let Err(error) = command.spawn() {
                         eprintln!("Ancilla could not reopen: {error}");
                     }
@@ -1096,7 +1141,7 @@ mod tests {
     use super::{
         bundled_node, bundled_node_in, classify_exit, error_page_url, find_resource, fresh_port, owned_page, page_response,
         parse_listening_url, plain_path, read_owner_record, remember_port, rotate_server_log, server_args, splash_page_url,
-        stable_port, start_with_retry, Began, BootError, OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome,
+        stable_port, start_with_retry, AtExit, Began, BootError, OwnerRecord, Quit, QuitPhase, Sidecar, StartFailure, StopOutcome,
         ERROR_PATH, OWNER_FILE, PORT_FILE, READY_LINE_DEADLINE, SIDECAR_STOP_GRACE, SPLASH_PAGE, SPLASH_PATH, STDIN_WATCHDOG_FLAG,
     };
     #[cfg(unix)]
@@ -1452,6 +1497,30 @@ mod tests {
         assert!(matches!(quit.begin(|| slot.take()), Began::Stop(1)));
         assert_eq!(quit.admit(2u8, |value| slot = Some(value)), Some(2));
         assert_eq!(slot, None);
+    }
+
+    #[test]
+    fn the_exit_event_stops_what_no_quit_stopped_and_kills_for_an_immediate_exit() {
+        // A Dock Quit reaches Exit alone: nothing began a stop, so the server is stopped there, once.
+        let quit = Quit::default();
+        assert!(matches!(quit.at_exit(|| Some(1u8)), AtExit::Stop(1)));
+        assert_eq!(quit.phase(), QuitPhase::Stopping);
+        assert!(matches!(quit.at_exit(|| Some(2u8)), AtExit::Nothing));
+        // With no server the quit is over at once.
+        let empty = Quit::default();
+        assert!(matches!(empty.at_exit(|| None::<u8>), AtExit::Nothing));
+        assert_eq!(empty.phase(), QuitPhase::Stopped);
+        // A stop that already ran leaves nothing for Exit to do.
+        let stopped = Quit::default();
+        assert!(matches!(stopped.begin(|| Some(3u8)), Began::Stop(3)));
+        stopped.finish();
+        assert!(matches!(stopped.at_exit(|| None::<u8>), AtExit::Nothing));
+        // The Linux reopen and a restart's exit ask for no graceful stop: the server is killed, whatever the phase.
+        let immediate = Quit::default();
+        immediate.exit_at_once();
+        assert!(matches!(immediate.at_exit(|| Some(4u8)), AtExit::Kill(4)));
+        assert_eq!(immediate.phase(), QuitPhase::Idle);
+        assert!(matches!(immediate.at_exit(|| None::<u8>), AtExit::Nothing));
     }
 
     #[test]

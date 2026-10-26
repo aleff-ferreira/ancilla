@@ -503,10 +503,10 @@ pub fn relaunch_installed_linux(app: tauri::AppHandle) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // The installed copy starts from the Exit event, once this process has killed and waited for its server (the
-    // stable port is free, preserving the UI's storage origin) and the single-instance plugin has let go of its
-    // name; started any earlier, the new copy would forward itself to this one and exit. The exit is immediate:
-    // the user asked for a reopen, not a quit.
+    // The installed copy starts from the Exit event, after the Exit arm has killed and waited for this process's
+    // server (the stable port is free, preserving the UI's storage origin) and the single-instance plugin has let
+    // go of its name; started any earlier, the new copy would forward itself to this one and exit. The exit is
+    // immediate: the user asked for a reopen, not a quit.
     let quit = app.state::<crate::Quit>();
     quit.remember_relaunch(command);
     quit.exit_at_once();
