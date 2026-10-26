@@ -12,7 +12,7 @@ An installed copy carries this file, [LICENSE](LICENSE), [LICENSE-HELICON](LICEN
 
 - [JavaScript packages](#javascript-packages): 83 bundled into the local server, 135 into the interface
 - [Node.js runtime](#nodejs-runtime): Node.js v22.23.2
-- [Rust crates](#rust-crates): 534 crates from Cargo.lock
+- [Rust crates](#rust-crates): 535 crates from Cargo.lock
 
 Code the build tools generate into the bundles themselves (esbuild's and Rollup's module helpers, Vite's
 module-preload polyfill) is not listed.
@@ -6513,6 +6513,7 @@ license too.
 - [tauri-plugin-notification 2.4.0](https://crates.io/crates/tauri-plugin-notification/2.4.0)
 - [tauri-plugin-opener 2.5.5](https://crates.io/crates/tauri-plugin-opener/2.5.5)
 - [tauri-plugin-process 2.3.1](https://crates.io/crates/tauri-plugin-process/2.3.1)
+- [tauri-plugin-single-instance 2.4.5](https://crates.io/crates/tauri-plugin-single-instance/2.4.5)
 - [tauri-plugin-updater 2.11.0](https://crates.io/crates/tauri-plugin-updater/2.11.0)
 - [tauri-runtime 2.11.3](https://crates.io/crates/tauri-runtime/2.11.3)
 - [tauri-runtime-wry 2.11.4](https://crates.io/crates/tauri-runtime-wry/2.11.4)

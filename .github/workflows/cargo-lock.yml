@@ -1,0 +1,114 @@
+name: Regenerate Cargo.lock and the notices
+
+# The desktop crate's lock file and THIRD_PARTY_NOTICES.md follow its dependencies, and the maintainer's machine
+# has no Rust toolchain to resolve a new crate with. This job resolves one crate into Cargo.lock on a runner,
+# refuses the result if any crate the lock already knew changed with it, regenerates the notices from the new
+# lock and uploads both files for the maintainer to download and commit:
+#
+#   gh workflow run cargo-lock.yml -R aleff-ferreira/ancilla --ref <branch> -f package=<crate>
+#   gh run download <run id> -R aleff-ferreira/ancilla -n cargo-lock-and-notices --dir <folder>
+#
+# Nothing is committed here: the files are reviewed and committed by hand.
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: The crate to resolve into Cargo.lock (a dependency of apps/desktop/src-tauri/Cargo.toml)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+      # Resolution reads the registry index and the manifests only; the native libraries Tauri links are not needed.
+      - name: Resolve the crate into Cargo.lock
+        env:
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          set -euo pipefail
+          manifest=apps/desktop/src-tauri/Cargo.toml
+          lock=apps/desktop/src-tauri/Cargo.lock
+          cp "$lock" "$RUNNER_TEMP/Cargo.lock.before"
+          if grep -q "^name = \"$PACKAGE\"$" "$lock"; then
+            cargo update --manifest-path "$manifest" -p "$PACKAGE"
+          else
+            # A crate the lock does not know yet cannot be named to cargo update. Resolving the workspace adds the
+            # entries that are missing and keeps every entry that is there at its locked version.
+            cargo update --manifest-path "$manifest" --workspace
+          fi
+          grep -q "^name = \"$PACKAGE\"$" "$lock" || { echo "::error::$PACKAGE is not in Cargo.lock after the resolve: is it a dependency in $manifest?"; exit 1; }
+      # Every crate the lock knew keeps its version, source and checksum; only the named crate and the crates it
+      # brings in may be new. Any other difference means the resolve did more than it was asked, and the lock is
+      # refused rather than reviewed line by line.
+      - name: Refuse a lock that changed more than the new crates
+        run: |
+          node - "$RUNNER_TEMP/Cargo.lock.before" apps/desktop/src-tauri/Cargo.lock <<'JS'
+          const { readFileSync } = require("node:fs");
+          const [before, after] = process.argv.slice(2).map((path) => readFileSync(path, "utf8"));
+          // Each [[package]] block, keyed by name and version: a lock may hold two versions of one crate.
+          const blocks = (text) => {
+            const map = new Map();
+            for (const block of text.split(/^\[\[package\]\]\n/m).slice(1)) {
+              const name = /^name = "(.+)"$/m.exec(block)?.[1];
+              const version = /^version = "(.+)"$/m.exec(block)?.[1];
+              map.set(`${name} ${version}`, block.trim().split("\n"));
+            }
+            return map;
+          };
+          const was = blocks(before);
+          const now = blocks(after);
+          const added = [...now.keys()].filter((key) => !was.has(key));
+          const addedNames = new Set(added.map((key) => key.split(" ")[0]));
+          const problems = [];
+          for (const [key, lines] of was) {
+            const current = now.get(key);
+            if (!current) {
+              problems.push(`${key} is gone`);
+              continue;
+            }
+            // A crate that was there may only gain dependency entries that name one of the new crates.
+            const removed = lines.filter((line) => !current.includes(line));
+            const gained = current.filter((line) => !lines.includes(line));
+            const dependency = (line) => /^ "(.+?)( .+)?",$/.exec(line)?.[1];
+            const stray = gained.filter((line) => !addedNames.has(dependency(line)));
+            if (removed.length > 0 || stray.length > 0) {
+              problems.push(`${key} changed: ${[...removed.map((l) => `-${l}`), ...stray.map((l) => `+${l}`)].join(" ")}`);
+            }
+          }
+          const head = (text) => text.split(/^\[\[package\]\]\n/m)[0];
+          if (head(before) !== head(after)) {
+            problems.push("the lock file header changed");
+          }
+          process.stdout.write(`${added.length > 0 ? `new crates: ${added.join(", ")}` : "no new crates"}\n`);
+          for (const problem of problems) {
+            process.stdout.write(`::error::${problem}\n`);
+          }
+          process.exitCode = problems.length > 0 ? 1 : 0;
+          JS
+      - run: npm ci
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      - run: npm run build --workspace @ancilla/web
+      - run: npm run notices
+      - run: git --no-pager diff --stat -- apps/desktop/src-tauri/Cargo.lock THIRD_PARTY_NOTICES.md
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: cargo-lock-and-notices
+          path: |
+            apps/desktop/src-tauri/Cargo.lock
+            THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
