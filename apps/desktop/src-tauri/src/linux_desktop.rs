@@ -783,7 +783,8 @@ mod tests {
                 .collect();
             (args, removed)
         };
-        let removed = ["APPIMAGE", "APPDIR", "ARGV0", "LD_LIBRARY_PATH", "LD_PRELOAD"];
+        // The command reports its environment changes in the order of the names.
+        let removed = ["APPDIR", "APPIMAGE", "ARGV0", "LD_LIBRARY_PATH", "LD_PRELOAD"];
         let plain = appimage_command("/home/user/.local/share/Ancilla.AppImage", false);
         assert_eq!(plain.get_program().to_string_lossy(), "/home/user/.local/share/Ancilla.AppImage");
         assert_eq!(named(&plain), (Vec::<String>::new(), removed.map(String::from).to_vec()));
