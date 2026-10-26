@@ -442,15 +442,13 @@ pub async fn install_linux_launcher(
 ) -> Result<LinuxDesktopStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let loc = Locations::for_app(&app)?;
-        let extract = std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").is_some()
-            || std::env::var("APPDIR").is_ok_and(|value| value.contains("appimage_extracted"));
         let result = install(
             &loc,
             installation_kind(),
             appimage_source().as_deref(),
             desktop_shortcut,
             env!("CARGO_PKG_VERSION"),
-            extract,
+            extract_and_run_active(),
         )?;
         // These helpers are optional. Some desktops require the user to choose Allow Launching themselves.
         if let Some(directory) = loc.menu.parent() {
@@ -477,19 +475,27 @@ pub async fn install_linux_launcher(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-pub fn relaunch_installed_linux(app: tauri::AppHandle) -> Result<(), String> {
-    let loc = Locations::for_app(&app)?;
-    let installation = read_installation(&loc)
-        .ok_or("Add Ancilla to the application menu before reopening it.")?;
-    if installation_kind() != "appimage" || !owned_file(&loc.binary(), loc.uid)? {
-        return Err("There is no installed AppImage to reopen.".into());
-    }
-    let mut command = Command::new(loc.binary());
-    if installation.extract_and_run {
+/// Whether this AppImage runs extracted, without FUSE: the runtime sets the first variable for
+/// `--appimage-extract-and-run`, and the extraction folder is the second's value.
+pub fn extract_and_run_in(flag: Option<&std::ffi::OsStr>, appdir: Option<&std::ffi::OsStr>) -> bool {
+    flag.is_some() || appdir.is_some_and(|dir| dir.to_string_lossy().contains("appimage_extracted"))
+}
+
+pub fn extract_and_run_active() -> bool {
+    extract_and_run_in(
+        std::env::var_os("APPIMAGE_EXTRACT_AND_RUN").as_deref(),
+        std::env::var_os("APPDIR").as_deref(),
+    )
+}
+
+/// A command that starts an AppImage afresh. The runtime takes `--appimage-extract-and-run` out of the arguments
+/// it hands on, so a copy started without FUSE is asked for it again; and nothing of the mounted image that is
+/// ending, its library paths or its identity, is carried into the new runtime.
+pub fn appimage_command(image: impl AsRef<std::ffi::OsStr>, extract_and_run: bool) -> Command {
+    let mut command = Command::new(image);
+    if extract_and_run {
         command.arg("--appimage-extract-and-run");
     }
-    // Do not carry a mounted AppImage's library paths or identity into the new runtime.
     for name in [
         "APPIMAGE",
         "APPDIR",
@@ -499,6 +505,18 @@ pub fn relaunch_installed_linux(app: tauri::AppHandle) -> Result<(), String> {
     ] {
         command.env_remove(name);
     }
+    command
+}
+
+#[tauri::command]
+pub fn relaunch_installed_linux(app: tauri::AppHandle) -> Result<(), String> {
+    let loc = Locations::for_app(&app)?;
+    let installation = read_installation(&loc)
+        .ok_or("Add Ancilla to the application menu before reopening it.")?;
+    if installation_kind() != "appimage" || !owned_file(&loc.binary(), loc.uid)? {
+        return Err("There is no installed AppImage to reopen.".into());
+    }
+    let mut command = appimage_command(loc.binary(), installation.extract_and_run);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -743,6 +761,38 @@ mod tests {
         fs::write(runtime.join("bus"), "").unwrap();
         assert!(session_bus_likely_in(None, Some(&runtime)));
         assert!(!session_bus_likely_in(None, None));
+    }
+
+    #[test]
+    fn extraction_is_recognised_from_the_runtime_variables() {
+        use std::ffi::OsStr;
+        assert!(!extract_and_run_in(None, None));
+        assert!(extract_and_run_in(Some(OsStr::new("1")), None));
+        assert!(extract_and_run_in(None, Some(OsStr::new("/tmp/appimage_extracted_0f3a9c"))));
+        assert!(!extract_and_run_in(None, Some(OsStr::new("/tmp/.mount_AncillaX1y2z3"))));
+    }
+
+    #[test]
+    fn a_fresh_appimage_command_asks_for_extraction_only_without_fuse_and_drops_the_mounted_image() {
+        let named = |command: &Command| -> (Vec<String>, Vec<String>) {
+            let args = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            let removed = command
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect();
+            (args, removed)
+        };
+        let removed = ["APPIMAGE", "APPDIR", "ARGV0", "LD_LIBRARY_PATH", "LD_PRELOAD"];
+        let plain = appimage_command("/home/user/.local/share/Ancilla.AppImage", false);
+        assert_eq!(plain.get_program().to_string_lossy(), "/home/user/.local/share/Ancilla.AppImage");
+        assert_eq!(named(&plain), (Vec::<String>::new(), removed.map(String::from).to_vec()));
+        let extracted = appimage_command("/home/user/.local/share/Ancilla.AppImage", true);
+        assert_eq!(named(&extracted), (vec!["--appimage-extract-and-run".to_string()], removed.map(String::from).to_vec()));
+        // Arguments the caller adds follow the flag, so the runtime still reads it first.
+        let mut with_args = appimage_command("/home/user/Ancilla.AppImage", true);
+        with_args.arg("--new-window");
+        assert_eq!(named(&with_args).0, ["--appimage-extract-and-run", "--new-window"]);
     }
 
     #[test]

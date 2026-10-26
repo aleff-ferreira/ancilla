@@ -233,10 +233,19 @@ fn begin_graceful_quit(app: &tauri::AppHandle) -> bool {
 }
 
 /// This executable with the arguments it was started with: what a second launch that arrived mid-quit asked for.
-/// Under an AppImage the image itself is run, not the binary mounted from it, which goes away with this process.
+/// Under an AppImage the image itself is run, not the binary mounted from it, which goes away with this process;
+/// it is started as the reopen does, with the dying mount's environment removed and, on a machine without FUSE,
+/// the flag the AppImage runtime takes out of the arguments it hands on.
 fn relaunch_command(app: &tauri::AppHandle) -> Option<Command> {
     let env = app.env();
     let binary = tauri::process::current_binary(&env).ok()?;
+    #[cfg(target_os = "linux")]
+    let mut command = if linux_desktop::installation_kind() == "appimage" {
+        linux_desktop::appimage_command(binary, linux_desktop::extract_and_run_active())
+    } else {
+        Command::new(binary)
+    };
+    #[cfg(not(target_os = "linux"))]
     let mut command = Command::new(binary);
     command.args(env.args_os.iter().skip(1));
     Some(command)
