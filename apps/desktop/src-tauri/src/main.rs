@@ -295,7 +295,7 @@ fn error_page_url() -> String {
     if cfg!(windows) {
         format!("http://{PAGE_SCHEME}.localhost/error")
     } else {
-        format!("{PAGE_SCHEME}://localhost/error")
+        "data:text/html,".to_string()
     }
 }
 
@@ -1013,7 +1013,7 @@ fn main() {
                         }
                         let page = handle.state::<ErrorPage>();
                         *locked(&page.0) = Some(error.page());
-                        error_page_url()
+                        format!("data:text/html,{}", error.page())
                     }
                 };
                 if let Ok(url) = target.parse::<Url>() {
