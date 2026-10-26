@@ -17,6 +17,12 @@ export interface RuntimeConfig {
   allowHosts?: string[];
   /** How long a Muse host may take to answer its start, in milliseconds; 0 turns the limit off. */
   hostStartTimeoutMs?: number;
+  /**
+   * False turns the data folder's owner lock off (`ancilla.owner`), so a second Ancilla over the folder starts instead
+   * of being refused. The way out for a desktop user whose lock cannot be trusted (a network folder); the server says
+   * what it costs when it starts.
+   */
+  dataDirLock?: boolean;
   /** Environment variables for Muse inside WSL, never set on the server itself. */
   wslEnv: Record<string, string>;
 }
@@ -78,11 +84,13 @@ export function parseRuntimeConfig(bytes: Buffer): { config: RuntimeConfig | nul
   if (distro !== undefined) config.distro = distro;
   const musePath = text("musePath");
   if (musePath !== undefined) config.musePath = musePath;
-  if (raw["syncSessionNames"] !== undefined) {
-    if (typeof raw["syncSessionNames"] === "boolean") {
-      config.syncSessionNames = raw["syncSessionNames"];
-    } else {
-      warnings.push(`"syncSessionNames" was ignored: it must be true or false, not ${describe(raw["syncSessionNames"])}`);
+  for (const key of ["syncSessionNames", "dataDirLock"] as const) {
+    if (raw[key] !== undefined) {
+      if (typeof raw[key] === "boolean") {
+        config[key] = raw[key] as boolean;
+      } else {
+        warnings.push(`"${key}" was ignored: it must be true or false, not ${describe(raw[key])}`);
+      }
     }
   }
   const hosts = raw["allowHosts"];

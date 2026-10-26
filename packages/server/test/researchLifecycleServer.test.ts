@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AncillaStore } from "@ancilla/daemon";
+import { EXIT_DATA_DIR_OWNED } from "../src/exitCodes.js";
 import type { ResearchEngine } from "../src/research/index.js";
 import { AncillaServer, type HostHandle } from "../src/server.js";
 import { aState, deferred, newRun, seededStore, tmpDir } from "./lifecycle-rig.js";
@@ -300,28 +301,39 @@ describe("the boot sweep", () => {
     assert.equal(((await get(first.base, "/api/health")).research as { live: number }).live, 1);
   });
 
-  it("is not run by the command-line server that finds its port taken either", { timeout: 120_000 }, async () => {
-    const dir = tmpDir("ancilla-lifecycle-data-");
-    const first = await rig({ dataDir: dir });
-    const runId = await first.startRun();
-    await waitFor(() => first.runOf(runId)?.status === "running", "the run to be running");
-    const port = new URL(first.base).port;
+  // The folder's lock refuses the command-line server before it binds, on the first server's port and on any other:
+  // the sweep is never reached, and the exit code tells the desktop shell not to try another port.
+  for (const [label, portOf] of [
+    ["the same port", (port: string) => port],
+    ["another port", () => "0"],
+  ] as const) {
+    it(`is not run by the command-line server over the same folder on ${label} either`, { timeout: 120_000 }, async () => {
+      const dir = tmpDir("ancilla-lifecycle-data-");
+      const first = await rig({ dataDir: dir });
+      const runId = await first.startRun();
+      await waitFor(() => first.runOf(runId)?.status === "running", "the run to be running");
+      const port = new URL(first.base).port;
 
-    const child = spawn(process.execPath, [join(__dirname, "..", "src", "cli.js"), "--port", port, "--data-dir", dir], { stdio: ["ignore", "pipe", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    const exited = new Promise<number | null>((resolve, reject) => {
-      child.once("error", reject);
-      child.once("close", (code) => resolve(code));
+      const child = spawn(process.execPath, [join(__dirname, "..", "src", "cli.js"), "--port", portOf(port), "--data-dir", dir], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      let stdout = "";
+      child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+      child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", (code) => resolve(code));
+      });
+      const killer = setTimeout(() => child.kill("SIGKILL"), 90_000);
+      const code = await exited;
+      clearTimeout(killer);
+      assert.equal(code, EXIT_DATA_DIR_OWNED, `a server over an owned folder exits with the folder's code; stderr:\n${stderr}`);
+      assert.equal(stdout, "", "nothing on stdout: the ready line is the only thing ever written there");
+      assert.match(stderr, /^ancilla-server: another Ancilla \(pid \d+, started \S+, http:\/\/127\.0\.0\.1:\d+\) owns the data folder /m);
+      assert.doesNotMatch(stderr, /EADDRINUSE/, "the lock answered before the bind");
+      assert.equal(first.runOf(runId)?.status, "running", `the first server's live run was rewritten by the second; stderr:\n${stderr}`);
+      assert.ok(!first.internals.store.listResearchEvents(runId).some((e) => e.type === "run_interrupted"));
     });
-    const killer = setTimeout(() => child.kill("SIGKILL"), 90_000);
-    const code = await exited;
-    clearTimeout(killer);
-    assert.notEqual(code, 0, `a server that cannot bind exits with an error; stderr:\n${stderr}`);
-    assert.match(stderr, /EADDRINUSE|in use/i);
-    assert.equal(first.runOf(runId)?.status, "running", `the first server's live run was rewritten by the second; stderr:\n${stderr}`);
-    assert.ok(!first.internals.store.listResearchEvents(runId).some((e) => e.type === "run_interrupted"));
-  });
+  }
 });
 
 describe("a graceful close of the server", () => {

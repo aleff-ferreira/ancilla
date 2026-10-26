@@ -8,11 +8,19 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { BOOT_BUSY_TIMEOUT_MS } from "@ancilla/daemon";
+import { EXIT_DATA_DIR_OWNED } from "../src/exitCodes.js";
 import { CLI_HOST_WAITS, DEFAULT_HOST_WAITS } from "../src/hostBounds.js";
 import { INSTALLER_KILL_GRACE_MS } from "../src/linuxMuseInstaller.js";
+import { BOOT_BUDGET_MS, OWNER_LOCK_WAIT_MS } from "../src/ownerLock.js";
 import { CLOSE_TIMEOUT_MS } from "../src/research/jobManager.js";
 import { SHELL_KILL_SETTLE_MS } from "../src/runCapture.js";
-import { LINUX_INSTALLER_CLEANUP_MS, LINUX_INSTALLER_STOP_MS,SHUTDOWN_DEADLINE_MS, shutdownSignals, worstCaseCloseMs } from "../src/shutdown.js";
+import { LINUX_INSTALLER_CLEANUP_MS, LINUX_INSTALLER_STOP_MS, SHUTDOWN_DEADLINE_MS, STDIN_EOF_FLAG, shutdownSignals, worstCaseCloseMs } from "../src/shutdown.js";
+
+/** The desktop shell's wait for the ready line: `from_secs(45)` in main.rs, which sidecarContract.test.ts reads there. */
+const SHELL_HANDSHAKE_MS = 45_000;
+/** The boot itself (about 1.7 s to the ready line over a slow mount) and a margin. */
+const BOOT_AND_MARGIN_MS = 2_500;
 
 /** The code of a source file: whole-line `//` comments and block comments left out, so text in a comment never counts. */
 function withoutComments(source: string): string {
@@ -54,6 +62,47 @@ describe("the shutdown deadline", () => {
     assert.ok(LINUX_INSTALLER_STOP_MS >= INSTALLER_KILL_GRACE_MS + LINUX_INSTALLER_CLEANUP_MS);
     assert.ok(LINUX_INSTALLER_STOP_MS > INSTALLER_KILL_GRACE_MS, "the cleanup after the kill is not counted");
     assert.equal(worstCaseCloseMs(CLI_HOST_WAITS), INSTALLER_KILL_GRACE_MS + LINUX_INSTALLER_CLEANUP_MS + CLOSE_TIMEOUT_MS + CLI_HOST_WAITS.closeMs);
+  });
+
+  it("is armed before the server listens, so a signal or the end of stdin during the boot still ends in a close", async () => {
+    for (const [name, source] of await cliSources()) {
+      const armed = source.indexOf("createShutdown(");
+      const listening = source.indexOf("server.listen(");
+      assert.ok(armed !== -1 && listening !== -1, `${name} does not create the shutdown and listen`);
+      assert.ok(armed < listening, `${name} creates the shutdown only after the server listens`);
+    }
+  });
+});
+
+describe("the boot budget", () => {
+  it("ends, with the boot itself and a margin, before the desktop shell gives up on the ready line", () => {
+    // The shell waited 25 s before 0.21.0, with no retry behind that wait. Without a budget the worst case was the
+    // boot, the lock wait, the store's boot busy timeout and the two sweeps' retries over a locked database (about
+    // 8.5 s): 25.2 s, past that deadline. The budget cuts the sweeps, and the shell now waits 45 s.
+    assert.ok(BOOT_BUDGET_MS + BOOT_AND_MARGIN_MS <= SHELL_HANDSHAKE_MS, `a boot can take ${BOOT_BUDGET_MS + BOOT_AND_MARGIN_MS} ms and the shell waits ${SHELL_HANDSHAKE_MS} ms`);
+  });
+
+  it("holds the lock wait and the store's boot wait, which run one after the other", () => {
+    assert.ok(OWNER_LOCK_WAIT_MS + BOOT_BUSY_TIMEOUT_MS <= BOOT_BUDGET_MS, `${OWNER_LOCK_WAIT_MS} + ${BOOT_BUSY_TIMEOUT_MS} ms of waits in a budget of ${BOOT_BUDGET_MS} ms`);
+  });
+});
+
+describe("the exit code of a refused data folder", () => {
+  it("is neither of the command line's own codes, and never reads as a death by signal", () => {
+    const code: number = EXIT_DATA_DIR_OWNED;
+    assert.ok(![0, 1].includes(code), "0 and 1 are the clean close and any other failure");
+    assert.ok(Number.isInteger(code) && code > 1 && code < 128, `${code} would read as a death by signal, or is not an exit code`);
+  });
+});
+
+describe("the stdin watchdog flag", () => {
+  it("is never a default and never listed: the command line takes it from the constant and keeps it out of usage and the value flags", async () => {
+    assert.match(STDIN_EOF_FLAG, /^--[a-z-]+$/);
+    for (const [name, source] of await cliSources()) {
+      assert.doesNotMatch(source, new RegExp(STDIN_EOF_FLAG), `${name} spells the flag out instead of taking it from shutdown.ts`);
+      assert.doesNotMatch(source, /VALUE_FLAGS\s*=\s*\[[^\]]*STDIN_EOF_FLAG/, `${name} lists the flag among the ones that take a value`);
+      assert.match(source, /STDIN_EOF_FLAG/, `${name} does not read the flag at all`);
+    }
   });
 });
 

@@ -63,6 +63,14 @@ describe("runtime.json", () => {
     ]);
   });
 
+  it("reads dataDirLock as true or false only, like syncSessionNames", () => {
+    assert.deepEqual(parseRuntimeConfig(utf8('{"dataDirLock":false}')).config, { dataDirLock: false, wslEnv: {} });
+    assert.deepEqual(parseRuntimeConfig(utf8('{"dataDirLock":true}')).config, { dataDirLock: true, wslEnv: {} });
+    const { config, warnings } = parseRuntimeConfig(utf8('{"dataDirLock":"off"}'));
+    assert.deepEqual(config, { wslEnv: {} });
+    assert.deepEqual(warnings, ['"dataDirLock" was ignored: it must be true or false, not string']);
+  });
+
   it("reads the file from disk, and starts from nothing when there is none or it cannot be used", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ancilla-runtime-"));
     const file = join(dir, "runtime.json");
