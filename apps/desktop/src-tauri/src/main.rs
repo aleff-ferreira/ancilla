@@ -65,7 +65,7 @@ impl Sidecar {
 
     /// The quit path: end of stdin, then the server's own close (its deadline is inside `grace`), then the kill.
     fn stop_gracefully(mut self, grace: Duration) -> StopOutcome {
-        let _kept = self.stdin.take();
+        drop(self.stdin.take());
         let started = Instant::now();
         loop {
             match self.child.try_wait() {
