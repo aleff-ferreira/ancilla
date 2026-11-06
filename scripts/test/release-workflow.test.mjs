@@ -301,10 +301,43 @@ describe("release.yml: the Linux job", () => {
   test("starts the repacked AppImage and the installed .deb before signing anything", () => {
     const sign = indexOfStep("desktop-linux", /^Sign/);
     const appimage = linux().findIndex((step) => /smoke-linux\.sh/.test(step.run ?? "") && /--appimage-extract-and-run/.test(step.run));
-    const deb = linux().findIndex((step) => /smoke-linux\.sh \/usr\/bin\/ancilla/.test(step.run ?? ""));
+    const deb = linux().findIndex((step) => /smoke-linux\.sh .*\/usr\/bin\/ancilla/.test(step.run ?? ""));
     assert.ok(deb > 0 && appimage > deb && sign > appimage, `${deb} < ${appimage} < ${sign}`);
     assert.match(linux()[deb].run, /apt-get install -y/);
     assert.match(linux()[appimage].run, /steps\.repack|APPIMAGE/);
+  });
+
+  test("runs every smoke launch where the script can: under a virtual display, the bus ones under a session bus", () => {
+    const smokes = linux().filter((step) => /smoke-linux\.sh/.test(step.run ?? ""));
+    assert.equal(smokes.length, 4, "the .deb and the repacked AppImage, each once without a session bus and once under one");
+    for (const step of smokes) {
+      // smoke-linux.sh stops with exit code 2 when DISPLAY is not set, as the first rehearsal of 0.21.0 found out.
+      assert.match(step.run, /xvfb-run -a (dbus-run-session -- )?bash apps\/desktop\/scripts\/smoke-linux\.sh /, `${step.name}: under a virtual display`);
+      assert.match(step.run, /--server packages\/server\/dist\/src\/cli\.js/, `${step.name}: with the launch over a folder a server started by hand owns`);
+    }
+    const bus = smokes.filter((step) => /--bus/.test(step.run));
+    assert.equal(bus.length, 2, "one .deb and one AppImage under a session bus");
+    for (const step of bus) {
+      assert.match(step.run, /xvfb-run -a dbus-run-session -- bash /, `${step.name}: --bus needs a session bus`);
+    }
+  });
+
+  test("installs what the smoke needs: a display, a way to find and close its window, and a session bus", () => {
+    const install = stepNamed("desktop-linux", /Install Tauri Linux dependencies/).run;
+    for (const tool of ["xvfb", "xdotool", "python3-xlib", "dbus"]) {
+      assert.match(install, new RegExp(`(^| )${tool}( |$)`), `${tool} is installed for the smoke`);
+    }
+  });
+
+  test("no workflow starts the Linux smoke without a virtual display", () => {
+    const dir = join(root, ".github", "workflows");
+    for (const file of readdirSync(dir).filter((name) => name.endsWith(".yml"))) {
+      read(`.github/workflows/${file}`).split("\n").forEach((line, index) => {
+        if (/bash apps\/desktop\/scripts\/smoke-linux\.sh/.test(line) && !/^\s*#/.test(line)) {
+          assert.match(line, /xvfb-run -a /, `${file}:${index + 1}: ${line.trim()}`);
+        }
+      });
+    }
   });
 
   test("signs, verifies against the newest published release's key, then replaces by release id, in that order", () => {

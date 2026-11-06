@@ -117,9 +117,9 @@ and `latest.json`, which lists each platform's update package, its signature and
 
 **Linux** then, with everything still private:
 
-1. checks all three package formats, installs the `.deb` and starts it from `/usr/bin/ancilla`;
+1. checks all three package formats, installs the `.deb` and starts it from `/usr/bin/ancilla`, under a virtual display, with and without a session bus (quit through its window, started again while it closes, started over a folder that a server started by hand owns);
 2. repacks the AppImage **the bundler just built** (not a published file) without the Wayland libraries the bundler copies in ([tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665)), and fails if any `libwayland` is left in the result;
-3. starts the repacked AppImage without FUSE;
+3. starts the repacked AppImage without FUSE, the same way;
 4. signs it;
 5. verifies that signature against the public key in `tauri.conf.json` **as the newest published release had it** (read from that tag with `git show`; if it cannot be read, the job fails). This is the key installed copies trust, and the right one for a key rotation (below);
 6. replaces the AppImage, its `.sig` and `latest.json` in the draft **by release id** and rewrites any temporary `untagged-...` download URL to the tag's. The AppImage goes in first, then its `.sig`, each tried up to three times with a wait between (GitHub sometimes refuses a large asset, and a refused upload leaves a partial asset that is removed before the next try), and each checked for state, size and digest. `latest.json` is touched last, so a refused upload leaves the draft with the `latest.json` it had, which lists every platform, and the failed Linux job can be run again. Only the last upload, of `latest.json` itself, can leave the draft without one; that takes three failures in a row, and then the whole workflow has to run again (below).

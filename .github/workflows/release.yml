@@ -287,8 +287,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
+      # xvfb stands in for a display for the smoke launches below. The smoke finds the window with xdotool and closes it
+      # with an X client message (python3-xlib), and dbus-run-session gives two of the launches the session bus that the
+      # single-instance plugin needs.
       - name: Install Tauri Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools rpm libarchive-tools desktop-file-utils xvfb
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev squashfs-tools rpm libarchive-tools desktop-file-utils xvfb xdotool python3-xlib dbus
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       # Pinned to a commit: this step holds the updater signing key, so a moved tag must not change what runs.
@@ -325,13 +328,18 @@ jobs:
           fi
       - name: Check every Linux installer contains its runtime and application-menu icon
         run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
-      # The package a user installs with apt, started from /usr/bin/ancilla, as the installer smoke test does.
+      # The package a user installs with apt, started from /usr/bin/ancilla, as the installer smoke test does: quit
+      # through its window, started again while the first copy closes, and started over a folder that a server started
+      # by hand owns, once with no session bus and once under one (docs/RELEASING.md, the 0.21.0 checklist). The script
+      # takes its display from the caller and stops without one.
       - name: Install the Debian package and launch it from its system path
         run: |
           set -euo pipefail
           debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
           sudo apt-get install -y "${debs[0]}"
-          bash apps/desktop/scripts/smoke-linux.sh /usr/bin/ancilla
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js /usr/bin/ancilla
+      - name: Launch the installed package twice under a session bus
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js /usr/bin/ancilla
       # linuxdeploy bundles Ubuntu 22.04's libwayland-*. Newer host Mesa fails EGL init against the stale copy, so
       # WebKitGTK aborts with EGL_BAD_ALLOC before the window opens (tauri-apps/tauri#15665). The AppImage the bundler
       # just built is repacked without those libraries, here on the runner and not after a download of what is
@@ -349,7 +357,11 @@ jobs:
       - name: Launch the repacked AppImage without requiring FUSE
         env:
           APPIMAGE: ${{ steps.repack.outputs.path }}
-        run: bash apps/desktop/scripts/smoke-linux.sh "$APPIMAGE" --appimage-extract-and-run
+        run: xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js "$APPIMAGE" --appimage-extract-and-run
+      - name: Launch the repacked AppImage twice under a session bus
+        env:
+          APPIMAGE: ${{ steps.repack.outputs.path }}
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js "$APPIMAGE" --appimage-extract-and-run
       - name: Sign the repacked AppImage
         id: sign
         shell: bash
