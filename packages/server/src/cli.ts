@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   }
   const { HOST_START_TIMEOUT_ENV, resolveHostStartTimeoutMs } = await import("./hostBounds.js");
   const { CLI_HOST_WAITS } = await import("./hostBounds.js");
-  const { createShutdown, shutdownSignals } = await import("./shutdown.js");
+  const { closeWhenStdinEnds, createShutdown, shutdownSignals } = await import("./shutdown.js");
   const server = new AncillaServer({
     // Short enough that the worst case of a close ends before the shutdown deadline; see `worstCaseCloseMs`.
     hostWaits: CLI_HOST_WAITS,
@@ -162,9 +162,7 @@ async function main(): Promise<void> {
   if (argv.includes(STDIN_EOF_FLAG)) {
     // Only with the flag: without it stdin is never touched, so a stdin that ends at once (systemd, Docker without
     // -i, nohup, cron) or an inherited handle that cannot be read (a GUI parent) changes nothing.
-    process.stdin.on("end", () => shutdown(STDIN_EOF_CAUSE));
-    process.stdin.on("error", () => shutdown(STDIN_EOF_CAUSE));
-    process.stdin.resume();
+    closeWhenStdinEnds(process.stdin, shutdown);
   }
   let bound: { host: string; port: number };
   try {

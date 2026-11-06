@@ -12,7 +12,7 @@ import { BOOT_BUSY_TIMEOUT_MS } from "@ancilla/daemon";
 import { EXIT_DATA_DIR_OWNED } from "../src/exitCodes.js";
 import { CLI_HOST_WAITS, DEFAULT_HOST_WAITS } from "../src/hostBounds.js";
 import { INSTALLER_KILL_GRACE_MS } from "../src/linuxMuseInstaller.js";
-import { BOOT_BUDGET_MS, OWNER_LOCK_WAIT_MS } from "../src/ownerLock.js";
+import { BOOT_BUDGET_MS, OWNER_FILE_RETRIES, OWNER_LOCK_WAIT_MS, OWNER_POLL_MS } from "../src/ownerLock.js";
 import { CLOSE_TIMEOUT_MS } from "../src/research/jobManager.js";
 import { SHELL_KILL_SETTLE_MS } from "../src/runCapture.js";
 import { LINUX_INSTALLER_CLEANUP_MS, LINUX_INSTALLER_STOP_MS, SHUTDOWN_DEADLINE_MS, STDIN_EOF_FLAG, shutdownSignals, worstCaseCloseMs } from "../src/shutdown.js";
@@ -84,6 +84,14 @@ describe("the boot budget", () => {
 
   it("holds the lock wait and the store's boot wait, which run one after the other", () => {
     assert.ok(OWNER_LOCK_WAIT_MS + BOOT_BUSY_TIMEOUT_MS <= BOOT_BUDGET_MS, `${OWNER_LOCK_WAIT_MS} + ${BOOT_BUSY_TIMEOUT_MS} ms of waits in a budget of ${BOOT_BUDGET_MS} ms`);
+  });
+
+  it("holds the passes a refused create, read or remove is tried again on as well", () => {
+    const retries = OWNER_FILE_RETRIES * OWNER_POLL_MS;
+    assert.ok(
+      OWNER_LOCK_WAIT_MS + retries + BOOT_BUSY_TIMEOUT_MS <= BOOT_BUDGET_MS,
+      `${OWNER_LOCK_WAIT_MS} + ${retries} + ${BOOT_BUSY_TIMEOUT_MS} ms of waits in a budget of ${BOOT_BUDGET_MS} ms`,
+    );
   });
 });
 

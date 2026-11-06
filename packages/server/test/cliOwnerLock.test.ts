@@ -15,8 +15,8 @@ import { EXIT_DATA_DIR_OWNED } from "../src/exitCodes.js";
 import { STDIN_EOF_FLAG } from "../src/shutdown.js";
 import { aState, tmpDir } from "./lifecycle-rig.js";
 import { FakeConnection, get, send, start, waitFor } from "./harness.js";
-import { ownerFile, ownerRecord, readOwner, writeOwner } from "./ownerLockFakes.js";
-import { exitedWithin, startCli } from "./cliRig.js";
+import { ownerFile, ownerRecord, readOwner, readOwnerText, writeOwner } from "./ownerLockFakes.js";
+import { exitedWithin, startCli, stopCli } from "./cliRig.js";
 
 /** An engine that checkpoints once and then waits for its signal, as a run in the middle of its work does. */
 const waitingEngine: ResearchEngine = async (input, _config, deps, signal) => {
@@ -77,24 +77,28 @@ describe("ancilla-server over a folder a live Ancilla owns", () => {
       const dir = tmpDir("ancilla-cli-lock-");
       const first = await owner(dir);
       const run = startCli(["--port", portOf(first.port), "--data-dir", dir]);
-      const ended = await exitedWithin(run);
-      assert.notEqual(ended, null, `the refused server did not exit; stderr:\n${run.stderr()}`);
-      assert.deepEqual(ended, { code: EXIT_DATA_DIR_OWNED, signal: null }, run.stderr());
-      assert.equal(run.stdout(), "", "a refused server wrote to stdout");
-      // Node's own warning about the SQLite module is not the server's.
-      const lines = run.stderr().split("\n").filter((line) => line !== "" && !/ExperimentalWarning|--trace-warnings/.test(line));
-      assert.equal(lines.length, 1, `one stderr line, not:\n${run.stderr()}`);
-      assert.match(
-        lines[0]!,
-        new RegExp(`^ancilla-server: another Ancilla \\(pid ${process.pid}, started \\S+, http://127\\.0\\.0\\.1:${first.port}\\) owns the data folder .*; close it first, or start this one with --data-dir <other folder>\\. \\(.*ancilla\\.owner holds the record\\)$`),
-      );
-      assert.ok(lines[0]!.includes(dir), "the line names the folder");
-      assert.equal(first.store.getResearchRun(first.runId)?.status, "running", "the owner's live run was rewritten");
-      assert.ok(!first.store.listResearchEvents(first.runId).some((event) => event.type === "run_interrupted"));
-      const health = await get(first.base, "/api/health");
-      assert.equal(health.ok, true);
-      assert.equal(health.instanceId, first.server.instanceId);
-      assert.equal(readOwner(dir)?.instanceId, first.server.instanceId, "the owner's record changed");
+      try {
+        const ended = await exitedWithin(run);
+        assert.notEqual(ended, null, `the refused server did not exit; stderr:\n${run.stderr()}`);
+        assert.deepEqual(ended, { code: EXIT_DATA_DIR_OWNED, signal: null }, run.stderr());
+        assert.equal(run.stdout(), "", "a refused server wrote to stdout");
+        // Node's own warning about the SQLite module is not the server's.
+        const lines = run.stderr().split("\n").filter((line) => line !== "" && !/ExperimentalWarning|--trace-warnings/.test(line));
+        assert.equal(lines.length, 1, `one stderr line, not:\n${run.stderr()}`);
+        assert.match(
+          lines[0]!,
+          new RegExp(`^ancilla-server: another Ancilla \\(pid ${process.pid}, started \\S+, http://127\\.0\\.0\\.1:${first.port}\\) owns the data folder .*; close it first, or start this one with --data-dir <other folder>\\. \\(.*ancilla\\.owner holds the record\\)$`),
+        );
+        assert.ok(lines[0]!.includes(dir), "the line names the folder");
+        assert.equal(first.store.getResearchRun(first.runId)?.status, "running", "the owner's live run was rewritten");
+        assert.ok(!first.store.listResearchEvents(first.runId).some((event) => event.type === "run_interrupted"));
+        const health = await get(first.base, "/api/health");
+        assert.equal(health.ok, true);
+        assert.equal(health.instanceId, first.server.instanceId);
+        assert.equal(readOwner(dir)?.instanceId, first.server.instanceId, "the owner's record changed");
+      } finally {
+        await stopCli(run);
+      }
     });
   }
 });
@@ -105,16 +109,20 @@ describe("ancilla-server over a folder with a record nobody serves", () => {
     const stale = ownerRecord({ pid: deadPid(), port: await closedPort(), startedAt: "2026-10-01T00:00:00.000Z" });
     writeOwner(dir, stale);
     const run = startCli(["--port", "0", "--data-dir", dir, STDIN_EOF_FLAG], {}, { stdin: "pipe" });
-    const base = await run.ready;
-    const record = readOwner(dir);
-    assert.equal(record?.pid, run.child.pid);
-    assert.equal(record?.port, Number(new URL(base).port));
-    assert.notEqual(record?.instanceId, stale.instanceId);
-    assert.equal(record?.instanceId, (await get(base, "/api/health")).instanceId);
-    assert.match(run.stderr(), /taking over the data folder .*is gone/);
-    run.child.stdin!.end();
-    assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
-    assert.equal(readOwner(dir), null);
+    try {
+      const base = await run.ready;
+      const record = readOwner(dir);
+      assert.equal(record?.pid, run.child.pid);
+      assert.equal(record?.port, Number(new URL(base).port));
+      assert.notEqual(record?.instanceId, stale.instanceId);
+      assert.equal(record?.instanceId, (await get(base, "/api/health")).instanceId);
+      assert.match(run.stderr(), /taking over the data folder .*is gone/);
+      run.child.stdin!.end();
+      assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
+      assert.equal(readOwner(dir), null);
+    } finally {
+      await stopCli(run);
+    }
   });
 
   it("starts without the lock, with a line, when the record cannot be read", { skip: process.platform === "win32" ? "file modes are POSIX" : ROOT_SKIP, timeout: 60_000 }, async () => {
@@ -123,13 +131,71 @@ describe("ancilla-server over a folder with a record nobody serves", () => {
     chmodSync(ownerFile(dir), 0o000);
     try {
       const run = startCli(["--port", "0", "--data-dir", dir, STDIN_EOF_FLAG], {}, { stdin: "pipe" });
-      const base = await run.ready;
-      assert.match(run.stderr(), /the data folder lock could not be read \(EACCES\): running without it/);
-      assert.equal((await get(base, "/api/health")).owner.lock, "unavailable");
-      run.child.stdin!.end();
-      assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
+      try {
+        const base = await run.ready;
+        assert.match(run.stderr(), /the data folder lock could not be read \(EACCES\): running without it/);
+        assert.equal((await get(base, "/api/health")).owner.lock, "unavailable");
+        run.child.stdin!.end();
+        assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
+      } finally {
+        await stopCli(run);
+      }
     } finally {
       chmodSync(ownerFile(dir), 0o600);
+    }
+  });
+});
+
+describe("two ancilla-server processes started together over a record they cannot call stale", () => {
+  it("never both run: in ten rounds one serves and the other exits 75 naming it", { timeout: 180_000 }, async () => {
+    // The record names a live process (this one) and a port nothing answers on, so both newcomers wait their whole ten
+    // seconds on it and their budgets end together: the case where each used to take the folder from the other.
+    const ROUNDS = 10;
+    const rounds = [];
+    for (let round = 0; round < ROUNDS; round += 1) {
+      const dir = tmpDir("ancilla-cli-lock-");
+      writeOwner(dir, ownerRecord({ port: await closedPort(), startedAt: "2026-10-01T00:00:00.000Z" }));
+      const runs = [0, 1].map(() => startCli(["--port", "0", "--data-dir", dir, STDIN_EOF_FLAG], {}, { stdin: "pipe" }));
+      rounds.push({ dir, runs });
+    }
+    try {
+      const outcomes = await Promise.all(
+        rounds.map(({ runs }) =>
+          Promise.all(runs.map((run) => Promise.race([run.ready.then(() => "serving" as const, () => "exited" as const), run.exited.then(() => "exited" as const)]))),
+        ),
+      );
+      for (const [round, { dir, runs }] of rounds.entries()) {
+        const states = outcomes[round]!;
+        const detail = runs.map((run, index) => `${index}: ${states[index]}\n${run.stderr()}`).join("\n");
+        assert.equal(states.filter((state) => state === "serving").length, 1, `round ${round}: expected one server, got ${JSON.stringify(states)}\n${detail}`);
+        const winner = runs[states.indexOf("serving")]!;
+        const loser = runs[states.indexOf("exited")]!;
+        assert.deepEqual(await exitedWithin(loser), { code: EXIT_DATA_DIR_OWNED, signal: null }, `round ${round}: the second was not refused\n${detail}`);
+        assert.match(loser.stderr(), new RegExp(`another Ancilla \\(pid ${winner.child.pid},`), `round ${round}: the refusal does not name the server that runs\n${detail}`);
+        assert.equal(readOwner(dir)?.pid, winner.child.pid, `round ${round}: the record does not name the server that runs`);
+        assert.equal(winner.child.exitCode, null, `round ${round}: the server that took the folder is gone\n${detail}`);
+      }
+    } finally {
+      await Promise.all(rounds.flatMap(({ runs }) => runs.map((run) => stopCli(run))));
+    }
+  });
+});
+
+describe("ancilla-server whose folder was taken while it ran", () => {
+  it("leaves the record of the server that took it, through the close on the end of its stdin", { timeout: 60_000 }, async () => {
+    const dir = tmpDir("ancilla-cli-lock-");
+    const run = startCli(["--port", "0", "--data-dir", dir, STDIN_EOF_FLAG], {}, { stdin: "pipe" });
+    try {
+      await run.ready;
+      assert.equal(readOwner(dir)?.pid, run.child.pid, "the record names the running server");
+      const successor = ownerRecord({ port: await closedPort() });
+      writeOwner(dir, successor);
+      const before = readOwnerText(dir);
+      run.child.stdin!.end();
+      assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
+      assert.equal(readOwnerText(dir), before, "the closing server rewrote or removed its successor's record");
+    } finally {
+      await stopCli(run);
     }
   });
 });
@@ -140,12 +206,16 @@ describe("runtime.json dataDirLock false", () => {
     const first = await owner(dir, false);
     writeFileSync(join(dir, "runtime.json"), JSON.stringify({ dataDirLock: false }), "utf8");
     const run = startCli(["--port", "0", "--data-dir", dir, STDIN_EOF_FLAG], {}, { stdin: "pipe" });
-    const base = await run.ready;
-    assert.match(run.stderr(), /runtime\.json dataDirLock is false: .* is not locked/);
-    assert.equal((await get(base, "/api/health")).owner.lock, "off");
-    assert.equal(readOwner(dir)?.instanceId, first.server.instanceId, "the owner's record changed");
-    run.child.stdin!.end();
-    assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
-    assert.equal(readOwner(dir)?.instanceId, first.server.instanceId);
+    try {
+      const base = await run.ready;
+      assert.match(run.stderr(), /runtime\.json dataDirLock is false: .* is not locked/);
+      assert.equal((await get(base, "/api/health")).owner.lock, "off");
+      assert.equal(readOwner(dir)?.instanceId, first.server.instanceId, "the owner's record changed");
+      run.child.stdin!.end();
+      assert.deepEqual(await exitedWithin(run), { code: 0, signal: null }, run.stderr());
+      assert.equal(readOwner(dir)?.instanceId, first.server.instanceId);
+    } finally {
+      await stopCli(run);
+    }
   });
 });

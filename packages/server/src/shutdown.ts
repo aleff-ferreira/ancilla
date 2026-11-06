@@ -136,3 +136,25 @@ export function createShutdown(options: ShutdownOptions): ShutdownHandler {
   };
   return Object.assign(handler, { begun: () => begun });
 }
+
+/** The part of `process.stdin` the watchdog uses. */
+export interface StdinEvents {
+  on(event: "end" | "error", listener: () => void): unknown;
+  resume(): unknown;
+}
+
+/**
+ * The end of stdin as a close, for a server started with `STDIN_EOF_FLAG`. A pipe can report its end and an error for
+ * the same loss, in either order, and the second report must not reach the handler as a second signal, which exits at
+ * once without the close having finished: so nothing is done once a close has begun, whatever began it.
+ */
+export function closeWhenStdinEnds(stdin: StdinEvents, shutdown: ShutdownHandler): void {
+  const ended = () => {
+    if (!shutdown.begun()) {
+      shutdown(STDIN_EOF_CAUSE);
+    }
+  };
+  stdin.on("end", ended);
+  stdin.on("error", ended);
+  stdin.resume();
+}

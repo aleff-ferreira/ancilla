@@ -61,6 +61,26 @@ export function exitedWithin(run: Running, ms = HUNG): Promise<{ code: number | 
   return Promise.race([run.exited, sleep(ms).then(() => null)]);
 }
 
+/**
+ * Ends a child a test is done with, or one a failed assertion left behind: its stdin closed (which stops a server
+ * started with the watchdog flag), then the kill if it is still there a few seconds later. Without it a failing
+ * assertion leaves the child on its open pipe, and the runner never exits.
+ */
+export async function stopCli(run: Running, graceMs = 5_000): Promise<void> {
+  const { child } = run;
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+  if (child.stdin && !child.stdin.destroyed) {
+    child.stdin.on("error", () => undefined);
+    child.stdin.end();
+  }
+  if ((await exitedWithin(run, graceMs)) === null) {
+    child.kill("SIGKILL");
+    await exitedWithin(run, graceMs);
+  }
+}
+
 /** Whether `GET /api/health` of this base answers at all. */
 export async function answers(base: string): Promise<boolean> {
   try {

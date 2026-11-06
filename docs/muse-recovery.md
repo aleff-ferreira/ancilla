@@ -279,9 +279,13 @@ ancilla-server: another Ancilla (pid 12345, started 2026-10-14T20:00:00.000Z, ht
 ```
 
 The desktop app shows a page saying that Ancilla is already open instead of starting its server on another port, and
-leaves its `server-port` file as it was. A server that is closing, or one that has not bound its port yet, is waited for
-(up to ten seconds, and the port it held is tried again meanwhile); a record left by a server that was killed (its port
-dead, its pid gone) is taken over at once. The record is removed when the server closes, and by its process on any
+leaves its `server-port` file as it was. A server that is closing, or one that has not bound its port yet, is waited for,
+up to ten seconds; once the folder is taken, a port the previous server still holds is tried again every quarter second
+until twenty seconds after the start. A record left by a server that was killed (its port dead, its pid gone) is taken
+over at once. When two servers are started together over a record they cannot call stale, the one that takes the folder
+runs and the other, which gives the newcomer a wait of its own, is refused once the newcomer answers. A record is
+rewritten and removed only while it still names the server doing it: one that finds the folder was taken from it leaves
+the file alone and says so once in its log. The record is removed when the server closes, and by its process on any
 other normal exit. A record written on another system (a Windows desktop and a WSL command line over one folder) is
 refused outright, since neither can see the other's processes or loopback: delete `ancilla.owner` when no other Ancilla
 runs. On a folder where the file cannot be written or read the server says so once and runs without the lock.
@@ -290,9 +294,12 @@ on a network folder where the lock cannot be trusted. Older versions of Ancilla 
 reports `instanceId` and `owner` (`lock` is `held`, `reentrant` for a second server in the same process, `unavailable`
 or `off`, with the pid, the start time and the file).
 
-A start can take longer than before when the folder's last server is still closing: the wait on the lock, the database's
-own wait for the previous process and the sweeps of what it left in flight are bounded together to twenty seconds, after
-which what is left is marked at the next start.
+A start can take longer than before when the folder's last server is still closing: the wait on the lock, the retries of
+the port and the sweeps of what it left in flight are kept within twenty seconds of the start (a second server that took
+the folder meanwhile is waited for ten seconds of its own), and what the sweeps could not reach is marked at the next
+start. That bound does not cover the database's own wait: the store waits up to five seconds for a database another
+process holds locked, and a server that still finds it locked then exits with code 1 (`database is locked`), as it
+always has.
 
 ## Limits
 

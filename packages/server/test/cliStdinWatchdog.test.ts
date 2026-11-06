@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isRunning } from "./fakeMuse.js";
+import { isRunning, killQuietly } from "./fakeMuse.js";
 import { CLI, HUNG, answers, exitedWithin, serverWithPendingCommand, startCli, until } from "./cliRig.js";
 import { sleep } from "./research-rigs.js";
 import { OWNER_LOCK_FILE } from "../src/ownerLock.js";
@@ -67,14 +67,18 @@ describe("ancilla-server with the stdin watchdog flag", () => {
     const stderrFile = join(root, "server.stderr");
     const parentScript = join(root, "parent.js");
     // The parent starts the server with a pipe for its stdin, relays the ready line and its child's pid, then exits
-    // without closing the pipe: the system closes it, and that end is what the server has to notice.
+    // without closing the pipe: the system closes it, and that end is what the server has to notice. The server is
+    // spawned detached: on Windows libuv puts a child that is not detached into a job object that kills it when
+    // its parent exits (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE), so the server died with the parent before it could see the
+    // pipe end, and the test measured libuv, not the watchdog. The desktop app is a Rust process, which makes no job
+    // object, so a detached child is the shape of the real case. `windowsHide` keeps a console window from opening.
     await writeFile(
       parentScript,
       [
         'const { spawn } = require("node:child_process");',
         'const { openSync } = require("node:fs");',
         "const [cli, dir, flag, stderrFile] = process.argv.slice(2);",
-        'const child = spawn(process.execPath, [cli, "--port", "0", "--data-dir", dir, flag], { stdio: ["pipe", "pipe", openSync(stderrFile, "w")] });',
+        'const child = spawn(process.execPath, [cli, "--port", "0", "--data-dir", dir, flag], { stdio: ["pipe", "pipe", openSync(stderrFile, "w")], detached: true, windowsHide: true });',
         'child.stdout.on("data", (chunk) => {',
         "  process.stdout.write(`${child.pid} ${chunk}`, () => process.exit(0));",
         "});",
@@ -84,18 +88,38 @@ describe("ancilla-server with the stdin watchdog flag", () => {
     );
     const parent = spawn(process.execPath, [parentScript, CLI, dir, FLAG, stderrFile], { stdio: ["ignore", "pipe", "pipe"] });
     let relayed = "";
+    let parentGone = false;
     parent.stdout.on("data", (chunk: Buffer) => { relayed += chunk.toString(); });
-    await new Promise<void>((resolve) => parent.once("close", () => resolve()));
-    const match = /^(\d+) ancilla-server listening on (http:\/\/\S+)/.exec(relayed);
-    assert.ok(match, `the parent did not relay the ready line: ${JSON.stringify(relayed)}`);
-    const pid = Number(match[1]);
-    const base = match[2]!;
-    await until(() => !isRunning(pid), "the orphaned server to exit");
-    const stderr = await readFile(stderrFile, "utf8");
-    assert.match(stderr, /stdin EOF received: closing the server/, stderr);
-    assert.doesNotMatch(stderr, /did not finish|closing failed|second signal/, stderr);
-    assert.equal(await answers(base), false, "the port still answers after the orphaned server closed");
-    assert.equal(existsSync(join(dir, OWNER_LOCK_FILE)), false, "the orphaned server did not release its record");
+    parent.once("close", () => { parentGone = true; });
+    // The server is the parent's child, not this test's: when an assertion fails it is still running, and so is the
+    // parent if it never relayed. Both are ended here, or the runner waits on them for good.
+    let finished = false;
+    const orphan = () => {
+      const first = /^(\d+) /.exec(relayed);
+      return first ? Number(first[1]) : null;
+    };
+    try {
+      await until(() => parentGone, "the parent to relay the ready line and exit");
+      const match = /^(\d+) ancilla-server listening on (http:\/\/\S+)/.exec(relayed);
+      assert.ok(match, `the parent did not relay the ready line: ${JSON.stringify(relayed)}`);
+      const pid = Number(match[1]);
+      const base = match[2]!;
+      await until(() => !isRunning(pid), "the orphaned server to exit");
+      const stderr = await readFile(stderrFile, "utf8");
+      assert.match(stderr, /stdin EOF received: closing the server/, stderr);
+      assert.doesNotMatch(stderr, /did not finish|closing failed|second signal/, stderr);
+      assert.equal(await answers(base), false, "the port still answers after the orphaned server closed");
+      assert.equal(existsSync(join(dir, OWNER_LOCK_FILE)), false, "the orphaned server did not release its record");
+      finished = true;
+    } finally {
+      if (!finished) {
+        const pid = orphan();
+        if (pid !== null) {
+          killQuietly(pid);
+        }
+        parent.kill("SIGKILL");
+      }
+    }
   });
 
   it("stops a `!` command still pending, as a signal does", { skip: process.platform === "win32" ? "needs a POSIX shell" : false, timeout: 60_000 }, async () => {

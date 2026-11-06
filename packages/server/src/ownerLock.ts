@@ -9,9 +9,12 @@
  * it in `listen()`, before the bind: the recorded port is probed for an Ancilla, and the record's pid is only a hint,
  * since pids are recycled and containers share none. A live owner is refused at once (`DataDirOwnedError`, exit code
  * `EXIT_DATA_DIR_OWNED`); one that is closing, booting, or whose port is down with its pid alive is waited for, at most
- * `OWNER_LOCK_WAIT_MS`, then taken over; a dead one is taken over at once. A file system that will not take the file
- * leaves the server running without the lock, with one line in the log: the lock protects the data, it must never keep
- * the data from opening. Servers in one process over one folder share one lock (tests, embedders).
+ * `OWNER_LOCK_WAIT_MS` for each record that stands in the file (a newcomer that takes the folder meanwhile gets a wait
+ * of its own), then taken over; a dead one is taken over at once. A record is removed only while the file still holds
+ * the one that was judged, and rewritten or deleted by its owner only while the file still names it. A file system that
+ * will not take the file leaves the server running without the lock, with one line in the log: the lock protects the
+ * data, it must never keep the data from opening. Servers in one process over one folder share one lock (tests,
+ * embedders).
  */
 import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { get as httpGet } from "node:http";
@@ -69,7 +72,27 @@ export type OwnerIdentity = Omit<OwnerRecord, "format" | "port" | "closingAt">;
  */
 export type OwnerProbe = { kind: "ancilla"; instanceId: string | null; closing: boolean } | { kind: "other" } | { kind: "down" };
 
+/**
+ * The two file operations a Windows file system can refuse for a moment (the previous record is delete-pending, or the
+ * owner is rewriting it in place). The defaults are the real ones; a test replaces them to stage the refusal.
+ */
+export interface OwnerFileOps {
+  /** Creates the file with the record, failing with EEXIST when it is there. */
+  createExclusive(file: string, record: OwnerRecord): void;
+  remove(file: string): void;
+}
+
+/**
+ * How many passes (a quarter second apart) a create, read or remove that a Windows file system refuses for a moment
+ * is tried again before the lock is given up as unavailable. Short: the refusal is the previous owner's exit hook
+ * finishing, not a folder that cannot be written, and one that cannot be written is worth saying so about soon. The
+ * passes come on top of the wait for the owner, inside the boot budget: shutdownBounds.test.ts holds the sum.
+ */
+export const OWNER_FILE_RETRIES = 8;
+
 export interface OwnerLockDeps {
+  /** Replaces the real file operations; see `OwnerFileOps`. */
+  files?: Partial<OwnerFileOps>;
   probe(host: string, port: number): Promise<OwnerProbe>;
   pidAlive(pid: number): boolean;
   now(): number;
@@ -313,6 +336,11 @@ export class OwnerLock {
   wasContended = false;
   /** The owner was closing and did not finish within the wait, so the folder was taken from it. */
   tookOverFromClosing = false;
+  /** The file was found to name another server, and the line saying so has been written. */
+  private reportedChangedHands = false;
+  /** The last refusal that may pass, and how many passes of `resolve()` met one; see `refusalMayPass`. */
+  private refusal: { code: string; what: "written" | "read" | "replaced" } | null = null;
+  private retries = 0;
   readonly file: string | null;
   private readonly key: string | null;
 
@@ -346,13 +374,21 @@ export class OwnerLock {
     }
     // A record removed between the claim and the read is a vanished owner: claim again, a few times at most.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (lock.tryClaim()) {
+      const claimed = lock.tryClaim();
+      if (claimed === "settled") {
         return lock;
       }
       lock.wasContended = true;
+      if (claimed === "again") {
+        // A refusal that may pass: the passes of `resolve()` try again.
+        return lock;
+      }
       const read = readRecord(lock.file as string);
       if (read.kind === "unreadable") {
-        lock.unavailable(read.code, "read");
+        // A record that is delete-pending cannot be read on Windows either: the passes of `resolve()` try again.
+        if (!lock.refusalMayPass(read.code)) {
+          lock.unavailable(read.code, "read");
+        }
         return lock;
       }
       if (read.kind !== "gone") {
@@ -381,30 +417,55 @@ export class OwnerLock {
   /**
    * Writes the record exclusively and reads it back: held when the file names this instance, else contended with what
    * it names (on a file system where `wx` were not exclusive the last writer wins, and the loser sees a foreign id).
-   * False when the file exists; a failure other than that makes the lock unavailable.
+   * `exists` when the file is there. `again` when a Windows file system refuses the create for a moment (EACCES, as
+   * while the previous record is delete-pending); a failure other than these makes the lock unavailable.
    */
-  private tryClaim(): boolean {
+  private tryClaim(): "settled" | "exists" | "again" {
     const file = this.file as string;
     try {
-      writeRecordExclusive(file, this.record);
+      (this.deps.files?.createExclusive ?? writeRecordExclusive)(file, this.record);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? "EIO";
       if (code === "EEXIST") {
-        return false;
+        return "exists";
+      }
+      if (this.refusalMayPass(code)) {
+        this.refusal = { code, what: "written" };
+        return "again";
       }
       this.unavailable(code, "written");
-      return true;
+      return "settled";
     }
     const back = readRecord(file);
     if (back.kind === "record" && back.record.instanceId === this.record.instanceId) {
       this.state = "held";
       registry.set(this.key as string, { file, holders: [this] });
       installExitHook();
-      return true;
+      return "settled";
     }
     this.wasContended = true;
     this.existing = back.kind === "record" ? back.record : null;
     this.state = "contended";
+    return "settled";
+  }
+
+  /**
+   * On Windows a create or a read that meets the previous record while its owner's exit hook is deleting it fails with
+   * EACCES or EPERM (delete-pending), and a remove that meets the owner's in-place rewrite with EPERM; all are over in a
+   * moment. Anywhere else those codes mean a folder that cannot be written or read.
+   */
+  private refusalMayPass(code: string): boolean {
+    return this.record.platform === "win32" && (code === "EACCES" || code === "EPERM");
+  }
+
+  /** A refusal that may pass was met on a pass: true when the retries are spent and the lock is given up. */
+  private refusedAgain(): boolean {
+    this.retries += 1;
+    if (this.retries <= OWNER_FILE_RETRIES) {
+      return false;
+    }
+    const refusal = this.refusal as { code: string; what: "written" | "read" | "replaced" };
+    this.unavailable(refusal.code, refusal.what);
     return true;
   }
 
@@ -424,7 +485,10 @@ export class OwnerLock {
     }
     const file = this.file as string;
     const budgetMs = options.budgetMs ?? this.deps.waitMs;
-    const started = this.deps.now();
+    // The budget belongs to the record in the file: a newcomer that took the folder meanwhile gets a wait of its own, so
+    // that a launcher whose budget ran out on the owner before is not the one that takes the folder from the newcomer.
+    let started = this.deps.now();
+    let judged: string | null = null;
     const spent = () => this.deps.now() - started >= budgetMs;
     for (;;) {
       if (options.signal?.aborted) {
@@ -439,24 +503,33 @@ export class OwnerLock {
       }
       const read = readRecord(file);
       if (read.kind === "unreadable") {
-        this.unavailable(read.code, "read");
-        return;
-      }
-      if (read.kind === "gone") {
+        if (!this.refusalMayPass(read.code)) {
+          this.unavailable(read.code, "read");
+          return;
+        }
+        this.refusal = { code: read.code, what: "read" };
+        if (this.refusedAgain()) {
+          return;
+        }
+      } else if (read.kind === "gone") {
         // The owner has gone; a second EEXIST means another launcher won this instant, and it is now booting.
-        if (this.tryClaim()) {
+        const claimed = this.tryClaim();
+        if (claimed === "settled" || (claimed === "again" && this.refusedAgain())) {
           return;
         }
       } else if (read.kind === "torn") {
         // An owner rewriting its record in place (its port, its closing time), or one that was stopped mid-write:
         // re-read until the budget ends, and only then take the folder.
-        if (spent()) {
-          this.takeOver("its record could not be read");
-          if (this.state !== "contended") return;
+        if (spent() && this.takeOver("torn", "its record could not be read")) {
+          return;
         }
       } else {
         const record = read.record;
         this.existing = record;
+        if (record.instanceId !== judged) {
+          judged = record.instanceId;
+          started = this.deps.now();
+        }
         const verdict = await this.judge(record);
         if (verdict === "live") {
           throw new DataDirOwnedError(record, this.dataDir, file, false);
@@ -465,16 +538,18 @@ export class OwnerLock {
           throw new DataDirOwnedError(record, this.dataDir, file, true);
         }
         if (verdict === "stale") {
-          this.takeOver(`the Ancilla it named (pid ${record.pid}) is gone`);
-          if (this.state !== "contended") return;
+          if (this.takeOver(record, `the Ancilla it named (pid ${record.pid}) is gone`)) {
+            return;
+          }
         } else if (spent()) {
-          this.tookOverFromClosing = verdict === "closing";
-          this.takeOver(
+          const why =
             verdict === "closing"
               ? `the Ancilla closing there (pid ${record.pid}) did not finish within ${Math.round(budgetMs / 1000)} s`
-              : `the Ancilla it named (pid ${record.pid}) did not answer within ${Math.round(budgetMs / 1000)} s`,
-          );
-          if (this.state !== "contended") return;
+              : `the Ancilla it named (pid ${record.pid}) did not answer within ${Math.round(budgetMs / 1000)} s`;
+          if (this.takeOver(record, why)) {
+            this.tookOverFromClosing = verdict === "closing" && (this.state as OwnerLockState) === "held";
+            return;
+          }
         }
       }
       if (!(await this.deps.wait(OWNER_POLL_MS, options.signal))) {
@@ -514,19 +589,49 @@ export class OwnerLock {
     return record.closingAt !== null ? "closing" : "waiting";
   }
 
-  /** Removes the record and claims the folder; a record that reappears in between belongs to a launcher that won. */
-  private takeOver(why: string): void {
-    this.deps.log(`taking over the data folder ${this.dataDir}: ${why}.`);
-    try {
-      unlinkSync(this.file as string);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? "EIO";
-      if (code !== "ENOENT") {
-        this.unavailable(code, "replaced");
-        return;
+  /**
+   * Removes the record that was judged and claims the folder. The file is read again first and removed only while it
+   * still holds that record (`torn`: still no record): a launcher that took the folder in the meantime, or an owner
+   * that wrote its port, is judged afresh on the next pass, never removed on the strength of the old judgement. A
+   * record that reappears after the removal belongs to a launcher that won. True when the pass is over, the lock
+   * being held, given up or lost to another; false to go on waiting.
+   */
+  private takeOver(judged: OwnerRecord | "torn", why: string): boolean {
+    const file = this.file as string;
+    const now = readRecord(file);
+    if (now.kind === "unreadable") {
+      if (!this.refusalMayPass(now.code)) {
+        this.unavailable(now.code, "read");
+        return true;
       }
+      this.refusal = { code: now.code, what: "read" };
+      return this.refusedAgain();
     }
-    this.tryClaim();
+    if (now.kind !== "gone") {
+      const unchanged = judged === "torn" ? now.kind === "torn" : now.kind === "record" && recordText(now.record) === recordText(judged);
+      if (!unchanged) {
+        return false;
+      }
+      try {
+        (this.deps.files?.remove ?? unlinkSync)(file);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "EIO";
+        if (code !== "ENOENT") {
+          if (this.refusalMayPass(code)) {
+            this.refusal = { code, what: "replaced" };
+            return this.refusedAgain();
+          }
+          this.unavailable(code, "replaced");
+          return true;
+        }
+      }
+      this.deps.log(`taking over the data folder ${this.dataDir}: ${why}.`);
+    }
+    const claimed = this.tryClaim();
+    if (claimed === "again") {
+      return this.refusedAgain();
+    }
+    return this.state !== "contended";
   }
 
   /** Whether this lock's record is the one in the file. */
@@ -534,20 +639,48 @@ export class OwnerLock {
     return (this.state === "held" || this.state === "reentrant") && registry.get(this.key as string)?.holders[0] === this;
   }
 
-  /** Rewrites the record in place; a reader that catches it half written re-reads. Best effort: the lock is not the data. */
-  private rewrite(): void {
+  /**
+   * Rewrites the record in place, and only while the file still names `expected`: this server's own id, or the id of
+   * the holder that is handing the file over. A server that was taken over (its owner wait spent while it was blocked,
+   * or asleep) must not write over, and so not later delete, the record of the one that took the folder. A reader that
+   * catches the write half done re-reads. Best effort: the lock is not the data.
+   */
+  private rewrite(expected: string): void {
+    const file = this.file as string;
     try {
-      writeFileSync(this.file as string, recordText(this.record));
+      const read = readRecord(file);
+      if (read.kind !== "record" || read.record.instanceId !== expected) {
+        this.changedHands(read);
+        return;
+      }
+      writeFileSync(file, recordText(this.record));
     } catch (error) {
       this.deps.log(`the data folder lock could not be updated (${(error as NodeJS.ErrnoException).code ?? String(error)}).`);
     }
+  }
+
+  /** One line, the first time this server finds the file is no longer its own: it is left as it is from then on. */
+  private changedHands(read: ReadResult): void {
+    if (this.reportedChangedHands) {
+      return;
+    }
+    this.reportedChangedHands = true;
+    const now =
+      read.kind === "record"
+        ? `names another server (instance ${read.record.instanceId}, pid ${read.record.pid})`
+        : read.kind === "gone"
+          ? "is gone"
+          : read.kind === "torn"
+            ? "holds no record"
+            : `cannot be read (${read.code})`;
+    this.deps.log(`the data folder record ${this.file} no longer names this server (it ${now}): left as it is.`);
   }
 
   /** Records the bound port, for the probe of a later launcher. */
   setPort(port: number): void {
     this.record.port = port;
     if (this.namesTheFile()) {
-      this.rewrite();
+      this.rewrite(this.record.instanceId);
     }
   }
 
@@ -558,7 +691,7 @@ export class OwnerLock {
     }
     this.record.closingAt = new Date(this.deps.now()).toISOString();
     if (this.namesTheFile()) {
-      this.rewrite();
+      this.rewrite(this.record.instanceId);
     }
   }
 
@@ -578,7 +711,7 @@ export class OwnerLock {
       const next = entry.holders[0];
       if (named && next) {
         next.state = "held";
-        next.rewrite();
+        next.rewrite(this.record.instanceId);
       } else if (named) {
         deleteIfOwn(entry.file, this.record.instanceId);
         registry.delete(this.key as string);

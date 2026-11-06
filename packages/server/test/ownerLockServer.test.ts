@@ -150,6 +150,19 @@ describe("the record of a running server", () => {
     assert.equal(existsSync(ownerFile(dir)), false, "the record was not released by close()");
   });
 
+  it("leaves a successor's record alone through close(): not rewritten when the close begins, not removed after the store", async () => {
+    const dir = tmpDir("ancilla-lock-server-");
+    const server = serverOver(dir);
+    await server.listen();
+    // Another launcher took the folder meanwhile (this server was blocked, asleep or slow past a takeover).
+    const successor = ownerRecord({ port: 4300 });
+    writeOwner(dir, successor);
+    const before = readOwnerText(dir);
+    await server.close();
+    assert.equal(readOwnerText(dir), before, "close() rewrote or removed the record of the server that took the folder");
+    assert.equal(readOwner(dir)?.instanceId, successor.instanceId);
+  });
+
   it("is shared by the servers of one process over one folder, and names the survivor", async () => {
     const dir = tmpDir("ancilla-lock-server-");
     const first = await start(new FakeConnection(), { dataDir: dir });

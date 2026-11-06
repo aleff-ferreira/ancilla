@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   DataDirOwnedError,
   OWNER_LOCK_FILE,
+  OWNER_FILE_RETRIES,
   OWNER_LOCK_WAIT_MS,
   OWNER_POLL_MS,
   claimOwnerLock,
@@ -486,6 +487,428 @@ describe("releasing the lock", () => {
     assert.doesNotThrow(() => releaseAllOwnerLocksSync());
     one.release();
     two.release();
+  });
+});
+
+describe("a record that changes hands while a launcher waits on it", () => {
+  /** What a launcher that took the folder last writes into the record when it has bound its port. */
+  const binds = (dir: string, deps: ReturnType<typeof fakeOwnerDeps>, record: ReturnType<typeof ownerRecord>, port: number) => {
+    writeOwner(dir, { ...record, port });
+    deps.probes.set(port, live(record.instanceId));
+  };
+
+  it("gives a newcomer that took the folder its own wait: the launcher whose budget is spent refuses it once it answers, and takes nothing", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const theirs = ownerRecord({ port: 4100, startedAt: "2026-10-14T18:00:00.000Z" });
+    writeOwner(dir, theirs);
+    const deps = fakeOwnerDeps({ alive: new Set([theirs.pid]) });
+    const newcomer = ownerRecord({ port: null, startedAt: new Date(deps.clock.now() + OWNER_LOCK_WAIT_MS).toISOString() });
+    const inner = deps.wait;
+    deps.wait = async (ms, signal) => {
+      const slept = await inner(ms, signal);
+      if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS) {
+        // The budget is spent: another launcher that spent its own took the folder this very moment, and is booting.
+        writeOwner(dir, newcomer);
+      } else if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 4) {
+        binds(dir, deps, newcomer, 4200);
+      }
+      return slept;
+    };
+    const lock = claimOwnerLock(dir, identity(), deps);
+    await assert.rejects(lock.resolve(), (error: unknown) => {
+      assert.ok(error instanceof DataDirOwnedError);
+      assert.equal(error.owner.instanceId, newcomer.instanceId);
+      assert.equal(error.owner.port, 4200);
+      return true;
+    });
+    assert.equal(lock.state, "contended");
+    assert.equal(deps.waits.length, OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 4, "the newcomer was waited for, not taken from");
+    assert.deepEqual(deps.lines, [], "nothing was taken over");
+    assert.equal(readOwner(dir)?.instanceId, newcomer.instanceId, "the newcomer's record is untouched");
+    assert.equal(readOwner(dir)?.port, 4200);
+  });
+
+  it("still takes the folder from a newcomer that never answers, after a full wait of its own", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const theirs = ownerRecord({ port: 4100 });
+    writeOwner(dir, theirs);
+    const deps = fakeOwnerDeps({ alive: new Set([theirs.pid]) });
+    const newcomer = ownerRecord({ port: null });
+    const inner = deps.wait;
+    deps.wait = async (ms, signal) => {
+      const slept = await inner(ms, signal);
+      if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS) {
+        writeOwner(dir, newcomer);
+      }
+      return slept;
+    };
+    const me = identity();
+    const lock = claimOwnerLock(dir, me, deps);
+    await lock.resolve();
+    assert.equal(lock.state, "held");
+    assert.equal(deps.waits.reduce((sum, ms) => sum + ms, 0), 2 * OWNER_LOCK_WAIT_MS, "each claimant is waited for once");
+    assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+    assert.match(deps.lines[0]!, new RegExp(`pid ${newcomer.pid}\\) did not answer within 10 s`));
+    assert.equal(readOwner(dir)?.instanceId, me.instanceId);
+    lock.release();
+  });
+
+  it("leaves a record that replaced the judged one before the removal, and judges the new one", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwner(dir, ownerRecord({ port: 4100, pid: deadPid() }));
+    const newcomer = ownerRecord({ port: null });
+    const deps = fakeOwnerDeps({ alive: new Set([newcomer.pid]) });
+    const inner = deps.probe;
+    let swapped = false;
+    deps.probe = async (host, port) => {
+      const answer = await inner(host, port);
+      if (!swapped) {
+        // Between the judgement (a dead owner) and the removal, a faster launcher took the folder.
+        swapped = true;
+        writeOwner(dir, newcomer);
+      }
+      return answer;
+    };
+    const inWait = deps.wait;
+    deps.wait = async (ms, signal) => {
+      const slept = await inWait(ms, signal);
+      if (deps.waits.length === 3) {
+        binds(dir, deps, newcomer, 4200);
+      }
+      return slept;
+    };
+    const lock = claimOwnerLock(dir, identity(), deps);
+    await assert.rejects(lock.resolve(), (error: unknown) => error instanceof DataDirOwnedError && error.owner.instanceId === newcomer.instanceId);
+    assert.deepEqual(deps.lines, [], "the newcomer's record was taken over");
+    assert.equal(readOwner(dir)?.instanceId, newcomer.instanceId);
+    assert.deepEqual(deps.waits, [OWNER_POLL_MS, OWNER_POLL_MS, OWNER_POLL_MS]);
+  });
+
+  it("leaves a record that the same owner rewrote in place (its port) between the judgement and the removal", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const theirs = ownerRecord({ port: 4100, pid: deadPid() });
+    writeOwner(dir, theirs);
+    const deps = fakeOwnerDeps();
+    const inner = deps.probe;
+    let rewritten = false;
+    deps.probe = async (host, port) => {
+      const answer = await inner(host, port);
+      if (!rewritten) {
+        rewritten = true;
+        binds(dir, deps, theirs, 4200);
+      }
+      return answer;
+    };
+    const lock = claimOwnerLock(dir, identity(), deps);
+    await assert.rejects(lock.resolve(), (error: unknown) => error instanceof DataDirOwnedError && error.owner.instanceId === theirs.instanceId && error.owner.port === 4200);
+    assert.deepEqual(deps.lines, []);
+    assert.equal(readOwner(dir)?.port, 4200);
+  });
+
+  it("leaves a record that appeared between reading a torn one and removing it", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwnerText(dir, "{\"format\":1,\"instanceId\":\"x\"");
+    const newcomer = ownerRecord({ port: null });
+    const deps = fakeOwnerDeps({ alive: new Set([newcomer.pid]) });
+    const started = deps.clock.now();
+    const inNow = deps.now;
+    let swapped = false;
+    deps.now = () => {
+      const now = inNow();
+      // The check that the budget is spent is what comes between the read of the torn record and the takeover.
+      if (!swapped && now - started >= OWNER_LOCK_WAIT_MS) {
+        swapped = true;
+        writeOwner(dir, newcomer);
+      }
+      return now;
+    };
+    const inWait = deps.wait;
+    deps.wait = async (ms, signal) => {
+      const slept = await inWait(ms, signal);
+      if (swapped && deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 3) {
+        binds(dir, deps, newcomer, 4200);
+      }
+      return slept;
+    };
+    const lock = claimOwnerLock(dir, identity(), deps);
+    await assert.rejects(lock.resolve(), (error: unknown) => error instanceof DataDirOwnedError && error.owner.instanceId === newcomer.instanceId);
+    assert.deepEqual(deps.lines, [], "the record that appeared was taken over");
+    assert.equal(readOwner(dir)?.instanceId, newcomer.instanceId);
+  });
+});
+
+describe("a Windows file system that refuses the record for a moment", () => {
+  /** A create that fails with `code` the first `times` calls and then does what the real one does. */
+  function refusing(code: string, times: number, real: (file: string, record: ReturnType<typeof ownerRecord>) => void) {
+    const state = { calls: 0 };
+    return {
+      state,
+      createExclusive: (file: string, record: ReturnType<typeof ownerRecord>) => {
+        state.calls += 1;
+        if (state.calls <= times) {
+          throw Object.assign(new Error(`${code}: staged`), { code });
+        }
+        real(file, record);
+      },
+    };
+  }
+  const create = (file: string, record: ReturnType<typeof ownerRecord>) => writeFileSync(file, JSON.stringify(record) + "\n", { flag: "wx" });
+
+  for (const code of ["EACCES", "EPERM"]) {
+    it(`tries a create refused with ${code} again on the next pass, and holds the lock once it is let through`, async () => {
+      const dir = tmpDir("ancilla-lock-");
+      const deps = fakeOwnerDeps();
+      const refuse = refusing(code, 3, create);
+      deps.files = { createExclusive: refuse.createExclusive };
+      const me = identity({ platform: "win32" });
+      const lock = claimOwnerLock(dir, me, deps);
+      assert.equal(lock.state, "contended", "a refusal that may pass is not the end of the lock");
+      await lock.resolve();
+      assert.equal(lock.state, "held");
+      assert.equal(refuse.state.calls, 4);
+      assert.equal(deps.waits.length, 2, "one wait between each of the passes after the first");
+      assert.deepEqual(deps.lines, []);
+      assert.equal(readOwner(dir)?.instanceId, me.instanceId);
+      lock.release();
+    });
+  }
+
+  // A record that is delete-pending cannot be opened for reading either; a file mode that refuses the read stages it.
+  const unreadable = { skip: process.platform === "win32" ? "file modes are POSIX" : ROOT_SKIP };
+
+  it("tries a record it cannot read (EACCES, as while the record is delete-pending) again on the next pass", unreadable, async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwner(dir, ownerRecord({ port: 4100, pid: deadPid(), platform: "win32" }));
+    chmodSync(ownerFile(dir), 0o000);
+    try {
+      const deps = fakeOwnerDeps();
+      const inner = deps.wait;
+      deps.wait = async (ms, signal) => {
+        const slept = await inner(ms, signal);
+        if (deps.waits.length === 2) {
+          chmodSync(ownerFile(dir), 0o600);
+        }
+        return slept;
+      };
+      const me = identity({ platform: "win32" });
+      const lock = claimOwnerLock(dir, me, deps);
+      assert.equal(lock.state, "contended", "a read that may pass is not the end of the lock");
+      await lock.resolve();
+      assert.equal(lock.state, "held");
+      assert.deepEqual(deps.waits, [OWNER_POLL_MS, OWNER_POLL_MS]);
+      assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+      assert.match(deps.lines[0]!, /taking over the data folder .*is gone/);
+      assert.equal(readOwner(dir)?.instanceId, me.instanceId);
+      lock.release();
+    } finally {
+      try {
+        chmodSync(ownerFile(dir), 0o600);
+      } catch {
+        /* the lock removed it */
+      }
+    }
+  });
+
+  it("declares the lock unavailable when the record cannot be read on any pass", unreadable, async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwner(dir, ownerRecord({ port: 4100, platform: "win32" }));
+    chmodSync(ownerFile(dir), 0o000);
+    try {
+      const deps = fakeOwnerDeps();
+      const lock = claimOwnerLock(dir, identity({ platform: "win32" }), deps);
+      await lock.resolve();
+      assert.equal(lock.state, "unavailable");
+      assert.equal(deps.waits.length, OWNER_FILE_RETRIES);
+      assert.match(deps.lines.at(-1)!, /the data folder lock could not be read \(EACCES\): running without it/);
+    } finally {
+      chmodSync(ownerFile(dir), 0o600);
+    }
+  });
+
+  it("tries again when the record cannot be read at the moment the folder is to be taken", unreadable, async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwnerText(dir, "{\"format\":1,\"instanceId\":\"x\"");
+    try {
+      const deps = fakeOwnerDeps();
+      const started = deps.clock.now();
+      const inNow = deps.now;
+      let refused = false;
+      deps.now = () => {
+        const now = inNow();
+        // The check that the budget is spent comes between the read of the torn record and the read before the removal.
+        if (!refused && now - started >= OWNER_LOCK_WAIT_MS) {
+          refused = true;
+          chmodSync(ownerFile(dir), 0o000);
+        }
+        return now;
+      };
+      const inWait = deps.wait;
+      deps.wait = async (ms, signal) => {
+        const slept = await inWait(ms, signal);
+        if (refused) {
+          chmodSync(ownerFile(dir), 0o600);
+        }
+        return slept;
+      };
+      const me = identity({ platform: "win32" });
+      const lock = claimOwnerLock(dir, me, deps);
+      await lock.resolve();
+      assert.equal(lock.state, "held");
+      assert.equal(deps.waits.length, OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 1, "one pass more than a record that is read at once");
+      assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+      assert.match(deps.lines[0]!, /its record could not be read/);
+      assert.equal(readOwner(dir)?.instanceId, me.instanceId);
+      lock.release();
+    } finally {
+      try {
+        chmodSync(ownerFile(dir), 0o600);
+      } catch {
+        /* the lock removed it */
+      }
+    }
+  });
+
+  it("declares the lock unavailable when the create is refused on every pass, within the budget", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const deps = fakeOwnerDeps();
+    const refuse = refusing("EACCES", Number.MAX_SAFE_INTEGER, create);
+    deps.files = { createExclusive: refuse.createExclusive };
+    const lock = claimOwnerLock(dir, identity({ platform: "win32" }), deps);
+    await lock.resolve();
+    assert.equal(lock.state, "unavailable");
+    assert.equal(deps.waits.length, OWNER_FILE_RETRIES);
+    assert.ok(deps.waits.reduce((sum, ms) => sum + ms, 0) < OWNER_LOCK_WAIT_MS, "the retries stay inside the budget");
+    assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+    assert.match(deps.lines[0]!, /the data folder lock could not be written \(EACCES\): running without it/);
+  });
+
+  it("does not retry a refusal on another system: a folder that cannot be written there is unavailable at once", () => {
+    const dir = tmpDir("ancilla-lock-");
+    const deps = fakeOwnerDeps();
+    deps.files = { createExclusive: refusing("EACCES", Number.MAX_SAFE_INTEGER, create).createExclusive };
+    const lock = claimOwnerLock(dir, identity({ platform: "linux" }), deps);
+    assert.equal(lock.state, "unavailable");
+    assert.match(deps.lines[0]!, /could not be written \(EACCES\)/);
+  });
+
+  it("tries a remove refused with EPERM (the owner is rewriting its record) again on the next pass, and takes the folder once it is let through", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwner(dir, ownerRecord({ port: 4100, pid: deadPid(), platform: "win32" }));
+    const deps = fakeOwnerDeps();
+    let calls = 0;
+    deps.files = {
+      remove: (file) => {
+        calls += 1;
+        if (calls <= 2) {
+          throw Object.assign(new Error("EPERM: staged"), { code: "EPERM" });
+        }
+        unlinkSync(file);
+      },
+    };
+    const me = identity({ platform: "win32" });
+    const lock = claimOwnerLock(dir, me, deps);
+    await lock.resolve();
+    assert.equal(lock.state, "held");
+    assert.equal(calls, 3);
+    assert.deepEqual(deps.waits, [OWNER_POLL_MS, OWNER_POLL_MS]);
+    assert.equal(deps.lines.length, 1, "one line for the takeover, not one per try");
+    assert.match(deps.lines[0]!, /taking over the data folder .*is gone/);
+    assert.equal(readOwner(dir)?.instanceId, me.instanceId);
+    lock.release();
+  });
+
+  it("declares the lock unavailable when the remove is refused on every pass", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const theirs = ownerRecord({ port: 4100, pid: deadPid(), platform: "win32" });
+    writeOwner(dir, theirs);
+    const before = readOwnerText(dir);
+    const deps = fakeOwnerDeps();
+    deps.files = { remove: () => { throw Object.assign(new Error("EPERM: staged"), { code: "EPERM" }); } };
+    const lock = claimOwnerLock(dir, identity({ platform: "win32" }), deps);
+    await lock.resolve();
+    assert.equal(lock.state, "unavailable");
+    assert.equal(deps.waits.length, OWNER_FILE_RETRIES);
+    assert.match(deps.lines.at(-1)!, /the data folder lock could not be replaced \(EPERM\): running without it/);
+    assert.equal(readOwnerText(dir), before, "the owner's record was touched");
+  });
+
+  it("does not retry a remove refused for another reason", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    writeOwner(dir, ownerRecord({ port: 4100, pid: deadPid(), platform: "win32" }));
+    const deps = fakeOwnerDeps();
+    deps.files = { remove: () => { throw Object.assign(new Error("EIO: staged"), { code: "EIO" }); } };
+    const lock = claimOwnerLock(dir, identity({ platform: "win32" }), deps);
+    await lock.resolve();
+    assert.equal(lock.state, "unavailable");
+    assert.deepEqual(deps.waits, []);
+    assert.match(deps.lines.at(-1)!, /could not be replaced \(EIO\)/);
+  });
+});
+
+describe("a record that changed hands under a running lock", () => {
+  it("is left byte for byte by markClosing(), setPort() and release(), with one line saying so", () => {
+    const dir = tmpDir("ancilla-lock-");
+    const deps = fakeOwnerDeps();
+    const lock = claimOwnerLock(dir, identity(), deps);
+    assert.equal(lock.state, "held");
+    const successor = ownerRecord({ port: 4300 });
+    writeOwner(dir, successor);
+    const before = readOwnerText(dir);
+    lock.markClosing();
+    assert.equal(readOwnerText(dir), before, "markClosing() rewrote a successor's record");
+    lock.setPort(4100);
+    assert.equal(readOwnerText(dir), before, "setPort() rewrote a successor's record");
+    assert.equal(lock.record.port, 4100, "the lock still remembers its own port");
+    assert.notEqual(lock.record.closingAt, null, "the lock still remembers that its close began");
+    lock.release();
+    assert.equal(readOwnerText(dir), before, "release() removed a successor's record");
+    assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+    assert.match(deps.lines[0]!, /no longer names this server/);
+    assert.ok(deps.lines[0]!.includes(successor.instanceId), "the line names who holds the file now");
+  });
+
+  it("does not bring back a record that was deleted by hand", () => {
+    const dir = tmpDir("ancilla-lock-");
+    const deps = fakeOwnerDeps();
+    const lock = claimOwnerLock(dir, identity(), deps);
+    unlinkSync(ownerFile(dir));
+    lock.setPort(4100);
+    lock.markClosing();
+    assert.equal(existsSync(ownerFile(dir)), false);
+    lock.release();
+    assert.equal(deps.lines.length, 1, deps.lines.join("\n"));
+    assert.match(deps.lines[0]!, /no longer names this server/);
+  });
+
+  it("is not overwritten by the handover to the next server of the process", () => {
+    const dir = tmpDir("ancilla-lock-");
+    const secondDeps = fakeOwnerDeps();
+    const one = claimOwnerLock(dir, identity(), fakeOwnerDeps());
+    const two = claimOwnerLock(dir, identity(), secondDeps);
+    assert.equal(two.state, "reentrant");
+    const successor = ownerRecord({ port: 4300 });
+    writeOwner(dir, successor);
+    const before = readOwnerText(dir);
+    one.release();
+    assert.equal(readOwnerText(dir), before, "the handover rewrote a successor's record");
+    two.release();
+    assert.equal(readOwnerText(dir), before, "the survivor removed a successor's record");
+    assert.match(secondDeps.lines.join("\n"), /no longer names this server/);
+  });
+
+  it("still hands the file to the next server when nobody else touched it", () => {
+    const dir = tmpDir("ancilla-lock-");
+    const second = identity();
+    const one = claimOwnerLock(dir, identity(), fakeOwnerDeps());
+    const twoDeps = fakeOwnerDeps();
+    const two = claimOwnerLock(dir, second, twoDeps);
+    two.setPort(4200);
+    one.release();
+    assert.equal(readOwner(dir)?.instanceId, second.instanceId);
+    assert.equal(readOwner(dir)?.port, 4200);
+    assert.deepEqual(twoDeps.lines, []);
+    two.release();
+    assert.equal(existsSync(ownerFile(dir)), false);
   });
 });
 
