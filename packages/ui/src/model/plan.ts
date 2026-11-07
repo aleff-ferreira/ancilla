@@ -112,7 +112,7 @@ function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number
 /**
  * Refresh asks Meta again, so it can help wherever Ancilla has made a direct check for the account (the server stamps
  * it with a check time), and after a failed read, which is what a retry is for. A reading only the Muse runtime
- * reports (a WSL host, a Keychain-only login, a login that lost its token) changes when Muse next sends usage, however
+ * reports (a named account's WSL host, a Keychain-only login, a login that lost its token) changes when Muse next sends usage, however
  * often it is refreshed. A report from a server that predates direct checks has no check time either, and such a
  * server never asked Meta, so it reads the same way.
  */

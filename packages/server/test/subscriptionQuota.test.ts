@@ -1,9 +1,10 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MuseSubscriptionReader, parseMetaSubscription } from "../src/subscriptionQuota.js";
+import { MuseSubscriptionReader, parseMetaSubscription, subscriptionIdentity } from "../src/subscriptionQuota.js";
 
 const NOW = 1_800_000_000_000;
 function payload(percent = 42) {
@@ -216,5 +217,24 @@ describe("Meta subscription quota", () => {
     while (!started) await new Promise((resolve) => setImmediate(resolve));
     pendingReader.close();
     assert.equal(await pending, null);
+  });
+});
+
+describe("a login file that does not open", () => {
+  it("is opened once, however many looks ask, so the thread pool is not used up", { skip: process.platform === "win32", timeout: 30_000 }, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), "ancilla-subscription-fifo-"));
+    const fifo = join(directory, "auth.json");
+    execFileSync("mkfifo", [fifo]);
+    const plain = join(directory, "plain.txt");
+    await writeFile(plain, "fine");
+    t.after(async () => {
+      await (await open(fifo, "r+")).close();
+      await rm(directory, { recursive: true, force: true });
+    });
+    // libuv gives file work four threads by default: one more look than that would starve every other read.
+    for (let look = 0; look < Number(process.env["UV_THREADPOOL_SIZE"] ?? 4) + 2; look++) void subscriptionIdentity(fifo);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const answer = await Promise.race([readFile(plain, "utf8"), new Promise<string>((resolve) => setTimeout(() => resolve("starved"), 2000))]);
+    assert.equal(answer, "fine");
   });
 });

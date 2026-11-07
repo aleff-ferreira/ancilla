@@ -201,11 +201,28 @@ describe("subscription account accuracy", () => {
   });
 
   it("shows missing limits, missing subscription and sign-in requirements distinctly without invented zeroes", () => {
-    for (const [status, text] of [["not-reported", "did not report subscription limits"], ["no-subscription", "no Muse subscription"], ["login-required", "Sign in to this Muse account"]] as const) {
+    for (const [status, text] of [["not-reported", "did not report subscription limits"], ["no-subscription", "no Muse subscription"], ["login-required", "Meta no longer accepts this login. Sign in again to see its subscription limits."]] as const) {
       const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status })] });
       assert.match(html, new RegExp(text));
       assert.doesNotMatch(html, /0%|progressbar/);
     }
+  });
+
+  it("says plainly that Meta no longer accepts a login, and still offers the way to sign in again", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status: "login-required" })] });
+    assert.match(html, /Meta no longer accepts this login\. Sign in again to see its subscription limits\./);
+    assert.match(html, /Open sign-in settings/);
+    assert.match(html, /Sign-in needed/);
+    assert.doesNotMatch(html, /Sign in to this Muse account/);
+  });
+
+  it("does not claim Meta refused a login that nothing was ever sent to Meta for", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status: "login-required", checkedAtMs: null })] });
+    assert.match(html, /Sign in to this Muse account to check its subscription limits\./);
+    assert.doesNotMatch(html, /Meta no longer accepts/);
+    assert.match(html, /Open sign-in settings/);
+    const bare = render(PlanMeter, { defaultLogin: { hasLogin: false } as AppState["defaultLogin"] });
+    assert.doesNotMatch(bare, /Meta no longer accepts/);
   });
 
   it("renders stale, saved, failed and omitted readings as historical values without current meters", () => {

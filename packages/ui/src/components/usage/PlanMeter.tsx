@@ -47,7 +47,10 @@ export function quotaAvailabilityLabel(account: PlanAccountUsage): string {
     case "unavailable": return account.usage
       ? "Could not refresh this account’s subscription limits. The previous reading is shown for reference; current allowance is unknown."
       : "Could not read this account’s subscription limits. Refresh to retry.";
-    case "login-required": return "Sign in to this Muse account to check its subscription limits.";
+    // A check time means Meta was asked and refused; without one the panel only knows no login is saved.
+    case "login-required": return account.checkedAtMs === null
+      ? "Sign in to this Muse account to check its subscription limits."
+      : "Meta no longer accepts this login. Sign in again to see its subscription limits.";
     case "no-subscription": return "Meta reports no Muse subscription for this login. No subscription allowance is available to display.";
     case "not-reported": return account.checkedAtMs === null
       ? "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown."

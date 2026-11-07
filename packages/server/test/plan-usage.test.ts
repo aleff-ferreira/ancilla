@@ -1,14 +1,15 @@
 import { describe, it, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createAonia } from "@harjjotsinghh/aonia";
 import type { ExecFn, ServeTarget } from "@ancilla/daemon";
 import { DB_FILE } from "../src/legacy.js";
-import { MuseSubscriptionReader } from "../src/subscriptionQuota.js";
-import { FakeConnection, fakeFactory, get, send, sseEvents, start } from "./harness.js";
+import { MuseSubscriptionReader, type SubscriptionReading } from "../src/subscriptionQuota.js";
+import { FakeConnection, fakeFactory, get, send, sseEvents, start, waitFor } from "./harness.js";
 
 const DAY = 86_400_000;
 
@@ -335,25 +336,29 @@ describe("observation stamps from the future", () => {
   });
 });
 
-describe("runtimes without a direct Meta read", () => {
-  /** A `wsl.exe` that finds Muse in the one distro. */
+/** The shell question that learns the distro user's home folder; see `WslHomes`. */
+const asksHome = (args: string[]) => args.includes('printf %s "$HOME"');
+
+describe("logins without a direct Meta read", () => {
+  /** A `wsl.exe` that finds Muse in the one distro and knows the user's home folder there. */
   const fakeWsl: ExecFn = async (command, args) => {
     if (command !== "wsl") return { stdout: "", exitCode: 127 };
     if (args[0] === "-l") return { stdout: "  NAME  STATE  VERSION\n* Ubuntu  Running  2\n", exitCode: 0 };
     if (args[2] === "-e" && args[3] === "test") return { stdout: "", exitCode: 0 };
+    if (asksHome(args)) return { stdout: "/home/u", exitCode: 0 };
     return { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 };
   };
   const WSL_PROJECT = "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj";
 
-  it("never reads a login under WSL, gives no plan name, and restores nothing after a restart", async (t) => {
+  it("never mistakes the Windows-side login for the one inside the distro, gives no plan name, and restores nothing after a restart", async (t) => {
     const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-wsl-"));
     const home = join(dataDir, "home");
     quotaEnvironment(t, home);
-    // A login on the Windows side must not be mistaken for the one Muse uses inside the distro.
+    // A login on the Windows side must not be mistaken for the one Muse uses inside the distro, which holds none.
     await saveLogin(join(home, ".config"), "person@example.test", "dca:windows-side");
     const { reader, probe } = scriptedReader({ now: Date.now, answer: () => Response.json(snapshot(Date.now(), 42)) });
     const options = { dataDir, home, platform: "win32" as const, runtime: "wsl" as const, musePath: "/home/u/.local/bin/muse",
-      exec: fakeWsl };
+      exec: fakeWsl, wslQuota: { localPath: () => join(dataDir, "distro", "home", "u", ".config", "muse", "auth.json") } };
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const initial = await start(connection, { ...options, subscriptionReader: reader, hostFactory: fakeFactory(connection) });
@@ -420,6 +425,542 @@ describe("runtimes without a direct Meta read", () => {
     assert.equal(work.planName, null);
     assert.equal(work.status, "runtime-only");
     assert.equal(probe.requests, 1, "only the default login is read from the override");
+  });
+});
+
+describe("a login read from inside the WSL distro", () => {
+  interface HomeAnswer { stdout: string; exitCode: number; timedOut?: boolean }
+  interface Bounds { homeTimeoutMs?: number; readTimeoutMs?: number; retryMs?: number }
+
+  /**
+   * Muse under WSL with a fake `wsl.exe` and a fixture standing in for the distro's disk: the seam maps a Linux path
+   * onto a folder in the temp dir, and the reader's fetch is the test's own. Nothing here starts WSL or reaches Meta.
+   */
+  async function rig(t: TestContext, o: {
+    distro?: string; home?: () => Promise<HomeAnswer>; wslEnv?: Record<string, string>; dataDir?: string;
+    answer?: (init: RequestInit | undefined) => Response | Promise<Response>; bounds?: Bounds;
+  } = {}) {
+    const root = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-"));
+    const winHome = join(root, "windows-home");
+    quotaEnvironment(t, winHome);
+    const distro = o.distro ?? "Ubuntu";
+    const probe = { homeCalls: 0, homeTimeouts: [] as (number | undefined)[], requests: 0, bearers: [] as string[], mapped: [] as [string, string][] };
+    const exec: ExecFn = async (command, args, options) => {
+      if (command !== "wsl") return { stdout: "", exitCode: 127 };
+      if (args[0] === "-l") return { stdout: "  NAME  STATE  VERSION\n* Ubuntu  Running  2\n", exitCode: 0 };
+      if (args[2] === "-e" && args[3] === "test") return { stdout: "", exitCode: 0 };
+      if (asksHome(args)) {
+        probe.homeCalls++;
+        probe.homeTimeouts.push(options?.timeoutMs);
+        return o.home ? o.home() : { stdout: "/home/u", exitCode: 0 };
+      }
+      return { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 };
+    };
+    const inDistro = (linux: string) => join(root, "distro", distro, ...linux.split("/").filter(Boolean));
+    const reader = new MuseSubscriptionReader({ now: Date.now, cacheMs: 0, fetch: async (_url, init) => {
+      probe.requests++;
+      probe.bearers.push(new Headers(init?.headers).get("authorization") ?? "");
+      return o.answer ? o.answer(init) : Response.json(snapshot(Date.now(), 42));
+    } });
+    const options = {
+      dataDir: o.dataDir ?? ":memory:", home: winHome, platform: "win32" as const, runtime: "wsl" as const,
+      musePath: "/home/u/.local/bin/muse", exec, subscriptionReader: reader, ...(o.distro ? { distro: o.distro } : {}),
+      ...(o.wslEnv ? { wslEnv: o.wslEnv } : {}),
+      wslQuota: { localPath: (name: string, linux: string) => { probe.mapped.push([name, linux]); return inDistro(linux); },
+        homeTimeoutMs: 2000, readTimeoutMs: 3000, retryMs: 60_000, ...(o.bounds ?? {}) },
+    };
+    /** A login saved in a folder of the distro, as `muse login` there would leave it. */
+    const login = (linuxDir: string, email: string, token?: string) => saveLogin(inDistro(linuxDir), email, token);
+    return { root, winHome, probe, options, login, inDistro };
+  }
+  const first = async (base: string) => (await get(base, "/api/plan-usage")).accounts[0];
+  const DISTRO_CONFIG = "/home/u/.config";
+
+  it("reads the numbers and the plan name from Meta with the distro's own login", async (t) => {
+    const r = await rig(t);
+    await saveLogin(join(r.winHome, ".config"), "windows@example.test", "dca:windows-side");
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), r.options);
+    const account = await first(base);
+    assert.equal(account.status, "ready");
+    assert.equal(account.planName, "Muse Code Power Usage");
+    assert.equal(account.source, "meta");
+    assert.equal(account.usage.window.usedPercent, 42);
+    assert.deepEqual(r.probe.bearers, ["Bearer dca:distro-side"], "the Windows-side login never reaches Meta");
+    assert.deepEqual(r.probe.mapped.at(-1), ["Ubuntu", "/home/u/.config/muse/auth.json"]);
+    await get(base, "/api/plan-usage");
+    await get(base, "/api/plan-usage");
+    assert.equal(r.probe.homeCalls, 1, "wsl.exe is asked for the home folder once, not on every poll");
+    assert.deepEqual(r.probe.homeTimeouts, [2000], "and the child is given a deadline");
+  });
+
+  it("says the login is dead when Meta answers 401 or 403", async (t) => {
+    for (const status of [401, 403]) {
+      const r = await rig(t, { answer: () => new Response("secret body", { status }) });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const { base } = await start(new FakeConnection(), r.options);
+      const report = await get(base, "/api/plan-usage");
+      assert.equal(report.accounts[0].status, "login-required", String(status));
+      assert.equal(report.accounts[0].usage, null);
+      assert.doesNotMatch(JSON.stringify(report), /secret body|dca:/);
+    }
+  });
+
+  it("is exactly what it was when the distro holds no login Ancilla may send", async (t) => {
+    const r = await rig(t);
+    const cases: [string, () => Promise<unknown>][] = [
+      ["no file", async () => {}],
+      ["not an oauth login", async () => {
+        const path = await r.login(DISTRO_CONFIG, "person@example.test", "dca:x");
+        await writeFile(path, JSON.stringify({ providers: { meta: { mechanism: "api_key", user_email: "person@example.test", access_token: "dca:x" } } }));
+      }],
+      ["no inline token", () => r.login(DISTRO_CONFIG, "person@example.test")],
+      ["not a device token", () => r.login(DISTRO_CONFIG, "person@example.test", "sk-not-a-device-token")],
+      ["a folder where the file should be", async () => {
+        await mkdir(join(r.inDistro(DISTRO_CONFIG), "muse", "auth.json"), { recursive: true });
+      }],
+    ];
+    for (const [name, prepare] of cases) {
+      await rm(r.inDistro(DISTRO_CONFIG), { recursive: true, force: true });
+      await prepare();
+      const { base } = await start(new FakeConnection(), r.options);
+      const account = await first(base);
+      assert.equal(account.status, "runtime-only", name);
+      assert.equal(account.usage, null, name);
+      assert.equal(account.planName, null, name);
+      assert.equal(account.checkedAtMs, null, name);
+    }
+    assert.equal(r.probe.requests, 0, "nothing was sent to Meta");
+  });
+
+  it("gives up on a distro that does not answer, in the time asked, and does not ask again at once", { timeout: 20_000 }, async (t) => {
+    const r = await rig(t, { home: () => new Promise<HomeAnswer>(() => {}), bounds: { homeTimeoutMs: 50, readTimeoutMs: 30_000 } });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), r.options);
+    const began = Date.now();
+    const reply = await send(base, "/api/plan-usage", undefined, "GET");
+    assert.ok(Date.now() - began < 10_000, "the page is not held by a stopped distro");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.accounts[0].status, "runtime-only");
+    assert.equal(r.probe.requests, 0);
+    await get(base, "/api/plan-usage");
+    assert.equal(r.probe.homeCalls, 1, "a failed answer is remembered, so wsl.exe is not spawned on every poll");
+  });
+
+  it("asks the distro again once the retry window has passed", async (t) => {
+    let calls = 0;
+    const r = await rig(t, { home: async () => ++calls === 1 ? { stdout: "", exitCode: 1 } : { stdout: "/home/u", exitCode: 0 }, bounds: { retryMs: 60 } });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), r.options);
+    assert.equal((await first(base)).status, "runtime-only");
+    await pause(150);
+    assert.equal((await first(base)).status, "ready");
+    assert.equal(r.probe.homeCalls, 2);
+  });
+
+  it("does not hold the page for a read that never finishes, and lets it go quietly", { timeout: 20_000 }, async (t) => {
+    const r = await rig(t, { answer: (init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    }), bounds: { readTimeoutMs: 150 } });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), r.options);
+    const began = Date.now();
+    const reply = await send(base, "/api/plan-usage", undefined, "GET");
+    assert.ok(Date.now() - began < 8000, "the read would otherwise be held for the reader's own twelve seconds");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.accounts[0].status, "runtime-only");
+    assert.equal(reply.json.accounts[0].usage, null);
+    assert.equal(r.probe.requests, 1);
+  });
+
+  it("does not hold the page for a path that cannot be had either", { timeout: 20_000 }, async (t) => {
+    const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: () => new Promise<string>(() => {}) } });
+    const reply = await send(base, "/api/plan-usage", undefined, "GET");
+    assert.equal(reply.status, 200);
+    assert.equal(reply.json.accounts[0].status, "runtime-only");
+    assert.equal(r.probe.requests, 0);
+  });
+
+  it("publishes nothing from a read that finished late, after another read has begun", async (t) => {
+    let release: (answer: Response) => void = () => {};
+    const r = await rig(t, { answer: () => new Promise<Response>((resolve) => { release = resolve; }), bounds: { readTimeoutMs: 100 } });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { server, base } = await start(new FakeConnection(), r.options);
+    assert.equal((await first(base)).status, "runtime-only");
+    // The next poll has begun: the revision has moved past the one the late read belongs to.
+    server["planUsageReadRevision"] += 1;
+    release(Response.json(snapshot(Date.now(), 42)));
+    await waitFor(() => server["subscriptionReader"]["cached"].size === 1, "the late answer arriving");
+    await pause(100);
+    assert.equal(server["defaultPlanUsage"], null);
+    assert.equal(server["directQuota"].size, 0);
+  });
+
+  it("reads no login when the home folder cannot be had in a form that is safe to map", async (t) => {
+    let answer: HomeAnswer = { stdout: "/home/u", exitCode: 0 };
+    const r = await rig(t, { home: async () => answer });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const bad: HomeAnswer[] = [
+      { stdout: "home/u", exitCode: 0 }, { stdout: "", exitCode: 0 }, { stdout: "/home/u\n", exitCode: 0 },
+      { stdout: "wsl: a notice\n/home/u", exitCode: 0 }, { stdout: "/home/../home/u", exitCode: 0 },
+      { stdout: "/home/u\0", exitCode: 0 }, { stdout: "/home\\u", exitCode: 0 },
+      { stdout: "/home/u", exitCode: 1 }, { stdout: "/home/u", exitCode: 1, timedOut: true },
+    ];
+    for (const next of bad) {
+      answer = next;
+      const { base } = await start(new FakeConnection(), r.options);
+      const account = await first(base);
+      assert.equal(account.status, "runtime-only", JSON.stringify(next));
+      assert.equal(account.usage, null);
+    }
+    assert.equal(r.probe.requests, 0);
+    assert.deepEqual(r.probe.mapped, [], "no path was ever mapped");
+    answer = { stdout: "/home/u", exitCode: 0 };
+    assert.equal((await first((await start(new FakeConnection(), r.options)).base)).status, "ready", "the same fixture reads once the answer is good");
+  });
+
+  it("reads no login from a distro whose name could change the path", async (t) => {
+    const r = await rig(t);
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    for (const distro of ["Ubuntu 22", "Ubuntu;calc", "..", "a/b", "a\\b", "Ubuntu\n", "é"]) {
+      const { base } = await start(new FakeConnection(), { ...r.options, distro });
+      assert.equal((await first(base)).status, "runtime-only", JSON.stringify(distro));
+    }
+    assert.equal(r.probe.requests, 0);
+    assert.equal(r.probe.homeCalls, 0, "wsl.exe is not even asked about such a distro");
+    assert.deepEqual(r.probe.mapped, []);
+  });
+
+  it("reads the login of the distro Muse is configured for", async (t) => {
+    const r = await rig(t, { distro: "Ubuntu-22.04_lts" });
+    await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+    const { base } = await start(new FakeConnection(), r.options);
+    assert.equal((await first(base)).status, "ready");
+    assert.deepEqual(r.probe.mapped.at(-1), ["Ubuntu-22.04_lts", "/home/u/.config/muse/auth.json"]);
+  });
+
+  describe("what real Windows runs, with no test seam", () => {
+    it("opens the wsl.localhost path of the distro Muse runs in, asks that distro for the home folder, and gives the child a deadline", async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "ancilla-quota-default-"));
+      quotaEnvironment(t, join(root, "windows-home"));
+      const asked: { argv: string[]; timeoutMs: number | undefined }[] = [];
+      const exec: ExecFn = async (command, args, options) => {
+        if (command !== "wsl") return { stdout: "", exitCode: 127 };
+        if (args[2] === "-e" && args[3] === "test") return { stdout: "", exitCode: 0 };
+        if (asksHome(args)) {
+          asked.push({ argv: args.slice(0, 4), timeoutMs: options?.timeoutMs });
+          return { stdout: "/home/u", exitCode: 0 };
+        }
+        return { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 };
+      };
+      const opened: string[] = [];
+      class Recording extends MuseSubscriptionReader {
+        override async read(path: string): Promise<SubscriptionReading | null> { opened.push(path); return null; }
+      }
+      const { base } = await start(new FakeConnection(), { dataDir: ":memory:", home: join(root, "windows-home"), platform: "win32",
+        runtime: "wsl", distro: "Ubuntu-22.04", musePath: "/home/u/.local/bin/muse", exec, subscriptionReader: new Recording() });
+      await first(base);
+      assert.deepEqual(opened, ["\\\\wsl.localhost\\Ubuntu-22.04\\home\\u\\.config\\muse\\auth.json"]);
+      assert.deepEqual(asked, [{ argv: ["-d", "Ubuntu-22.04", "-e", "sh"], timeoutMs: 5000 }]);
+    });
+
+    it("saves a reading under the mapped file too, so one person's two files do not share it", async (t) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-two-files-"));
+      const r = await rig(t, { dataDir, wslEnv: { XDG_CONFIG_HOME: "/x/cfg" } });
+      await r.login("/x/cfg", "person@example.test", "dca:one");
+      await r.login("/y/cfg", "person@example.test", "dca:one");
+      const initial = await start(new FakeConnection(), r.options);
+      assert.equal((await first(initial.base)).status, "ready");
+      await initial.server.close();
+
+      const down = scriptedReader({ now: Date.now, answer: () => new Response(null, { status: 503 }) });
+      const other = await start(new FakeConnection(), { ...r.options, wslEnv: { XDG_CONFIG_HOME: "/y/cfg" }, subscriptionReader: down.reader });
+      const report = await get(other.base, "/api/plan-usage");
+      assert.equal(report.usage, null, "the other file has not been read yet");
+      await other.server.close();
+      const same = await start(new FakeConnection(), { ...r.options, subscriptionReader: down.reader });
+      assert.equal((await get(same.base, "/api/plan-usage")).usage.window.usedPercent, 42, "the same file still has its reading");
+    });
+  });
+
+  describe("a distro that stalls", () => {
+    const released: (() => void)[] = [];
+    const releaseAll = () => { for (const release of released.splice(0)) release(); };
+
+    class Hung extends MuseSubscriptionReader {
+      calls = 0;
+      override read(): Promise<SubscriptionReading | null> {
+        this.calls++;
+        return new Promise((resolve) => { released.push(() => resolve(null)); });
+      }
+    }
+
+    it("starts no second read while one that outlived its bound is unsettled, and reads again once it has", async (t) => {
+      const r = await rig(t, { bounds: { readTimeoutMs: 100 } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const hung = new Hung();
+      const { base } = await start(new FakeConnection(), { ...r.options, subscriptionReader: hung });
+      for (let poll = 0; poll < 3; poll++) assert.equal((await first(base)).status, "runtime-only");
+      assert.equal(hung.calls, 1, "three polls, one read");
+      releaseAll();
+      await pause(30);
+      await first(base);
+      assert.equal(hung.calls, 2, "a read that has settled is not waited on any more");
+      releaseAll();
+    });
+
+    it("starts no second look at the path while one that outlived its bound is unsettled", async (t) => {
+      const r = await rig(t, { bounds: { readTimeoutMs: 100 } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const mapping = { calls: 0 };
+      const stalled = { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: () => {
+        mapping.calls++;
+        return new Promise<string>((resolve) => { released.push(() => resolve("")); });
+      } } };
+      const { base } = await start(new FakeConnection(), stalled);
+      assert.equal((await first(base)).status, "runtime-only");
+      const afterFirst = mapping.calls;
+      assert.ok(afterFirst > 0);
+      await first(base);
+      await first(base);
+      assert.equal(mapping.calls, afterFirst, "later polls do not look at the distro again");
+      releaseAll();
+    });
+
+    it("answers every poll, and leaves the rest of the process working, while the login file never opens", { skip: process.platform === "win32", timeout: 30_000 }, async (t) => {
+      const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+      const fifo = join(r.root, "stalled-login");
+      execFileSync("mkfifo", [fifo]);
+      t.after(async () => { await (await open(fifo, "r+")).close(); });
+      const plain = join(r.root, "plain.txt");
+      await writeFile(plain, "fine");
+      const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: () => fifo } });
+      const verdicts: string[] = [];
+      for (let poll = 0; poll < 4; poll++) {
+        const answer = await Promise.race([send(base, "/api/plan-usage", undefined, "GET").then((reply) => `${reply.status}`), pause(5000).then(() => "held")]);
+        verdicts.push(answer);
+      }
+      assert.deepEqual(verdicts, ["200", "200", "200", "200"]);
+      assert.equal(await Promise.race([readFile(plain, "utf8"), pause(2000).then(() => "starved")]), "fine", "the thread pool is not used up");
+    });
+
+    it("keeps the reading on screen when one look at the login is slower than the bound", async (t) => {
+      const meta = { down: false };
+      const r = await rig(t, { bounds: { readTimeoutMs: 150 },
+        answer: () => meta.down ? new Response(null, { status: 503 }) : Response.json(snapshot(Date.now(), 42)) });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const slow = { next: 0 };
+      const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota,
+        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(500); } return r.inDistro(linux); } } });
+      assert.equal((await first(base)).status, "ready");
+      slow.next = 1;
+      meta.down = true;
+      const slowed = await first(base);
+      assert.equal(slowed.status, "unavailable", "Meta's own failure is the only thing this poll reports");
+      assert.equal(slowed.usage.window.usedPercent, 42, "a slow look is no reading this time, not a login that changed");
+      assert.equal(slowed.planName, "Muse Code Power Usage");
+      assert.equal(slowed.source, "meta");
+      meta.down = false;
+      await pause(600);
+      assert.equal((await first(base)).status, "ready");
+    });
+
+    it("keeps the read it just made when the first look at the login is the slow one", async (t) => {
+      const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const slow = { next: 1 };
+      const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota,
+        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(500); } return r.inDistro(linux); } } });
+      const account = await first(base);
+      assert.equal(account.status, "ready");
+      assert.equal(account.usage.window.usedPercent, 42);
+    });
+  });
+
+  describe("a host started while the distro was slow", () => {
+    it("takes the identity of the login once the home folder is known, so its usage frames are not dropped", async (t) => {
+      let asked = 0;
+      const r = await rig(t, { home: async () => ++asked === 1 ? { stdout: "", exitCode: 1 } : { stdout: "/home/u", exitCode: 0 }, bounds: { retryMs: 60 } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const connection = new FakeConnection();
+      connection.replies.set("session/start", { session: { sessionId: "s1" } });
+      const { base } = await start(connection, { ...r.options, hostFactory: fakeFactory(connection) });
+      assert.equal((await send(base, "/api/sessions", { cwd: "\\\\wsl.localhost\\Ubuntu\\home\\u\\proj" })).status, 200);
+      await pause(120);
+      assert.equal((await first(base)).source, "meta");
+      connection.notify("usage/changed", reading(Date.now() + 2000, 77));
+      const account = await first(base);
+      assert.equal(account.usage.window.usedPercent, 77, "the host's newer frame is taken");
+      assert.equal(account.source, "runtime");
+    });
+  });
+
+  describe("what never leaves the machine", () => {
+    it("shows no token, address, file or path in output, events, answers or saved files", async (t) => {
+      const token = "dca:leak-check-7f3a91";
+      const email = "leak-check-person@example.test";
+      const written: string[] = [];
+      for (const stream of [process.stdout, process.stderr]) {
+        const original = stream.write;
+        stream.write = function write(this: unknown, chunk: unknown, ...rest: unknown[]) {
+          written.push(typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8"));
+          return (original as (...args: unknown[]) => boolean).call(stream, chunk, ...rest);
+        } as typeof stream.write;
+        t.after(() => { stream.write = original; });
+      }
+      const seen: string[] = [];
+      const roots: string[] = [];
+      const modes: { name: string; answer?: () => Response; home?: string }[] = [
+        { name: "ok" }, { name: "refused", answer: () => new Response(`${token} ${email}`, { status: 401 }) },
+        { name: "hostile home", home: "/home/../x\n" },
+      ];
+      for (const mode of modes) {
+        const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-leak-"));
+        const r = await rig(t, { dataDir, ...(mode.answer ? { answer: mode.answer } : {}),
+          ...(mode.home ? { home: async () => ({ stdout: mode.home as string, exitCode: 0 }) } : {}) });
+        await r.login(DISTRO_CONFIG, email, token);
+        roots.push(r.root, dataDir);
+        const { server, base } = await start(new FakeConnection(), r.options);
+        const events = await sseEvents(base, "plan-usage", async () => { seen.push(JSON.stringify(await get(base, "/api/plan-usage"))); });
+        seen.push(JSON.stringify(events), JSON.stringify(await get(base, "/api/plan-usage")));
+        await server.close();
+        const walk = async (dir: string): Promise<void> => {
+          for (const entry of await readdir(dir, { withFileTypes: true })) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory()) await walk(path); else seen.push((await readFile(path)).toString("latin1"));
+          }
+        };
+        await walk(dataDir);
+      }
+      const forbidden = [token, email, "auth.json", "wsl.localhost", ...roots].map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      const haystack = [...seen, ...written].join("\n");
+      assert.doesNotMatch(haystack, new RegExp(forbidden.join("|")));
+    });
+  });
+
+  describe("the file Muse is told to use", () => {
+    it("follows MUSE_AUTH_PATH, then XDG_CONFIG_HOME, from runtime.json's wslEnv, and asks no home folder then", async (t) => {
+      const both = await rig(t, { wslEnv: { MUSE_AUTH_PATH: "/srv/muse/auth.json", XDG_CONFIG_HOME: "/x/cfg" } });
+      await both.login("/srv", "person@example.test", "dca:override");
+      await both.login("/x/cfg", "other@example.test", "dca:xdg");
+      assert.equal((await first((await start(new FakeConnection(), both.options)).base)).status, "ready");
+      assert.deepEqual(both.probe.bearers, ["Bearer dca:override"]);
+      assert.deepEqual(both.probe.mapped.at(-1), ["Ubuntu", "/srv/muse/auth.json"]);
+      assert.equal(both.probe.homeCalls, 0);
+
+      const xdg = await rig(t, { wslEnv: { XDG_CONFIG_HOME: "/x/cfg" } });
+      await xdg.login("/x/cfg", "other@example.test", "dca:xdg");
+      await xdg.login(DISTRO_CONFIG, "person@example.test", "dca:home");
+      assert.equal((await first((await start(new FakeConnection(), xdg.options)).base)).status, "ready");
+      assert.deepEqual(xdg.probe.bearers, ["Bearer dca:xdg"]);
+      assert.deepEqual(xdg.probe.mapped.at(-1), ["Ubuntu", "/x/cfg/muse/auth.json"]);
+      assert.equal(xdg.probe.homeCalls, 0);
+    });
+
+    it("falls back to the home folder when those are not absolute Linux paths", async (t) => {
+      const r = await rig(t, { wslEnv: { MUSE_AUTH_PATH: "rel/auth.json", XDG_CONFIG_HOME: "cfg" } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:home");
+      assert.equal((await first((await start(new FakeConnection(), r.options)).base)).status, "ready");
+      assert.deepEqual(r.probe.mapped.at(-1), ["Ubuntu", "/home/u/.config/muse/auth.json"]);
+    });
+
+    it("reads nothing when an override is absolute but cannot be mapped safely", async (t) => {
+      const r = await rig(t, { wslEnv: { MUSE_AUTH_PATH: "/srv/../etc/auth.json" } });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:home");
+      assert.equal((await first((await start(new FakeConnection(), r.options)).base)).status, "runtime-only");
+      assert.equal(r.probe.requests, 0);
+      assert.deepEqual(r.probe.mapped, []);
+    });
+  });
+
+  describe("what stays as it was", () => {
+    it("does not read when an API key overrides the login, whether set here or for the distro", async (t) => {
+      const forDistro = await rig(t, { wslEnv: { META_API_KEY: "test-api-key" } });
+      await forDistro.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.equal((await first((await start(new FakeConnection(), forDistro.options)).base)).status, "runtime-only");
+      assert.equal(forDistro.probe.requests, 0);
+
+      const here = await rig(t);
+      await here.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      process.env["META_API_KEY"] = "test-api-key";
+      assert.equal((await first((await start(new FakeConnection(), here.options)).base)).status, "runtime-only");
+      assert.equal(here.probe.requests, 0);
+    });
+
+    it("does not read when this server's own environment names an auth file", async (t) => {
+      const r = await rig(t);
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      process.env["MUSE_AUTH_PATH"] = join(r.winHome, "elsewhere", "auth.json");
+      assert.equal((await first((await start(new FakeConnection(), r.options)).base)).status, "runtime-only");
+      assert.equal(r.probe.requests, 0);
+    });
+
+    it("gives a named account no direct read under WSL", async (t) => {
+      const r = await rig(t);
+      const aonia = createAonia({ home: r.winHome, platform: "linux", musePath: "muse" });
+      const profile = await aonia.createProfile("work");
+      await saveLogin(profile.roots.config, "work@example.test", "dca:work");
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const { base } = await start(new FakeConnection(), { ...r.options, aonia });
+      const accounts = (await get(base, "/api/plan-usage")).accounts;
+      const work = accounts.find((account: { accountId: string | null }) => account.accountId === "work");
+      assert.equal(accounts.find((account: { accountId: string | null }) => account.accountId === null).status, "ready");
+      assert.equal(work.status, "runtime-only");
+      assert.equal(work.planName, null);
+      assert.deepEqual(r.probe.bearers, ["Bearer dca:distro-side"]);
+    });
+  });
+
+  describe("what is remembered", () => {
+    it("keeps the last reading across a restart over the same data folder", async (t) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-data-"));
+      const r = await rig(t, { dataDir });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const initial = await start(new FakeConnection(), r.options);
+      assert.equal((await first(initial.base)).status, "ready");
+      await initial.server.close();
+
+      const down = scriptedReader({ now: Date.now, answer: () => new Response(null, { status: 503 }) });
+      const restarted = await start(new FakeConnection(), { ...r.options, subscriptionReader: down.reader });
+      const report = await get(restarted.base, "/api/plan-usage");
+      assert.equal(report.usage.window.usedPercent, 42);
+      assert.equal(report.accounts[0].source, "saved");
+      assert.equal(report.accounts[0].status, "unavailable");
+    });
+
+    it("forgets it, and its plan name, when the login in the distro is another one", async (t) => {
+      let answer: () => Response = () => Response.json(snapshot(Date.now(), 42));
+      const r = await rig(t, { answer: () => answer() });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const { base } = await start(new FakeConnection(), r.options);
+      assert.equal((await first(base)).planName, "Muse Code Power Usage");
+
+      await r.login(DISTRO_CONFIG, "other@example.test", "dca:other-side");
+      answer = () => new Response(null, { status: 503 });
+      const switched = await first(base);
+      assert.equal(switched.usage, null, "another login never inherits the previous reading");
+      assert.equal(switched.planName, null);
+    });
+
+    it("keeps no credential in what it saves", async (t) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-keys-"));
+      const r = await rig(t, { dataDir });
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const { server, base } = await start(new FakeConnection(), r.options);
+      await first(base);
+      const scope = await server["quotaCacheScope"](null);
+      assert.ok(scope);
+      assert.match(scope, /^[0-9a-f]{64}$/);
+      await server.close();
+      const db = new DatabaseSync(join(dataDir, DB_FILE));
+      try {
+        const rows = JSON.stringify(db.prepare("SELECT * FROM subscription_usage").all());
+        assert.doesNotMatch(rows, /dca:|person@example/);
+        assert.match(rows, new RegExp(scope));
+      } finally { db.close(); }
+    });
   });
 });
 

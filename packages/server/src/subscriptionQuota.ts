@@ -26,7 +26,23 @@ const record = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 const text = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 
-async function authMetadata(path: string): Promise<Record<string, unknown> | null> {
+const opening = new Map<string, Promise<Record<string, unknown> | null>>();
+
+/**
+ * One open per file at a time. A login on a share that does not answer (a WSL distro that is stopped or restarting)
+ * holds a thread of libuv's four-thread pool for as long as it takes, and every further look that opened it again
+ * would hold another, until nothing else in the process could read a file.
+ */
+function authMetadata(path: string): Promise<Record<string, unknown> | null> {
+  let pending = opening.get(path);
+  if (!pending) {
+    pending = readAuthMetadata(path).finally(() => { opening.delete(path); });
+    opening.set(path, pending);
+  }
+  return pending;
+}
+
+async function readAuthMetadata(path: string): Promise<Record<string, unknown> | null> {
   try {
     const file = await open(path, "r");
     try {
@@ -116,7 +132,7 @@ interface PendingReading { fingerprint: string; promise: Promise<SubscriptionRea
 /**
  * Uses the same device-login exchange as Muse, without an inference call or a session. Inline CLI
  * credentials stay in this process; returned inference keys are discarded, never saved or exposed.
- * Keychain-only and WSL logins fall back to the running Muse host instead of prompting for secrets.
+ * Keychain-only logins, and named accounts under WSL, fall back to the running Muse host instead of prompting for secrets.
  */
 export class MuseSubscriptionReader {
   private readonly cached = new Map<string, CachedReading>();

@@ -68,6 +68,7 @@ import { SseBroadcaster } from "./sse.js";
 import { buildThreadTitlePrompt, deriveTitle, parseExecTitle, sanitizeThreadTitle } from "./threadTitles.js";
 import { replayUsageAt, turnStartTimes } from "./usageTime.js";
 import { dayBucketer, usageWindow } from "./usageWindow.js";
+import { WSL_HOME_RETRY_MS, WSL_HOME_TIMEOUT_MS, WSL_READ_TIMEOUT_MS, WslHomes, isDistroName, linuxAuthPath, localAuthPath, withinMs } from "./wslLogin.js";
 import { ATTACHMENT_DIR, RESEARCH_DIR, assertWritableFile, entryState, ownedProjectDir, writeAttachment, type AttachmentWriter } from "./workspaceWrite.js";
 import {
   BOOT_SWEEP_RETRY_MS,
@@ -197,6 +198,17 @@ export interface ServerOptions {
   linuxInstaller?: LinuxMuseInstaller;
   /** Reads the Meta device-login quota without a model call; injectable for offline tests. */
   subscriptionReader?: MuseSubscriptionReader;
+  /**
+   * Windows with Muse in WSL: how the login Muse keeps inside the distro is read for the subscription meter. Tests
+   * map the Linux path onto a local file and shorten the bounds: `homeTimeoutMs` for `wsl.exe` naming the user's
+   * home folder, `readTimeoutMs` for the whole read, `retryMs` for how long a failed look at the home folder stands.
+   */
+  wslQuota?: {
+    localPath?: (distro: string, linuxPath: string) => string | null | Promise<string | null>;
+    homeTimeoutMs?: number;
+    readTimeoutMs?: number;
+    retryMs?: number;
+  };
   /** The DeepResearch engine; the daemon's `runResearch` by default, a fake in tests. */
   researchEngine?: ResearchEngine;
   /** Research workers running at once across every run. */
@@ -882,6 +894,11 @@ export class AncillaServer {
   private readonly quotaScopes = new Map<string | null, string | null>();
   private readonly directQuota = new Map<string | null, SubscriptionReading>();
   private readonly subscriptionReader: MuseSubscriptionReader;
+  /** The home folder of the distro's user, which says where its login is; see `wslQuotaAuthPath`. */
+  private readonly wslHomes: WslHomes;
+  private readonly wslQuota: NonNullable<ServerOptions["wslQuota"]>;
+  /** The kinds of look at a WSL login that outlived their bound and have not settled; see `wslUnit`. */
+  private readonly wslStuck = new Set<string>();
   private readonly pendingHostQuotas = new WeakMap<ManagedHost, Promise<SubscriptionUsage | null>>();
   /** Where each account's current reading came from, recorded when it was observed rather than guessed later. */
   private readonly usageSources = new Map<string | null, "meta" | "runtime" | "saved">();
@@ -953,6 +970,7 @@ export class AncillaServer {
       | "loginSpawn"
       | "linuxInstaller"
       | "subscriptionReader"
+      | "wslQuota"
       | "researchEngine"
       | "researchMaxWorkers"
       | "researchStartupMs"
@@ -1047,6 +1065,12 @@ export class AncillaServer {
       ...(this.options.musePath ? { musePath: this.options.musePath } : {}) });
     this.linuxInstaller = options.linuxInstaller ?? new LinuxMuseInstaller({ platform: this.options.platform, home: this.options.home });
     this.subscriptionReader = options.subscriptionReader ?? new MuseSubscriptionReader();
+    this.wslQuota = options.wslQuota ?? {};
+    this.wslHomes = new WslHomes({
+      run: (distro) => this.askWslHome(distro),
+      timeoutMs: this.wslQuota.homeTimeoutMs ?? WSL_HOME_TIMEOUT_MS,
+      retryMs: this.wslQuota.retryMs ?? WSL_HOME_RETRY_MS,
+    });
     this.researchEngine = options.researchEngine ?? runResearch;
     this.researchMaxWorkers = options.researchMaxWorkers;
     // The folder is claimed before anything in it is opened: a live owner's database is never migrated under it, and
@@ -4920,7 +4944,13 @@ export class AncillaServer {
     const quotaAccountGeneration = accountId ? this.quotaAccountGenerations.get(accountId) ?? 0 : 0;
     const target = await this.serveTargetFor(cwd, accountId);
     if (accountId) this.removedQuotaAccounts.delete(accountId);
-    const quotaCacheScope = await this.quotaCacheScope(accountId);
+    let quotaCacheScope = await this.quotaCacheScope(accountId);
+    if (!quotaCacheScope && await this.readsWslLogin(accountId)) {
+      // A host keeps this identity for its life, and its usage frames are dropped without one: a first look that
+      // failed on a distro still starting is not allowed to decide it.
+      this.wslHomes.forgetFailure(this.wslDistro());
+      quotaCacheScope = await this.quotaCacheScope(accountId);
+    }
     // The awaits above can outlast the restart or the shutdown that gave up on this start: nothing is spawned for it.
     this.assertStartWanted(token);
     const handle = this.options.hostFactory(target);
@@ -5740,9 +5770,13 @@ export class AncillaServer {
     return false;
   }
 
-  /** Resolve only credentials belonging to this runtime. WSL and Keychain-only logins use MSP observations. */
+  /**
+   * Resolve only credentials belonging to this runtime. Keychain-only logins and a named account under WSL use MSP
+   * observations; the default login under WSL is the file inside the distro.
+   */
   private async quotaAuthPath(accountId: string | null): Promise<string | null> {
-    if (await this.museRuntime() === "wsl" || process.env["META_API_KEY"]) return null;
+    if (await this.museRuntime() === "wsl") return this.wslQuotaAuthPath(accountId);
+    if (process.env["META_API_KEY"]) return null;
     if (accountId) {
       // A global auth override defeats Aonia's isolated account roots; do not assign it to every profile.
       if (process.env["MUSE_AUTH_PATH"]) return null;
@@ -5752,8 +5786,69 @@ export class AncillaServer {
     return process.env["MUSE_AUTH_PATH"] || join(process.env["XDG_CONFIG_HOME"] || join(this.options.home, ".config"), "muse", "auth.json");
   }
 
-  /** Only the non-secret identity scopes durable readings; no credentials enter the quota cache. */
+  /**
+   * The default login of Muse in WSL, as the Windows side can open it. The login Muse uses is the file in the
+   * distro, never the one on the Windows side, and this process's own environment is the Windows one: only
+   * runtime.json's `wslEnv` says what Muse there was told. An API key, here or for the distro, or an auth file named
+   * by this process's environment leaves no direct read, as it does natively.
+   */
+  private async wslQuotaAuthPath(accountId: string | null): Promise<string | null> {
+    if (accountId !== null || this.options.platform !== "win32" || process.env["META_API_KEY"] || process.env["MUSE_AUTH_PATH"] ||
+      this.options.wslEnv["META_API_KEY"]) return null;
+    const distro = this.wslDistro();
+    if (!isDistroName(distro)) return null;
+    const linux = await linuxAuthPath(this.options.wslEnv, () => this.wslHomes.get(distro));
+    if (!linux) return null;
+    return this.wslQuota.localPath ? await this.wslQuota.localPath(distro, linux) : localAuthPath(distro, linux);
+  }
+
+  /** The distro user's home folder, as `wsl.exe` prints it; null when the call fails or runs out of time. */
+  private async askWslHome(distro: string): Promise<string | null> {
+    const plan = planHostCommand({ platform: this.options.platform, distro, runtime: "wsl", program: "sh", args: ["-c", 'printf %s "$HOME"'] });
+    const timeoutMs = this.wslQuota.homeTimeoutMs ?? WSL_HOME_TIMEOUT_MS;
+    const env = this.wslEnvFor();
+    const result = await this.options.exec(plan.command, plan.args, { timeoutMs, ...(env ? { env } : {}) });
+    return result.exitCode === 0 && !result.timedOut ? result.stdout : null;
+  }
+
+  /** Whether the quota of this login is read from inside a WSL distro, where a stopped one must not hold anything up. */
+  private async readsWslLogin(accountId: string | null): Promise<boolean> {
+    try {
+      return accountId === null && this.options.platform === "win32" && await this.museRuntime() === "wsl";
+    } catch { return false; }
+  }
+
+  /**
+   * One kind of look at a WSL login (`scope` or `read`), given up on after `readTimeoutMs`: `fallback()` is the answer
+   * then, and whatever the look still does is checked by the revision. Opening a file in a stopped or slow distro can
+   * hold a thread of the pool for as long as the distro takes, so while a look that outlived its bound has not
+   * settled, the same kind is not started again and answers `fallback()` at once. The environment probe that finds
+   * the distro is not part of this bound.
+   */
+  private async wslUnit<T, F>(kind: string, start: () => Promise<T>, fallback: () => F): Promise<T | F> {
+    if (this.wslStuck.has(kind)) return fallback();
+    const run = start();
+    let settled = false;
+    const done = () => { settled = true; };
+    run.then(done, done);
+    const answer = await withinMs(run, this.wslQuota.readTimeoutMs ?? WSL_READ_TIMEOUT_MS);
+    if (settled) return answer as T;
+    this.wslStuck.add(kind);
+    const free = () => { this.wslStuck.delete(kind); };
+    run.then(free, free);
+    return fallback();
+  }
+
+  /**
+   * Only the non-secret identity scopes durable readings; no credentials enter the quota cache. A WSL look that gave
+   * up says nothing about the login, so the identity last seen stands rather than reading as a login that changed.
+   */
   private async quotaCacheScope(accountId: string | null): Promise<string | null> {
+    if (!await this.readsWslLogin(accountId)) return this.quotaScopeOf(accountId);
+    return this.wslUnit("scope", () => this.quotaScopeOf(accountId), () => this.quotaScopes.get(accountId) ?? null);
+  }
+
+  private async quotaScopeOf(accountId: string | null): Promise<string | null> {
     try {
       const path = await this.quotaAuthPath(accountId);
       if (!path) return null;
@@ -5888,25 +5983,29 @@ export class AncillaServer {
       } catch { failed += 1; }
     });
     const directReads = [...sources].map(async (accountId) => {
-      try {
-        const path = await this.quotaAuthPath(accountId);
-        const reading = path ? await this.subscriptionReader.read(path) : null;
-        if (revision !== this.planUsageReadRevision || this.closed || (accountId && this.removedQuotaAccounts.has(accountId))) return;
-        // Login can change while Meta answers, even if no other quota request has noticed it yet.
-        const scope = await this.quotaCacheScope(accountId);
-        if (revision !== this.planUsageReadRevision) return;
-        if (scope !== scopes.get(accountId)) { this.forgetQuota(accountId); this.quotaScopes.set(accountId, scope); return; }
-        if (!reading) { this.directQuota.delete(accountId); return; }
-        if (reading.status === "no-subscription") {
-          // A plan that ended is not the plan to show after the next failed check.
-          this.lastPlanNames.delete(accountId);
-          const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
-          if (!prior || prior.observedAtMs <= reading.checkedAtMs) this.forgetQuota(accountId);
-        } else if (reading.planName) this.lastPlanNames.set(accountId, reading.planName);
-        this.directQuota.set(accountId, reading);
-        this.quotaScopes.set(accountId, scope);
-        this.observeUsage(reading.usage, accountId, "meta", scope);
-      } catch { /* A missing or inaccessible profile still has its runtime-only row below. */ }
+      const direct = async () => {
+        try {
+          const path = await this.quotaAuthPath(accountId);
+          const reading = path ? await this.subscriptionReader.read(path) : null;
+          if (revision !== this.planUsageReadRevision || this.closed || (accountId && this.removedQuotaAccounts.has(accountId))) return;
+          // Login can change while Meta answers, even if no other quota request has noticed it yet.
+          const scope = await this.quotaCacheScope(accountId);
+          if (revision !== this.planUsageReadRevision) return;
+          if (scope !== scopes.get(accountId)) { this.forgetQuota(accountId); this.quotaScopes.set(accountId, scope); return; }
+          if (!reading) { this.directQuota.delete(accountId); return; }
+          if (reading.status === "no-subscription") {
+            // A plan that ended is not the plan to show after the next failed check.
+            this.lastPlanNames.delete(accountId);
+            const prior = accountId ? this.planUsageByAccount.get(accountId) : this.defaultPlanUsage;
+            if (!prior || prior.observedAtMs <= reading.checkedAtMs) this.forgetQuota(accountId);
+          } else if (reading.planName) this.lastPlanNames.set(accountId, reading.planName);
+          this.directQuota.set(accountId, reading);
+          this.quotaScopes.set(accountId, scope);
+          this.observeUsage(reading.usage, accountId, "meta", scope);
+        } catch { /* A missing or inaccessible profile still has its runtime-only row below. */ }
+      };
+      // A WSL login is read through a distro that may be stopped or slow; the page does not wait long for it.
+      await (await this.readsWslLogin(accountId) ? this.wslUnit("read", direct, () => undefined) : direct());
     });
     await Promise.all([...hostReads, ...directReads]);
     const accounts: PlanAccountUsage[] = [null, ...profiles.map((profile) => profile.id)]

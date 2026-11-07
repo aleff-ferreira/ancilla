@@ -98,8 +98,9 @@ does not switch the meter. Expired, missing and failed readings show **Current u
 ![The Usage page separating Muse subscription limits and reset times from local thread activity and cost estimates](docs/assets/usage.png)
 
 Below the subscription section, explore local token history by date, model and thread. **API-rate cost estimates are
-separate from subscription allowance and are not a bill.** Meta may omit quota data when a window is idle. WSL and
-Keychain-only logins use labelled runtime observations; saved readings retain their original age. API keys do not
+separate from subscription allowance and are not a bill.** Meta may omit quota data when a window is idle. The default
+login under WSL is read from the distro's own login file; named accounts under WSL and Keychain-only logins use
+labelled runtime observations; saved readings retain their original age. API keys do not
 establish subscription allowance. See [subscription data sources](docs/subscription-usage.md) for the precise limits.
 
 ## The everyday workspace

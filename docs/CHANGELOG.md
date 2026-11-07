@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **The subscription meter reads a login kept in WSL, and Refresh now has an effect.** On Windows with Muse in WSL the Usage page said "Not reported" for both windows and Refresh changed nothing: the meter waited for Muse to report limits, and Muse reports none until a turn has been sent. The server now reads the default login from the distro Muse runs in, as it does for a login on Windows or Linux and never from the Windows side: the file `.config/muse/auth.json` under that distro user's home folder, or the file that `MUSE_AUTH_PATH` or `XDG_CONFIG_HOME` names in `runtime.json`'s `wslEnv`. Ancilla on the Windows side opens it through the `\\wsl.localhost\` share and sends its device token to Meta, and nowhere else. The numbers and the plan name appear after one read and stay current, a reading survives a restart marked as saved, and a different login never inherits it. When Meta no longer accepts the login, the panel says "Meta no longer accepts this login. Sign in again to see its subscription limits." and keeps the button to the sign-in settings. A stopped or slow distro does not hold the page: the home folder is asked for once, each look at the login is given six seconds, and while one that ran longer is still unanswered no other starts. Named accounts, an API key (in the server's environment or in `wslEnv`) and a `MUSE_AUTH_PATH` in the server's own environment still get no direct read.
+
 ## 0.21.0
 
 ### New
