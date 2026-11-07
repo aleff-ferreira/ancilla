@@ -98,7 +98,7 @@ import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
 import { loginIdentity, MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
 import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
-export const ANCILLA_VERSION = "0.21.2";
+export const ANCILLA_VERSION = "0.21.3";
 
 export interface HostExit {
   code: number | null;
