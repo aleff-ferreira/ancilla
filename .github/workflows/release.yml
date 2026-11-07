@@ -41,10 +41,9 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.21.1**
-    - **The subscription meter reads a login kept in WSL, and Refresh now has an effect.** On Windows with Muse in WSL the Usage page said "Not reported" and Refresh did nothing, because the meter waited for Muse to report limits and Muse reports none until a turn has been sent. Ancilla now reads the default login from the distro Muse runs in and asks Meta, as it does for a login on Windows or Linux, so the numbers and the plan name appear after one read and stay current. When Meta no longer accepts the login, the panel says so and offers the sign-in settings: if yours has expired, sign in to Meta again.
-    - **A stalled distro cannot freeze the Usage page.** Each look at the login is bounded: on a distro that never answers, the first check can take about twelve seconds and the next ones almost none. Reading the login opens the distro's share, which may start a stopped distro.
-    - **Named accounts under WSL, an API key, and an auth file set in the server's own environment still get no direct read** and keep showing what Muse reports.
+    **New in 0.21.2**
+    - **Settings shows the account you are signed in with when Muse runs in WSL.** The sign-in card used to say "Sign in with Meta" even when you were signed in. It now reads the account from the same login file in the distro that the Usage meter reads, and shows "Signed in as" with your e-mail and a "Sign in again" button. Only the e-mail leaves the server, never the token or the file path, and when the file shows no login the card says it cannot tell rather than that you are signed out.
+    - **The Usage page says what an empty meter means.** When Meta confirms your plan but sends no usage numbers, which it can do before the first use in a new usage window, the page now says exactly that and what to try, instead of a line that read like a malfunction. A missing value is still shown as unknown, never as zero.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
