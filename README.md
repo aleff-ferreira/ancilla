@@ -16,9 +16,8 @@ It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windo
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.21.0:** one Ancilla per data folder, a server that closes with the app that started it, a quit that
-> closes the server in order, and an "already open" page instead of a second copy.
-> [Read the release notes](docs/CHANGELOG.md#0210).
+> **New in 0.21.1:** the Usage meter now reads a Muse login kept in WSL and says when Meta no longer accepts it, so
+> Refresh works for it. [Read the release notes](docs/CHANGELOG.md#0211).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
