@@ -8,7 +8,7 @@ import { TooltipProvider } from "../src/components/ui/overlays.js";
 import { nearCapHint } from "../src/components/home/Home.js";
 import type { AncillaController } from "../src/model/controller.js";
 import { emptyFold, type ThreadFold } from "../src/model/fold.js";
-import { PLAN_SYNC_MS, backgroundTasks, bindingRow, contextualPlanAccountId, formatReset, legacyPlanAccounts, mergePlanAccounts, planAccount, planAge, planReadFailed, planSyncDue, planView, startPlanPolling, startPlanSync } from "../src/model/plan.js";
+import { PLAN_SYNC_MS, backgroundTasks, bindingRow, contextualPlanAccountId, formatReset, lastKnownRow, legacyPlanAccounts, mergePlanAccounts, planAccount, planAge, planReadFailed, planSyncDue, planView, startPlanPolling, startPlanSync } from "../src/model/plan.js";
 import { defaultPrefs, initialState, Store, type AppState } from "../src/model/store.js";
 import type { MspItem, PlanAccountUsage, PlanUsage, ProjectView } from "../src/types.js";
 import { session } from "./crew-fixtures.js";
@@ -32,8 +32,8 @@ describe("plan meter", () => {
     );
     assert.equal(view?.tier, "High usage");
     assert.deepEqual(view?.rows, [
-      { key: "window", label: "5-hour window", percent: 72, barPercent: 72, remainingPercent: 28, tone: "warn", resetsAtMs: NOW + (2 * 60 + 14) * 60_000, expired: false, current: true, resets: "Resets in 2h 14m" },
-      { key: "weekly", label: "Weekly limit", percent: 94, barPercent: 94, remainingPercent: 6, tone: "danger", resetsAtMs: NOW - 1, expired: true, current: false, resets: "Reset time passed · refresh needed" },
+      { key: "window", label: "5-hour window", percent: 72, barPercent: 72, remainingPercent: 28, tone: "warn", resetsAtMs: NOW + (2 * 60 + 14) * 60_000, expired: false, current: true, standing: "current", resets: "Resets in 2h 14m" },
+      { key: "weekly", label: "Weekly limit", percent: 94, barPercent: 94, remainingPercent: 6, tone: "danger", resetsAtMs: NOW - 1, expired: true, current: false, standing: "ended", resets: "Reset just now" },
     ]);
     assert.equal(view?.stale, true, "a passed reset makes this observation stale");
   });
@@ -128,12 +128,84 @@ describe("subscription quota presentation", () => {
       window: { usedPercent: 92, resetsAtMs: NOW - 1, windowDurationMins: 300 },
       weekly: { usedPercent: 40, resetsAtMs: NOW - 1, windowDurationMins: null } }, NOW)!;
     const html = renderToStaticMarkup(createElement(MeterDetails, { view, title: "Default login" }));
-    assert.match(html, /92% used/);
-    assert.match(html, /Previous reading: 92% used/);
-    assert.match(html, /Reset time passed/);
-    assert.match(html, /Current allowance is unknown/);
+    assert.match(html, /Last report: 92% used, before it ended\./);
+    assert.match(html, /Window ended/);
+    assert.match(html, /Ended just now/);
+    assert.match(html, /Week reset/);
+    assert.match(html, /Reset just now/);
+    assert.match(html, /The 5-hour window has ended and a new one starts with your next message, so usage in it is unknown until then\./);
+    assert.match(html, /The weekly limit has reset since this report, so usage in the new week is unknown until Meta reports it\./);
     assert.doesNotMatch(html, /remaining at reading/);
     assert.doesNotMatch(html, /role="progressbar"/);
+    assert.doesNotMatch(html, /Previous reading|Current usage unknown|until it is refreshed/);
+  });
+});
+
+describe("the last report", () => {
+  const DAY = 24 * 60 * 60_000;
+
+  it("is kept however old, and says what it means and how to get a current one", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: quota(92, NOW - 40 * DAY), status: "not-reported" })] });
+    assert.match(html, /Window ended/);
+    assert.match(html, /Week reset/);
+    assert.match(html, /Last report: 92% used, before it ended\./);
+    assert.match(html, /Last report: 40% used, before it reset\./);
+    assert.match(html, /Reported 40d ago/);
+    assert.match(html, /These are the last numbers reported for this account, 40d ago\./);
+    assert.match(html, /The 5-hour window has ended and a new one starts with your next message/);
+    assert.match(html, /The weekly limit has reset since this report/);
+    assert.match(html, /Meta sends usage numbers only while a 5-hour window is running, and a window starts with your first message\./);
+    assert.match(html, /send a message in a thread that uses this account, then choose Refresh/);
+    assert.match(html, /href="https:\/\/dev\.meta\.ai\/usage"/);
+    assert.match(html, /target="_blank"/);
+    assert.match(html, /rel="noreferrer"/);
+    // The sentence under the limits is about the reply, not about a failure to read.
+    assert.match(html, /Meta confirms your plan but is not sending usage numbers right now/);
+    assert.doesNotMatch(html, /role="progressbar"|Current usage unknown|Previous reading|did not report/);
+  });
+
+  it("shows the last report of a window that is still open with a muted bar, not as the live meter", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 55, { usage: quota(55, NOW - 90 * 60_000), status: "unavailable" })] });
+    assert.match(html, /Last report: 55% used/);
+    assert.match(html, /Usage may be higher now\./);
+    assert.match(html, /aria-hidden="true"[^>]*><div class="h-full rounded-full opacity-40/);
+    assert.match(html, /Resets in 3h 30m/);
+    assert.doesNotMatch(html, /role="progressbar"|remaining at reading|has ended and a new one starts|has reset since this report/);
+    assert.match(html, /Could not refresh this account/);
+  });
+
+  it("says where Refresh cannot help, and still points to Meta's page", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: quota(92, NOW - 5 * 60 * 60_000), source: "runtime", status: "runtime-only", checkedAtMs: null })] });
+    assert.match(html, /Muse reports again when it next sends usage, and Refresh cannot update it\./);
+    assert.doesNotMatch(html, /then choose Refresh/);
+    assert.match(html, /href="https:\/\/dev\.meta\.ai\/usage"/);
+  });
+
+  it("keeps a current reading free of the note, and uses the live meter", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 40)] });
+    assert.match(html, /role="progressbar"/);
+    assert.doesNotMatch(html, /last numbers reported|Last report|dev\.meta\.ai/);
+  });
+
+  it("is what the pill falls back to: an open window before an ended one, the highest, the short window on a tie", () => {
+    const lastOf = (usage: PlanUsage) => lastKnownRow(planView(usage, NOW, account(null, 0, { status: "unavailable" }))!);
+    const old = NOW - 31 * 60_000;
+    assert.equal(lastOf(limits(10, 97, old))?.key, "weekly");
+    assert.equal(lastOf(limits(50, 50, old))?.key, "window", "a tie goes to the short window");
+    const windowEnded = (usage: PlanUsage): PlanUsage => ({ ...usage, window: { ...usage.window, resetsAtMs: NOW - 1 } });
+    assert.equal(lastOf(windowEnded(limits(97, 10, old)))?.key, "weekly", "an open window comes before one that has ended, whatever the percentages");
+    const bothEnded = lastOf(limits(30, 12, NOW - 40 * DAY));
+    assert.equal(bothEnded?.key, "window");
+    assert.equal(bothEnded?.standing, "ended", "an old report is still kept for the pill");
+    assert.equal(bothEnded?.percent, 30);
+  });
+
+  it("never lets an old report bind a limit, so it cannot make a suggestion", () => {
+    const view = planView(limits(10, 97, NOW - 40 * DAY), NOW, account(null, 10, { status: "not-reported" }))!;
+    assert.equal(bindingRow(view), null);
+    assert.ok(view.rows.every((row) => row.standing === "ended"));
+    const hint = nearCapHint({ ...project, defaultAccountId: null }, [accountView], [account(null, 10, { usage: limits(10, 97, NOW - 40 * DAY), status: "not-reported" })], NOW);
+    assert.equal(hint, null);
   });
 });
 
@@ -264,7 +336,7 @@ describe("subscription account accuracy", () => {
     assert.doesNotMatch(bare, /Meta no longer accepts/);
   });
 
-  it("renders stale, saved, failed and omitted readings as historical values without current meters", () => {
+  it("renders stale, saved, failed and omitted readings as the last report, without current meters", () => {
     for (const record of [
       account(null, 92, { usage: quota(92, NOW - 31 * 60_000) }),
       account(null, 92, { source: "saved", status: "runtime-only" }),
@@ -272,12 +344,12 @@ describe("subscription account accuracy", () => {
       account(null, 92, { status: "not-reported" }),
     ]) {
       const html = render(PlanMeter, { planUsageAccounts: [record] });
-      assert.match(html, /Current usage unknown/);
-      assert.match(html, /Previous reading: 92% used/);
-      assert.doesNotMatch(html, /role="progressbar"|remaining at reading/);
+      assert.match(html, /Last report: 92% used/);
+      assert.match(html, /These are the last numbers reported for this account/);
+      assert.doesNotMatch(html, /role="progressbar"|remaining at reading|Current usage unknown|Previous reading/);
       const pill = render(PlanPill, { planUsageAccounts: [record] });
-      assert.match(pill, /—<\/button>/);
-      assert.doesNotMatch(pill, /92%<\/button>/);
+      assert.match(pill, /92%<span[^>]*> · (31m|now)<\/span><\/button>/, "the pill keeps the last report, marked with its age");
+      assert.doesNotMatch(pill, /<\/svg><\/button>/, "the pill is never left empty");
     }
   });
 
@@ -286,7 +358,7 @@ describe("subscription account accuracy", () => {
     reading.window.resetsAtMs = NOW - 1;
     const record = account(null, 92, { usage: reading });
     const html = render(PlanMeter, { planUsageAccounts: [record] });
-    assert.match(html, /Previous reading: 92% used/);
+    assert.match(html, /Last report: 92% used, before it ended\./);
     assert.equal((html.match(/role="progressbar"/g) ?? []).length, 1);
     assert.match(html, /40% used as last reported by Meta/);
   });
@@ -407,13 +479,24 @@ describe("binding limit", () => {
     const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: windowPassed(limits(10, 97)) })] });
     assert.match(html, /97% wk<\/button>/);
     assert.doesNotMatch(html, /—<\/button>/);
-    assert.match(html, /5-hour window: current usage unknown; previous reading 10% used/);
+    assert.match(html, /5-hour window: last reported 10% used, ended just now/);
   });
 
-  it("keeps the dash when no limit is current", () => {
+  it("keeps the last report, muted and marked with its age, when no limit is current", () => {
     const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: limits(10, 97, NOW - 31 * 60_000) })] });
-    assert.match(html, /—<\/button>/);
-    assert.doesNotMatch(html, /97%<\/button>|wk</);
+    assert.match(html, /97% wk<span[^>]*> · 31m<\/span><\/button>/);
+    assert.doesNotMatch(html, /<\/svg><\/button>/, "the pill is never left empty");
+    assert.match(html, /No limit is current, so the pill shows the last report, the weekly limit/);
+    assert.match(html, /5-hour window: last reported 10% used, resets in 4h 29m/);
+    assert.match(html, /Send a message in a thread that uses this account to get current numbers/);
+    assert.match(html, /text-subtle/);
+    assert.doesNotMatch(html, /text-danger-text/, "an old figure does not take the alarm colour of a current one");
+  });
+
+  it("keeps even a very old report in the pill", () => {
+    const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: limits(30, 12, NOW - 40 * 24 * 60 * 60_000) })] });
+    assert.match(html, /30%<span[^>]*> · 40d<\/span><\/button>/);
+    assert.match(html, /5-hour window: last reported 30% used, ended 39d \d+h ago/);
   });
 
   it("is what the new-thread hint compares, so a weekly cap is not missed", () => {
@@ -431,18 +514,18 @@ describe("wording by source", () => {
   it("does not promise a refresh for a reading only the Muse runtime reports", () => {
     const runtime = account(null, 92, { usage: quota(92, NOW - 31 * 60_000), source: "runtime", status: "runtime-only", checkedAtMs: null });
     const html = render(PlanMeter, { planUsageAccounts: [runtime] });
-    assert.doesNotMatch(html, /refresh needed|until it is refreshed/);
-    assert.match(html, /Muse reports this again when it next sends usage\. Refresh cannot update it\./);
+    assert.doesNotMatch(html, /refresh needed|until it is refreshed|then choose Refresh/);
+    assert.match(html, /Muse reports again when it next sends usage, and Refresh cannot update it\./);
     const passed = render(PlanMeter, { planUsageAccounts: [{ ...runtime, usage: windowPassed(quota(92)) }] });
-    assert.match(passed, /Reset time passed · waiting for Muse(&#x27;|')s next report/);
-    assert.doesNotMatch(passed, /refresh needed|until it is refreshed/);
+    assert.match(passed, /Ended just now/);
+    assert.doesNotMatch(passed, /refresh needed|until it is refreshed|then choose Refresh/);
     assert.match(passed, /Refresh cannot update it/);
   });
 
   it("keeps the refresh wording where Refresh asks Meta again", () => {
     const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: windowPassed(quota(92)) })] });
-    assert.match(html, /Reset time passed · refresh needed/);
-    assert.match(html, /until it is refreshed/);
+    assert.match(html, /Ended just now/);
+    assert.match(html, /then choose Refresh/);
     assert.doesNotMatch(html, /Refresh cannot update it|waiting for Muse/);
     for (const record of [
       account(null, 92, { usage: quota(92, NOW - 31 * 60_000), status: "unavailable" }),
@@ -450,7 +533,7 @@ describe("wording by source", () => {
       account(null, 92, { usage: quota(92, NOW - 31 * 60_000), source: "runtime", status: "runtime-only" }),
     ]) {
       const stale = render(PlanMeter, { planUsageAccounts: [record] });
-      assert.match(stale, /until it is refreshed/);
+      assert.match(stale, /then choose Refresh/);
       assert.doesNotMatch(stale, /Refresh cannot update it/);
     }
   });
@@ -466,8 +549,11 @@ describe("wording by source", () => {
     assert.equal(refreshable({ source: "saved", status: "runtime-only", checkedAtMs: null }), false);
     assert.equal(refreshable({ source: "meta", status: "runtime-only", checkedAtMs: null }), false, "Meta's numbers, but no check to repeat");
     const passed = planView(windowPassed(usage), NOW, account(null, 10, { source: "runtime", status: "runtime-only", checkedAtMs: null }));
-    assert.equal(passed?.rows[0]?.resets, "Reset time passed · waiting for Muse's next report");
-    assert.equal(planView(windowPassed(usage), NOW)?.rows[0]?.resets, "Reset time passed · refresh needed");
+    // What the line under a window that has ended says no longer depends on the source: the note below the limits does.
+    assert.equal(passed?.rows[0]?.resets, "Ended just now");
+    assert.equal(planView(windowPassed(usage), NOW)?.rows[0]?.resets, "Ended just now");
+    assert.equal(passed?.refreshable, false);
+    assert.equal(planView(windowPassed(usage), NOW)?.refreshable, true);
   });
 
   it("words a Meta reading whose login lost its token as one that cannot be refreshed, and not as a runtime reading", () => {
@@ -486,10 +572,10 @@ describe("wording by source", () => {
     assert.equal(legacy?.checkedAtMs, null);
     const html = render(PlanMeter, { planUsageAccounts: [legacy!] });
     assert.match(html, /Refresh cannot update it/);
-    assert.doesNotMatch(html, /until it is refreshed/);
+    assert.doesNotMatch(html, /then choose Refresh/);
     // A failed read is still worth retrying, wherever the report came from.
     const [failed] = legacyPlanAccounts({ usage: old, byAccount: {}, accountId: null, status: "unavailable" }, []);
-    assert.match(render(PlanMeter, { planUsageAccounts: [failed!] }), /until it is refreshed/);
+    assert.match(render(PlanMeter, { planUsageAccounts: [failed!] }), /then choose Refresh/);
   });
 });
 

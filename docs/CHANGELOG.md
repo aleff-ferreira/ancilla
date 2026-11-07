@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The Usage page keeps the last report however old, and says what it means.** An old reading used to turn into "Current usage unknown" with the number in small print, and the sidebar meter fell back to a dash, so the last report seemed lost. It is now always kept, across restarts too, and shown as the last report: a limit whose window is still open says "Last report" with a muted bar and its time to reset, and a limit whose reset time has passed says that the window ended and what was last reported before that. The sidebar meter keeps the figure, muted and marked with its age. A note under the limits says what the report is, why nothing newer exists (Meta sends usage numbers only while a 5-hour window is running, and a window starts with your first message) and how to get a current one: send a message in a thread that uses that account, then choose Refresh, or open Meta's usage page, which always shows the current figures. Where only the Muse runtime reports an account, the note says that Refresh cannot update it. An old report still never shows as the current allowance and never drives a near-cap suggestion.
+
 ## 0.21.2
 
 ### Fixed

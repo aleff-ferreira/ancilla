@@ -30,18 +30,28 @@ HTTP request wins; the HTTP response's arrival does not artificially make its ol
 - The five-hour class window uses Meta's reported duration; a missing duration is not guessed.
 - Percentages above 100 are retained. Only the drawn progress bar is capped at 100.
 - Meta's HTTP reset stamps are epoch seconds; MSP reset stamps are epoch milliseconds.
-- A passed reset does not prove that the new allowance is unused. An expired window shows unknown until a new
-  snapshot arrives. Old values remain available as previous readings, without active quota bars.
-- A reading older than 30 minutes is treated the same way. What the panel then says depends on whether Refresh can
-  help. Refresh re-reads Meta, so for an account Ancilla has checked directly (a Meta reading, a newer runtime reading
-  on such an account, or a check that just failed) the panel asks for a refresh, and a failed check is reported on its
-  own line. For an account only the Muse runtime reports (a named account under WSL, a Keychain-only login, a login
-  that lost its token), Refresh cannot produce newer data, so the panel says that Muse reports it again when it next
-  sends usage. It does not name a trigger, because the protocol allows several. A report from a server that predates
-  direct checks carries no check time, so it is worded the same way.
+- The last report is kept for as long as the login stays the same, however old: in memory and, once Ancilla can
+  verify the login's identity, in the local database, so it survives a restart with its original age. It is never
+  dropped for being old and never passes for the current allowance. Only a reading under 30 minutes old, of a window
+  whose reset time has not passed, that is not a saved one from an earlier run and that the latest check did not
+  contradict (Meta unavailable, no usage numbers sent, a refused login), is drawn as a live meter.
+- Every other report is shown as the last report. A limit whose window is still open says "Last report", with a muted
+  bar and the time left to its reset; usage may be higher now. A limit whose reset time has passed says that the window
+  ended (or that the week reset) and shows what was last reported before that, without a bar: a passed reset does not
+  prove that the next window is unused, and Meta sends nothing for a window that has not started.
+- A note under the limits says what the report is (its age), why nothing newer exists (Meta sends usage numbers only
+  while a 5-hour window is running, and a window starts with the first message) and how to get a current one: send a
+  message in a thread that uses the account, then choose Refresh, or open Meta's usage page
+  (`https://dev.meta.ai/usage`, which Meta's documentation calls the Usage dashboard), which always shows the current
+  figures. For an account only the Muse runtime reports (a named account under WSL, a Keychain-only login, a login that
+  lost its token, a report from a server that predates direct checks) Refresh cannot produce newer data, so the note
+  says that Muse reports again when it next sends usage and that Refresh cannot update it. It does not name a trigger,
+  because the protocol allows several.
 - The sidebar pill follows the binding limit: the highest percentage among the limits that are current, marked as the
-  weekly one when that is the one binding. It shows a dash only when no limit is current. The "switch accounts" hint on
-  the new-thread screen compares accounts by the same figure.
+  weekly one when that is the one binding. When no limit is current it keeps the last report instead, muted and marked
+  with its age (a window that is still open before one that has ended, the highest percentage, the short window on a
+  tie), so it shows a dash only when there has never been a report. A last report never binds a limit: the "switch
+  accounts" hint on the new-thread screen compares accounts by the current figures only.
 - Reset countdowns count whole minutes below an hour and never show seconds, because the clock ticks once a minute.
   The pill tooltip and the Usage page describe a reading's age in the same short form, such as `28h` or `36d`.
 - A missing `subs_usage` field is not a zero. Meta can omit it while the short window is idle, even if weekly usage
@@ -49,8 +59,9 @@ HTTP request wins; the HTTP response's arrival does not artificially make its ol
   `muse usage --json` reports the same for such an account, `allowance: null` with the reason `server_sent_no_usage`.
   The panel keeps the reported plan name and says that Meta confirms the plan but has sent no usage numbers yet; sending
   a message in a thread that uses that account and then choosing Refresh checks again; if no numbers appear after that,
-  Meta has not sent any for the account. Without a plan name it keeps the plainer line that Meta did not report limits.
-  Either way a missing value is unknown, never zero usage.
+  Meta has not sent any for the account. When a last report is kept, the line says that Meta is not sending numbers
+  right now. Without a plan name it keeps the plainer line that Meta did not report limits. Either way a missing value
+  is unknown, never zero usage.
 - Account selection is explicit. Readings from a different account cannot take over the selected meter.
 
 ## Plan name and source labels

@@ -92,12 +92,14 @@ See [Agents and tasks](docs/agent-activity.md) for the full interaction model an
 The Usage page shows your **5-hour window and weekly limits**, including used and remaining percentages, reset
 times and plan name. With a supported Muse browser login, **Refresh** fetches a fresh subscription snapshot from
 Meta without starting a thread or spending model tokens. Choose the account explicitly; another account's activity
-does not switch the meter. Expired, missing and failed readings show **Current usage unknown** instead of a misleading bar.
+does not switch the meter. The last report is always kept, however old: once it is no longer current it is shown as the
+**last report**, with its age, whether its window has ended and how to get a current one, instead of a misleading bar.
 
 ![The Usage page separating Muse subscription limits and reset times from local thread activity and cost estimates](docs/assets/usage.png)
 
 Below the subscription section, explore local token history by date, model and thread. **API-rate cost estimates are
-separate from subscription allowance and are not a bill.** Meta may omit quota data when a window is idle. The default
+separate from subscription allowance and are not a bill.** Meta sends quota data only while a 5-hour window is running
+(it starts with your first message), so an idle account shows its last report. The default
 login under WSL is read from the distro's own login file; named accounts under WSL and Keychain-only logins use
 labelled runtime observations; saved readings retain their original age. API keys do not
 establish subscription allowance. See [subscription data sources](docs/subscription-usage.md) for the precise limits.

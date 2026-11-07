@@ -18,7 +18,14 @@ export interface PlanRow {
   expired: boolean;
   /** Only a recent observation of the current window can use an active meter. */
   current: boolean;
-  /** A passed reset does not establish the new allowance until Muse reports it. */
+  /**
+   * Where the figure stands. `current`: a recent reading of a window that is still open. `last`: the last report of a
+   * window that is still open, too old, or too uncertain, to be the live meter, so the real figure may be higher.
+   * `ended`: the last report of a window whose reset time has passed, so what it counted is over. A report is kept
+   * whatever its age; only this changes how it is shown.
+   */
+  standing: "current" | "last" | "ended";
+  /** When the window resets, or how long ago it did: a passed reset does not tell what the new window holds. */
   resets: string;
 }
 
@@ -94,18 +101,26 @@ export function formatReset(ms: number): string {
   return rest === 0 ? `${days}d` : `${days}d ${rest}h`;
 }
 
-function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number, recent: boolean, refreshable: boolean): PlanRow {
+/** How long ago a window reset, for the line under a window that has ended. */
+function agoLabel(ms: number): string {
+  return ms < MINUTE_MS ? "just now" : `${formatReset(ms)} ago`;
+}
+
+function row(key: PlanRow["key"], label: string, window: PlanWindow, now: number, recent: boolean): PlanRow {
   const percent = Math.round(window.usedPercent);
   const left = window.resetsAtMs - now;
+  const ended = left <= 0;
+  const current = recent && !ended;
   return {
     key, label, percent,
     barPercent: Math.min(100, percent),
     remainingPercent: Math.max(0, 100 - percent),
     tone: tone(percent),
     resetsAtMs: window.resetsAtMs,
-    expired: left <= 0,
-    current: recent && left > 0,
-    resets: left > 0 ? `Resets in ${formatReset(left)}` : refreshable ? "Reset time passed · refresh needed" : "Reset time passed · waiting for Muse's next report",
+    expired: ended,
+    current,
+    standing: current ? "current" : ended ? "ended" : "last",
+    resets: ended ? `${key === "window" ? "Ended" : "Reset"} ${agoLabel(-left)}` : `Resets in ${formatReset(left)}`,
   };
 }
 
@@ -132,8 +147,8 @@ export function planView(usage: PlanUsage | null, now: number, account?: PlanAcc
   const refreshable = canRefresh(account);
   return {
     tier: /^[a-z][a-z0-9_ -]{0,31}$/i.test(usage.tier) ? humanize(usage.tier) : null,
-    rows: [row("window", windowLabel(usage.window), usage.window, now, !old && available, refreshable),
-      row("weekly", "Weekly limit", usage.weekly, now, !old && available, refreshable)],
+    rows: [row("window", windowLabel(usage.window), usage.window, now, !old && available),
+      row("weekly", "Weekly limit", usage.weekly, now, !old && available)],
     observedAtMs: usage.observedAtMs,
     stale: old || usage.window.resetsAtMs <= now || usage.weekly.resetsAtMs <= now,
     age: planAge(usage.observedAtMs, now),
@@ -153,6 +168,17 @@ export function bindingRow(view: PlanView): PlanRow | null {
     }
   }
   return binding;
+}
+
+/**
+ * What the pill shows when no limit is current: the last report, so the figure is kept however old it is and the pill
+ * is never left on a dash while a reading exists. A window that is still open comes before one that has ended; within
+ * a group the highest percentage wins and the short window takes a tie. Never used to suggest anything: only a current
+ * reading, through `bindingRow`, can say an account is near its cap.
+ */
+export function lastKnownRow(view: PlanView): PlanRow | null {
+  const highest = (rows: PlanRow[]): PlanRow | null => rows.reduce<PlanRow | null>((best, row) => !best || row.percent > best.percent ? row : best, null);
+  return highest(view.rows.filter((row) => row.standing === "last")) ?? highest(view.rows.filter((row) => row.standing === "ended"));
 }
 
 /**
