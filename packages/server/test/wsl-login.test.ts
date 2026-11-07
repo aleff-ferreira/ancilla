@@ -50,7 +50,8 @@ describe("which auth file Muse uses in the distro", () => {
 
   it("refuses an override that Windows would read as another file than Linux does", async () => {
     const h = home("/home/u");
-    for (const odd of ["/srv/a.json ", "/srv/a.json ", "/srv/a.json\t", "/srv/a.json/", "/srv/a.json."]) {
+    for (const odd of ["/srv/a.json ", "/srv/a.json ", "/srv/a.json\t", "/srv/a.json/", "/srv/a.json.",
+      "/srv/a.json::$DATA", "/srv/a.json:$DATA", "/srv/a.json::$data", "/srv/a.json:stream"]) {
       assert.equal(await linuxAuthPath({ MUSE_AUTH_PATH: odd }, h.fn), null, JSON.stringify(odd));
     }
     assert.equal(await linuxAuthPath({ MUSE_AUTH_PATH: "/srv/a b.json" }, h.fn), "/srv/a b.json", "a space inside a name is the same file on both sides");

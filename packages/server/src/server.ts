@@ -5788,9 +5788,10 @@ export class AncillaServer {
 
   /**
    * The default login of Muse in WSL, as the Windows side can open it. The login Muse uses is the file in the
-   * distro, never the one on the Windows side, and this process's own environment is the Windows one: only
-   * runtime.json's `wslEnv` says what Muse there was told. An API key, here or for the distro, or an auth file named
-   * by this process's environment leaves no direct read, as it does natively.
+   * distro, never the one on the Windows side (unless the distro's own variables name a folder under /mnt/<drive>,
+   * where Muse reads it too), and this process's own environment is the Windows one: runtime.json's `wslEnv` says
+   * what Muse there was told, and a variable the user's own WSLENV forwards is not seen. An API key, here or for the
+   * distro, or an auth file named by this process's environment leaves no direct read, as it does natively.
    */
   private async wslQuotaAuthPath(accountId: string | null): Promise<string | null> {
     if (accountId !== null || this.options.platform !== "win32" || process.env["META_API_KEY"] || process.env["MUSE_AUTH_PATH"] ||
@@ -5821,9 +5822,10 @@ export class AncillaServer {
   /**
    * One kind of look at a WSL login (`scope` or `read`), given up on after `readTimeoutMs`: `fallback()` is the answer
    * then, and whatever the look still does is checked by the revision. Opening a file in a stopped or slow distro can
-   * hold a thread of the pool for as long as the distro takes, so while a look that outlived its bound has not
-   * settled, the same kind is not started again and answers `fallback()` at once. The environment probe that finds
-   * the distro is not part of this bound.
+   * hold a thread of the pool for as long as the distro takes, so once a look has outlived its bound the same kind is
+   * not started again, and answers `fallback()` at once, until a look that outlived it has settled. The first to
+   * settle lifts the hold; what keeps overlapping looks from each pinning a thread is the one open per login file in
+   * subscriptionQuota.ts. The environment probe that finds the distro is not part of this bound.
    */
   private async wslUnit<T, F>(kind: string, start: () => Promise<T>, fallback: () => F): Promise<T | F> {
     if (this.wslStuck.has(kind)) return fallback();

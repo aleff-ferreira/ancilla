@@ -16,9 +16,10 @@ The direct reader uses the CLI's `oauth` device credential from `auth.json` and 
 or XDG config root, and each named account's isolated config root. For Muse running in WSL on Windows, the default
 login is read from the distro's own `auth.json` through the `\\wsl.localhost\` share: the absolute `MUSE_AUTH_PATH` or
 else `XDG_CONFIG_HOME` that `runtime.json`'s `wslEnv` gives Muse, else `.config/muse/auth.json` under the distro user's
-home folder (asked of the distro once and remembered). Never the login on the Windows side. It does not start a Muse
-session or model turn. Returned inference keys and payment details are discarded. Credentials never enter the browser,
-local quota database, or error messages, and the reader never rewrites the CLI's login file.
+home folder (asked of the distro once it answers, and remembered). Never the login on the Windows side. Opening the
+share may start a stopped distro. It does not start a Muse session or model turn. Returned inference keys and payment
+details are discarded. Credentials never enter the browser, local quota database, or error messages, and the reader
+never rewrites the CLI's login file.
 
 Requests share a short 15-second cache per credential, concurrent requests are combined, and rate-limit responses
 delay retries. Changing or removing a login invalidates an in-flight response. A runtime observation newer than an
@@ -50,8 +51,10 @@ HTTP request wins; the HTTP response's arrival does not artificially make its ol
 ## Plan name and source labels
 
 `accounts[].planName` comes only from Meta's direct read (`subs_tier_name`). It is therefore null wherever that read
-does not happen: for named accounts under WSL, for Keychain-only logins, with `META_API_KEY`, and for named accounts
-while `MUSE_AUTH_PATH` is set. Nothing else supplies it, and the numeric `usage.tier` is an opaque id, not a plan name.
+does not happen: for named accounts under WSL, for the default login under WSL when an API key is set (here or in
+`wslEnv`) or `MUSE_AUTH_PATH` is set in the server's own environment, for Keychain-only logins, with `META_API_KEY`,
+and for named accounts while `MUSE_AUTH_PATH` is set. Nothing else supplies it, and the numeric `usage.tier` is an
+opaque id, not a plan name.
 
 - When Meta does not answer with a plan, the account keeps the name it last gave, so the badge does not flicker. That
   covers a failed direct check (a timeout, a server error, a rate limit), a login Meta rejected (`login-required`), and
@@ -82,11 +85,14 @@ holds a future one. A few minutes of ordinary clock skew is left alone.
 
 Keychain-only credentials, and named accounts under WSL, stay with Muse and use labelled runtime observations. Ancilla
 does not read browser cookies or trigger Keychain prompts to fill a missing quota. The default login under WSL is the
-distro's file (see above) and nothing else: a login on the Windows side is never used for Muse in WSL, and a login file
-or home folder that is a symbolic link cannot be opened through the `\\wsl.localhost\` share, so such a login also
-stays with runtime observations. A stopped or slow distro is bounded: five seconds to name the home folder (a failure
-is not retried for thirty), six seconds for each look at the login, and no new look while one that ran past that is
-still unanswered. Meta refusing the login (HTTP 401 or 403) is reported as `login-required`. An inherited
+distro's file (see above) and nothing else: a login on the Windows side is never used for Muse in WSL. The server
+takes what Muse there was told from `runtime.json`'s `wslEnv` alone, so a variable that the user's own `WSLENV`
+forwards from Windows is not seen. A login file or home folder that is a symbolic link cannot be opened through the
+`\\wsl.localhost\` share, so such a login also stays with runtime observations. A stopped or slow distro is bounded:
+five seconds to name the home folder (a failure is not retried for thirty seconds, except when a thread starts, which
+asks again at once), six seconds for each look at the login, and once a look has run past that, later looks wait for
+it to answer. The first poll on a distro that never answers can therefore take about twelve seconds, and the next ones
+almost none. Meta refusing the login (HTTP 401 or 403) is reported as `login-required`. An inherited
 `META_API_KEY` overrides subscription sign-in, so that process does not query the browser login's allowance. A global
 `MUSE_AUTH_PATH` override also prevents assigning that credential to every named profile. Readings with no verified
 login identity are never saved, so they do not survive a restart.

@@ -1,7 +1,8 @@
 import { describe, it, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { openSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -443,6 +444,8 @@ describe("a login read from inside the WSL distro", () => {
     const root = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-"));
     const winHome = join(root, "windows-home");
     quotaEnvironment(t, winHome);
+    // A login on the Windows side, which nothing under WSL may read or send whatever becomes of the distro's own.
+    await saveLogin(join(winHome, ".config"), "windows@example.test", "dca:windows-side");
     const distro = o.distro ?? "Ubuntu";
     const probe = { homeCalls: 0, homeTimeouts: [] as (number | undefined)[], requests: 0, bearers: [] as string[], mapped: [] as [string, string][] };
     const exec: ExecFn = async (command, args, options) => {
@@ -733,7 +736,9 @@ describe("a login read from inside the WSL distro", () => {
       const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
       const fifo = join(r.root, "stalled-login");
       execFileSync("mkfifo", [fifo]);
-      t.after(async () => { await (await open(fifo, "r+")).close(); });
+      // Opened at once and left open: letting the blocked opens go must not need a pool thread, which the very
+      // regression this test is for would have used up, and the test then fails instead of hanging.
+      t.after(() => { openSync(fifo, "r+"); });
       const plain = join(r.root, "plain.txt");
       await writeFile(plain, "fine");
       const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: () => fifo } });
@@ -748,12 +753,13 @@ describe("a login read from inside the WSL distro", () => {
 
     it("keeps the reading on screen when one look at the login is slower than the bound", async (t) => {
       const meta = { down: false };
-      const r = await rig(t, { bounds: { readTimeoutMs: 150 },
+      // The bound is a second and the slow look three, so that only the order of events is raced, not the speed of the disk.
+      const r = await rig(t, { bounds: { readTimeoutMs: 1000 },
         answer: () => meta.down ? new Response(null, { status: 503 }) : Response.json(snapshot(Date.now(), 42)) });
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
       const slow = { next: 0 };
       const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota,
-        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(500); } return r.inDistro(linux); } } });
+        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(3000); } return r.inDistro(linux); } } });
       assert.equal((await first(base)).status, "ready");
       slow.next = 1;
       meta.down = true;
@@ -763,16 +769,16 @@ describe("a login read from inside the WSL distro", () => {
       assert.equal(slowed.planName, "Muse Code Power Usage");
       assert.equal(slowed.source, "meta");
       meta.down = false;
-      await pause(600);
+      await pause(2500);
       assert.equal((await first(base)).status, "ready");
     });
 
     it("keeps the read it just made when the first look at the login is the slow one", async (t) => {
-      const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+      const r = await rig(t, { bounds: { readTimeoutMs: 1000 } });
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
       const slow = { next: 1 };
       const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota,
-        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(500); } return r.inDistro(linux); } } });
+        localPath: async (_distro: string, linux: string) => { if (slow.next > 0) { slow.next--; await pause(3000); } return r.inDistro(linux); } } });
       const account = await first(base);
       assert.equal(account.status, "ready");
       assert.equal(account.usage.window.usedPercent, 42);
@@ -892,7 +898,7 @@ describe("a login read from inside the WSL distro", () => {
     it("does not read when this server's own environment names an auth file", async (t) => {
       const r = await rig(t);
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
-      process.env["MUSE_AUTH_PATH"] = join(r.winHome, "elsewhere", "auth.json");
+      process.env["MUSE_AUTH_PATH"] = await saveLogin(join(r.winHome, "elsewhere"), "windows@example.test", "dca:windows-side");
       assert.equal((await first((await start(new FakeConnection(), r.options)).base)).status, "runtime-only");
       assert.equal(r.probe.requests, 0);
     });

@@ -1,7 +1,8 @@
 import { after, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { openSync } from "node:fs";
+import fs, { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MuseSubscriptionReader, parseMetaSubscription, subscriptionIdentity } from "../src/subscriptionQuota.js";
@@ -228,7 +229,9 @@ describe("a login file that does not open", () => {
     const plain = join(directory, "plain.txt");
     await writeFile(plain, "fine");
     t.after(async () => {
-      await (await open(fifo, "r+")).close();
+      // Opened at once and left open: letting the blocked opens go must not need a pool thread, which the very
+      // regression this test is for would have used up, and the test then fails instead of hanging.
+      openSync(fifo, "r+");
       await rm(directory, { recursive: true, force: true });
     });
     // libuv gives file work four threads by default: one more look than that would starve every other read.
@@ -236,5 +239,15 @@ describe("a login file that does not open", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     const answer = await Promise.race([readFile(plain, "utf8"), new Promise<string>((resolve) => setTimeout(() => resolve("starved"), 2000))]);
     assert.equal(answer, "fine");
+  });
+
+  it("is opened once however many looks ask, on every platform, with nothing here to block a thread", async (t) => {
+    // The same guard without a FIFO, which Windows has none of: an open that never settles pins no thread, and six looks
+    // at the file must still make one open. Six opens is the bug.
+    let opens = 0;
+    t.mock.method(fs, "open", () => { opens++; return new Promise(() => {}); });
+    for (let look = 0; look < 6; look++) void subscriptionIdentity(join(tmpdir(), "ancilla-never-opened", "auth.json"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(opens, 1);
   });
 });

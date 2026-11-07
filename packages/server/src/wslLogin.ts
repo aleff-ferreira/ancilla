@@ -22,19 +22,23 @@ export function cleanLinuxPath(value: string | null | undefined): string | null 
 }
 
 /**
- * A file path Windows opens as the very file Linux would: Windows drops a trailing space or dot and the mapper a
- * trailing slash, which would be another file (or none) there. Null for such a path and for an unsafe one.
+ * A file path Windows opens as the very file Linux would. The mapper trims a path and drops a trailing slash, and
+ * Windows reads a colon in the file's own name as a stream of the file before it (`auth.json::$DATA` is `auth.json`),
+ * so each of these would be another file there than the one Muse is told to use. Null for such a path, for one that
+ * ends in a dot, and for an unsafe one.
  */
 function cleanLinuxFile(value: string): string | null {
   const path = cleanLinuxPath(value);
-  return path && path === path.trim() && !/[/.]$/.test(path) ? path : null;
+  if (!path || path !== path.trim() || /[/.]$/.test(path)) return null;
+  return path.slice(path.lastIndexOf("/") + 1).includes(":") ? null : path;
 }
 
 /**
  * The file Muse keeps its login in, inside the distro: an absolute `MUSE_AUTH_PATH`, else `XDG_CONFIG_HOME`, else the
- * user's home folder, taking the variables from runtime.json's `wslEnv` (this process's own are the Windows ones). A
- * variable that is not absolute is skipped; one that is absolute but unsafe to map leaves no file at all, since the
- * next choice could be another account's. `home` is only asked for when nothing before it answers.
+ * user's home folder, taking the variables from runtime.json's `wslEnv` (this process's own are the Windows ones, and
+ * one that the user's own WSLENV forwards is not seen). A variable that is not absolute is skipped; one that is
+ * absolute but unsafe to map leaves no file at all, since the next choice could be another account's. `home` is only
+ * asked for when nothing before it answers.
  */
 export async function linuxAuthPath(env: Record<string, string>, home: () => Promise<string | null>): Promise<string | null> {
   const override = env["MUSE_AUTH_PATH"];

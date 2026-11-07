@@ -216,6 +216,13 @@ describe("subscription account accuracy", () => {
     assert.doesNotMatch(html, /Sign in to this Muse account/);
   });
 
+  it("offers the way to sign in only where a sign-in is what is missing", () => {
+    for (const status of ["not-reported", "no-subscription", "unavailable", "runtime-only"] as const) {
+      const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status })] });
+      assert.doesNotMatch(html, /Open sign-in settings/, status);
+    }
+  });
+
   it("does not claim Meta refused a login that nothing was ever sent to Meta for", () => {
     const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status: "login-required", checkedAtMs: null })] });
     assert.match(html, /Sign in to this Muse account to check its subscription limits\./);
