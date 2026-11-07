@@ -919,6 +919,280 @@ describe("a login read from inside the WSL distro", () => {
     });
   });
 
+  describe("the account Settings shows (GET /api/accounts/health)", () => {
+    type Rig = Awaited<ReturnType<typeof rig>>;
+    const UNKNOWN = { hasLogin: null, email: null };
+    const identity = async (base: string) => (await get(base, "/api/accounts/health")).defaultLogin;
+    /** What `muse login` leaves in the distro, written as the test chooses. */
+    async function putFile(r: Rig, body: string | object) {
+      const dir = join(r.inDistro(DISTRO_CONFIG), "muse");
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "auth.json"), typeof body === "string" ? body : JSON.stringify(body));
+    }
+    const meta = (fields: Record<string, unknown>) => ({ providers: { meta: fields } });
+    const released: (() => void)[] = [];
+    const releaseAll = () => { for (const release of released.splice(0)) release(); };
+
+    it("says the distro holds a login and names its e-mail, without asking Meta", async (t) => {
+      const r = await rig(t);
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const { base } = await start(new FakeConnection(), r.options);
+      const health = await get(base, "/api/accounts/health");
+      assert.deepEqual(health.defaultLogin, { hasLogin: true, email: "person@example.test" });
+      assert.deepEqual(Object.keys(health).sort(), ["defaultLogin", "metaApiKeyInherited"]);
+      assert.deepEqual(r.probe.mapped.at(-1), ["Ubuntu", "/home/u/.config/muse/auth.json"], "the file of the distro, found the way the meter finds it");
+      assert.equal(r.probe.requests, 0, "nothing is sent to Meta to learn who is signed in");
+    });
+
+    it("says a login exists when the file has a mechanism and no e-mail", async (t) => {
+      const r = await rig(t);
+      const { base } = await start(new FakeConnection(), r.options);
+      await putFile(r, meta({ mechanism: "oauth" }));
+      assert.deepEqual(await identity(base), { hasLogin: true, email: null });
+      await putFile(r, meta({ mechanism: "oauth", user_email: "" }));
+      assert.deepEqual(await identity(base), { hasLogin: true, email: null });
+      await putFile(r, meta({ mechanism: "api_key", user_email: "person@example.test" }));
+      assert.deepEqual(await identity(base), { hasLogin: true, email: "person@example.test" });
+    });
+
+    it("never says there is no login: a file that does not show one leaves it unknown, as another store could hold it", async (t) => {
+      const r = await rig(t);
+      const { base } = await start(new FakeConnection(), r.options);
+      const cases: [string, () => Promise<unknown>][] = [
+        ["no file", async () => {}],
+        ["a folder where the file should be", () => mkdir(join(r.inDistro(DISTRO_CONFIG), "muse", "auth.json"), { recursive: true })],
+        ["no meta provider", () => putFile(r, { providers: { other: { mechanism: "oauth" } } })],
+        ["no providers at all", () => putFile(r, {})],
+        ["no mechanism", () => putFile(r, meta({ user_email: "person@example.test" }))],
+        ["an empty mechanism", () => putFile(r, meta({ mechanism: "", user_email: "person@example.test" }))],
+        ["a mechanism that is not text", () => putFile(r, meta({ mechanism: 1, user_email: "person@example.test" }))],
+        ["a file that is not JSON", () => putFile(r, "{ not json")],
+      ];
+      for (const [name, prepare] of cases) {
+        await rm(r.inDistro(DISTRO_CONFIG), { recursive: true, force: true });
+        await prepare();
+        assert.deepEqual(await identity(base), UNKNOWN, name);
+      }
+      assert.ok(r.probe.mapped.length > 0, "each of these was looked for in the distro");
+    });
+
+    it("never takes the login on the Windows side for the one in the distro", async (t) => {
+      // The rig saved a login on the Windows side, and the distro holds none.
+      const r = await rig(t);
+      const { base } = await start(new FakeConnection(), r.options);
+      const health = await get(base, "/api/accounts/health");
+      assert.deepEqual(health.defaultLogin, UNKNOWN);
+      assert.doesNotMatch(JSON.stringify(health), /windows@example/);
+      assert.ok(r.probe.mapped.length > 0);
+      for (const [, linux] of r.probe.mapped) assert.ok(linux.startsWith("/"), "only paths inside the distro were asked for");
+    });
+
+    it("reads the file Muse is told to use through runtime.json's wslEnv, not the one in the home folder", async (t) => {
+      // MUSE_AUTH_PATH first, then XDG_CONFIG_HOME, as the meter has it; a login of another person waits in the home folder.
+      const named = await rig(t, { wslEnv: { MUSE_AUTH_PATH: "/srv/muse/auth.json", XDG_CONFIG_HOME: "/x/cfg" } });
+      await named.login("/srv", "named@example.test", "dca:named");
+      await named.login("/x/cfg", "xdg@example.test", "dca:xdg");
+      await named.login(DISTRO_CONFIG, "home@example.test", "dca:home");
+      assert.deepEqual(await identity((await start(new FakeConnection(), named.options)).base), { hasLogin: true, email: "named@example.test" });
+      assert.deepEqual(named.probe.mapped.at(-1), ["Ubuntu", "/srv/muse/auth.json"]);
+      assert.equal(named.probe.homeCalls, 0, "no home folder is asked for then");
+
+      const xdg = await rig(t, { wslEnv: { XDG_CONFIG_HOME: "/x/cfg" } });
+      await xdg.login("/x/cfg", "xdg@example.test", "dca:xdg");
+      await xdg.login(DISTRO_CONFIG, "home@example.test", "dca:home");
+      assert.deepEqual(await identity((await start(new FakeConnection(), xdg.options)).base), { hasLogin: true, email: "xdg@example.test" });
+      assert.deepEqual(xdg.probe.mapped.at(-1), ["Ubuntu", "/x/cfg/muse/auth.json"]);
+      assert.equal(xdg.probe.homeCalls, 0);
+      assert.equal(xdg.probe.requests, 0);
+    });
+
+    it("opens nothing, and says nothing is known, when an API key or an auth file named here overrides the login", async (t) => {
+      const SIGNED_IN = { hasLogin: true, email: "person@example.test" };
+      // The same fixture, without the override, is read: so the answer below is the override's doing.
+      const forDistro = await rig(t, { wslEnv: { META_API_KEY: "test-api-key" } });
+      await forDistro.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), { ...forDistro.options, wslEnv: {} })).base), SIGNED_IN, "no key for the distro");
+      const mappedForDistro = forDistro.probe.mapped.length;
+      assert.deepEqual(await identity((await start(new FakeConnection(), forDistro.options)).base), UNKNOWN, "an API key for the distro");
+      assert.equal(forDistro.probe.mapped.length, mappedForDistro, "nothing more was opened");
+
+      const here = await rig(t);
+      await here.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), here.options)).base), SIGNED_IN, "no key here");
+      const mappedHere = here.probe.mapped.length;
+      process.env["META_API_KEY"] = "test-api-key";
+      assert.deepEqual(await identity((await start(new FakeConnection(), here.options)).base), UNKNOWN, "an API key in this server's environment");
+      assert.equal(here.probe.mapped.length, mappedHere, "nothing more was opened");
+      delete process.env["META_API_KEY"];
+
+      const named = await rig(t);
+      await named.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), named.options)).base), SIGNED_IN, "no file named here");
+      const mappedNamed = named.probe.mapped.length;
+      process.env["MUSE_AUTH_PATH"] = await saveLogin(join(named.winHome, "elsewhere"), "windows@example.test", "dca:windows-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), named.options)).base), UNKNOWN, "an auth file named in this server's environment");
+      assert.equal(named.probe.mapped.length, mappedNamed, "nothing more was opened");
+    });
+
+    it("opens nothing for a distro name that could change the path, or a home folder that is not safe to map", async (t) => {
+      const r = await rig(t);
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), r.options)).base), { hasLogin: true, email: "person@example.test" }, "a good name is read");
+      const [mapped, homeCalls] = [r.probe.mapped.length, r.probe.homeCalls];
+      for (const distro of ["Ubuntu 22", "Ubuntu;calc", "..", "a/b", "a\\b", "Ubuntu\n", "é"]) {
+        const { base } = await start(new FakeConnection(), { ...r.options, distro });
+        assert.deepEqual(await identity(base), UNKNOWN, JSON.stringify(distro));
+      }
+      assert.equal(r.probe.homeCalls, homeCalls, "wsl.exe is not even asked about such a distro");
+      assert.equal(r.probe.mapped.length, mapped, "no path was mapped");
+
+      let answer = { stdout: "/home/../home/u", exitCode: 0 };
+      const unsafe = await rig(t, { home: async () => answer });
+      await unsafe.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      for (const next of [answer, { stdout: "home/u", exitCode: 0 }, { stdout: "/home/u\n", exitCode: 0 }, { stdout: "", exitCode: 0 }, { stdout: "/home/u", exitCode: 1 }]) {
+        answer = next;
+        const { base } = await start(new FakeConnection(), unsafe.options);
+        assert.deepEqual(await identity(base), UNKNOWN, JSON.stringify(next));
+      }
+      assert.deepEqual(unsafe.probe.mapped, [], "no path was ever mapped");
+      answer = { stdout: "/home/u", exitCode: 0 };
+      assert.deepEqual(await identity((await start(new FakeConnection(), unsafe.options)).base), { hasLogin: true, email: "person@example.test" }, "the same fixture is read once the answer is good");
+    });
+
+    describe("a distro that stalls", () => {
+      it("answers within the bound when the path cannot be had, and starts no second look while that one is unsettled", { timeout: 20_000 }, async (t) => {
+        const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+        await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+        const mapping = { calls: 0, stalls: true };
+        const stalled = { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: (_distro: string, linux: string) => {
+          mapping.calls++;
+          if (!mapping.stalls) return r.inDistro(linux);
+          return new Promise<string>((resolve) => { released.push(() => resolve(r.inDistro(linux))); });
+        } } };
+        const { server, base } = await start(new FakeConnection(), stalled);
+        const began = Date.now();
+        const reply = await send(base, "/api/accounts/health", undefined, "GET");
+        assert.ok(Date.now() - began < 8000, "the page is not held by a distro that does not answer");
+        assert.equal(reply.status, 200);
+        assert.deepEqual(reply.json.defaultLogin, UNKNOWN);
+        assert.ok(server["wslStuck"].has("identity"), "a look that outlived its bound holds its own kind");
+        const afterFirst = mapping.calls;
+        assert.ok(afterFirst > 0);
+        assert.deepEqual(await identity(base), UNKNOWN);
+        assert.deepEqual(await identity(base), UNKNOWN);
+        assert.equal(mapping.calls, afterFirst, "later requests do not look at the distro again");
+        mapping.stalls = false;
+        releaseAll();
+        await waitFor(() => !server["wslStuck"].has("identity"), "the look settling");
+        assert.deepEqual(await identity(base), { hasLogin: true, email: "person@example.test" }, "a look that has settled is not waited on any more");
+        assert.ok(mapping.calls > afterFirst);
+        releaseAll();
+      });
+
+      it("answers within the bound when wsl.exe never answers about the home folder", { timeout: 20_000 }, async (t) => {
+        const r = await rig(t, { home: () => new Promise<HomeAnswer>(() => {}), bounds: { homeTimeoutMs: 4000, readTimeoutMs: 150 } });
+        await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+        const { server, base } = await start(new FakeConnection(), r.options);
+        const began = Date.now();
+        const reply = await send(base, "/api/accounts/health", undefined, "GET");
+        assert.ok(Date.now() - began < 3000, "the bound of the look, not that of the home folder, ends the wait");
+        assert.equal(reply.status, 200);
+        assert.deepEqual(reply.json.defaultLogin, UNKNOWN);
+        assert.ok(server["wslStuck"].has("identity"));
+        assert.deepEqual(await identity(base), UNKNOWN);
+        assert.equal(r.probe.homeCalls, 1, "wsl.exe is not started again while it has not answered");
+      });
+
+      it("answers every request, and leaves the rest of the process working, while the login file never opens", { skip: process.platform === "win32", timeout: 30_000 }, async (t) => {
+        const r = await rig(t, { bounds: { readTimeoutMs: 150 } });
+        const fifo = join(r.root, "stalled-login");
+        execFileSync("mkfifo", [fifo]);
+        // Opened at once and left open, so that letting the blocked open go needs no pool thread.
+        t.after(() => { openSync(fifo, "r+"); });
+        const plain = join(r.root, "plain.txt");
+        await writeFile(plain, "fine");
+        await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+        assert.deepEqual(await identity((await start(new FakeConnection(), r.options)).base), { hasLogin: true, email: "person@example.test" }, "the same rig reads a file that opens");
+        const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota, localPath: () => fifo } });
+        const verdicts: string[] = [];
+        for (let poll = 0; poll < 4; poll++) {
+          const answer = await Promise.race([send(base, "/api/accounts/health", undefined, "GET").then((reply) => `${reply.status} ${JSON.stringify(reply.json.defaultLogin)}`), pause(5000).then(() => "held")]);
+          verdicts.push(answer);
+        }
+        assert.deepEqual(verdicts, Array(4).fill(`200 ${JSON.stringify(UNKNOWN)}`));
+        assert.equal(await Promise.race([readFile(plain, "utf8"), pause(2000).then(() => "starved")]), "fine", "the thread pool is not used up");
+      });
+    });
+
+    it("lets only the e-mail out: no token, path, name or other field, in the answer or in any output", async (t) => {
+      const token = "dca:identity-leak-7f3a91";
+      const email = "identity-leak@example.test";
+      const written: string[] = [];
+      for (const stream of [process.stdout, process.stderr]) {
+        const original = stream.write;
+        stream.write = function write(this: unknown, chunk: unknown, ...rest: unknown[]) {
+          written.push(typeof chunk === "string" ? chunk : Buffer.from(chunk as Uint8Array).toString("utf8"));
+          return (original as (...args: unknown[]) => boolean).call(stream, chunk, ...rest);
+        } as typeof stream.write;
+        t.after(() => { stream.write = original; });
+      }
+      const seen: string[] = [];
+      const roots: string[] = [];
+      const files: (string | object)[] = [
+        meta({ mechanism: "oauth", user_email: email, user_full_name: "Identity Leak Name", access_token: token, refresh_token: "identity-refresh-secret" }),
+        `{ not json ${token} ${email}`,
+      ];
+      for (const file of files) {
+        const r = await rig(t);
+        roots.push(r.root);
+        await putFile(r, file);
+        const { server, base } = await start(new FakeConnection(), r.options);
+        const health = await get(base, "/api/accounts/health");
+        seen.push(JSON.stringify(health));
+        if (typeof file !== "string") assert.deepEqual(health.defaultLogin, { hasLogin: true, email }, "only these two fields");
+        await server.close();
+      }
+      const escape = (word: string) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const secrets = [token, "Identity Leak Name", "identity-refresh-secret", "auth.json", "wsl.localhost", "windows@example", ...roots];
+      assert.doesNotMatch(seen.join("\n"), new RegExp(secrets.map(escape).join("|")));
+      assert.doesNotMatch(written.join("\n"), new RegExp([email, ...secrets].map(escape).join("|")), "no line of output holds the e-mail or any of the rest");
+    });
+
+    it("answers as before for a named account and for Muse outside WSL", async (t) => {
+      const r = await rig(t);
+      const aonia = createAonia({ home: r.winHome, platform: "linux", musePath: "muse" });
+      const profile = await aonia.createProfile("work");
+      await saveLogin(profile.roots.config, "work@example.test", "dca:work");
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      const wsl = await start(new FakeConnection(), { ...r.options, aonia });
+      const work = (await get(wsl.base, "/api/accounts")).accounts.find((account: { id: string }) => account.id === "work");
+      assert.equal(work.hasLogin, true);
+      assert.equal(work.email, "work@example.test", "a named account is still read from its own folder");
+      assert.deepEqual(await identity(wsl.base), { hasLogin: true, email: "person@example.test" });
+
+      const mapped = r.probe.mapped.length;
+      for (const platform of ["win32", "linux"] as const) {
+        const native = await start(new FakeConnection(), { ...r.options, platform, runtime: "native" });
+        assert.deepEqual(await identity(native.base), { hasLogin: true, email: "windows@example.test" }, `${platform}: the login on this machine`);
+        await rm(join(r.winHome, ".config", "muse"), { recursive: true, force: true });
+        assert.deepEqual(await identity(native.base), { hasLogin: false, email: null }, `${platform}: signed out is still said`);
+        await saveLogin(join(r.winHome, ".config"), "windows@example.test", "dca:windows-side");
+      }
+      assert.equal(r.probe.mapped.length, mapped, "the distro was not looked at");
+    });
+
+    it("leaves the distro alone for a runtime that is not WSL", async (t) => {
+      const r = await rig(t);
+      await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
+      assert.deepEqual(await identity((await start(new FakeConnection(), r.options)).base), { hasLogin: true, email: "person@example.test" }, "the same rig under WSL reads the distro");
+      const before = r.probe.mapped.length;
+      const native = await start(new FakeConnection(), { ...r.options, runtime: "native" });
+      assert.deepEqual(await identity(native.base), { hasLogin: true, email: "windows@example.test" });
+      assert.equal(r.probe.mapped.length, before, "nothing was mapped into the distro");
+      assert.equal(r.probe.homeCalls, 1, "wsl.exe was asked only by the WSL server");
+    });
+  });
+
   describe("what is remembered", () => {
     it("keeps the last reading across a restart over the same data folder", async (t) => {
       const dataDir = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-data-"));

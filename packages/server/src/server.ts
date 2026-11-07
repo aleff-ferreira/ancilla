@@ -95,7 +95,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
-import { MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
+import { loginIdentity, MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
 import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
 export const ANCILLA_VERSION = "0.21.1";
@@ -5153,7 +5153,7 @@ export class AncillaServer {
     // Absence of a local auth file does not prove a Keychain or WSL login is missing.
     // A custom auth path also makes the default XDG file an unrelated source of identity.
     if (process.env["MUSE_AUTH_PATH"]) return { hasLogin: null, email: null };
-    if ((await this.museRuntime()) === "wsl") return { hasLogin: null, email: null };
+    if ((await this.museRuntime()) === "wsl") return this.wslLoginIdentity();
     try {
       const identity = await this.aonia.identityOf({
         id: "default", name: "Default login", createdAt: "", lastUsedAt: null,
@@ -5164,6 +5164,23 @@ export class AncillaServer {
         email: identity.email,
       };
     } catch { return { hasLogin: null, email: null }; }
+  }
+
+  /**
+   * Who is signed in for Muse in WSL, from the login file inside the distro: the one the meter reads, found the same
+   * way, and never the login on the Windows side. Unknown, never "no login", whenever the file does not show one or
+   * cannot be had in time, since another credential store could hold the login. The look is one of the `wslUnit`
+   * kinds, so a stopped or slow distro cannot hold the reply beyond its bound.
+   */
+  private async wslLoginIdentity(): Promise<{ hasLogin: boolean | null; email: string | null }> {
+    const unknown = { hasLogin: null, email: null };
+    if (!await this.readsWslLogin(null)) return unknown;
+    return this.wslUnit("identity", async () => {
+      try {
+        const path = await this.wslQuotaAuthPath(null);
+        return path ? (await loginIdentity(path)) ?? unknown : unknown;
+      } catch { return unknown; }
+    }, () => unknown);
   }
 
   /** Turns an aonia error into the right HTTP status: a duplicate is 409, a bad id or missing profile is 400. */
@@ -5820,7 +5837,7 @@ export class AncillaServer {
   }
 
   /**
-   * One kind of look at a WSL login (`scope` or `read`), given up on after `readTimeoutMs`: `fallback()` is the answer
+   * One kind of look at a WSL login (`scope`, `read` or `identity`), given up on after `readTimeoutMs`: `fallback()` is the answer
    * then, and whatever the look still does is checked by the revision. Opening a file in a stopped or slow distro can
    * hold a thread of the pool for as long as the distro takes, so once a look has outlived its bound the same kind is
    * not started again, and answers `fallback()` at once, until a look that outlived it has settled. The first to

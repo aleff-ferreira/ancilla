@@ -4,7 +4,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ControllerProvider } from "../src/app/context.js";
 import { Onboarding } from "../src/components/home/Home.js";
-import { MuseSubscriptionCard } from "../src/components/settings/MuseSignIn.js";
+import { MuseSubscriptionCard, SignInDone, signInDoneNote } from "../src/components/settings/MuseSignIn.js";
 import { LinuxSetupCard } from "../src/components/settings/LinuxSetup.js";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
 import type { AncillaController } from "../src/model/controller.js";
@@ -36,8 +36,40 @@ describe("Muse subscription setup", () => {
 
   it("explains unknown credential stores without claiming the user is signed out", () => {
     const html = render(MuseSubscriptionCard, { defaultLogin: { hasLogin: null, email: null } });
-    assert.match(html, /some credential stores cannot report it here/);
-    assert.doesNotMatch(html, /not signed in|signed out/i);
+    assert.match(html, /Already signed in through Muse\? Ancilla reuses that login; some credential stores cannot report it here\./);
+    assert.match(html, /Sign in with Meta/);
+    assert.doesNotMatch(html, /Signed in as|Sign in again|not signed in|signed out/i);
+  });
+
+  it("shows the account once the server can see the login, and then drops the line about unknown stores", () => {
+    const named = render(MuseSubscriptionCard, { defaultLogin: { hasLogin: true, email: "person@example.test" } });
+    assert.match(named, /Signed in as person@example\.test\./);
+    assert.match(named, /Sign in again/);
+    assert.doesNotMatch(named, /Sign in with Meta|Already signed in through Muse|cannot report it here/);
+    const nameless = render(MuseSubscriptionCard, { defaultLogin: { hasLogin: true, email: null } });
+    assert.match(nameless, /Muse has a saved login\./);
+    assert.match(nameless, /Sign in again/);
+    assert.doesNotMatch(nameless, /Signed in as|Already signed in through Muse/);
+  });
+
+  it("tells a finished sign-in that a new usage window can start with no numbers", () => {
+    const note = signInDoneNote(null, "Default login");
+    assert.match(note, /Ancilla will use your default Muse login\./);
+    assert.match(note, /Reported subscription limits appear in Usage after Muse receives a quota reading\./);
+    assert.match(note, /In a new usage window, Meta can send no numbers until you send your first message\./);
+    assert.match(signInDoneNote("work", "Work"), /^Choose Work beside the model picker when starting a new thread\./);
+    assert.match(signInDoneNote("work", "Work"), /In a new usage window/);
+  });
+
+  it("shows that sentence where the finished sign-in dialog shows it", () => {
+    const html = render(() => createElement(SignInDone, { accountId: null, name: "Default login" }), {});
+    assert.match(html, /Muse confirmed your browser sign-in\./);
+    assert.match(html, /Ancilla will use your default Muse login\./);
+    assert.match(html, /In a new usage window, Meta can send no numbers until you send your first message\./);
+    assert.match(html, /Continue/);
+    const named = render(() => createElement(SignInDone, { accountId: "work", name: "Work" }), {});
+    assert.match(named, /Choose Work beside the model picker/);
+    assert.match(named, /In a new usage window/);
   });
 
   it("explains why an environment API key bypasses subscription sign-in", () => {

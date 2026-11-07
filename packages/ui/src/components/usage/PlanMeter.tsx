@@ -54,7 +54,10 @@ export function quotaAvailabilityLabel(account: PlanAccountUsage): string {
     case "no-subscription": return "Meta reports no Muse subscription for this login. No subscription allowance is available to display.";
     case "not-reported": return account.checkedAtMs === null
       ? "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown."
-      : "Meta did not report subscription limits for this account. Missing values are unknown, not zero usage.";
+      : account.planName
+        // Meta answered and named the plan but sent no numbers, which it does before the first use in a new window.
+        ? "Meta confirms your plan but has not sent any usage numbers yet. This can happen before the first use in a new usage window: send a message in a thread that uses this account, then choose Refresh. If no numbers appear after that, Meta has not sent any for this account. Missing values are unknown, not zero usage."
+        : "Meta did not report subscription limits for this account. Missing values are unknown, not zero usage.";
     case "runtime-only": return !account.usage
       ? "The Muse runtime has not reported subscription limits for this login. Current allowance is unknown."
       : account.source === "saved"

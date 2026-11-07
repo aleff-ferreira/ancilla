@@ -51,6 +51,28 @@ export function MuseSubscriptionCard() {
   );
 }
 
+/** What the confirmed sign-in dialog says next, for the account just signed in (`null` is the default login). */
+export function signInDoneNote(accountId: string | null, name: string): string {
+  const next = accountId
+    ? `Choose ${name} beside the model picker when starting a new thread. Existing threads keep their account.`
+    : "Open a project and start a thread. Ancilla will use your default Muse login.";
+  return `${next} Reported subscription limits appear in Usage after Muse receives a quota reading. In a new usage window, Meta can send no numbers until you send your first message.`;
+}
+
+/** The body of the confirmed sign-in dialog; its own component so the words can be checked where the dialog shows them. */
+export function SignInDone(props: { accountId: string | null; name: string }) {
+  const controller = useController();
+  return (
+    <>
+      <p role="status" className="flex items-start gap-2 text-sm text-fg"><CheckCircleIcon size={18} className="mt-0.5 shrink-0 text-ok-text" /> Muse confirmed your browser sign-in.</p>
+      <p className="text-sm leading-relaxed text-muted">
+        {signInDoneNote(props.accountId, props.name)}
+      </p>
+      <div className="flex justify-end"><Button variant="primary" onClick={() => controller.cancelLogin()}>Continue</Button></div>
+    </>
+  );
+}
+
 /** Mounted once above the app shell so sign-in works during setup and from any account entry point. */
 export function DeviceLoginModal() {
   const controller = useController();
@@ -80,14 +102,7 @@ export function DeviceLoginModal() {
         <div className="mt-4 flex flex-col gap-4">
           <MuseApiKeyNotice />
           {done ? (
-            <>
-              <p role="status" className="flex items-start gap-2 text-sm text-fg"><CheckCircleIcon size={18} className="mt-0.5 shrink-0 text-ok-text" /> Muse confirmed your browser sign-in.</p>
-              <p className="text-sm leading-relaxed text-muted">
-                {device.accountId ? `Choose ${name} beside the model picker when starting a new thread. Existing threads keep their account.` : "Open a project and start a thread. Ancilla will use your default Muse login."}
-                {" "}Reported subscription limits appear in Usage after Muse receives a quota reading.
-              </p>
-              <div className="flex justify-end"><Button variant="primary" onClick={() => controller.cancelLogin()}>Continue</Button></div>
-            </>
+            <SignInDone accountId={device.accountId} name={name} />
           ) : starting ? (
             <>
               <p role="status" className="flex items-center gap-2 text-sm text-muted"><Spinner size={14} /> Asking Muse for a sign-in code…</p>

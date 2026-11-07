@@ -45,7 +45,12 @@ HTTP request wins; the HTTP response's arrival does not artificially make its ol
 - Reset countdowns count whole minutes below an hour and never show seconds, because the clock ticks once a minute.
   The pill tooltip and the Usage page describe a reading's age in the same short form, such as `28h` or `36d`.
 - A missing `subs_usage` field is not a zero. Meta can omit it while the short window is idle, even if weekly usage
-  exists. The panel keeps the reported plan name and explains that current quota was not included.
+  exists, and before the first use in a new usage window. That is Meta's reply, not a fault in Ancilla: Muse's own
+  `muse usage --json` reports the same for such an account, `allowance: null` with the reason `server_sent_no_usage`.
+  The panel keeps the reported plan name and says that Meta confirms the plan but has sent no usage numbers yet; sending
+  a message in a thread that uses that account and then choosing Refresh checks again; if no numbers appear after that,
+  Meta has not sent any for the account. Without a plan name it keeps the plainer line that Meta did not report limits.
+  Either way a missing value is unknown, never zero usage.
 - Account selection is explicit. Readings from a different account cannot take over the selected meter.
 
 ## Plan name and source labels
@@ -92,10 +97,17 @@ forwards from Windows is not seen. A login file or home folder that is a symboli
 five seconds to name the home folder (a failure is not retried for thirty seconds, except when a thread starts, which
 asks again at once), six seconds for each look at the login, and once a look has run past that, later looks wait for
 it to answer. The first poll on a distro that never answers can therefore take about twelve seconds, and the next ones
-almost none. Meta refusing the login (HTTP 401 or 403) is reported as `login-required`. An inherited
-`META_API_KEY` overrides subscription sign-in, so that process does not query the browser login's allowance. A global
-`MUSE_AUTH_PATH` override also prevents assigning that credential to every named profile. Readings with no verified
-login identity are never saved, so they do not survive a restart.
+almost none. Settings shows the signed-in account under WSL from the same file, through `GET /api/accounts/health`
+(`defaultLogin`): it says a login exists when the meta provider has a mechanism, and names its e-mail when it has one
+(trimmed, and left out when it is longer than 320 characters or holds control or line-break characters).
+Only the e-mail leaves the server, never the token, the path or the person's name. Where the file is missing, unreadable
+or shows no login, or the distro does not answer in time, Settings does not say the user is signed out, since another
+credential store could hold the login: it keeps the line that some credential stores cannot report it. The same
+conditions as for the meter apply (an API key or a `MUSE_AUTH_PATH` in the server's environment leaves it unknown), and
+this look has its own bound and its own hold, so a stalled distro cannot hold the page. Meta refusing the login (HTTP
+401 or 403) is reported as `login-required`. An inherited `META_API_KEY` overrides subscription sign-in, so that process
+does not query the browser login's allowance. A global `MUSE_AUTH_PATH` override also prevents assigning that credential
+to every named profile. Readings with no verified login identity are never saved, so they do not survive a restart.
 
 Rejected logins, timeouts, unavailable service responses and malformed payloads never produce a fabricated allowance.
 The panel distinguishes these from an inactive subscription and a subscription whose current quota was omitted.

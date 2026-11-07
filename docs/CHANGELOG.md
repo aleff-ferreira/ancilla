@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Settings shows the account you are signed in with when Muse runs in WSL.** On Windows with Muse in WSL the sign-in card kept saying "Sign in with Meta" and that some credential stores cannot report the login, although you were signed in. The server now reads the signed-in account from the same login file in the distro that the Usage meter uses, never the login on the Windows side, and the card shows "Signed in as" with the e-mail and offers "Sign in again". Only the e-mail leaves the server, never the token, the file path or your name. When the file is missing or unreadable, shows no login, or the distro does not answer in time, the card says nothing is known rather than that you are signed out, since another credential store could hold the login. The look is bounded like the meter's, so a stopped distro cannot hold the page, and an API key or a `MUSE_AUTH_PATH` in the server's environment still leaves it unknown.
+- **The Usage page says what is happening when Meta confirms your plan but sends no numbers.** For a plan Meta has confirmed, the page said "Meta did not report subscription limits for this account", which read like a malfunction. It now says that Meta confirms your plan but has not sent any usage numbers yet, which can happen before the first use in a new usage window: send a message in a thread that uses that account, then choose Refresh, and if no numbers appear after that, Meta has not sent any for this account. A missing value is still unknown and never shown as zero usage. The sign-in confirmation says the same about a new usage window. This is Meta's own reply: Muse's `muse usage --json` reports the same for such an account.
+
 ## 0.21.1
 
 ### Fixed

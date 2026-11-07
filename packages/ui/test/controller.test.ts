@@ -433,8 +433,11 @@ class FakeClient implements AncillaClient {
     }
   }
   metaApiKeyInherited = false;
+  defaultLogin: import("../src/types.js").DefaultLoginIdentity | undefined = undefined;
+  healthCalls = 0;
   async accountsHealth() {
-    return { metaApiKeyInherited: this.metaApiKeyInherited };
+    this.healthCalls++;
+    return { metaApiKeyInherited: this.metaApiKeyInherited, ...(this.defaultLogin ? { defaultLogin: this.defaultLogin } : {}) };
   }
   loginAccountResult: import("../src/types.js").AccountLoginResult = {
     url: "https://auth.meta.com/oauth/device/?code=TEST-CODE",
@@ -2139,6 +2142,29 @@ describe("AncillaController", () => {
     assert.deepEqual(client.accounts, []);
     controller.cancelLogin();
     assert.deepEqual(client.cancelledLoginCalls, [], "closing confirmed sign-in does not cancel it");
+  });
+
+  it("asks the server who is signed in again once a sign-in is confirmed, so Settings shows the account", async () => {
+    const client = new FakeClient();
+    client.defaultLogin = { hasLogin: null, email: null };
+    client.loginAccountResult = { url: "https://auth.meta.com/oauth/device/?code=TEST-CODE", code: "TEST-CODE", loginId: "default-attempt" };
+    let status: "waiting" | "done" = "waiting";
+    client.accountLoginProgress = async () => ({ status });
+    const controller = new AncillaController(client, { ...platform(), schedule: () => 0 });
+    await controller.loadAccounts();
+    await settle();
+    assert.deepEqual(controller.store.get().defaultLogin, { hasLogin: null, email: null }, "before the sign-in the server cannot say");
+    await controller.beginLogin(null);
+    await controller.checkLogin();
+    const before = client.healthCalls;
+    client.defaultLogin = { hasLogin: true, email: "person@example.test" };
+    status = "done";
+    await controller.checkLogin();
+    await settle();
+    assert.equal((controller.store.get().accountLogin as { status: string }).status, "done");
+    assert.ok(client.healthCalls > before, "the identity was asked for again after the confirmation");
+    assert.deepEqual(controller.store.get().defaultLogin, { hasLogin: true, email: "person@example.test" });
+    controller.cancelLogin();
   });
 
   it("does not confuse an existing credential with completion of a new browser sign-in", async () => {

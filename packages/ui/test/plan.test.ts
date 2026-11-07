@@ -202,10 +202,42 @@ describe("subscription account accuracy", () => {
 
   it("shows missing limits, missing subscription and sign-in requirements distinctly without invented zeroes", () => {
     for (const [status, text] of [["not-reported", "did not report subscription limits"], ["no-subscription", "no Muse subscription"], ["login-required", "Meta no longer accepts this login. Sign in again to see its subscription limits."]] as const) {
-      const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status })] });
+      // No plan name here: with one, a window Meta has not reported yet has words of its own (below).
+      const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status, planName: null })] });
       assert.match(html, new RegExp(text));
       assert.doesNotMatch(html, /0%|progressbar/);
     }
+  });
+
+  it("says what is true when Meta confirms the plan but has sent no usage numbers yet", () => {
+    const bare = account(null, 0, { usage: null, source: null, status: "not-reported" });
+    const label = quotaAvailabilityLabel(bare);
+    assert.match(label, /Meta confirms your plan but has not sent any usage numbers yet/);
+    assert.match(label, /before the first use in a new usage window/);
+    assert.match(label, /send a message in a thread that uses this account, then choose Refresh/);
+    assert.doesNotMatch(label, /any thread/, "a message on another account cannot start this account's window");
+    assert.match(label, /If no numbers appear after that, Meta has not sent any for this account\./, "it does not promise that Refresh fixes it");
+    assert.match(label, /unknown, not zero usage/);
+    // The same words serve a named account.
+    assert.equal(quotaAvailabilityLabel(account("work", 0, { usage: null, source: null, status: "not-reported" })), label);
+    assert.doesNotMatch(label, /did not report/, "it does not read like a malfunction");
+    const html = render(PlanMeter, { planUsageAccounts: [bare] });
+    assert.match(html, /Meta confirms your plan but has not sent any usage numbers yet/);
+    assert.match(html, /Muse Plus/);
+    assert.match(html, /Refresh/);
+    assert.doesNotMatch(html, /0%|progressbar/);
+  });
+
+  it("keeps its other words for a window that was never checked or has no plan name", () => {
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", planName: null })),
+      "Meta did not report subscription limits for this account. Missing values are unknown, not zero usage.");
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", checkedAtMs: null })),
+      "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown.");
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", checkedAtMs: null, planName: null })),
+      "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown.");
+    // Other statuses keep their words, plan name or not.
+    assert.match(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "no-subscription" })), /no Muse subscription/);
+    assert.match(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "unavailable" })), /Could not read/);
   });
 
   it("says plainly that Meta no longer accepts a login, and still offers the way to sign in again", () => {

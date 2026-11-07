@@ -5,7 +5,7 @@ import { openSync } from "node:fs";
 import fs, { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MuseSubscriptionReader, parseMetaSubscription, subscriptionIdentity } from "../src/subscriptionQuota.js";
+import { loginIdentity, MuseSubscriptionReader, parseMetaSubscription, subscriptionIdentity } from "../src/subscriptionQuota.js";
 
 const NOW = 1_800_000_000_000;
 function payload(percent = 42) {
@@ -218,6 +218,74 @@ describe("Meta subscription quota", () => {
     while (!started) await new Promise((resolve) => setImmediate(resolve));
     pendingReader.close();
     assert.equal(await pending, null);
+  });
+});
+
+describe("the identity of a saved login", () => {
+  async function saved(body: string | object) {
+    const directory = await mkdtemp(join(tmpdir(), "ancilla-identity-"));
+    after(() => rm(directory, { recursive: true, force: true }));
+    const path = join(directory, "auth.json");
+    await writeFile(path, typeof body === "string" ? body : JSON.stringify(body));
+    return path;
+  }
+  const meta = (fields: Record<string, unknown>) => ({ providers: { meta: fields } });
+
+  it("says a login exists, and names its e-mail, from the meta provider's mechanism and user_email", async () => {
+    assert.deepEqual(await loginIdentity(await saved(meta({ mechanism: "oauth", user_email: "person@example.test", access_token: "dca:t" }))),
+      { hasLogin: true, email: "person@example.test" });
+    assert.deepEqual(await loginIdentity(await saved(meta({ mechanism: "oauth" }))), { hasLogin: true, email: null });
+    assert.deepEqual(await loginIdentity(await saved(meta({ mechanism: "oauth", user_email: "" }))), { hasLogin: true, email: null });
+    assert.deepEqual(await loginIdentity(await saved(meta({ mechanism: "oauth", user_email: 7 }))), { hasLogin: true, email: null });
+    // Any non-empty text is a mechanism, as it is for a login on the machine that runs the server.
+    assert.deepEqual(await loginIdentity(await saved(meta({ mechanism: "api_key", user_email: "other@example.test" }))),
+      { hasLogin: true, email: "other@example.test" });
+  });
+
+  it("gives nothing, never a claim of no login, for a file that does not say one exists", async () => {
+    const missing = join(tmpdir(), "ancilla-identity-missing", "auth.json");
+    const folder = await mkdtemp(join(tmpdir(), "ancilla-identity-folder-"));
+    after(() => rm(folder, { recursive: true, force: true }));
+    const cases: [string, string][] = [
+      ["no file", missing], ["a folder", folder],
+      ["not JSON", await saved("{ not json")], ["empty", await saved("")], ["an array", await saved("[]")], ["a string", await saved('"meta"')],
+      ["no providers", await saved({})], ["no meta provider", await saved({ providers: { other: { mechanism: "oauth" } } })],
+      ["meta is text", await saved({ providers: { meta: "oauth" } })], ["meta is a list", await saved({ providers: { meta: [] } })],
+      ["no mechanism", await saved(meta({ user_email: "person@example.test" }))], ["an empty mechanism", await saved(meta({ mechanism: "", user_email: "person@example.test" }))],
+      ["a mechanism that is not text", await saved(meta({ mechanism: true, user_email: "person@example.test" }))],
+      ["a file past the size limit", await saved(" ".repeat(512 * 1024 + 1))],
+    ];
+    for (const [name, path] of cases) assert.equal(await loginIdentity(path), null, name);
+  });
+
+  it("trims the e-mail, and gives none (the login still exists) for text that is not fit to show as one", async () => {
+    const email = async (value: unknown) => await loginIdentity(await saved(meta({ mechanism: "oauth", user_email: value })));
+    assert.deepEqual(await email("  person@example.test \n"), { hasLogin: true, email: "person@example.test" });
+    const unfit: [string, string][] = [
+      ["only spaces", "   "], ["a line break inside", "person@example.test\nsecond line"], ["a bell", "per\u0007son@example.test"],
+      ["a right-to-left override", "person@example.test‮"], ["a line separator", "person@example.test second"],
+      ["a control character of the C1 block", "person\u0085@example.test"],
+      ["more than 320 characters", `${"a".repeat(321)}@example.test`],
+    ];
+    for (const [name, value] of unfit) assert.deepEqual(await email(value), { hasLogin: true, email: null }, name);
+    assert.deepEqual(await email(`${"a".repeat(300)}@example.test`), { hasLogin: true, email: `${"a".repeat(300)}@example.test` }, "a long but sane address is kept");
+  });
+
+  it("returns only the two fields, whatever else the file holds", async () => {
+    const path = await saved(meta({ mechanism: "oauth", user_email: "person@example.test", user_full_name: "Full Person",
+      access_token: "dca:secret-token", refresh_token: "secret-refresh", expires_at: 1 }));
+    const identity = await loginIdentity(path);
+    assert.deepEqual(Object.keys(identity ?? {}).sort(), ["email", "hasLogin"]);
+    assert.doesNotMatch(JSON.stringify(identity), /Full Person|secret|dca:|auth\.json/);
+  });
+
+  it("opens a file once for every look at it, those of the quota reader's own kind included", async (t) => {
+    let opens = 0;
+    t.mock.method(fs, "open", () => { opens++; return new Promise(() => {}); });
+    const path = join(tmpdir(), "ancilla-identity-never-opened", "auth.json");
+    for (let look = 0; look < 3; look++) { void loginIdentity(path); void subscriptionIdentity(path); }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(opens, 1);
   });
 });
 

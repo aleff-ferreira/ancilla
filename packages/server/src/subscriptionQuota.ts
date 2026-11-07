@@ -68,6 +68,25 @@ export async function subscriptionIdentity(path: string): Promise<string | null>
   return meta?.["mechanism"] === "oauth" ? text(meta["user_email"]) : null;
 }
 
+const filled = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
+
+/** An e-mail fit to show on a card: trimmed, at most 320 characters, no control, format or line-break characters. */
+function showable(value: unknown): string | null {
+  const email = filled(value)?.trim();
+  return email && email.length <= 320 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(email) ? email : null;
+}
+
+/**
+ * Who a saved login belongs to, as the same file reads for a login on this machine: it exists when the meta provider
+ * has a mechanism, and the e-mail is its `user_email`, left out when it is not fit to show. Null whenever the file does
+ * not show a login (missing, unreadable, not JSON, no mechanism), which says nothing about whether another store holds
+ * one. Only these two fields leave: never the token, the name or anything else the file holds.
+ */
+export async function loginIdentity(path: string): Promise<{ hasLogin: true; email: string | null } | null> {
+  const meta = await authMetadata(path);
+  return filled(meta?.["mechanism"]) === null ? null : { hasLogin: true, email: showable(meta?.["user_email"]) };
+}
+
 interface Credential { token: string; email: string | null; fingerprint: string }
 async function credential(path: string): Promise<Credential | null> {
   const meta = await authMetadata(path);
