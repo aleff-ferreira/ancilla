@@ -204,14 +204,98 @@ paraphrases), at no more than 2 points of precision. What the tables show:
   points of precision on both sets: more irrelevant notes put in front of every prompt, which is the failure the
   precision target exists to stop.
 
-None met the rule on both sets, so none is in the assistant. Paraphrase recall is therefore its weakest number, and the
-tables say how weak (a question that shares no word with a note mostly does not find it). Two things follow from that and
-are in the product: a note can be pinned, so it is there whatever is asked, and a question about what is remembered that
-finds nothing says so instead of guessing.
+None of these met the rule on both sets, so none is on by default. Paraphrase recall is therefore the weakest number of
+the assistant as it ships, and the tables say how weak (a question that shares no word with a note mostly does not find
+it). Two things follow from that and are in the product: a note can be pinned, so it is there whatever is asked, and a
+question about what is remembered that finds nothing says so instead of guessing.
 
-What would change this: embeddings from a model. They were not evaluated because they need a model to be downloaded and
-run on the user's machine, which is a second runtime and a download the user has not been asked about. The measured gap
-is the case for asking.
+What would change this was embeddings from a real model, which need a model to be downloaded and run (a second runtime
+the user has not been asked about). They were measured afterwards, and are an option the user switches on: see the next
+section.
+
+### Retrieval: meaning vectors from a model the user names (measured, an option, off by default)
+
+The same rule, probes, ranking and budget as above, with one more technique: each note and each question is turned into a
+vector by a real embedding model, and a note the words did not find is added when it is near the question in meaning. The
+model was Qwen3-Embedding-0.6B (Q8_0) served by llama.cpp; a question was marked with the model's own instruction line
+("Given a question from the user, retrieve the saved note that answers it") and notes were embedded as written. A note that
+is added is scored as if its text match were `0.3 + 2 * (cosine - base)` (at most 0.7) and goes through the same ranking
+and the same budget as any other. This is the full run, the same one as the tables above; the first row of each table is
+the shipped retrieval, words only.
+
+Two reasons to add a note were measured. The first is a **bar**: a note at least this close in cosine is added, the closest
+first, at most two. The second is that a note **stands out**: the nearest note of all is added when it is at least *f* close
+and at least *g* clear of the second nearest. A first look with ten notes and nine paraphrased questions is what suggested
+it: the right note was the nearest one every time, but only two of the nine scored over 0.65 (they scored 0.50 to 0.67),
+while the nearest note to three questions that nothing answers scored 0.29 to 0.43. A question that a note answers tends
+to have one note clearly nearer than the rest, even when that note is not very near, and a question nothing answers has
+its nearest notes all about as far as one another. A bar cannot tell these apart, and has to be high to be safe, which
+leaves most answers under it. (That was ten notes, looked at by eye. The tables are the measurement.)
+
+Development set:
+
+| setting | paraphrase, all | shares a word | shares none, lexicon covers it | shares none, lexicon does not | precision of notes | unsupported claims | abstains when it should | mean tokens |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| assistant as shipped (words only) | 27.5% | 73.0% | 0.0% | 15.0% | 98.0% | 0.0% | 100.0% | 177 |
+| bar 0.7, closest 2 | 34.2% | 73.0% | 0.0% | 35.0% | 98.0% | 0.0% | 100.0% | 178 |
+| bar 0.65, closest 2 (**Strict**) | 48.3% | 83.8% | 30.2% | 35.0% | 98.1% | 0.0% | 100.0% | 179 |
+| bar 0.6, closest 2 | 58.3% | 94.6% | 48.8% | 35.0% | 94.2% | 0.0% | 100.0% | 180 |
+| bar 0.55, closest 2 | 66.7% | 94.6% | 67.4% | 40.0% | 86.7% | 0.0% | 100.0% | 183 |
+| bar 0.5, closest 2 | 78.3% | 100.0% | 76.7% | 60.0% | 71.0% | 0.0% | 100.0% | 187 |
+| bar 0.45, no limit | 90.0% | 100.0% | 76.7% | 95.0% | 41.1% | 0.0% | 100.0% | 205 |
+| the nearest alone, when it stands out (from 0.5, 0.15 ahead) | 42.5% | 86.5% | 11.6% | 35.0% | 96.6% | 0.0% | 100.0% | 179 |
+| **bar 0.65 or stands out from 0.5 by 0.15, closest 2 (Balanced, the default)** | **55.0%** | 94.6% | 39.5% | 35.0% | **96.8%** | 0.0% | 100.0% | 180 |
+| bar 0.65 or stands out from 0.45 by 0.1, closest 2 (**Loose**) | 61.7% | 97.3% | 53.5% | 37.5% | 94.9% | 0.0% | 100.0% | 180 |
+
+Held-out set:
+
+| setting | paraphrase, all | shares a word | shares none, lexicon covers it | shares none, lexicon does not | precision of notes | unsupported claims | abstains when it should | mean tokens |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| assistant as shipped (words only) | 14.2% | 42.9% | 0.0% | 6.6% | 98.7% | 0.6% | 95.0% | 174 |
+| bar 0.7, closest 2 | 21.7% | 75.0% | 0.0% | 6.6% | 98.8% | 0.6% | 95.0% | 175 |
+| bar 0.65, closest 2 (**Strict**) | 26.7% | 78.6% | 0.0% | 13.2% | 98.8% | 0.6% | 95.0% | 175 |
+| bar 0.6, closest 2 | 37.5% | 78.6% | 0.0% | 30.3% | 97.4% | 0.6% | 95.0% | 176 |
+| bar 0.55, closest 2 | 49.2% | 100.0% | 0.0% | 40.8% | 90.7% | 0.6% | 95.0% | 178 |
+| bar 0.5, closest 2 | 79.2% | 100.0% | 56.3% | 76.3% | 74.7% | 0.6% | 95.0% | 184 |
+| bar 0.45, no limit | 91.7% | 100.0% | 93.8% | 88.2% | 40.9% | 0.6% | 95.0% | 202 |
+| the nearest alone, when it stands out (from 0.5, 0.15 ahead) | 37.5% | 75.0% | 6.3% | 30.3% | 97.4% | 0.6% | 95.0% | 176 |
+| **bar 0.65 or stands out from 0.5 by 0.15, closest 2 (Balanced, the default)** | **38.3%** | 78.6% | 6.3% | 30.3% | **97.4%** | 0.6% | 95.0% | 176 |
+| bar 0.65 or stands out from 0.45 by 0.1, closest 2 (**Loose**) | 53.3% | 78.6% | 25.0% | 50.0% | 96.5% | 0.6% | 95.0% | 177 |
+
+What the rows say:
+
+- **Three settings meet the rule on both sets: Strict, the standout alone, and the two together (Balanced).** Balanced
+  finds the most of them: 27.5 and 24.1 more points of paraphrase recall on the development and held-out sets, for 1.2 and
+  1.3 points of precision. That is the default. Strict adds 20.8 and 12.5 points and costs nothing in precision. Loose adds
+  34.2 and 39.1 points and costs 3.1 and 2.2, which is over the rule's two, so it is offered and not recommended. A bar of
+  0.6 passes on the held-out set and fails on the development set (3.8 points of precision).
+- **Nothing else about the retrieval moves.** Unsupported claims, abstention and the size of a block (a few tokens more)
+  are as they were.
+- **How it was chosen, and what the held-out set is worth here.** About twenty settings were run on both sets together:
+  bars from 0.45 to 0.7, nine standouts alone (three floors by three leads) and six of the two together. The default is the one that
+  finds the most on the development set within the rule's two points of precision, and the held-out set then agreed with
+  it. But the held-out set was looked at while the grid was explored, so it confirms a choice and is not an untouched
+  estimate.
+- **It does not make paraphrase recall good.** At the default a little over half of the development paraphrases are found
+  and a little under 40% of the held-out ones, and a question that shares no word with its note and is not in the lexicon
+  is found 35.0% and 30.3% of the time (words alone: 15.0% and 6.6%). A model is not a reader.
+- **More recall costs precision quickly.** A bar of 0.5 finds 78% and 79% and puts a wrong note in about a quarter of the
+  blocks (precision 71% and 75%); a bar of 0.45 is at 41%. That is the failure the precision target exists to stop (above),
+  and the rule is the same here.
+- **The numbers are for this model.** The bar, the floor and the lead are cosines of one model; another scores nearness on
+  another scale, so its settings have to be measured before they are trusted. The harness takes any server that speaks the
+  embeddings protocol: `ANCILLA_EVAL_EMBED_URL`, `ANCILLA_EVAL_EMBED_MODEL` and `ANCILLA_EVAL_EMBED_QUERY_PREFIX`, then
+  `node scripts/assistant-eval.mjs --print`; the row "meaning search as shipped (the default settings)" is the assistant's
+  own default, so a change to it cannot go unmeasured. Nothing is called when those are not set, and the tables in the
+  results block above are made without a model.
+- **What it costs.** On this machine (llama.cpp on the laptop's GPU, over loopback) one question's vector took 6 ms at
+  the median and at the 95th percentile (60 requests), and sixteen notes in one request about 39 ms, so a turn pays a few
+  milliseconds and the index of a thousand notes is built in a few seconds. A slower server (a hosted one, or a CPU) costs
+  what its round trip costs, up to the wait a turn will give it (400 ms for a message, 250 ms in a call); after that the
+  words answer alone.
+- **What it does not show.** These are synthetic probes with a scripted reader, as everywhere in this document, and one
+  model. They say how often the right note is put in front of the prompt, and nothing about what a real model then does
+  with it.
 
 ### Frameworks and graph stores for memory
 

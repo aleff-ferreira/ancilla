@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { assembleContext } from "./context.js";
+import { fromBlob, toBlob } from "./embed.js";
 import { extractCandidates, type ExtractContext } from "./extract.js";
 import { ASSISTANT_ID, DEFAULT_PROFILE, applyProfilePatch, normalizeProfile, parseGoalInput, parseProfilePatch, ValidationError, type ProfilePatch } from "./profile.js";
 import { asksAboutMemory, asksForEverything, rankMemories, scopeKey, visibleScopes, type Hit } from "./rank.js";
@@ -42,7 +43,7 @@ import {
  */
 
 export type Row = Record<string, unknown>;
-export type Param = string | number | null;
+export type Param = string | number | null | Uint8Array;
 
 export class ConflictError extends Error {
   readonly code = "conflict";
@@ -416,13 +417,98 @@ export class MemoryStore {
   }
 
   private indexItem(itemId: string, text: string, slot: string | null): void {
+    // The words changed (or the note is new), so what its meaning was computed from is gone: it is computed again.
+    this.vectorStamp += 1;
+    this.run("DELETE FROM memory_vectors WHERE item_id = ?", [itemId]);
     if (!this.fts) return;
     this.run("DELETE FROM memory_fts WHERE ref = ?", [itemId]);
     this.run("INSERT INTO memory_fts (ref, text) VALUES (?, ?)", [itemId, this.indexText(text, slot)]);
   }
 
   private unindexItem(itemId: string): void {
+    // A vector can be turned back into much of the words it came from, so it goes whenever the words do.
+    this.vectorStamp += 1;
+    this.run("DELETE FROM memory_vectors WHERE item_id = ?", [itemId]);
     if (this.fts) this.run("DELETE FROM memory_fts WHERE ref = ?", [itemId]);
+  }
+
+  // ------------------------------------------------------------------------------------------------ meaning vectors
+
+  /** Moves whenever a vector is made or removed, so that what was read from the file before is read again. */
+  private vectorStamp = 0;
+  /** The vectors of the notes that are believed, decoded once and kept until a note or a vector changes: a turn should cost a few dot products, not a read of the file. */
+  private vectorMemo: { key: string; rows: { item: MemoryItem; vec: Float32Array }[] } | null = null;
+  /** How many times the vectors were read from the file. The tests use it to show that it is not once per turn. */
+  vectorLoads = 0;
+
+  /** Keeps the meaning of a note, as computed by `model`. A note that changed or was erased in the meantime keeps nothing. */
+  putVector(itemId: string, model: string, vec: Float32Array, expectedText: string): boolean {
+    const current = this.get("SELECT text FROM memory_items WHERE id = ? AND status IN ('active','contested')", [itemId]);
+    if (!current || String(current.text) !== expectedText) return false;
+    this.vectorStamp += 1;
+    this.run("INSERT INTO memory_vectors (item_id, model, dim, vec) VALUES (?, ?, ?, ?) ON CONFLICT(item_id) DO UPDATE SET model = excluded.model, dim = excluded.dim, vec = excluded.vec", [itemId, model, vec.length, toBlob(vec)]);
+    return true;
+  }
+
+  /** Notes that are believed now (active or disputed) and have no vector from `model` yet, newest first. */
+  itemsNeedingVectors(model: string, limit: number): { id: string; text: string }[] {
+    return this.all(
+      "SELECT i.id AS id, i.text AS text FROM memory_items i LEFT JOIN memory_vectors v ON v.item_id = i.id AND v.model = ? WHERE i.assistant_id = ? AND i.status IN ('active','contested') AND v.item_id IS NULL ORDER BY i.observed_at DESC LIMIT ?",
+      [model, ASSISTANT_ID, Math.max(1, Math.floor(limit))],
+    ).map((r) => ({ id: String(r.id), text: String(r.text) }));
+  }
+
+  /** Whether any note has a vector from `model`: the cheap question a turn asks before it spends a request on the question's own. */
+  hasVectors(model: string): boolean {
+    return this.get("SELECT 1 AS x FROM memory_vectors WHERE model = ? LIMIT 1", [model]) !== undefined;
+  }
+
+  /** How many notes that are believed now can be found by `model`'s meaning, and how many still wait for it. */
+  vectorStats(model: string): { indexed: number; pending: number } {
+    const indexed = Number(
+      this.get("SELECT COUNT(*) AS n FROM memory_vectors v JOIN memory_items i ON i.id = v.item_id WHERE v.model = ? AND i.assistant_id = ? AND i.status IN ('active','contested')", [model, ASSISTANT_ID])?.n ?? 0,
+    );
+    const wanted = Number(this.get("SELECT COUNT(*) AS n FROM memory_items WHERE assistant_id = ? AND status IN ('active','contested')", [ASSISTANT_ID])?.n ?? 0);
+    return { indexed, pending: Math.max(0, wanted - indexed) };
+  }
+
+  /**
+   * The vectors of the notes in these scopes that were made by `model`. Only notes that are believed now (active or
+   * disputed) have any worth keeping, so no other status is answered with anything.
+   */
+  vectorsFor(model: string, scopeKeys: readonly string[], statuses: readonly string[]): { item: MemoryItem; vec: Float32Array }[] {
+    if (scopeKeys.length === 0 || statuses.length === 0) return [];
+    // Any write to the notes moves the epoch and any change to a vector moves the stamp: either one means reading again.
+    const key = `${model}|${this.epoch()}|${this.vectorStamp}`;
+    if (!this.vectorMemo || this.vectorMemo.key !== key) {
+      const rows = this.all("SELECT i.*, v.vec AS vec FROM memory_vectors v JOIN memory_items i ON i.id = v.item_id WHERE v.model = ? AND i.assistant_id = ? AND i.status IN ('active','contested')", [model, ASSISTANT_ID]);
+      this.vectorMemo = { key, rows: rows.map((r) => ({ item: toItem(r), vec: fromBlob(r.vec as Uint8Array) })) };
+      this.vectorLoads += 1;
+    }
+    const scopes = new Set(scopeKeys);
+    const wanted = new Set(statuses);
+    return this.vectorMemo.rows.filter((r) => scopes.has(scopeKey(r.item.scope)) && wanted.has(r.item.status));
+  }
+
+  /**
+   * Forgets the vectors of every model but `keep` (every vector when none is named): the model changed, or the person
+   * wants meaning search gone. A vector can be turned back into much of the words it came from, so none outlives its use.
+   */
+  dropVectors(keep?: string): void {
+    this.vectorStamp += 1;
+    this.vectorMemo = null;
+    if (keep === undefined) this.run("DELETE FROM memory_vectors");
+    else this.run("DELETE FROM memory_vectors WHERE model != ?", [keep]);
+  }
+
+  /** Removes the vectors of notes that are no longer believed (replaced, say): nothing asks for them, and they are not kept for nothing. */
+  pruneVectors(): number {
+    const stale = Number(this.get("SELECT COUNT(*) AS n FROM memory_vectors WHERE item_id NOT IN (SELECT id FROM memory_items WHERE status IN ('active','contested'))")?.n ?? 0);
+    if (stale > 0) {
+      this.vectorStamp += 1;
+      this.run("DELETE FROM memory_vectors WHERE item_id NOT IN (SELECT id FROM memory_items WHERE status IN ('active','contested'))");
+    }
+    return stale;
   }
 
   /** Drops the text index and builds it again from the items: the index is derived, and the items are the truth. */
@@ -1223,7 +1309,7 @@ export class MemoryStore {
   wipe(): number {
     const count = this.write(() => {
       const n = Number(this.get("SELECT COUNT(*) AS n FROM memory_items WHERE status != 'deleted'")?.n ?? 0);
-      for (const table of ["memory_evidence", "memory_revisions", "memory_links", "memory_sources", "memory_summaries", "memory_tombstones", "memory_items"]) this.run(`DELETE FROM ${table}`);
+      for (const table of ["memory_vectors", "memory_evidence", "memory_revisions", "memory_links", "memory_sources", "memory_summaries", "memory_tombstones", "memory_items"]) this.run(`DELETE FROM ${table}`);
       this.run("DELETE FROM assistant_meta WHERE key LIKE 'recent:%' OR key LIKE 'last:%'");
       if (this.fts) {
         this.run("DELETE FROM memory_fts");

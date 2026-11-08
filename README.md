@@ -103,7 +103,9 @@ See [Agents and tasks](docs/agent-activity.md) for the full interaction model an
 Switch on the **Assistant** page (the brain icon in the sidebar footer) and threads stop starting from nothing. It reads
 what you type, keeps rules, preferences, decisions, deadlines and facts with your exact words and where each came from,
 and puts the notes that bear on a message in front of the prompt. It adds no model of its own and costs no extra: Muse
-still does the thinking, on your plan. It is **off until you switch it on**.
+still does the thinking, on your plan, unless you choose otherwise for a call. Voice calls and finding notes by meaning
+are optional extras that use models you choose, and send nothing anywhere until you set them up. The assistant is **off
+until you switch it on**.
 
 ![The assistant's home: its face on a lit stage, what it would do next, the rules it follows and what you have shared](docs/assets/assistant-home.png)
 
@@ -112,6 +114,8 @@ still does the thinking, on your plan. It is **off until you switch it on**.
 | **Memory you can read** | Every note shows who said it and when, with its earlier versions. Correct it, pin it, confirm it, settle a dispute, export everything, pause remembering, or erase a note, and the same old words are not learned again. |
 | **Honest about what it knows** | A guess never replaces what you said, a note that may be out of date says so, and when nothing saved answers a question it says that. Passwords, keys and ID numbers are never kept. |
 | **Tasks** | Give it work and it runs through Muse in a thread you can open, one step at a time, inside limits you set. It is marked done only when a check that reads a file passed. A step that may already have changed files is not run again after a restart. |
+| **Talk to it** | An optional voice call. It listens while you talk and works out when you have finished, answers a sentence at a time, can be cut off in the middle of a word and goes on from what you heard, remembers the conversation, and starts read-only work in the background while you keep talking. The speech recognition and the voice run on your computer (a download of about 0.6 GB that you start yourself); the model that answers is your choice: your Muse plan, or any server that speaks the common chat protocol, including one on your own machine. English and Brazilian Portuguese. A spoken sentence can read and research but never change a file or approve anything. [How it works and what was measured](docs/assistant-voice.md). |
+| **Finds notes by meaning** | Optional. Name an embedding model (one running on your computer works) and a question that shares no word with a note, such as "which car do I own?" against "drives a Subaru", can still find it. Measured on the evaluation's questions: at least twice as many paraphrases found, for about one point of precision. Nothing is sent anywhere until you name a model, and then only to it. |
 | **Initiative, within limits** | Ask first, suggest, or act on its own for work that only reads, a couple of times a day at most. Memory never grants permission: settings and Muse's approvals do. |
 | **A character of your own** | A short first meeting, or the Persona tab later, gives it a name, a face (five forms you can recolour and tune), a voice (eight temperaments and five dials) and up to four habits. Its face is in the sidebar, on the Home tab and beside the composer, where it works while a turn runs, wants you when something waits and is pleased when it finishes. It changes how it sounds, never what it may do or what is true, and it says it is an AI if you ask. |
 | **What you have shared** | Days together, what it remembers, what you finished together and a few round numbers, read from what is stored. No streaks and nothing that counts the days you were away, and you can hide it. |

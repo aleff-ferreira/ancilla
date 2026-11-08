@@ -8,6 +8,7 @@ import { Button, Toggle, cn } from "../ui/primitives.js";
 import { Row, Section } from "../settings/SettingsPage.js";
 import { Pick } from "../settings/SettingsPage.js";
 import { KINDS, KIND_LABEL, ago, day, scopeLabel, useAssistantCall, useAssistantData } from "./api.js";
+import { MeaningSearch } from "./MeaningSearch.js";
 import { Chip, Notice } from "./parts.js";
 
 type View = "active" | "attention" | "history";
@@ -156,6 +157,7 @@ export function MemoryPanel(props: { profile: AssistantProfileView; changed: () 
         ) : null}
       </Section>
 
+      <MeaningSearch bump={props.bump} changed={props.changed} />
       <Preview />
       <Activity bump={props.bump} now={now} />
 

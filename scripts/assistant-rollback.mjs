@@ -3,7 +3,8 @@
 //   node scripts/assistant-rollback.mjs <data folder> <version>    for example: ... ~/.ancilla 1
 //   node scripts/assistant-rollback.mjs <data folder> --status     which version the file is at, and what the steps are
 //
-// Version 0 removes every table the assistant made; 1 keeps memory and profile and drops tasks, schedules and conversations; 2 keeps tasks and drops conversations.
+// Version 0 removes every table the assistant made; 1 keeps memory and profile and drops tasks, schedules and conversations; 2 keeps tasks and drops conversations;
+// 4 keeps the conversations and drops the meaning vectors of the notes (derived from them, and made again when meaning search is on).
 // Quit Ancilla first. A rollback destroys the data of the steps it undoes; the export written beside the file is the
 // way back to the memories (it does not hold tasks). To remove the assistant entirely, deleting assistant.db and its
 // -wal and -shm files does the same.

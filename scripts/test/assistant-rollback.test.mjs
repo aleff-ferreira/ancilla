@@ -40,11 +40,28 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     const dir = await makeData();
     const out = run(dir, "--status");
     assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /schema version 4/);
+    assert.match(out.stdout, /schema version 5/);
     assert.match(out.stdout, /1: memory and profile/);
     assert.match(out.stdout, /2: tasks and schedules/);
     assert.match(out.stdout, /3: conversations/);
     assert.match(out.stdout, /4: the Muse thread of a conversation/);
+    assert.match(out.stdout, /5: notes by meaning/);
+  });
+
+  test("steps back over the meaning of the notes and keeps the notes and the conversations", async () => {
+    const dir = await makeData();
+    assert.ok(tables(dir).names.includes("memory_vectors"));
+    assert.equal(run(dir, "4").status, 0);
+    const four = tables(dir);
+    assert.equal(four.version, 4);
+    assert.ok(!four.names.includes("memory_vectors"), "the vectors are gone: they are derived from the notes, which are not");
+    assert.ok(four.names.includes("memory_items") && four.names.includes("conversations"));
+    const db = new DatabaseSync(join(dir, "assistant.db"));
+    const notes = db.prepare("SELECT COUNT(*) AS n FROM memory_items").get().n;
+    const columns = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
+    db.close();
+    assert.equal(notes, 1, "the note is still there");
+    assert.ok(columns.includes("muse_session"), "and the Muse thread column, which is version 4");
   });
 
   test("steps back over the voice's conversations and keeps the tasks", async () => {
@@ -54,6 +71,7 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     assert.equal(run(dir, "3").status, 0);
     const three = tables(dir);
     assert.equal(three.version, 3);
+    assert.ok(!three.names.includes("memory_vectors"), "going back to 3 passes 4 and 5 on the way");
     assert.ok(three.names.includes("conversations"), "version 3 still has conversations");
     const db = new DatabaseSync(join(dir, "assistant.db"));
     const columns = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
@@ -90,13 +108,13 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
 
   test("refuses a version it is not at or above, a missing file and a missing argument", async () => {
     const dir = await makeData();
-    assert.equal(run(dir, "4").status, 2);
+    assert.equal(run(dir, "5").status, 2);
     assert.equal(run(dir, "7").status, 2);
     assert.equal(run(dir, "x").status, 2);
     assert.equal(run(dir).status, 2);
     const empty = mkdtempSync(join(tmpdir(), "ancilla-rollback-empty-"));
     dirs.push(empty);
     assert.equal(run(empty, "0").status, 1);
-    assert.equal(tables(dir).version, 4, "nothing was changed by the refusals");
+    assert.equal(tables(dir).version, 5, "nothing was changed by the refusals");
   });
 });

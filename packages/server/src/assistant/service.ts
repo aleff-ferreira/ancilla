@@ -1,6 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_EMBEDDING_SETTINGS, embedderFor, EmbeddingRejected, keyIsSet, readEmbeddingSettings, writeEmbeddingSettings, type Embedder, type EmbeddingSettings } from "./embed.js";
 import { Executive, type ExecutiveHost, type RecoverySummary } from "./executive.js";
+import { withMeaningVectors, type MeaningOptions } from "./meaning.js";
+import { looksSecret } from "./secrets.js";
 import { digest, isPastQuestion, parseAsOf, tokens } from "./text.js";
 import { MemoryStore, type Change, type CaptureResult } from "./store.js";
 import { DEFAULT_PROFILE } from "./profile.js";
@@ -57,6 +60,10 @@ export interface PreparedTurn {
   tokens: number;
 }
 
+/** A turn that has been read and is waiting for its notes; or one that needs none (the assistant is off, or it was a command). */
+type Pending = { done?: undefined; profile: AssistantProfile; captured: Change[]; queryText: string; asOf: number | null };
+type Begun = Pending | { done: PreparedTurn };
+
 export interface UsedContext {
   at: number;
   memoryIds: string[];
@@ -75,11 +82,50 @@ export interface AssistantDeps {
   host?: ExecutiveHost;
   /** How often the executive looks for work, in milliseconds. */
   tickMs?: number;
+  /** The data folder, where the meaning-search settings are kept; without it they last only as long as the process. */
+  dataDir?: string;
+  /** Meaning search, already set up: what a server started with it or a test passes. Off when absent. */
+  embedding?: { settings: EmbeddingSettings; embedder: Embedder } | null;
 }
+
+/** What the page shows of meaning search: the settings (never a key, only whether the variable that holds it is set) and how far the index has come. */
+export interface EmbeddingStatus {
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  queryPrefix: string;
+  apiKeyEnv: string | null;
+  keyPresent: boolean;
+  minCosine: number;
+  standoutCosine: number | null;
+  standoutLead: number;
+  most: number;
+  /** Notes that can be found by meaning now. */
+  indexed: number;
+  /** Notes still waiting for their vector. */
+  pending: number;
+  /** Notes the server refused to read (too long, say): left to the words. */
+  skipped: number;
+  /** The server did not answer, and meaning search waits before asking again. */
+  paused: boolean;
+  error: string | null;
+}
+
+/** What the page is shown while meaning search is off: the defaults it would start from. */
+export const NO_EMBEDDING: EmbeddingStatus = {
+  configured: false, baseUrl: "", model: "", queryPrefix: DEFAULT_EMBEDDING_SETTINGS.queryPrefix, apiKeyEnv: null, keyPresent: false,
+  minCosine: DEFAULT_EMBEDDING_SETTINGS.minCosine, standoutCosine: DEFAULT_EMBEDDING_SETTINGS.standoutCosine, standoutLead: DEFAULT_EMBEDDING_SETTINGS.standoutLead,
+  most: DEFAULT_EMBEDDING_SETTINGS.most, indexed: 0, pending: 0, skipped: 0, paused: false, error: null,
+};
 
 const CACHE_LIMIT = 64;
 const CACHE_TTL_MS = 5 * 60_000;
 const SHORT_QUESTION_WORDS = 5;
+/** How long a turn waits for the question's vector before it goes on with words alone. */
+export const MEANING_TIMEOUT_MS = 400;
+const QUERY_VECTOR_LIMIT = 32;
+const INDEX_BATCH = 16;
+const INDEX_ROUNDS = 50;
 
 function words(text: string): number {
   return tokens(text).length;
@@ -111,10 +157,27 @@ export class AssistantService {
   readonly executive: Executive | null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
+  // Meaning search: off until the user names an embedding model. Everything below is idle while `embedding` is null.
+  private embedding: { settings: EmbeddingSettings; embedder: Embedder } | null;
+  /** Counts the times vectors were written, so that a cached block made before them is not reused after. */
+  private vectorEpoch = 0;
+  private indexTimer: ReturnType<typeof setTimeout> | null = null;
+  private indexing = false;
+  /** Set when a note arrived while a pass was running. */
+  private indexAgain = false;
+  private embedFailures = 0;
+  private embedPausedUntil = 0;
+  private lastEmbedError: string | null = null;
+  /** Notes the server refused to read, by id and wording: not asked about again while they say the same. */
+  private readonly unembeddable = new Set<string>();
+  private readonly queryVectors = new Map<string, Float32Array>();
+  private isClosed = false;
+
   constructor(
     readonly store: MemoryStore,
     private readonly deps: AssistantDeps,
   ) {
+    this.embedding = deps.embedding ?? null;
     this.tasks = new TaskStore(store, () => this.now());
     this.executive = deps.host
       ? new Executive(this.tasks, deps.host, {
@@ -131,6 +194,8 @@ export class AssistantService {
    * and look for work. Safe to call once; never throws.
    */
   async start(): Promise<RecoverySummary | null> {
+    // Notes written while the server was off, or before meaning search was set up, get their vectors now.
+    this.kickIndex(1000);
     const executive = this.executive;
     if (!executive) return null;
     let summary: RecoverySummary | null = null;
@@ -212,7 +277,10 @@ export class AssistantService {
       path = join(dataDir, ASSISTANT_DB_FILE);
     }
     const store = MemoryStore.open(path, deps.now ? { now: deps.now } : {});
-    return new AssistantService(store, deps);
+    // Meaning search is on when the user saved a model for it; a server given one directly (a test) keeps that one.
+    const saved = deps.embedding === undefined ? readEmbeddingSettings(dataDir) : null;
+    const embedding = deps.embedding !== undefined ? deps.embedding : saved ? { settings: saved, embedder: embedderFor(saved) } : null;
+    return new AssistantService(store, { ...deps, dataDir, embedding });
   }
 
   private now(): number {
@@ -220,7 +288,13 @@ export class AssistantService {
   }
 
   close(): void {
+    this.isClosed = true;
     this.cache.clear();
+    this.queryVectors.clear();
+    if (this.indexTimer) {
+      clearTimeout(this.indexTimer);
+      this.indexTimer = null;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -240,6 +314,8 @@ export class AssistantService {
 
   announce(event: Omit<AssistantEvent, "type" | "epoch"> & { epoch?: number }): void {
     this.invalidate();
+    // A note that was just written or changed has no vector yet: it gets one in a moment.
+    if (event.reason === "memory") this.kickIndex();
     try {
       this.deps.emit({ type: "assistant", epoch: this.store.epoch(), ...event });
     } catch (error) {
@@ -285,15 +361,34 @@ export class AssistantService {
    * are chosen), then pick the notes for it. Never throws.
    */
   prepareTurn(input: TurnInput): PreparedTurn {
+    const begun = this.beginTurn(input);
+    if (begun.done) return begun.done;
+    return this.finishTurn(input, begun, null);
+  }
+
+  /**
+   * `prepareTurn`, with meaning search when it is set up: the notes nearest the question in meaning are found as well,
+   * for a question that shares no words with its answer. It waits for the question's vector no longer than `timeoutMs`;
+   * a server that is down, slow or not set up costs the turn that wait at most, and the words decide as before.
+   */
+  async prepareTurnAsync(input: TurnInput, options: { timeoutMs?: number } = {}): Promise<PreparedTurn> {
+    const begun = this.beginTurn(input);
+    if (begun.done) return begun.done;
+    const meaning = await this.meaningFor(begun.queryText, options.timeoutMs ?? MEANING_TIMEOUT_MS);
+    return this.finishTurn(input, begun, meaning);
+  }
+
+  /** The first half of a turn: read what the user said, and work out what the notes are to be looked up by. */
+  private beginTurn(input: TurnInput): Begun {
     const nothing: PreparedTurn = { prefix: null, captured: [], used: [], tokens: 0 };
     let profile: AssistantProfile;
     try {
       profile = this.store.getProfile();
     } catch (error) {
       this.deps.log(`assistant: the memory could not be read: ${error instanceof Error ? error.message : String(error)}`);
-      return nothing;
+      return { done: nothing };
     }
-    if (!profile.enabled || /^\s*\//.test(input.text)) return nothing;
+    if (!profile.enabled || /^\s*\//.test(input.text)) return { done: nothing };
     const captured = this.noteMessage(input);
     try {
       const previous = this.lastQuery.get(input.sessionId) ?? "";
@@ -303,7 +398,18 @@ export class AssistantService {
       if (this.lastQuery.size > 200) this.lastQuery.delete(this.lastQuery.keys().next().value as string);
       // A question about a past moment ("what was my timezone in September?") is answered as of then.
       const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
-      const out = this.context(input, queryText, profile, asOf);
+      return { profile, captured, queryText, asOf };
+    } catch (error) {
+      this.deps.log(`assistant: choosing notes for a turn failed: ${error instanceof Error ? error.message : String(error)}`);
+      return { done: { ...nothing, captured } };
+    }
+  }
+
+  /** The second half: the notes for the question (by meaning too when `meaning` is given), and the block they make. */
+  private finishTurn(input: TurnInput, begun: Pending, meaning: MeaningOptions | null): PreparedTurn {
+    const { profile, captured, queryText, asOf } = begun;
+    try {
+      const out = this.context(input, queryText, profile, asOf, meaning);
       const goals = this.store.activeGoals();
       const inject = out.memories.length > 0 || out.noEvidence || hasIdentity(profile, goals);
       const used = out.memories.map((m) => m.item.id);
@@ -313,17 +419,19 @@ export class AssistantService {
       return { prefix: inject ? out.text : null, captured, used, tokens: inject ? out.tokens : 0 };
     } catch (error) {
       this.deps.log(`assistant: choosing notes for a turn failed: ${error instanceof Error ? error.message : String(error)}`);
-      return { ...nothing, captured };
+      return { prefix: null, captured, used: [], tokens: 0 };
     }
   }
 
-  private context(input: TurnInput, queryText: string, profile: AssistantProfile, asOf: number | null): AssembledContext & { epoch: number } {
+  private context(input: TurnInput, queryText: string, profile: AssistantProfile, asOf: number | null, meaning: MeaningOptions | null): AssembledContext & { epoch: number } {
     const epoch = this.store.epoch();
-    const key = [epoch, input.sessionId, input.project ?? "", input.account ?? "", profile.contextBudgetTokens, asOf ?? "", digest(queryText)].join("|");
+    // A block made with meaning depends on which vectors existed then, so it is keyed by that too.
+    const by = meaning ? `${meaning.model}:${meaning.bar}:${meaning.floor}:${meaning.gap}:${meaning.most}:${this.vectorEpoch}` : "";
+    const key = [epoch, input.sessionId, input.project ?? "", input.account ?? "", profile.contextBudgetTokens, asOf ?? "", digest(queryText), by].join("|");
     const now = this.now();
     const hit = this.cache.get(key);
     if (hit && hit.epoch === epoch && now - hit.at < CACHE_TTL_MS) return hit.out;
-    const out = this.store.retrieve({
+    const query = {
       text: queryText,
       thread: input.sessionId,
       ...(input.project ? { project: input.project } : {}),
@@ -331,17 +439,27 @@ export class AssistantService {
       budgetTokens: profile.contextBudgetTokens,
       now,
       ...(asOf !== null ? { asOf } : {}),
-    });
+    };
+    const out = meaning ? this.store.retrieveWith(query, withMeaningVectors(this.store, meaning)) : this.store.retrieve(query);
     this.cache.set(key, { at: now, epoch, out });
     if (this.cache.size > CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value as string);
     return out;
   }
 
-  /** What the model would be told for this question, without sending anything: so the user can see it. */
+  /** What the model would be told for this question, without sending anything: so the user can see it. Words only; see `previewAsync`. */
   preview(input: TurnInput): AssembledContext & { epoch: number; wouldAdd: boolean } {
+    return this.previewWith(input, null);
+  }
+
+  /** `preview`, with meaning search when it is set up: what a turn would really be told. */
+  async previewAsync(input: TurnInput, options: { timeoutMs?: number } = {}): Promise<AssembledContext & { epoch: number; wouldAdd: boolean }> {
+    return this.previewWith(input, await this.meaningFor(input.text, options.timeoutMs ?? MEANING_TIMEOUT_MS));
+  }
+
+  private previewWith(input: TurnInput, meaning: MeaningOptions | null): AssembledContext & { epoch: number; wouldAdd: boolean } {
     const profile = this.store.getProfile();
     const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
-    const out = this.store.retrieve({
+    const query = {
       text: input.text,
       thread: input.sessionId,
       ...(input.project ? { project: input.project } : {}),
@@ -349,9 +467,215 @@ export class AssistantService {
       budgetTokens: profile.contextBudgetTokens,
       now: this.now(),
       ...(asOf !== null ? { asOf } : {}),
-    });
+    };
+    const out = meaning ? this.store.retrieveWith(query, withMeaningVectors(this.store, meaning)) : this.store.retrieve(query);
     const inject = profile.enabled && (out.memories.length > 0 || out.noEvidence || hasIdentity(profile, this.store.activeGoals()));
     return { ...out, wouldAdd: inject };
+  }
+
+  // ------------------------------------------------------------------------------------------------ meaning search
+
+  /**
+   * The question's vector, when meaning search is on and can answer in time; null when it is off, down, slow, or has
+   * nothing indexed yet (the words alone then decide). What is said goes to the address the user named for this and to
+   * nowhere else, and a message that looks like a secret is not sent at all.
+   */
+  private async meaningFor(text: string, timeoutMs: number): Promise<MeaningOptions | null> {
+    const emb = this.embedding;
+    if (!emb || this.isClosed || this.now() < this.embedPausedUntil || looksSecret(text) !== null) return null;
+    const model = emb.embedder.id;
+    try {
+      // Nothing to compare with yet: the question is not worth a request.
+      if (!this.store.hasVectors(model)) return null;
+    } catch {
+      return null;
+    }
+    const options = (queryVector: Float32Array): MeaningOptions => ({
+      model,
+      queryVector,
+      bar: emb.settings.minCosine,
+      floor: emb.settings.standoutCosine ?? Infinity,
+      gap: emb.settings.standoutLead,
+      most: emb.settings.most,
+    });
+    const key = `${model}|${text}`;
+    const known = this.queryVectors.get(key);
+    if (known) return options(known);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const vector = await emb.embedder.query(text, controller.signal);
+      // Meaning search was changed or switched off while this was in flight: that answer is about something else.
+      if (this.embedding !== emb) return null;
+      this.queryVectors.set(key, vector);
+      if (this.queryVectors.size > QUERY_VECTOR_LIMIT) this.queryVectors.delete(this.queryVectors.keys().next().value as string);
+      this.embedFailures = 0;
+      this.lastEmbedError = null;
+      return options(vector);
+    } catch (error) {
+      this.embeddingFailed(controller.signal.aborted ? new Error("the embedding server did not answer in time") : error, emb);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** A server that does not answer is left alone for a while, longer each time, so no turn waits on it again and again. */
+  private embeddingFailed(error: unknown, emb: { settings: EmbeddingSettings; embedder: Embedder }): void {
+    if (this.embedding !== emb) return;
+    const reason = error instanceof Error ? error.message : String(error);
+    this.lastEmbedError = reason;
+    // A request the server refused is about that text, not about the server being there.
+    if (error instanceof EmbeddingRejected) return;
+    this.embedFailures += 1;
+    const wait = Math.min(5 * 60_000, 15_000 * 2 ** (this.embedFailures - 1));
+    this.embedPausedUntil = this.now() + wait;
+    if (this.embedFailures === 1) this.deps.log(`assistant: meaning search is paused for ${Math.round(wait / 1000)} s, and turns go on with words alone: ${reason}`);
+  }
+
+  /** Looks soon for notes that have no vector, unless that is already planned; a server that failed is not asked before its pause is over. */
+  private kickIndex(delayMs = 300): void {
+    if (!this.embedding || this.isClosed || this.indexTimer) return;
+    const wait = Math.max(delayMs, this.embedPausedUntil - this.now());
+    this.indexTimer = setTimeout(() => {
+      this.indexTimer = null;
+      void this.indexSome();
+    }, wait);
+    this.indexTimer.unref?.();
+  }
+
+  /**
+   * Gives every note that has no vector one, a few at a time: a note said a moment ago can be found by meaning a moment
+   * later. It stops at once if meaning search is changed or switched off, and never throws.
+   */
+  async indexSome(): Promise<void> {
+    const emb = this.embedding;
+    if (!emb || this.isClosed) return;
+    if (this.indexing) {
+      // A note arrived while a pass was running: that pass may have looked already, so another follows it.
+      this.indexAgain = true;
+      return;
+    }
+    if (this.now() < this.embedPausedUntil) {
+      this.kickIndex();
+      return;
+    }
+    this.indexing = true;
+    /** The pass ended with work left (it was long), or failed: it is looked at again. */
+    let again = false;
+    let failed = false;
+    try {
+      const model = emb.embedder.id;
+      // A note that was replaced keeps no vector: nothing asks for it, and it is derived data.
+      if (this.store.pruneVectors() > 0) this.vectorEpoch += 1;
+      for (let round = 0; round < INDEX_ROUNDS; round += 1) {
+        if (this.embedding !== emb || this.isClosed) return;
+        const wanted = this.store
+          .itemsNeedingVectors(model, INDEX_BATCH + this.unembeddable.size)
+          .filter((note) => !this.unembeddable.has(`${note.id}|${digest(note.text)}`))
+          .slice(0, INDEX_BATCH);
+        if (wanted.length === 0) return;
+        const vectors = await this.embedNotes(emb, wanted);
+        if (this.embedding !== emb || this.isClosed) return;
+        let wrote = false;
+        wanted.forEach((note, i) => {
+          const vector = vectors[i];
+          // A note that was edited or forgotten while its vector was being made gets none: the vector would be of other words.
+          if (vector && this.store.putVector(note.id, model, vector, note.text)) wrote = true;
+        });
+        if (wrote) this.vectorEpoch += 1;
+        this.embedFailures = 0;
+        this.lastEmbedError = null;
+        again = round === INDEX_ROUNDS - 1;
+      }
+    } catch (error) {
+      this.embeddingFailed(error, emb);
+      failed = true;
+    } finally {
+      this.indexing = false;
+      const arrived = this.indexAgain;
+      this.indexAgain = false;
+      if (failed || again || arrived) this.kickIndex(failed ? 1000 : 100);
+    }
+  }
+
+  /** The vectors of some notes. When the server refuses a batch it is because of one of them: find it, leave it to the words, and read the rest. */
+  private async embedNotes(emb: { embedder: Embedder }, notes: readonly { id: string; text: string }[]): Promise<(Float32Array | null)[]> {
+    const skip = (note: { id: string; text: string }): null => {
+      this.unembeddable.add(`${note.id}|${digest(note.text)}`);
+      return null;
+    };
+    try {
+      return await emb.embedder.embed(notes.map((n) => n.text));
+    } catch (error) {
+      if (!(error instanceof EmbeddingRejected)) throw error;
+      if (notes.length === 1) return [skip(notes[0] as { id: string; text: string })];
+      const out: (Float32Array | null)[] = [];
+      for (const note of notes) {
+        try {
+          out.push((await emb.embedder.embed([note.text]))[0] ?? null);
+        } catch (inner) {
+          if (!(inner instanceof EmbeddingRejected)) throw inner;
+          out.push(skip(note));
+        }
+      }
+      return out;
+    }
+  }
+
+  /** What meaning search is set to now, or null when it is off. */
+  embeddingSettings(): EmbeddingSettings | null {
+    return this.embedding ? { ...this.embedding.settings } : null;
+  }
+
+  /** How meaning search stands, for the page: what is set, how many notes can be found by meaning, whether the server is answering. */
+  embeddingStatus(): EmbeddingStatus {
+    const emb = this.embedding;
+    if (!emb) return { ...NO_EMBEDDING };
+    const s = emb.settings;
+    const stats = this.store.vectorStats(emb.embedder.id);
+    return {
+      configured: true,
+      baseUrl: s.baseUrl,
+      model: s.model,
+      queryPrefix: s.queryPrefix,
+      apiKeyEnv: s.apiKeyEnv,
+      keyPresent: keyIsSet(s),
+      minCosine: s.minCosine,
+      standoutCosine: s.standoutCosine,
+      standoutLead: s.standoutLead,
+      most: s.most,
+      indexed: stats.indexed,
+      pending: Math.max(0, stats.pending - this.unembeddable.size),
+      skipped: this.unembeddable.size,
+      paused: this.now() < this.embedPausedUntil,
+      error: this.lastEmbedError,
+    };
+  }
+
+  /**
+   * Switches meaning search on, changes it, or (with null) off. Vectors made by another model are erased now, and all of
+   * them when it is switched off: a vector can be turned back into much of the words it came from. The settings are kept
+   * in the data folder so that they outlast a restart.
+   */
+  configureEmbeddings(settings: EmbeddingSettings | null, embedder?: Embedder): void {
+    const next = settings ? { settings, embedder: embedder ?? embedderFor(settings) } : null;
+    this.embedding = next;
+    if (next) this.store.dropVectors(next.embedder.id);
+    else this.store.dropVectors();
+    this.vectorEpoch += 1;
+    this.embedFailures = 0;
+    this.embedPausedUntil = 0;
+    this.lastEmbedError = null;
+    this.unembeddable.clear();
+    this.queryVectors.clear();
+    if (this.indexTimer) {
+      clearTimeout(this.indexTimer);
+      this.indexTimer = null;
+    }
+    if (this.deps.dataDir) writeEmbeddingSettings(this.deps.dataDir, settings);
+    this.invalidate();
+    if (next) this.kickIndex(0);
   }
 
   /** The notes the last turn of a thread drew on, for the "used N notes" line under it. */

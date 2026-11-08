@@ -57,6 +57,7 @@ nothing else**:
 | --- | --- | --- |
 | The words of each conversation (yours and its, with how much of a cut-off reply you heard) | `assistant.db`, next to the memory | Until you delete them, or for the number of days you choose |
 | Notes it learned from what you said | `assistant.db` (see [the memory](assistant.md#how-the-memory-works)) | As the memory says |
+| The meaning of each note, as numbers, if you switched on [meaning search](assistant.md#meaning-search) | `assistant.db`, beside the note | As long as the note; erased with it, and all of it when meaning search is turned off |
 | The sound of your voice | **nowhere**: it is turned into words and dropped | Not kept |
 | A key for a hosted model | `voice-secrets.json`, readable by you only | Until you remove it |
 | The downloaded models | `voice/` in the data folder | Until you press *Remove* |
@@ -96,6 +97,9 @@ The decisions that matter, and why:
 - **The model is behind one small interface** (`brain.ts`): conversation and tools in, text and tool calls out. Muse, any
   OpenAI-compatible server and a stand-in for tests all fit it. A model with no tool calling is given tools through a
   convention in its text.
+- **The notes it is told are found the way the text box's are,** by words and, if you switched it on, by meaning. The
+  embedding model is asked for at most a quarter of a second, because a call is about the next half second; a server
+  that is down or slow costs the turn that wait at most, and is then left alone for a while.
 - **The engines are an optional download**, not part of the installer: they carry native code for each platform and half a
   gigabyte of models, and most people who never call should not pay for them. Every file has a pinned address, size and
   checksum.
@@ -113,6 +117,8 @@ reproduces the call numbers.
 | Voice, spoken back through the recogniser | 5.1% word error, all of it "22" against "twenty two": the speech is intelligible in both languages |
 | Voice speed | 0.75 s to say a 4.9 s sentence at the default quality (0.37 s at the fastest setting) |
 | End of your speech to the first sound, with a model that takes 0.35 s to start | 1.2 to 1.4 s, in the browser and over the socket; the pause that ends your turn (0.5 s) and the model's first word are the two largest parts |
+| The same, with everything on this computer: a 4-billion-parameter model (Qwen3-4B-Instruct, 4-bit) on the laptop's graphics card through llama.cpp, the speech on the processor | about 1.0 to 1.2 s at the median; the model loads in 3.5 to 6.6 s the first time |
+| Finding a note by meaning, with a local embedding model, during that wait | 6 ms for the question's vector; a call never waits more than 0.25 s for it, and the words answer alone when it is late |
 | Interrupting | the voice dips 0.06 s after you start, stops about 0.25 s after |
 | First call after starting Ancilla | 4 to 6 s to load the models; they stay loaded for ten minutes after a call |
 
@@ -131,8 +137,9 @@ Muse thread as the model (its speed is Muse's), and a quiet or noisy room other 
   the installer against a stand-in network, and the Muse thread against a stand-in Muse. The page's half is in
   `packages/ui/test/voice-call.test.ts`.
 - Real engines: `node scripts/voice/bench.mjs --runtime <dir> --models <dir> --clips <dir>` runs calls on a real clock and
-  prints the timings; `scripts/voice/mock-llm.mjs` is a stand-in model that speaks the chat protocol, for running a call
-  with no key; `scripts/voice/replay.mjs` replays a recorded call (start the server with `ANCILLA_VOICE_DEBUG=1` and the
+  prints the timings (`--llm-url` and `--llm-model` use a real model server, such as a local llama.cpp, instead of the
+  stand-in); `scripts/voice/mock-llm.mjs` is a stand-in model that speaks the chat protocol, for running a call with no
+  key; `scripts/voice/replay.mjs` replays a recorded call (start the server with `ANCILLA_VOICE_DEBUG=1` and the
   audio it receives is written to the temp folder; it is your voice, so delete it when you are done).
 - Adding a model: implement `BrainProvider` (`stream` returns text, tool calls and how it ended) and add it to `brains.ts`.
   Adding an engine: implement `VadEngine`, `AsrEngine` or `TtsEngine` from `engines.ts`.

@@ -304,6 +304,22 @@ DROP TABLE IF EXISTS conversations;
     up: `ALTER TABLE conversations ADD COLUMN muse_session TEXT;`,
     down: `ALTER TABLE conversations DROP COLUMN muse_session;`,
   },
+  {
+    version: 5,
+    name: "notes by meaning",
+    // The meaning of each note as a vector, from an embedding model the user named. Derived from the note and erased with it
+    // (a vector can be turned back into much of the words that made it, so it is kept and removed exactly as the note is).
+    up: `
+CREATE TABLE memory_vectors (
+  item_id TEXT PRIMARY KEY REFERENCES memory_items (id) ON DELETE CASCADE,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  vec BLOB NOT NULL
+);
+CREATE INDEX memory_vectors_model ON memory_vectors (model);
+`,
+    down: `DROP TABLE IF EXISTS memory_vectors;`,
+  },
 ];
 
 /** The full text index. Kept apart from the migrations because it is built by hand, and rebuilt when it cannot be trusted. */

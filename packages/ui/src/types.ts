@@ -1021,6 +1021,27 @@ export interface AssistantPreviewView {
   memories: { id: string; text: string; kind: MemoryKind; score: number; why: string[]; stale: boolean }[];
 }
 
+/** Meaning search: finding notes by what they mean, with an embedding model the user names. A key is never sent here, only whether it is set. */
+export interface AssistantEmbeddingsView {
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  queryPrefix: string;
+  apiKeyEnv: string | null;
+  keyPresent: boolean;
+  minCosine: number;
+  standoutCosine: number | null;
+  standoutLead: number;
+  most: number;
+  indexed: number;
+  pending: number;
+  skipped: number;
+  paused: boolean;
+  error: string | null;
+}
+
+export type AssistantEmbeddingTestView = { ok: true; dimensions: number; ms: number } | { ok: false; error: string };
+
 export interface AssistantActivityView {
   id: number;
   at: number;

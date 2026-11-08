@@ -194,8 +194,47 @@ changes and has not been confirmed lately, shows the exact words when asked "why
 saved" when a question about what is remembered finds nothing, instead of leaving a gap to fill. Words from a note are
 neutralised so a note cannot close its own block.
 
-Retrieval is lexical on purpose. The evaluation measures how much that costs on paraphrase and what each added
-technique buys; see [assistant-evaluation.md](assistant-evaluation.md).
+Retrieval is lexical on purpose, and meaning search is an option you switch on (below). The evaluation measures how much
+the words alone cost on paraphrase and what each added technique buys; see [assistant-evaluation.md](assistant-evaluation.md).
+
+### Meaning search
+
+Off until you name an embedding model, in Assistant, Memory, Find notes by meaning. Any server that speaks the common
+`/embeddings` protocol will do: llama.cpp, Ollama or LM Studio on this computer, or a hosted one. Each note is turned into
+a vector by that model (in the background, a few at a time, soon after it is written), and a question is turned into one
+too. Two kinds of note are added to the candidates the words found, two at most: a note very near the question in meaning
+(a cosine of at least 0.65), and the one note that stands out (at least 0.5 near, and 0.15 ahead of the next nearest),
+which finds the answer to a question that no note is very near to, and adds nothing to one that nothing answers, whose
+nearest notes are all about as far as one another. They then go through the same ranking and the same budget as every
+other candidate, and the audit trail says "close in meaning" for them instead of "text match". The page offers three
+measured settings: Strict (the bar only), Balanced (both, the default) and Loose.
+
+- **Nothing is sent until you name a server, and then only there.** The text of a note and of what you ask goes to the
+  address you gave and to nowhere else; a model on this computer keeps all of it here. A message that looks like a
+  password or a key is not sent at all (the words alone decide that turn), and a note that looks like one was never kept.
+- **A vector is kept as the note is kept.** It lives beside the note in `assistant.db` (`memory_vectors`), is erased when
+  the note is forgotten or edited (and made again from the new words), when everything is erased, and when meaning search
+  is switched off or its model is changed, because a vector can be turned back into much of the words that made it. The
+  settings are in `embeddings.json` in the data folder and hold the name of the variable that holds a key, never a key.
+- **It can only help.** A server that is down, slow or refuses costs a turn at most a short wait (400 ms for a message,
+  250 ms in a call), and the words answer as they always did. A server that fails is left alone for 15 seconds, then 30,
+  up to five minutes, so no turn waits on it again and again. A note the server refuses (too long, say) is left to the
+  words and does not stop the others.
+- **The numbers belong to a model.** The bar, the standout's floor and lead, and the two notes at most were measured with
+  one model, Qwen3-Embedding-0.6B: Balanced finds 27.5 and 24.1 more points of paraphrase recall on the development and
+  the held-out questions, for about one point of precision, which is inside the evaluation's rule; Strict finds 20.8 and
+  12.5 more at no cost; Loose finds more again and goes over the rule's limit on precision, so it is offered and not
+  recommended ([assistant-evaluation.md](assistant-evaluation.md)). Another model scores nearness on another scale: the
+  evaluation harness takes any server through `ANCILLA_EVAL_EMBED_URL`, to measure one before you trust different numbers,
+  which you can put in `embeddings.json` (`minCosine`, `standoutCosine`, `standoutLead`, `most`).
+
+To try the measured one, run a llama.cpp server on a quantised copy of the model and point the page at it:
+
+```bash
+llama-server -m Qwen3-Embedding-0.6B-Q8_0.gguf --embeddings --pooling last --port 8080
+```
+
+then, in Assistant, Memory, Find notes by meaning, pick "Qwen3-Embedding (llama.cpp)", press Try it, and Turn on.
 
 ### What memory is not allowed to do
 
@@ -283,7 +322,9 @@ flowchart LR
   field an older file lacks takes its default. Tables: profile and goals; memory items,
   revisions, sources, evidence links, links between items, tombstones, a capture log, summaries and an audit log of what
   changed and who changed it (ids and rule names, never the words); tasks, steps, attempts, events, checkpoints and
-  schedules; and an FTS5 index that is rebuilt from the items whenever it disagrees with them.
+  schedules; conversations; the meaning vectors of notes (only when meaning search is on); and an FTS5 index that is
+  rebuilt from the items whenever it disagrees with them. `embeddings.json` beside it holds the address and model of the
+  embedding server, and the name of the variable that holds its key.
 - Code: `packages/server/src/assistant/`. The pure parts (extraction, resolution, ranking, context) have no database,
   clock or Muse in them.
 
@@ -301,6 +342,8 @@ All under `/api/assistant`, behind the same host check, origin check and token a
 | `POST /wipe` | erase everything, only with `{"confirm":"wipe everything"}` |
 | `GET /export` | everything you may keep, as a file |
 | `POST /preview`, `GET /threads/:id/context` | what the model would be told, and what the last turn used |
+| `GET /embeddings`, `PUT` or `PATCH`, `DELETE` | meaning search: how it is set and how far it has got (never a key); set it, or change what is named; switch it off and erase every vector |
+| `POST /embeddings/test` | try a server with the settings in the body, without saving them or opening the assistant |
 | `GET /activity` | what changed and who changed it |
 | `GET/POST /goals`, `PATCH/DELETE /goals/:id` | goals |
 | `GET/POST /tasks`, `GET /tasks/:id`, `POST /tasks/:id/{pause,resume,cancel,retry,confirm,extend,resolve}` | tasks |
@@ -323,7 +366,7 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
 4. **Downgrade Ancilla**: an older Ancilla does not open `assistant.db`, so it ignores it. A newer file than the program
    understands is refused, never altered, with a message saying which version to restore.
 5. **Step the schema back** without removing the file: `scripts/assistant-rollback.mjs <data folder> <version>` writes an
-   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks; version 3 adds the voice's conversations; version 4 adds the Muse thread of a conversation).
+   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks; version 3 adds the voice's conversations; version 4 adds the Muse thread of a conversation; version 5 adds the meaning vectors of notes, which stepping back drops and switching meaning search on makes again).
 
 ## What it does not do
 
@@ -332,7 +375,8 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
 - A sentence you paste into a message is read as yours unless it is fenced, quoted or tagged as a document. The page
   shows every capture with its source, so nothing is hidden, and memory cannot grant permissions, but this is a real
   limit.
-- Retrieval finds notes by words and identifiers. A question that shares no word with the note it needs will not find it.
+- Retrieval finds notes by words and identifiers. A question that shares no word with the note it needs will not find it,
+  unless meaning search is on, and then only when the model puts the two near each other (the evaluation says how often).
 - Tasks run only while Ancilla is open (the desktop shell closes the server with its window), and they need Muse. Checks
   read files in the project; they do not run commands.
 - `assistant.db` is not encrypted at rest, like `ancilla.db`, and the desktop server runs without a token on loopback, so

@@ -3,6 +3,8 @@ import type {
   AssistantAttemptView,
   AssistantBondView,
   AssistantCharacterView,
+  AssistantEmbeddingTestView,
+  AssistantEmbeddingsView,
   AssistantGoalView,
   AssistantPreviewView,
   AssistantProfileView,
@@ -301,6 +303,12 @@ export class DemoAssistant {
       bump();
       return { item: this.view(n), epoch: this.epoch };
     }
+    // Meaning search needs an embedding server, which a demo has none of: the page shows it off and says so when it is tried.
+    if (path === "/embeddings" && (method === "GET" || method === "DELETE")) {
+      return { configured: false, baseUrl: "", model: "", queryPrefix: "", apiKeyEnv: null, keyPresent: false, minCosine: 0.65, standoutCosine: 0.5, standoutLead: 0.15, most: 2, indexed: 0, pending: 0, skipped: 0, paused: false, error: null } satisfies AssistantEmbeddingsView;
+    }
+    if (path === "/embeddings/test" && method === "POST") return { ok: false, error: "The demo has no embedding server to try." } satisfies AssistantEmbeddingTestView;
+    if (path === "/embeddings" && method === "PATCH") throw Object.assign(new Error("The demo has no embedding server to use. Install Ancilla to turn meaning search on."), { kind: "invalid" });
     if (method === "GET" && path === "/activity") return { activity: this.activityLog.slice(0, Number(q.get("limit") ?? 50)) };
     if (method === "GET" && path === "/export") return { format: "ancilla.assistant.export", version: 1, items: [...this.notes.values()].map((n) => this.view(n)), goals: this.goals, profile: this.profile };
     if (method === "POST" && path === "/preview") {

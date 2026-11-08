@@ -1,5 +1,6 @@
+import { parseEmbeddingSettings, testEmbedding } from "./embed.js";
 import { DEFAULT_PROFILE } from "./profile.js";
-import type { AssistantService } from "./service.js";
+import { NO_EMBEDDING, type AssistantService } from "./service.js";
 import { ConflictError, EMPTY_BOND, NotFoundError, ValidationError, type ListFilter } from "./store.js";
 import { dismissSuggestion, suggest } from "./suggest.js";
 import { parseScheduleSpec, parseTaskSpec } from "./tasks.js";
@@ -104,6 +105,7 @@ function untouched(req: AssistantRequest, sub: string): AssistantReply {
   if (req.method === "GET" && sub === "/suggestions") return { status: 200, body: { suggestions: [], autonomy: DEFAULT_PROFILE.autonomy } };
   if (req.method === "GET" && sub === "/schedules") return { status: 200, body: { schedules: [] } };
   if (req.method === "GET" && sub === "/memories") return { status: 200, body: { items: [], total: 0, epoch: 0 } };
+  if (req.method === "GET" && sub === "/embeddings") return { status: 200, body: { ...NO_EMBEDDING } };
   if (req.method === "GET" && sub === "/activity") return { status: 200, body: { activity: [] } };
   if (req.method === "GET" && sub === "/export") return { status: 200, body: { format: "ancilla.assistant.export", version: 1, items: [], goals: [], profile: DEFAULT_PROFILE, notes: ["The assistant has not been used yet."] }, download: "ancilla-assistant-empty.json" };
   if (req.method === "POST" && sub === "/preview") return { status: 200, body: { text: "", tokens: 0, wouldAdd: false, noEvidence: false, omitted: [], memories: [] } };
@@ -212,6 +214,14 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
 export async function handleAssistant(access: AssistantAccess, req: AssistantRequest): Promise<AssistantReply | null> {
   if (!isAssistantPath(req.path)) return null;
   const sub = req.path.slice(ASSISTANT_PREFIX.length);
+  // Trying an embedding server touches no memory, so it needs (and creates) no assistant file.
+  if (req.method === "POST" && sub === "/embeddings/test") {
+    try {
+      return { status: 200, body: await testEmbedding(parseEmbeddingSettings(await req.body())) };
+    } catch (error) {
+      return replyError(error);
+    }
+  }
   const reading = req.method === "GET" || sub === "/preview";
   const service = access.get(!reading);
   if (!service) {
@@ -343,6 +353,20 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
       return { status: 200, body: { item, epoch: store.epoch() } };
     }
 
+    // ---- meaning search: finding notes by what they mean, with an embedding model the user names
+    if (req.method === "GET" && sub === "/embeddings") return { status: 200, body: service.embeddingStatus() };
+    // PUT sets all of it; PATCH changes what it names and keeps the rest (the page sends PATCH, as it does everywhere).
+    if ((req.method === "PUT" || req.method === "PATCH") && sub === "/embeddings") {
+      const body = await req.body();
+      const current = req.method === "PATCH" ? service.embeddingSettings() : null;
+      service.configureEmbeddings(parseEmbeddingSettings(current ? { ...current, ...body } : body));
+      return { status: 200, body: service.embeddingStatus() };
+    }
+    if (req.method === "DELETE" && sub === "/embeddings") {
+      service.configureEmbeddings(null);
+      return { status: 200, body: service.embeddingStatus() };
+    }
+
     // ---- transparency and portability
     if (req.method === "GET" && sub === "/activity") return { status: 200, body: { activity: store.activity(integer(req.query.get("limit"), 50, 1, 500)) } };
     if (req.method === "GET" && sub === "/export") {
@@ -351,7 +375,7 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
     }
     if (req.method === "POST" && sub === "/preview") {
       const body = await req.body();
-      const out = service.preview({
+      const out = await service.previewAsync({
         sessionId: typeof body["sessionId"] === "string" ? body["sessionId"] : "preview",
         text: text(body["text"], "text", 4000),
         project: typeof body["project"] === "string" ? body["project"] : null,

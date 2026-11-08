@@ -105,6 +105,8 @@ export interface Hit {
   item: MemoryItem;
   /** 0 to 1, normalised over this query's text hits; 0 for an item that is here for another reason. */
   lexical: number;
+  /** Set when what found it was not words but nearness in meaning: the audit trail says so rather than "text match". */
+  by?: "meaning";
 }
 
 export function rankMemories(query: RetrievalQuery, hits: readonly Hit[]): RetrievedMemory[] {
@@ -117,7 +119,7 @@ export function rankMemories(query: RetrievalQuery, hits: readonly Hit[]): Retri
     let score = 0;
     if (hit.lexical > 0) {
       score += 0.55 * hit.lexical;
-      why.push("text match");
+      why.push(hit.by === "meaning" ? "close in meaning" : "text match");
     }
     const overlap = containment(q, tokenSet(item.text));
     if (overlap > 0) {

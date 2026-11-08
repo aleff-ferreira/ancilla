@@ -14,6 +14,9 @@ import { VoiceTools } from "./tools.js";
  * runs and tells the person about. The call itself knows none of this; it is handed this object and nothing else.
  */
 
+/** How long a spoken turn waits for the vector of what was said, to find notes by meaning, before it goes on with words. */
+const VOICE_MEANING_TIMEOUT_MS = 250;
+
 export interface TaskChange {
   taskId: string;
 }
@@ -99,11 +102,12 @@ export class AssistantVoiceHost implements VoiceHost {
     };
   }
 
-  context(text: string, _source: "voice" | "text"): string | null {
+  async context(text: string, _source: "voice" | "text"): Promise<string | null> {
     const guess = guessLanguage(text);
     if (guess !== "unknown") this.userLang = guess;
     try {
-      return this.deps.assistant.prepareTurn({ sessionId: this.deps.conversationId, text, project: null, account: null }).prefix;
+      // Meaning search is given a short wait: a call is about the next half second, and the words decide when it is late.
+      return (await this.deps.assistant.prepareTurnAsync({ sessionId: this.deps.conversationId, text, project: null, account: null }, { timeoutMs: VOICE_MEANING_TIMEOUT_MS })).prefix;
     } catch (error) {
       this.deps.log(`voice: the notes for a turn could not be chosen: ${error instanceof Error ? error.message : String(error)}`);
       return null;

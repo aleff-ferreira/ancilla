@@ -161,7 +161,7 @@ export class VoiceTools {
         case "recall": {
           const query = str(args["query"], 400);
           if (query === "") return { ok: false, text: "Say what to look up." };
-          const found = assistant.preview({ sessionId: this.deps.conversationId, text: query, project: null, account: null });
+          const found = await assistant.previewAsync({ sessionId: this.deps.conversationId, text: query, project: null, account: null }, { timeoutMs: 600 });
           return { ok: true, text: found.memories.length === 0 ? "Nothing is remembered about that." : found.text };
         }
         default:

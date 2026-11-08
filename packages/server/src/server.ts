@@ -2864,7 +2864,7 @@ export class AncillaServer {
       // Whatever goes wrong in there costs the turn its notes, never the turn.
       const typed = str(body["displayText"]) ?? text;
       const assistant = typed ? this.assistantFor(false) : null;
-      const memory = assistant ? assistant.prepareTurn({ sessionId, text: typed, ...this.assistantScope(sessionId) }) : null;
+      const memory = assistant ? await assistant.prepareTurnAsync({ sessionId, text: typed, ...this.assistantScope(sessionId) }) : null;
       const prompt = memory?.prefix ? `${memory.prefix}\n\n${prepared.prompt(text)}` : prepared.prompt(text);
       this.wake(sessionId);
       const live = this.liveFor(sessionId);
