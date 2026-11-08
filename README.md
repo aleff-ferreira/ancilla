@@ -6,12 +6,10 @@
 
 ![Ancilla — Deep research. Agents in view. An AMAZONIA WORKS product.](docs/assets/readme-hero.svg)
 
-**Ask a question, get a cited research report, watch parallel agents work.**
+**Deep research, agent monitoring and approvals for Muse Code.**
 
-Ancilla is an open-source desktop and web workspace for Meta's **Muse Code CLI** (`muse`). Turn a question into a
-cited research report, follow parallel agents as they work, and keep coding threads, approvals and background tasks
-in one place, with an opt-in assistant that remembers what you tell it. It uses your Muse login, so there are no
-extra API keys, on Windows, macOS or Linux.
+An open-source desktop and web app for Meta's **Muse Code CLI** (`muse`). It uses your Muse login: no extra API keys,
+on Windows, macOS and Linux.
 
 **[Download Ancilla](https://github.com/aleff-ferreira/ancilla/releases/latest)** ·
 [See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
@@ -27,11 +25,9 @@ extra API keys, on Windows, macOS or Linux.
 
 ## See it in action
 
-![Choosing the assistant's face in its first meeting: a form, a colour, then a voice](docs/assets/ancilla-tour.gif)
+![Asking a deep research question, setting its scope, then the workers' searches and sources counting up](docs/assets/ancilla-tour.gif)
 
-That is the assistant's first meeting. The whole tour (1 min 32 s, no sound, on sample data) goes on to what the
-assistant remembers, a run card with the plan folded in, a cited research report, the Crew panel and the usage meter:
-[download the tour](https://github.com/aleff-ferreira/ancilla/raw/main/docs/assets/ancilla-tour.mp4) (MP4, 10 MB).
+[Download the full tour](https://github.com/aleff-ferreira/ancilla/raw/main/docs/assets/ancilla-tour.mp4) (MP4, 1 min 39 s, no sound, sample data).
 
 ## Deep Research
 

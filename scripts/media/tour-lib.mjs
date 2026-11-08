@@ -77,8 +77,9 @@ function stage(b) {
   S.hover = async (spec, o = {}) => {
     let t = await S.find(spec);
     if (!t) throw new Error(`hover: not found ${JSON.stringify(spec)}`);
-    // A target outside the comfortable part of the screen is scrolled to first, smoothly, as a person would.
-    if (t.y < 160 || t.y > H - 200) {
+    // A target outside the comfortable part of the screen is scrolled to first, smoothly, as a person would
+    // (not one in the page's own header, which stays put: `noScroll`).
+    if (!spec.noScroll && (t.y < 160 || t.y > H - 200)) {
       await S.scrollBy(t.y - H * 0.48, 800);
       await sleep(120);
       t = (await S.find(spec)) ?? t;
@@ -105,6 +106,14 @@ function stage(b) {
     }
   };
   S.select = () => js(`document.activeElement && document.activeElement.select && document.activeElement.select()`);
+  /** A shortcut such as Ctrl+Shift+R: S.chord("R", "KeyR", 82, 10), modifiers being Alt 1, Ctrl 2, Meta 4, Shift 8. */
+  S.chord = async (key, code, vk, modifiers = 0) => {
+    await b.send("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode: vk, modifiers });
+    await b.send("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: vk, modifiers });
+  };
+  /** Plays what follows faster (factor 3 is three times) or at the normal pace (1): for a wait that only shows a spinner. */
+  S.marks = [];
+  S.speed = (factor) => { S.marks.push({ m: performance.now() / 1000, factor }); };
   S.key = (name) => b.press(name);
 
   S.scrollBy = (dy, ms = 1200) => js(`new Promise((done) => { const el = ${SCROLLER}; if (!el) return done(null); const from = el.scrollTop; const to = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, from + ${dy})); const t0 = performance.now(); const step = (now) => { const p = Math.min(1, (now - t0) / ${ms}); const e = p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p+2, 3)/2; el.scrollTop = from + (to - from) * e; if (p < 1) requestAnimationFrame(step); else done(el.scrollTop); }; requestAnimationFrame(step); })`);
@@ -147,12 +156,15 @@ export async function clip(name, { query = "", hash = "", settle = 1800 } = {}, 
   });
   let tEnd = 0;
   let tEndM = 0;
+  let marks = [];
   try {
     await b.goto(`${BASE}?${query}${query ? "&" : ""}theme=dark&zoom=${ZOOM}${hash}`, settle);
     await b.eval(OVERLAY);
     const m0 = performance.now() / 1000;
     await b.send("Page.startScreencast", { format: "jpeg", quality: 92, everyNthFrame: 2 });
-    await script(stage(b));
+    const S = stage(b);
+    await script(S);
+    marks = S.marks;
     tEnd = Date.now() / 1000;
     tEndM = performance.now() / 1000;
     await b.send("Page.stopScreencast");
@@ -160,6 +172,6 @@ export async function clip(name, { query = "", hash = "", settle = 1800 } = {}, 
   } finally {
     await b.close();
   }
-  writeFileSync(`${dir}/frames.json`, JSON.stringify({ tEnd, tEndM, frames }));
+  writeFileSync(`${dir}/frames.json`, JSON.stringify({ tEnd, tEndM, marks, frames }));
   console.log(`${name}: ${frames.length} frames over ${(tEndM - frames[0].m).toFixed(1)} s`);
 }

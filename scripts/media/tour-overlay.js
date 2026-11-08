@@ -18,7 +18,7 @@
   #tour-veil{position:absolute;inset:0;background:#0b1511;opacity:1;transition:opacity .7s cubic-bezier(.4,0,.2,1)}
   #tour-card{position:absolute;inset:0;background:#0b1511;opacity:0;transition:opacity .6s ease}
   #tour-card.on{opacity:1}
-  #tour-cap{position:absolute;left:50%;max-width:1360px;min-width:560px;padding:18px 40px 20px;border-radius:22px;background:rgba(8,16,12,.95);border:1px solid rgba(99,205,169,.36);box-shadow:0 22px 70px rgba(0,0,0,.62);text-align:center;opacity:0;transition:opacity .5s ease,transform .55s cubic-bezier(.2,.8,.2,1)}
+  #tour-cap{position:absolute;left:50%;width:max-content;max-width:1360px;min-width:560px;padding:18px 40px 20px;border-radius:22px;background:rgba(8,16,12,.95);border:1px solid rgba(99,205,169,.36);box-shadow:0 22px 70px rgba(0,0,0,.62);text-align:center;opacity:0;transition:opacity .5s ease,transform .55s cubic-bezier(.2,.8,.2,1)}
   #tour-cap.top{top:36px;transform:translate(-50%,-18px)}
   #tour-cap.bottom{bottom:44px;transform:translate(-50%,18px)}
   #tour-cap.on{opacity:1;transform:translate(-50%,0)}
@@ -38,7 +38,7 @@
   .tc h1 span{display:block;opacity:0;transform:translateY(30px);animation:tc-up 1s cubic-bezier(.2,.8,.2,1) forwards}
   .tc h1 span:nth-child(1){animation-delay:.55s}
   .tc h1 span:nth-child(2){animation-delay:.95s}
-  .tc p{position:relative;margin:44px 0 0;font-size:34px;color:#a9bbaf;opacity:0;animation:tc-up .9s 1.5s cubic-bezier(.2,.8,.2,1) forwards}
+  .tc p{position:relative;margin:44px 0 0;max-width:880px;line-height:1.35;font-size:34px;color:#a9bbaf;opacity:0;animation:tc-up .9s 1.5s cubic-bezier(.2,.8,.2,1) forwards}
   .tc small{position:absolute;left:150px;bottom:70px;font-size:22px;letter-spacing:.4px;color:#7d9186;opacity:0;animation:tc-up .8s 2s ease forwards}
   .tc-url{position:relative;margin:30px 0 0;font:500 70px/1.1 ${MONO};letter-spacing:-1.5px;color:#63cda9;opacity:0;animation:tc-up .9s 1.1s cubic-bezier(.2,.8,.2,1) forwards}
   .tc-os{position:relative;margin:34px 0 0;font-size:34px;color:#a9bbaf;opacity:0;animation:tc-up .9s 1.5s cubic-bezier(.2,.8,.2,1) forwards}
@@ -52,6 +52,9 @@
   .tc.outro h1{font-size:104px;letter-spacing:-2.6px}
   .tc.outro .tc-url{font-size:42px;letter-spacing:-.8px;margin-top:34px}
   .tc.outro .tc-os{font-size:30px;margin-top:26px;max-width:880px;line-height:1.4}
+  /* Radix positions its menus and popovers in screen pixels, which the app's own zoom then multiplies: put them back where they belong. */
+  [data-radix-popper-content-wrapper]{zoom:${1 / zoom}}
+  [data-radix-popper-content-wrapper]>*{zoom:${zoom}}
   @keyframes tc-up{to{opacity:1;transform:none}}
   @keyframes tc-draw{to{stroke-dashoffset:0}}
   @keyframes tc-pop{from{opacity:0;transform-box:fill-box;transform-origin:center;transform:scale(.4)}to{opacity:1;transform-box:fill-box;transform-origin:center;transform:scale(1)}}

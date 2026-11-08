@@ -20,7 +20,7 @@ import tempfile
 
 FF = os.environ.get("FFMPEG") or shutil.which("ffmpeg")
 ROOT = os.environ.get("TOUR_DIR", os.path.join(tempfile.gettempdir(), "ancilla-tour"))
-ORDER = ["intro", "meeting", "memory", "run", "research", "crew", "usage", "outro"]
+ORDER = ["intro", "assistant", "ask", "report", "crew", "plan", "diffs", "usage", "outro"]
 
 
 def run(cmd):
@@ -58,11 +58,21 @@ def clip(name):
     d = f"{ROOT}/{name}"
     data = json.load(open(f"{d}/frames.json"))
     frames, t_end = timeline(data)
+    # Stretches the script asked to play faster (S.speed): a wait that only shows a spinner. Marks are on the monotonic clock.
+    marks = sorted(data.get("marks", []), key=lambda k: k["m"]) if "tEndM" in data else []
+
+    def pace(t):
+        factor = 1.0
+        for mark in marks:
+            if mark["m"] <= t:
+                factor = mark["factor"]
+        return factor
+
     lines = []
     for i, f in enumerate(frames):
         nxt = frames[i + 1]["t"] if i + 1 < len(frames) else t_end
         lines.append(f"file '{f['file']}'")
-        lines.append(f"duration {max(0.001, nxt - f['t']):.4f}")
+        lines.append(f"duration {max(0.001, nxt - f['t']) / pace(f['t']):.4f}")
     lines.append(f"file '{frames[-1]['file']}'")
     open(f"{d}/list.txt", "w").write("\n".join(lines) + "\n")
     out = f"{ROOT}/{name}.mp4"
