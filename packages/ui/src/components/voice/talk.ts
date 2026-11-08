@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useController } from "../../app/context.js";
 import { callIsLive, closeCall, readVoiceStatus, startCall, useCallSession } from "./call.js";
 import { wantAssistantTab } from "./nav.js";
+import { warmVoice } from "./warm.js";
 
 /**
  * "Talk to the assistant", for every place that offers it. Whether the voice is installed is read once and kept for a
@@ -43,12 +44,15 @@ export function forgetVoiceStatus(): void {
   known = null;
 }
 
-/** The click on "Talk": starts a call, or takes the person to where the voice is installed when it is not. */
-export function useTalk(): { talk: () => void; live: boolean; available: boolean | null } {
+/** The click on "Talk": starts a call, or takes the person to where the voice is installed when it is not. `warm` is for the moment before it: a pointer over the button, or the focus on it. */
+export function useTalk(): { talk: () => void; warm: () => void; live: boolean; available: boolean | null } {
   const controller = useController();
   const session = useCallSession();
   const available = useVoiceAvailable();
   const live = callIsLive(session);
+  const warm = useCallback(() => {
+    if (!live) warmVoice(controller, available);
+  }, [controller, live, available]);
   const talk = useCallback(() => {
     if (live) {
       closeCall();
@@ -62,5 +66,5 @@ export function useTalk(): { talk: () => void; live: boolean; available: boolean
     }
     startCall(controller, { mode: known?.mode ?? "hands-free" });
   }, [controller, live, available]);
-  return { talk, live, available };
+  return { talk, warm, live, available };
 }

@@ -33,11 +33,15 @@ const TTFT = Number(arg("ttft", "350"));
 const REFINE = arg("refine", "yes") !== "no";
 const STEPS = Number(arg("steps", "4"));
 const OUT = arg("out", null);
+// A real model instead of the scripted one: any server that speaks the chat protocol (llama.cpp, Ollama, a hosted model).
+const LLM_URL = arg("llm-url", null);
+const LLM_MODEL = arg("llm-model", "local");
 if (!RUNTIME || !MODELS) {
-  console.error("usage: bench.mjs --runtime <dir with node_modules/sherpa-onnx-node> --models <models dir> --clips <dir> [--suite latency|barge|echo|all] [--n 8] [--ttft 350] [--refine yes|no] [--steps 4] [--out file.json]");
+  console.error("usage: bench.mjs --runtime <dir with node_modules/sherpa-onnx-node> --models <models dir> --clips <dir> [--suite latency|barge|echo|all] [--n 8] [--ttft 350] [--refine yes|no] [--steps 4] [--llm-url http://127.0.0.1:8791/v1 --llm-model name] [--out file.json]");
   process.exit(2);
 }
 
+const { OpenAiCompatibleProvider } = voice("brain.js");
 const { createSherpaEngines, loadSherpa } = voice("engines/index.js");
 const { VoiceSession } = voice("session.js");
 const { ScriptedBrain, FakeHost } = voice("testing.js");
@@ -211,7 +215,7 @@ async function openCall(brainScript) {
   const client = new RealClient(set.engines.tts.sampleRate);
   const host = new FakeHost();
   host.persona$ = { name: "Vesper", callsUser: null, language: null, tone: null, voice: null };
-  const brain = new ScriptedBrain(systemScheduler, brainScript);
+  const brain = LLM_URL ? new OpenAiCompatibleProvider({ baseUrl: LLM_URL, model: LLM_MODEL, local: true }) : new ScriptedBrain(systemScheduler, brainScript);
   const logs = [];
   const session = new VoiceSession({ engines: set.engines, brain, host, scheduler: systemScheduler, send: client.receive, sendAudio: client.receiveAudio, log: (l) => logs.push(l), id: "bench" });
   client.session = session;

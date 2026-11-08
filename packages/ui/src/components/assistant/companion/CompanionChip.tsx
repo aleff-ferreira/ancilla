@@ -35,7 +35,7 @@ export function CompanionChip() {
   const asking = state === "invite";
   const sub = chipSub(state, glance.needsYou);
   return (
-    <div className="group/cc relative">
+    <div className="group/cc relative" onPointerEnter={voice.warm}>
       <button
         type="button"
         data-state={state}
@@ -61,6 +61,7 @@ export function CompanionChip() {
             type="button"
             aria-label={voice.live ? "End the call" : `Talk to ${glance.name}`}
             onClick={voice.talk}
+            onFocus={voice.warm}
             className={cn(
               "absolute top-1/2 right-2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-lg transition-colors",
               voice.live ? "bg-danger-soft text-danger-text" : "text-subtle opacity-0 hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/cc:opacity-100",

@@ -199,7 +199,10 @@ export interface ChunkOptions {
   maxChars: number;
 }
 
-export const DEFAULT_CHUNKS: ChunkOptions = { firstMinChars: 18, firstMaxChars: 70, minChars: 28, maxChars: 240 };
+// The first piece decides how soon sound starts, and the voice takes time in proportion to what it has to say: a first
+// piece of about twenty characters is begun in a quarter of a second, one of sixty in half a second. So the first piece
+// stops at the first clause past ten characters ("Of course.", "Got it, every..."), or at forty.
+export const DEFAULT_CHUNKS: ChunkOptions = { firstMinChars: 10, firstMaxChars: 44, minChars: 28, maxChars: 240 };
 
 /** Where the first sentence of `text` ends, as the index after its last mark; -1 when none has ended yet. */
 function sentenceEnd(text: string): number {

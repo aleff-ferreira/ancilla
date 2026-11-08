@@ -248,6 +248,8 @@ export class VoiceService {
   async prewarm(): Promise<void> {
     try {
       await this.ensureEngines();
+      // A call may never follow: the models are let go after the idle time, as they are after a call.
+      if (this.active === null && !this.closed) this.scheduleUnload();
     } catch (error) {
       this.deps.log(`voice: warming the models failed: ${error instanceof Error ? error.message : String(error)}`);
     }

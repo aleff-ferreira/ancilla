@@ -88,7 +88,7 @@ export function AssistantPage() {
             {profile && configured && !meeting ? (
               <div className="order-2 ml-auto flex items-center gap-3 @min-[520px]:order-3 @min-[520px]:ml-0">
                 {profile.enabled && controller.hasVoice ? (
-                  <Button size="sm" variant={voice.live ? "danger" : "accent"} onClick={voice.talk} aria-label={voice.live ? "End the call" : `Talk to ${profile.name}`}>
+                  <Button size="sm" variant={voice.live ? "danger" : "accent"} onClick={voice.talk} onPointerEnter={voice.warm} onFocus={voice.warm} aria-label={voice.live ? "End the call" : `Talk to ${profile.name}`}>
                     {voice.live ? <PhoneDisconnectIcon size={14} /> : <MicrophoneIcon size={14} />}
                     {voice.live ? "End call" : "Talk"}
                   </Button>

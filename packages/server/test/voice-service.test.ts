@@ -447,6 +447,24 @@ describe("a call over a socket", () => {
     await sleep(250);
     assert.equal(rig.voice.status().engines.loaded, false);
   });
+
+  it("loads the models ahead of a call when asked, and lets them go again if nobody calls", async () => {
+    const rig = await callRig();
+    assert.equal(rig.voice.status().engines.loaded, false);
+    await rig.voice.prewarm();
+    assert.equal(rig.voice.status().engines.loaded, true, "warmed: the first words of a call are not the slowest");
+    await sleep(250);
+    assert.equal(rig.voice.status().engines.loaded, false, "and not kept for good: nobody called");
+    // A call that does come while they are warm finds them loaded, and they stay for it.
+    await rig.voice.prewarm();
+    const client = await connect(rig.url);
+    client.ws.send(hello());
+    await client.waitFor((m) => m.type === "ready");
+    await sleep(250);
+    assert.equal(rig.voice.status().engines.loaded, true, "a call in progress keeps them");
+    client.ws.send(JSON.stringify({ type: "end" }));
+    await client.closed;
+  });
 });
 
 describe("the routes of the voice", () => {
