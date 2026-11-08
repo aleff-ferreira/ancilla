@@ -5,7 +5,7 @@
  *
  * Query options, all optional:
  *   view=home|agents|diff|approval|research|usage|settings|palette   the screen to start on
- *   crew=running|stalled|failed|waiting|partial|reconnect|done|big|task
+ *   crew=running|stalled|failed|waiting|partial|reconnect|done|big|task|turn
  *       what the audit thread's agents are doing; opens that thread unless view= says otherwise:
  *       running    the design's run 41m 16s in: ten agents in four phases, one failed after two attempts, one
  *                  quiet past the run's own threshold, one finishing, one planned; a request Muse raised during
@@ -18,6 +18,9 @@
  *       done       the run after it landed: everyone landed, one agent on its third attempt, the report
  *       big        two thousand agents in eight phases over 120 revisions, for the benchmark and the bins
  *       task       no run, only three background tasks: printing, silent for four minutes, and failed
+ *       turn       an ordinary prompt already running: a plan of six steps and about fifty tool calls over two and a
+ *                  half minutes, one of them failing; send a prompt to play it again, `speed=3` to play it faster,
+ *                  `plan=0` to play it without the plan
  *   theme=light|dark   zoom=1.25   sidebar=0   files=1   telemetry=1   palette=1   workflow=done
  * `workflow=done` lets whatever run is loaded finish as the page opens. The app's own routes work as well:
  * #/usage, #/settings and #/t/<thread id>. Nothing is saved: a reload always starts from the same sample state.

@@ -2,17 +2,21 @@ import { useEffect, useId, useMemo, useRef, type CSSProperties, type MouseEvent 
 import { useNow } from "../../app/context.js";
 import { CaretDownIcon, CaretRightIcon, ShieldWarningIcon } from "../ui/icons.js";
 import { durationText, runLive, type AgentVM, type RunVM } from "../../model/crew.js";
-import { Kbd, cn } from "../ui/primitives.js";
+import { cn } from "../ui/primitives.js";
 import { stateWord } from "./panel.js";
 
 /** SVG up to this many lanes; a canvas above it. */
 export const CANVAS_AT = 200;
 
 const GUTTER = 74;
-const AXIS_H = 18;
-const LANE_H = 8;
-const LANE_GAP = 2.5;
-const PHASE_GAP = 8;
+const AXIS_H = 22;
+const LANE_H = 10;
+const LANE_GAP = 4;
+const PHASE_GAP = 14;
+/** Calls that did not overlap share a row; this much clear space keeps two neighbours from touching. */
+const PACK_GAP = 3;
+/** The thin thread the lead of a prompt is drawn as. */
+const SLIM_H = 4;
 /** A tick label this close to the now label is dropped (the mock's 84 px, for `now 41m 16s`); a longer end label clears more. */
 const TICK_CLEARANCE = 84;
 const END_LABEL_CHARS = "now 41m 16s".length;
@@ -43,6 +47,15 @@ export interface Lane {
   placeholder: "planned" | "scheduled" | null;
   /** The lane is still growing: its last segment ends at the clock. */
   live: boolean;
+  /** The lane shares its row with other calls that did not overlap it, so the row is not its own to highlight or click. */
+  packed: boolean;
+  /** The lead of a prompt runs under everything else, so it is drawn as a thin thread and the calls ride above it. */
+  slim: boolean;
+}
+
+/** The bar a lane draws: a full lane, or the thin one centred in its row. */
+export function laneBox(laneHeight: number, lane: Pick<Lane, "y" | "slim">): { y: number; h: number } {
+  return lane.slim ? { y: lane.y + (laneHeight - SLIM_H) / 2, h: SLIM_H } : { y: lane.y, h: laneHeight };
 }
 
 export interface Band {
@@ -105,6 +118,17 @@ export interface LayoutOptions {
   bands?: ReadonlySet<string>;
 }
 
+/** The baseline of the axis labels and the now label, in the band above the lanes. */
+const AXIS_TEXT = 14;
+
+/** Where a packed lane's segments sit along its row, so a highlight or a click takes that call and not the whole row. */
+function extent(lane: Lane): { x0: number; x1: number } {
+  return {
+    x0: Math.min(...lane.segments.map((segment) => segment.x0)),
+    x1: Math.max(...lane.segments.map((segment) => Math.max(segment.x1, segment.x0 + 2))),
+  };
+}
+
 /** What fits in the gutter at 11 px medium: about eleven characters. */
 const GUTTER_CHARS = 11;
 
@@ -112,14 +136,36 @@ function gutterLabel(name: string): string {
   return name.length <= GUTTER_CHARS ? name : `${name.slice(0, GUTTER_CHARS - 1).trimEnd()}…`;
 }
 
+/** The steps a tick may take, from a few seconds to hours: the smallest that leaves no more than seven labels. */
+const TICK_STEPS_MS = [5_000, 10_000, 15_000, 30_000, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000, 30 * 60_000, 3_600_000, 2 * 3_600_000, 6 * 3_600_000];
+
 function tickStep(totalMs: number): number {
-  const minutes = totalMs / 60_000;
-  if (minutes <= 90) return 10;
-  if (minutes <= 240) return 30;
-  return 60;
+  return TICK_STEPS_MS.find((step) => totalMs / step <= 7) ?? (TICK_STEPS_MS[TICK_STEPS_MS.length - 1] as number);
 }
 
-/** The chart's geometry (final.js `timeline`): gutter 74, lanes 8 px, 2.5 px gaps, 8 px between phases, ticks by ten minutes. */
+/** `0`, `30s`, `5m`, `90m`: a tick's label, in the unit its step makes whole. */
+function tickText(ms: number, step: number): string {
+  if (ms === 0) return "0";
+  return step < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60_000)}m`;
+}
+
+/** The row each lane takes when calls that did not overlap share one: the first that is clear of it, else a new row. */
+function packRows(lanes: readonly Lane[]): number[] {
+  const ends: number[] = [];
+  return lanes.map((lane) => {
+    const start = Math.min(...lane.segments.map((segment) => segment.x0));
+    const end = Math.max(...lane.segments.map((segment) => segment.x1));
+    const row = ends.findIndex((last) => last + PACK_GAP <= start);
+    if (row < 0) {
+      ends.push(end);
+      return ends.length - 1;
+    }
+    ends[row] = end;
+    return row;
+  });
+}
+
+/** The chart's geometry: gutter 74, lanes 10 px with 4 px gaps, 14 px between phases, ticks at the step that leaves seven labels or fewer. */
 export function timelineLayout(run: RunVM, width: number, options: LayoutOptions = {}): TimelineLayout | null {
   const start = run.startedAt;
   if (start === null) return null;
@@ -136,36 +182,43 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
   const clearance = TICK_CLEARANCE + Math.max(0, endLabel.length - END_LABEL_CHARS) * CHAR_PX;
   const ticks: Tick[] = [];
   const step = tickStep(total);
-  for (let m = 0; m * 60_000 <= total; m += step) {
-    const x = X(start + m * 60_000);
-    ticks.push({ x, label: Math.abs(endX - x) < clearance ? null : m === 0 ? "0" : `${m}m` });
+  for (let at = 0; at <= total; at += step) {
+    const x = X(start + at);
+    ticks.push({ x, label: Math.abs(endX - x) < clearance ? null : tickText(at, step) });
   }
 
-  let y = AXIS_H + 6;
+  let y = AXIS_H + 8;
   let lanes = 0;
   let plannedNote: TimelineLayout["plannedNote"] = null;
   const phases: PhaseBlock[] = [];
   for (const phase of run.phases) {
     const planned = phase.state === "planned";
     const band = options.bands?.has(phase.name) === true && !planned;
-    const n = band ? 1 : phase.agents.length;
-    const height = Math.max(LANE_H, n * (LANE_H + LANE_GAP) - LANE_GAP);
     const rows: (Lane | Band)[] = [];
+    let slots: number;
     if (band) {
+      slots = 1;
       rows.push(densityBand(phase.name, phase.agents, start, clock, X, y, finished));
     } else {
-      phase.agents.forEach((agent, i) => {
-        const ly = y + i * (LANE_H + LANE_GAP);
-        const lane = laneOf(agent, run, start, clock, X, ly, endX);
-        if (lane.placeholder === "planned" && plannedNote === null) plannedNote = { x: endX - 6, y: ly + 8.5 };
-        rows.push(lane);
+      // A prompt's tool calls run one after another, mostly, so a lane each would draw a staircase: calls that did
+      // not overlap share a row, and two on one row are never at once. Workflow agents keep a lane of their own.
+      const drawn = phase.agents.map((agent, i) => laneOf(agent, run, start, clock, X, y + i * (LANE_H + LANE_GAP), endX));
+      const pack = phase.name === "Tools" && drawn.length > 1 && drawn.every((lane) => lane.placeholder === null && lane.segments.length > 0);
+      const slotOf = pack ? packRows(drawn) : drawn.map((_, i) => i);
+      slots = pack ? Math.max(...slotOf) + 1 : drawn.length;
+      drawn.forEach((lane, i) => {
+        const ly = y + (slotOf[i] as number) * (LANE_H + LANE_GAP);
+        const placed: Lane = { ...lane, y: ly, packed: pack };
+        if (placed.placeholder === "planned" && plannedNote === null) plannedNote = { x: endX - 6, y: ly + 9 };
+        rows.push(placed);
         lanes += 1;
       });
     }
+    const height = Math.max(LANE_H, slots * (LANE_H + LANE_GAP) - LANE_GAP);
     phases.push({ name: phase.name, label: gutterLabel(phase.name), planned, y, height, rows });
     y += height + PHASE_GAP;
   }
-  const height = Math.max(AXIS_H + 6 + LANE_H + 4, y - PHASE_GAP + 4);
+  const height = Math.max(AXIS_H + 8 + LANE_H + 4, y - PHASE_GAP + 4);
 
   const markers: Marker[] = [];
   for (const need of run.runNeeds) {
@@ -195,7 +248,7 @@ export function timelineLayout(run: RunVM, width: number, options: LayoutOptions
 }
 
 function laneOf(agent: AgentVM, run: RunVM, start: number, clock: number, X: (ms: number) => number, y: number, endX: number): Lane {
-  const base: Lane = { kind: "lane", id: agent.id, name: agent.name, state: agent.state, word: stateWord(agent), y, segments: [], quiet: null, placeholder: null, live: false };
+  const base: Lane = { kind: "lane", id: agent.id, name: agent.name, state: agent.state, word: stateWord(agent), y, segments: [], quiet: null, placeholder: null, live: false, packed: false, slim: agent.kind === "lead" };
   if (agent.state === "planned") return { ...base, placeholder: "planned" };
   const spans: { from: number; to: number; last: boolean; outcome: AgentVM["attempts"][number]["outcome"] }[] = [];
   agent.attempts.forEach((attempt, index) => {
@@ -327,8 +380,7 @@ export function Timeline(props: TimelineProps) {
         </button>
         {run.partialHistory ? <span className="text-2xs text-subtle">from loaded history</span> : null}
         <span className="ml-auto flex min-w-0 items-center gap-2.5 text-2xs text-subtle">
-          {props.collapsed ? null : <Legend />}
-          <Kbd className="h-4 min-w-4 text-[10.5px]">t</Kbd>
+          {props.collapsed || layout === null ? null : <Legend layout={layout} />}
         </span>
       </div>
       {props.collapsed ? null : layout === null ? (
@@ -346,15 +398,45 @@ export function Timeline(props: TimelineProps) {
   );
 }
 
-function Legend() {
+/** The states the chart draws now, and no others: a key for what is not there is only noise. */
+export function legendStates(layout: TimelineLayout): ("done" | "work" | "quiet" | "need" | "fail")[] {
+  const fills = new Set<LaneFill | "live-band" | "done-band">();
+  for (const phase of layout.phases) {
+    for (const row of phase.rows) {
+      if (row.kind === "band") {
+        for (const cell of row.cells) fills.add(cell.live ? "live-band" : "done-band");
+        continue;
+      }
+      for (const segment of row.segments) fills.add(segment.fill);
+      if (row.quiet) fills.add("quiet");
+    }
+  }
+  const states: ("done" | "work" | "quiet" | "need" | "fail")[] = [];
+  if (fills.has("done") || fills.has("done-band")) states.push("done");
+  if (fills.has("work") || fills.has("live-band")) states.push("work");
+  if (fills.has("quiet")) states.push("quiet");
+  if (layout.markers.length > 0) states.push("need");
+  if (fills.has("fail")) states.push("fail");
+  return states;
+}
+
+const LEGEND: Record<ReturnType<typeof legendStates>[number], { word: string; swatch: string }> = {
+  done: { word: "Done", swatch: "bg-[var(--lane-done)]" },
+  work: { word: "Working", swatch: "bg-accent" },
+  quiet: { word: "No update", swatch: "bg-[repeating-linear-gradient(135deg,var(--accent)_0_2px,color-mix(in_oklab,var(--accent)_30%,var(--bg-raised))_2px_4px)]" },
+  need: { word: "Waiting on you", swatch: "bg-transparent shadow-[inset_0_0_0_1.5px_var(--warn)]" },
+  fail: { word: "Failed", swatch: "bg-[repeating-linear-gradient(45deg,var(--danger)_0_2px,var(--hatch-fail)_2px_4px)]" },
+};
+
+function Legend({ layout }: { layout: TimelineLayout }) {
   const swatch = "inline-block h-[7px] w-[11px] rounded-sm";
+  const states = legendStates(layout);
+  if (states.length === 0) return null;
   return (
     <span className="hidden items-center gap-2.5 whitespace-nowrap @min-[480px]:inline-flex" aria-hidden="true">
-      <span className="inline-flex items-center gap-1.5"><i className={cn(swatch, "bg-[var(--lane-done)]")} />Done</span>
-      <span className="inline-flex items-center gap-1.5"><i className={cn(swatch, "bg-accent")} />Working</span>
-      <span className="inline-flex items-center gap-1.5"><i className={cn(swatch, "bg-[repeating-linear-gradient(135deg,var(--accent)_0_2px,color-mix(in_oklab,var(--accent)_30%,var(--bg-raised))_2px_4px)]")} />No update</span>
-      <span className="inline-flex items-center gap-1.5"><i className={cn(swatch, "bg-transparent shadow-[inset_0_0_0_1.5px_var(--warn)]")} />Waiting on you</span>
-      <span className="inline-flex items-center gap-1.5"><i className={cn(swatch, "bg-[repeating-linear-gradient(45deg,var(--danger)_0_2px,var(--hatch-fail)_2px_4px)]")} />Failed</span>
+      {states.map((state) => (
+        <span key={state} className="inline-flex items-center gap-1.5"><i className={cn(swatch, LEGEND[state].swatch)} />{LEGEND[state].word}</span>
+      ))}
     </span>
   );
 }
@@ -390,14 +472,14 @@ function TimelineSvg(props: { run: RunVM; layout: TimelineLayout; selectedId: st
       {layout.ticks.map((tick, index) => (
         <g key={index}>
           {tick.label !== null ? (
-            <text x={tick.x} y={11} fontSize={10} fill="var(--fg-subtle)" textAnchor={tick.label === "0" ? "start" : "middle"}>{tick.label}</text>
+            <text x={tick.x} y={AXIS_TEXT} fontSize={10} fill="var(--fg-subtle)" textAnchor={tick.label === "0" ? "start" : "middle"}>{tick.label}</text>
           ) : null}
-          <line x1={tick.x} x2={tick.x} y1={layout.axisHeight} y2={layout.height} stroke="var(--border)" strokeWidth={1} />
+          <line x1={tick.x} x2={tick.x} y1={layout.axisHeight} y2={layout.height} stroke="var(--border)" strokeWidth={1} opacity={0.7} />
         </g>
       ))}
       {layout.phases.map((phase) => (
         <g key={phase.name} data-phase={phase.name}>
-          <text x={0} y={phase.y + Math.min(phase.height, 16) / 2 + 4} fontSize={11} fontWeight={500} fill={phase.planned ? "var(--fg-subtle)" : "var(--fg-muted)"}>
+          <text x={0} y={phase.y + layout.laneHeight / 2 + 4} fontSize={11} fontWeight={500} fill={phase.planned ? "var(--fg-subtle)" : "var(--fg-muted)"}>
             {phase.label !== phase.name ? <title>{phase.name}</title> : null}
             {phase.label}
           </text>
@@ -411,18 +493,24 @@ function TimelineSvg(props: { run: RunVM; layout: TimelineLayout; selectedId: st
             ) : (
               <g key={row.id} data-lane={row.id} className={row.placeholder ? undefined : "cursor-pointer"} onClick={row.placeholder ? undefined : () => props.onLane(row.id)}>
                 <title>{`${row.name} · ${row.word}`}</title>
-                {props.selectedId === row.id ? <rect x={layout.gutter - 4} y={row.y - 2.5} width={plot + 4} height={layout.laneHeight + 5} rx={3} fill="var(--bg-active)" /> : null}
+                {props.selectedId === row.id ? (
+                  row.packed
+                    ? <rect x={extent(row).x0 - 4} y={row.y - 3} width={extent(row).x1 - extent(row).x0 + 8} height={layout.laneHeight + 6} rx={4} fill="var(--bg-active)" />
+                    : <rect x={layout.gutter - 4} y={row.y - 3} width={plot + 4} height={layout.laneHeight + 6} rx={4} fill="var(--bg-active)" />
+                ) : null}
                 {row.placeholder ? (
-                  <rect x={layout.endX + 4} y={row.y} width={22} height={layout.laneHeight} rx={2} fill="none" stroke="var(--border-strong)" strokeDasharray={row.placeholder === "planned" ? "2 2" : undefined} />
+                  <rect x={layout.endX + 4} y={row.y} width={22} height={layout.laneHeight} rx={3} fill="none" stroke="var(--border-strong)" strokeDasharray={row.placeholder === "planned" ? "2 2" : undefined} />
                 ) : null}
                 {row.segments.map((segment, index) => (
-                  <rect key={index} className="crew-lane-seg" x={segment.x0} y={row.y} width={Math.max(2, segment.x1 - segment.x0)} height={layout.laneHeight} rx={2} fill={fillOf(segment.fill)} />
+                  <rect key={index} className="crew-lane-seg" x={segment.x0} y={laneBox(layout.laneHeight, row).y} width={Math.max(2, segment.x1 - segment.x0)} height={laneBox(layout.laneHeight, row).h} rx={row.slim ? 2 : 3} fill={fillOf(segment.fill)} />
                 ))}
-                {row.quiet ? <rect x={row.quiet.x0} y={row.y} width={Math.max(1, row.quiet.x1 - row.quiet.x0)} height={layout.laneHeight} rx={2} fill={`url(#${quietId})`} data-quiet="" /> : null}
+                {row.quiet ? <rect x={row.quiet.x0} y={laneBox(layout.laneHeight, row).y} width={Math.max(1, row.quiet.x1 - row.quiet.x0)} height={laneBox(layout.laneHeight, row).h} rx={row.slim ? 2 : 3} fill={`url(#${quietId})`} data-quiet="" /> : null}
                 {row.segments.filter((segment) => segment.cross).map((segment, index) => (
-                  <path key={`x${index}`} d={`M${segment.x1 - 7} ${row.y + 2} l4 ${layout.laneHeight - 4} M${segment.x1 - 3} ${row.y + 2} l-4 ${layout.laneHeight - 4}`} stroke="var(--bg)" strokeWidth={1.5} />
+                  <path key={`x${index}`} d={`M${segment.x1 - 8} ${row.y + 2.5} l5 ${layout.laneHeight - 5} M${segment.x1 - 3} ${row.y + 2.5} l-5 ${layout.laneHeight - 5}`} stroke="var(--bg)" strokeWidth={1.5} />
                 ))}
-                <rect x={layout.gutter} y={row.y - 1.25} width={plot} height={layout.laneHeight + 2.5} fill="transparent" />
+                {row.packed
+                  ? <rect x={extent(row).x0 - 2} y={row.y - 2} width={extent(row).x1 - extent(row).x0 + 4} height={layout.laneHeight + 4} fill="transparent" />
+                  : <rect x={layout.gutter} y={row.y - 2} width={plot} height={layout.laneHeight + 4} fill="transparent" />}
               </g>
             ),
           )}
@@ -454,10 +542,11 @@ function EndLine(props: { layout: TimelineLayout; live: boolean; lanes: Lane[] }
   return (
     <g data-end-line="">
       {props.live && x > layout.endX
-        ? props.lanes.map((lane) => <rect key={lane.id} x={layout.endX - 1} y={lane.y} width={x - layout.endX + 1} height={layout.laneHeight} fill={lane.quiet ? "var(--hatch)" : "var(--accent)"} />)
+        ? props.lanes.map((lane) => <rect key={lane.id} x={layout.endX - 1} y={laneBox(layout.laneHeight, lane).y} width={x - layout.endX + 1} height={laneBox(layout.laneHeight, lane).h} rx={lane.slim ? 2 : 0} fill={lane.quiet ? "var(--hatch)" : "var(--accent)"} />)
         : null}
-      <line x1={x} x2={x} y1={layout.axisHeight - 2} y2={layout.height} stroke={stroke} strokeWidth={1} strokeDasharray={layout.finished ? undefined : "3 2"} />
-      <text x={x - 4} y={11} fontSize={10} fill={text} textAnchor="end" fontWeight={500}>{elapsed}</text>
+      <line x1={x} x2={x} y1={layout.axisHeight - 4} y2={layout.height} stroke={stroke} strokeWidth={1.25} strokeDasharray={layout.stale ? "3 2" : undefined} />
+      <circle cx={x} cy={layout.axisHeight - 4} r={2.5} fill={stroke} />
+      <text x={x - 7} y={AXIS_TEXT} fontSize={10} fill={text} textAnchor="end" fontWeight={500}>{elapsed}</text>
     </g>
   );
 }
@@ -505,7 +594,7 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
       if (tick.label !== null) {
         ctx.fillStyle = colors.subtle;
         ctx.textAlign = tick.label === "0" ? "start" : "center";
-        ctx.fillText(tick.label, tick.x, 11);
+        ctx.fillText(tick.label, tick.x, AXIS_TEXT);
       }
     }
     const hatch = (x: number, y: number, w: number, h: number, a: string, b: string, angle: number) => {
@@ -535,7 +624,7 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
     for (const phase of layout.phases) {
       ctx.fillStyle = phase.planned ? colors.subtle : colors.muted;
       ctx.textAlign = "start";
-      ctx.fillText(phase.label, 0, phase.y + Math.min(phase.height, 16) / 2 + 4);
+      ctx.fillText(phase.label, 0, phase.y + layout.laneHeight / 2 + 4);
       for (const row of phase.rows) {
         if (row.kind === "band") {
           for (const cell of row.cells) {
@@ -548,7 +637,12 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
         }
         if (props.selectedId === row.id) {
           ctx.fillStyle = colors.active;
-          ctx.fillRect(layout.gutter - 4, row.y - 2.5, layout.width - layout.gutter + 4, layout.laneHeight + 5);
+          if (row.packed) {
+            const box = extent(row);
+            ctx.fillRect(box.x0 - 4, row.y - 3, box.x1 - box.x0 + 8, layout.laneHeight + 6);
+          } else {
+            ctx.fillRect(layout.gutter - 4, row.y - 3, layout.width - layout.gutter + 4, layout.laneHeight + 6);
+          }
         }
         if (row.placeholder) {
           ctx.strokeStyle = colors.strong;
@@ -558,10 +652,11 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
         }
         for (const segment of row.segments) {
           const w = Math.max(2, segment.x1 - segment.x0);
-          if (segment.fill === "fail") hatch(segment.x0, row.y, w, layout.laneHeight, colors.danger, colors.hatchFail, 45);
+          const box = laneBox(layout.laneHeight, row);
+          if (segment.fill === "fail") hatch(segment.x0, box.y, w, box.h, colors.danger, colors.hatchFail, 45);
           else {
             ctx.fillStyle = segment.fill === "done" ? colors.done : segment.fill === "work" ? colors.work : segment.fill === "stale" ? colors.stale : colors.neutral;
-            ctx.fillRect(segment.x0, row.y, w, layout.laneHeight);
+            ctx.fillRect(segment.x0, box.y, w, box.h);
           }
           if (segment.cross) {
             ctx.strokeStyle = colors.bg;
@@ -599,21 +694,22 @@ function TimelineCanvas(props: { run: RunVM; layout: TimelineLayout; selectedId:
     ctx.lineWidth = 1;
     ctx.setLineDash(layout.finished ? [] : [3, 2]);
     ctx.beginPath();
-    ctx.moveTo(layout.endX, layout.axisHeight - 2);
+    ctx.moveTo(layout.endX, layout.axisHeight - 4);
     ctx.lineTo(layout.endX, layout.height);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.font = "500 10px sans-serif";
     ctx.fillStyle = layout.finished ? colors.ok : layout.stale ? colors.subtle : colors.work;
     ctx.textAlign = "end";
-    ctx.fillText(layout.endLabel, layout.endX - 4, 11);
+    ctx.fillText(layout.endLabel, layout.endX - 7, AXIS_TEXT);
   }, [layout, props.selectedId]);
   const onClick = (event: MouseEvent<HTMLCanvasElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
     for (const phase of layout.phases) {
       for (const row of phase.rows) {
-        if (row.kind === "lane" && !row.placeholder && y >= row.y - 1.25 && y <= row.y + layout.laneHeight + 1.25) {
+        if (row.kind === "lane" && !row.placeholder && y >= row.y - 2 && y <= row.y + layout.laneHeight + 2 && (!row.packed || (x >= extent(row).x0 - 2 && x <= extent(row).x1 + 2))) {
           props.onLane(row.id);
           return;
         }

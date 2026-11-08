@@ -18,9 +18,10 @@ const started = (turnId = "t1", at = T0): ViewEvent => ({ method: "turn/started"
 const changed = (items: unknown = ITEMS, at = T0 + 1_000): ViewEvent => ({ method: "session/todoListChanged", params: { items, viewCursor: `v:s:${at}` }, at });
 const ended = (terminal = "completed"): ViewEvent => ({ method: "turn/completed", params: { turnId: "t1", terminal }, at: T0 + 2_000 });
 const running = () => applyEvents(emptyFold(), [started(), changed()]);
-const render = (view: TaskPlanView, hidden = false) => {
+const render = (view: TaskPlanView, hidden = false, open = false) => {
   const prefs = defaultPrefs("2026-09-28T00:00:00.000Z");
   if (hidden) prefs.hiddenCards.push("plan:s1");
+  if (open) prefs.openCards.push("plan:s1");
   const controller = { store: new Store(initialState(prefs)) } as unknown as AncillaController;
   return renderToStaticMarkup(createElement(ControllerProvider, { controller, children:
     createElement(TooltipProvider, { children: createElement(PlanPanel, { sessionId: "s1", view }) }) }));
@@ -50,6 +51,7 @@ describe("execution-aware task plans", () => {
     const fold = running();
     const view = taskPlanView(fold)!;
     assert.equal(fold.meta.todoTurnId, "t1");
+    assert.equal(view.turnId, "t1", "the view says whose plan it is, so the run card can take it in");
     assert.equal(view.state, "working");
     assert.equal(view.animate, true);
     assert.equal(view.activeIndex, 1);
@@ -177,17 +179,27 @@ describe("execution-aware task plans", () => {
 });
 
 describe("Plan panel presentation", () => {
-  it("shows the real active step, accessible progress, and update time", () => {
+  it("rests as a glance: the real active step as its first line, and a spine that is the accessible progress", () => {
     const html = render(taskPlanView(running())!);
     assert.match(html, /Implementing the change/);
+    assert.match(html, /aria-label="Plan steps completed" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1"/);
+    assert.match(html, /<span class="cnt">1\/3<\/span>/);
+    assert.match(html, /aria-expanded="false"/);
+    assert.doesNotMatch(html, /<ol|aria-current="step"|dateTime=/, "the steps and the update time wait for the card to open");
+  });
+
+  it("shows the real active step, the step marks, and the update time once opened", () => {
+    const html = render(taskPlanView(running())!, false, true);
+    assert.match(html, /aria-expanded="true"/);
     assert.match(html, /aria-current="step"/);
     assert.match(html, /aria-label="In progress"/);
-    assert.match(html, /aria-label="Plan steps completed" aria-valuemin="0" aria-valuemax="3" aria-valuenow="1"/);
+    assert.match(html, /aria-label="Done"/);
+    assert.match(html, /aria-label="To do"/);
     assert.match(html, /dateTime="2026-09-28T12:00:01.000Z"/);
   });
 
   it("explains an unconfirmed ended step without leaving a running spinner or active verb", () => {
-    const html = render(taskPlanView(applyEvents(running(), [ended()]))!);
+    const html = render(taskPlanView(applyEvents(running(), [ended()]))!, false, true);
     assert.match(html, /Turn finished/);
     assert.match(html, /Implement the change/);
     assert.match(html, /last active/);

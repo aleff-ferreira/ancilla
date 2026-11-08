@@ -77,6 +77,11 @@ export interface Prefs {
    */
   collapsedCards: string[];
   /**
+   * Run and plan cards the user opened, as `crew:<sessionId>` or `plan:<sessionId>`. They rest as a glance, a first
+   * line and a spine, so only the opened ones are kept and a thread nobody has touched costs nothing to remember.
+   */
+  openCards: string[];
+  /**
    * Dock cards the user closed, with the same keys (plus `tasks:<sessionId>`). A closed card stays out of the dock
    * until the user brings it back from the thread's top bar.
    */
@@ -200,6 +205,7 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     collapsedProjects: [],
     openShelves: [],
     collapsedCards: [],
+    openCards: [],
     hiddenCards: [],
     dismissedTurnErrors: [],
     // Off until asked for: nobody should be interrupted by something they never turned on.
@@ -501,6 +507,7 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     collapsedProjects: pick("collapsedProjects", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
     openShelves: pick("openShelves", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
     collapsedCards: pick("collapsedCards", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
+    openCards: pick("openCards", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
     hiddenCards: pick("hiddenCards", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
     dismissedTurnErrors: pick("dismissedTurnErrors", (v) => Array.isArray(v) && v.every((x) => typeof x === "string")),
     notifications: pick("notifications", (v) => typeof v === "boolean"),

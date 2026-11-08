@@ -46,6 +46,7 @@ import type {
   ResearchSettings,
   ResearchWorkerView,
 } from "@ancilla/ui";
+import { BUILD_END_AT, BUILD_PROMPT, BUILD_REPLY, BUILD_STEPS, BUILD_STEP_AT, BUILD_TOOLS } from "./build.js";
 import { DemoFiles } from "./files.js";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
 import {
@@ -178,6 +179,10 @@ export class DemoAncillaClient implements AncillaClient {
     ];
     if (scenario === "reconnect") {
       void this.whenListed().then(() => this.startOutage());
+    }
+    if (scenario === "turn") {
+      // The prompt is already running when the page opens, so the card has something to show straight away.
+      void this.whenListed().then(() => this.playBuild(THREADS.audit));
     }
     // The seeded run carries on from where the seed left it once the app is watching.
     void this.whenListed().then(() => {
@@ -712,6 +717,9 @@ export class DemoAncillaClient implements AncillaClient {
       return { turnId: sampleId(`queued:${sessionId}:${this.created}`), disposition: "queued" };
     }
 
+    if (this.scenario === "turn" && sessionId === THREADS.audit) {
+      return this.playBuild(sessionId, shown);
+    }
     const turnId = sampleId(`turn:${sessionId}:${this.created}:${Date.now()}`);
     const started = Date.now();
     let summary: SessionSummary = { ...thread.summary, turnCount: thread.summary.turnCount + 1 };
@@ -761,6 +769,90 @@ export class DemoAncillaClient implements AncillaClient {
       this.emit(sessionId, "turn/completed", { turnId, terminal: "completed", durationMs: Date.now() - started, timeToFirstTokenMs: 2400 });
       this.setLive(sessionId, idle());
     }, at + 200);
+    return { turnId, disposition: "started" };
+  }
+
+  /**
+   * The `turn` scenario's prompt: six planned steps and the tool calls Muse makes between them, as one turn that
+   * ends on its own. `?speed=3` plays it three times as fast, for looking at the end without waiting for it.
+   */
+  private playBuild(sessionId: string, prompt: string = BUILD_PROMPT): { turnId: string | null; disposition: string | null } {
+    const thread = this.threads.get(sessionId);
+    if (!thread) {
+      return { turnId: null, disposition: null };
+    }
+    const speed = Math.max(0.25, Number(new URLSearchParams(window.location.search).get("speed")) || 1);
+    const at = (ms: number) => Math.round(ms / speed);
+    const started = Date.now();
+    this.created += 1;
+    const turnId = sampleId(`build:${sessionId}:${this.created}:${started}`);
+    thread.summary = { ...thread.summary, turnCount: thread.summary.turnCount + 1 };
+    this.setLive(sessionId, { ...idle(null), activeTurnId: turnId, turnStartedAt: iso(started) });
+    this.broadcast({ type: "sessions-changed" });
+    this.later(sessionId, () => {
+      this.emit(sessionId, "turn/started", { turnId, commandId: turnId });
+      this.emit(sessionId, "item/completed", {
+        item: { itemId: sampleId(`prompt:${turnId}`), kind: "userMessage", status: "completed", revision: 1, text: prompt, turnId, commandId: turnId, recordedAt: iso(Date.now()) },
+      });
+    }, 120);
+    // `?plan=0` plays the same turn without a plan, to see the card as it is when Muse keeps no checklist.
+    if (new URLSearchParams(window.location.search).get("plan") !== "0") {
+      const plan = (active: number) =>
+        BUILD_STEPS.map((step, index) => ({ text: step.text, activeForm: step.active, status: index < active ? "completed" : index === active ? "inProgress" : "pending" }));
+      BUILD_STEP_AT.forEach((ms, index) => {
+        this.later(sessionId, () => this.emit(sessionId, "session/todoListChanged", { items: plan(index), turnId }), at(ms));
+      });
+      this.later(sessionId, () => this.emit(sessionId, "session/todoListChanged", { items: plan(BUILD_STEPS.length), turnId }), at(BUILD_END_AT - 4_000));
+    }
+    BUILD_TOOLS.forEach((tool, index) => {
+      const itemId = sampleId(`build:tool:${turnId}:${index}`);
+      const args = JSON.stringify(
+        tool.tool === "bash" ? { command: tool.subject, ...(tool.note ? { description: tool.note } : {}) } : tool.tool === "grep" ? { pattern: tool.subject, path: "src" } : { path: tool.subject },
+      );
+      this.later(sessionId, () => this.emit(sessionId, "item/started", { item: { itemId, kind: "toolCall", tool: tool.tool, status: "inProgress", revision: 1, turnId, args } }), at(tool.at));
+      this.later(sessionId, () => {
+        const failure = tool.fail ? { failureKind: "tool_error", failureReason: tool.fail } : {};
+        this.emit(sessionId, "item/completed", {
+          item: {
+            itemId, kind: "toolCall", tool: tool.tool, status: tool.fail ? "failed" : "completed", revision: 2, turnId, args,
+            visibleOutput: tool.fail ?? tool.output ?? "", ...(tool.tool === "bash" ? { exitCode: tool.fail ? 1 : 0 } : {}), ...failure, recordedAt: iso(Date.now()),
+          },
+        });
+      }, at(tool.at + tool.ms));
+    });
+    // The model's own calls: one every ten seconds, each a little larger than the last as the context grows.
+    let prompted = 0;
+    let produced = 0;
+    for (let call = 1; call * 10_000 < BUILD_END_AT - 5_000; call += 1) {
+      this.later(sessionId, () => {
+        const promptTokens = 80_000 + call * 6_500;
+        const outputTokens = 620 + call * 40;
+        prompted += promptTokens;
+        produced += outputTokens;
+        this.emit(sessionId, "session/tokenUsage", {
+          turnId,
+          modelId: thread.summary.modelId ?? MODEL,
+          durationMs: 2_400 + call * 90,
+          promptTokens,
+          totalTokens: promptTokens + outputTokens,
+          usage: { inputTokens: promptTokens, outputTokens, cachedTokens: Math.round(promptTokens * 0.8), cacheReadTokens: Math.round(promptTokens * 0.8), cacheWriteTokens: 0, reasoningTokens: Math.round(outputTokens * 0.2) },
+          cumulative: { promptTokens: prompted, outputTokens: produced, totalTokens: prompted + produced },
+        });
+      }, at(call * 10_000));
+    }
+    const replyId = sampleId(`reply:${turnId}`);
+    const replyAt = BUILD_END_AT - 3_000;
+    this.later(sessionId, () => this.emit(sessionId, "item/started", { item: { itemId: replyId, kind: "agentMessage", status: "inProgress", revision: 1, text: "", turnId } }), at(replyAt));
+    const words = BUILD_REPLY.split(/(?<= )/);
+    for (let i = 0; i < words.length; i += 3) {
+      const delta = words.slice(i, i + 3).join("");
+      this.later(sessionId, () => this.emit(sessionId, "item/delta", { itemId: replyId, field: "text", delta, turnId }), at(replyAt + 100 + (i / 3) * 90));
+    }
+    this.later(sessionId, () => {
+      this.emit(sessionId, "item/completed", { item: { itemId: replyId, kind: "agentMessage", status: "completed", revision: 2, text: BUILD_REPLY, turnId, recordedAt: iso(Date.now()) } });
+      this.emit(sessionId, "turn/completed", { turnId, terminal: "completed", durationMs: Date.now() - started, timeToFirstTokenMs: 1_900 });
+      this.setLive(sessionId, idle());
+    }, at(BUILD_END_AT));
     return { turnId, disposition: "started" };
   }
 

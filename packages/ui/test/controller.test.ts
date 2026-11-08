@@ -1382,6 +1382,32 @@ describe("AncillaController", () => {
     stop();
   });
 
+  it("remembers which run and plan cards a thread had opened, since they rest as a glance", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const opened = () => controller.store.get().prefs.openCards;
+    // Shut by default, so a thread nobody has touched costs nothing to remember.
+    assert.deepEqual(opened(), []);
+
+    controller.setCardExpanded("crew:s1", true);
+    controller.setCardExpanded("plan:s1", true);
+    assert.deepEqual(opened(), ["crew:s1", "plan:s1"]);
+
+    // Opening one that is open leaves the list alone; shutting one drops it rather than recording a second state.
+    controller.setCardExpanded("crew:s1", true);
+    assert.deepEqual(opened(), ["crew:s1", "plan:s1"]);
+    controller.setCardExpanded("crew:s1", false);
+    assert.deepEqual(opened(), ["plan:s1"]);
+    controller.setCardExpanded("crew:s1", false);
+    assert.deepEqual(opened(), ["plan:s1"]);
+
+    // The oldest are forgotten past a few hundred threads.
+    for (let i = 0; i < 305; i += 1) controller.setCardExpanded(`crew:t${i}`, true);
+    assert.equal(opened().length, 300);
+    assert.equal(opened().at(-1), "crew:t304");
+    stop();
+  });
+
   it("announces the edges of what a thread is doing, not the state it is sitting in", async () => {
     const client = new FakeClient();
     const shown: string[] = [];

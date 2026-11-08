@@ -13,6 +13,7 @@ import {
   type RunVM,
   type TranscriptLoad,
 } from "@ancilla/ui";
+import { BUILD_END_AT, BUILD_STEPS, BUILD_STEP_AT, BUILD_TOOLS } from "../src/demo/build.js";
 import { DemoAncillaClient } from "../src/demo/client.js";
 import { REPLAY_FAILURE, RESEARCH_RUNS, SCENARIOS, THREADS, seed, type Scenario, type SeedThread } from "../src/demo/seed.js";
 
@@ -70,8 +71,24 @@ describe("the demo seed", () => {
       const seeded = seed(NOW, scenario);
       assert.equal(seeded.threads.length, 9, scenario);
       assert.equal(seeded.threads[0]?.summary.sessionId, THREADS.audit, `${scenario} keeps the audit thread's id`);
-      assert.equal(seeded.audit === null, scenario === "task", `${scenario} ${scenario === "task" ? "has no run" : "has a run"}`);
+      const none = scenario === "task" || scenario === "turn";
+      assert.equal(seeded.audit === null, none, `${scenario} ${none ? "has no workflow run" : "has a run"}`);
     }
+  });
+
+  it("plays the turn scenario's prompt inside its own length, with one call that fails", () => {
+    assert.equal(BUILD_STEPS.length, BUILD_STEP_AT.length, "a moment for every step");
+    assert.ok(BUILD_STEP_AT.every((at, index) => index === 0 || at > (BUILD_STEP_AT[index - 1] as number)), "the steps become active in order");
+    assert.ok((BUILD_STEP_AT[BUILD_STEP_AT.length - 1] as number) < BUILD_END_AT - 5_000, "the last step has time before the reply");
+    for (const tool of BUILD_TOOLS) {
+      assert.ok(tool.at > 0 && tool.at + tool.ms < BUILD_END_AT - 3_000, `${tool.tool} ${tool.subject} ends before the reply starts`);
+    }
+    assert.equal(BUILD_TOOLS.filter((tool) => tool.fail !== undefined).length, 1, "one call fails, so the card shows what a failure looks like");
+    assert.ok(BUILD_TOOLS.some((tool, index) => index > 0 && tool.at < (BUILD_TOOLS[index - 1] as (typeof BUILD_TOOLS)[number]).at + (BUILD_TOOLS[index - 1] as (typeof BUILD_TOOLS)[number]).ms), "some calls overlap, so the timeline stacks a row");
+    const quiet = viewOf("turn").vm;
+    assert.equal(quiet.runs.length, 1, "the thread starts with one finished question and nothing running");
+    assert.equal(quiet.runs[0]?.kind, "turn");
+    assert.equal(quiet.runs[0]?.status, "finished");
   });
 
   it("carries a finished research run with its cited report and a running one on the research thread", () => {

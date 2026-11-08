@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CANVAS_AT, Timeline, timelineLabel, timelineLayout, type Lane, type TimelineLayout } from "../src/components/crew/Timeline.js";
+import { CANVAS_AT, Timeline, laneBox, legendStates, timelineLabel, timelineLayout, type Lane, type TimelineLayout } from "../src/components/crew/Timeline.js";
 import { crewView, type RunVM } from "../src/model/crew.js";
 import { Feed, NOW, S, SESSION, approvalAt, atNow, fold, lantern, lanternDone, lanternRun, launch } from "./crew-panel-fixture.js";
 
@@ -37,19 +37,20 @@ function bigRun(n: number): RunVM {
 }
 
 describe("Timeline layout", () => {
-  it("lays one lane per agent under its phase, in run order, with the mock's metrics", () => {
+  it("lays one lane per agent under its phase, in run order, with room to breathe", () => {
     const layout = layoutOf(lanternRun());
     assert.equal(layout.lanes, 10);
     assert.deepEqual(layout.phases.map((phase) => [phase.name, phase.rows.length]), [["Research", 4], ["Design", 3], ["Judge", 2], ["Synthesize", 1]]);
     assert.equal(layout.gutter, 74);
-    assert.equal(layout.laneHeight, 8);
-    assert.equal(layout.axisHeight, 18);
+    assert.equal(layout.laneHeight, 10);
+    assert.equal(layout.axisHeight, 22);
     assert.equal(layout.width, WIDTH);
     const research = layout.phases[0]!;
-    assert.equal(research.y, 24, "the first lane sits 6 px under the axis");
-    assert.equal(research.height, 4 * 10.5 - 2.5, "8 px lanes with 2.5 px gaps");
-    assert.equal(layout.phases[1]!.y, research.y + research.height + 8, "8 px between phases");
+    assert.equal(research.y, 30, "the first lane sits 8 px under the axis");
+    assert.equal(research.height, 4 * 14 - 4, "10 px lanes with 4 px gaps");
+    assert.equal(layout.phases[1]!.y, research.y + research.height + 14, "14 px between phases");
     assert.equal(layout.height, layout.phases[3]!.y + layout.phases[3]!.height + 4);
+    assert.ok(layout.phases.every((phase) => phase.rows.every((row) => row.kind === "lane" && !row.packed && !row.slim)), "a workflow's agents each keep a lane of their own");
   });
 
   it("scales the plot so now sits a tenth short of the right edge, and drops a tick label that would touch it", () => {
@@ -98,7 +99,7 @@ describe("Timeline layout", () => {
     const planned = lane(layout, "synthesize:report");
     assert.equal(planned.placeholder, "planned");
     assert.deepEqual(planned.segments, []);
-    assert.deepEqual(layout.plannedNote, { x: layout.endX - 6, y: planned.y + 8.5 });
+    assert.deepEqual(layout.plannedNote, { x: layout.endX - 6, y: planned.y + 9 });
   });
 
   it("marks a run-level request on the axis at the time it was first seen", () => {
@@ -150,8 +151,73 @@ describe("Timeline layout", () => {
   });
 });
 
+const TURN_START = Date.UTC(2026, 8, 28, 12);
+const turnSession = { sessionId: "thread", title: "Ordinary prompt", cwd: "/work", titleSource: "user", turnCount: 1, modelId: "muse", origin: "ancilla", archived: false, createdAt: new Date(TURN_START).toISOString(), activityAt: new Date(TURN_START).toISOString(), settled: false, settledAt: null, unsettledAt: null, sandboxDisabled: false, accountId: null, live: null } as const;
+
+/** A prompt's run: tool calls given as [id, start, end], an end of null for one still going. */
+function turnRun(calls: readonly (readonly [string, number, number | null])[], now: number): RunVM {
+  const events = [{ method: "turn/started", at: TURN_START, params: { turnId: "t1" } } as const];
+  const item = (id: string, status: string, revision: number) => ({ itemId: id, kind: "toolCall", tool: "bash", args: JSON.stringify({ command: `run ${id}` }), turnId: "t1", status, revision });
+  const wire = calls.flatMap(([id, from, to]) => [
+    { method: "item/started", at: TURN_START + from, params: { item: item(id, "inProgress", 1) } },
+    ...(to === null ? [] : [{ method: "item/completed", at: TURN_START + to, params: { item: { ...item(id, "completed", 2), exitCode: 0 } } }]),
+  ]);
+  const run = crewView(fold([...events, ...wire].sort((a, b) => a.at - b.at) as never, TURN_START + now), turnSession as never, TURN_START + now).runs[0];
+  if (!run) throw new Error("no run");
+  return run;
+}
+
+describe("Timeline of a prompt", () => {
+  it("packs calls that did not overlap into one row, and puts a call that did on the next", () => {
+    // a and b follow one another; c runs while b does, so it cannot share b's row.
+    const run = turnRun([["a", 1_000, 3_000], ["b", 4_000, 9_000], ["c", 5_000, 7_000], ["d", 10_000, 12_000]], 14_000);
+    const layout = layoutOf(run);
+    const tools = layout.phases.find((phase) => phase.name === "Tools")!;
+    const rowOf = (name: string) => (tools.rows.find((row) => row.kind === "lane" && row.name === `run ${name}`) as Lane).y;
+    assert.equal(rowOf("a"), rowOf("b"), "b starts after a ended, so they share a row");
+    assert.equal(rowOf("d"), rowOf("a"), "so does d, which starts after b ended");
+    assert.equal(rowOf("c"), rowOf("a") + 14, "c overlaps b and takes the row under it");
+    assert.equal(tools.height, 2 * 14 - 4, "two rows, not four lanes");
+    assert.equal(layout.lanes, 5, "the lead and four calls are all lanes still");
+    assert.ok((tools.rows as Lane[]).every((row) => row.packed), "each knows its row is shared, so a click takes only its own capsule");
+  });
+
+  it("draws the lead as a thin thread under the calls, centred in its row", () => {
+    const layout = layoutOf(turnRun([["a", 1_000, 3_000], ["b", 4_000, null]], 6_000));
+    const lead = layout.phases.find((phase) => phase.name === "Lead")!.rows[0] as Lane;
+    assert.equal(lead.slim, true);
+    assert.deepEqual(laneBox(layout.laneHeight, lead), { y: lead.y + 3, h: 4 });
+    assert.deepEqual(laneBox(layout.laneHeight, { y: 50, slim: false }), { y: 50, h: 10 });
+    const markup = render(turnRun([["a", 1_000, 3_000], ["b", 4_000, null]], 6_000));
+    assert.match(markup, /<rect class="crew-lane-seg" x="[\d.]+" y="[\d.]+" width="[\d.]+" height="4" rx="2"/, "the thread is four pixels tall");
+  });
+
+  it("keeps one lane per call when a placeholder has no time to place it by", () => {
+    const run = turnRun([["a", 1_000, 3_000]], 5_000);
+    const tools = layoutOf(run).phases.find((phase) => phase.name === "Tools")!;
+    assert.equal((tools.rows as Lane[]).length, 1);
+    assert.equal((tools.rows[0] as Lane).packed, false, "a single call has nothing to share a row with");
+  });
+
+  it("labels a short run's axis in seconds and minutes it can read, not with only a zero", () => {
+    const short = layoutOf(turnRun([["a", 1_000, 3_000]], 38_000));
+    assert.deepEqual(short.ticks.map((tick) => tick.label).slice(0, 4), ["0", "10s", "20s", null], "the last label would touch now");
+    const minutes = layoutOf(turnRun([["a", 1_000, 3_000]], 5 * 60_000 + 2_000));
+    assert.deepEqual(minutes.ticks.map((tick) => tick.label).slice(0, 6), ["0", "1m", "2m", "3m", null, null], "the 4m and 5m labels would touch the now label");
+  });
+
+  it("keys only the states it draws", () => {
+    const layout = layoutOf(turnRun([["a", 1_000, 3_000], ["b", 4_000, null]], 6_000));
+    assert.deepEqual(legendStates(layout), ["done", "work"]);
+    const markup = render(turnRun([["a", 1_000, 3_000], ["b", 4_000, null]], 6_000));
+    assert.ok(markup.includes("</i>Done</span>") && markup.includes("</i>Working</span>"));
+    for (const word of ["No update", "Waiting on you", "Failed"]) assert.ok(!markup.includes(`</i>${word}</span>`), `${word} is not drawn, so it is not keyed`);
+    assert.deepEqual(legendStates(layoutOf(lanternRun(NOW, [approvalAt(S(39, 36))]))), ["done", "work", "quiet", "need", "fail"]);
+  });
+});
+
 describe("Timeline markup", () => {
-  it("is an image with the roster as its table, one group per lane, the legend and the t key", () => {
+  it("is an image with the roster as its table, one group per lane and the legend, and no key hint", () => {
     const run = lanternRun(NOW, [approvalAt(S(39, 36))]);
     const markup = render(run);
     assert.equal(timelineLabel(run), "Timeline of 10 agents over 41m 12s");
@@ -163,7 +229,7 @@ describe("Timeline markup", () => {
     assert.match(markup, /now 41m 12s/);
     assert.match(markup, /data-end-line=""/);
     for (const word of ["Done", "Working", "No update", "Waiting on you", "Failed"]) assert.ok(markup.includes(`</i>${word}</span>`), word);
-    assert.match(markup, /<kbd[^>]*>t<\/kbd>/);
+    assert.doesNotMatch(markup, /<kbd/, "the t key is named by the panel's menu, not by the chart's head");
     assert.match(markup, /<title>judge:perf · No update for 16m 02s<\/title>/);
     assert.doesNotMatch(markup, /from loaded history/);
   });
@@ -178,7 +244,7 @@ describe("Timeline markup", () => {
   it("highlights the inspected lane and folds away when collapsed", () => {
     const run = lanternRun();
     const selected = render(run, { selectedId: run.agents.find((agent) => agent.name === "judge:perf")!.id });
-    assert.match(selected, /<rect x="70" y="[\d.]+" width="418" height="13" rx="3" fill="var\(--bg-active\)"/);
+    assert.match(selected, /<rect x="70" y="[\d.]+" width="418" height="16" rx="4" fill="var\(--bg-active\)"/);
     const collapsed = render(run, { collapsed: true });
     assert.match(collapsed, /data-collapsed="true"/);
     assert.doesNotMatch(collapsed, /role="img"/);

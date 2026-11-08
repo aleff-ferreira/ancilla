@@ -602,10 +602,10 @@ export function CrewPanel(props: { sessionId: string }) {
         <Modal
           open={stopping}
           onOpenChange={setStopping}
-          title={`Stop the run ${run.name}?`}
-          description={`${workingNames(run).length === 0 ? "No agent is working" : `${workingNames(run).length} working ${workingNames(run).length === 1 ? "agent" : "agents"} will be cancelled`}. Finished work stays.`}
+          title={run.kind === "turn" ? "Stop this turn?" : `Stop the run ${run.name}?`}
+          description={run.kind === "turn" ? "Muse stops working on your prompt. Finished work stays." : `${workingNames(run).length === 0 ? "No agent is working" : `${workingNames(run).length} working ${workingNames(run).length === 1 ? "agent" : "agents"} will be cancelled`}. Finished work stays.`}
         >
-          {workingNames(run).length > 0 ? (
+          {run.kind !== "turn" && workingNames(run).length > 0 ? (
             <ul className="mt-3 flex list-none flex-col gap-1 pl-0 text-sm text-fg">
               {workingNames(run).map((name) => (
                 <li key={name} className="flex items-center gap-2"><Spinner size={10} className="text-accent-text" />{name}</li>
@@ -614,7 +614,7 @@ export function CrewPanel(props: { sessionId: string }) {
           ) : null}
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setStopping(false)}>Keep running</Button>
-            <Button variant="danger" onClick={stopRun}><StopCircleIcon size={13} />Stop run</Button>
+            <Button variant="danger" onClick={stopRun}><StopCircleIcon size={13} />{run.kind === "turn" ? "Stop turn" : "Stop run"}</Button>
           </div>
         </Modal>
       ) : null}

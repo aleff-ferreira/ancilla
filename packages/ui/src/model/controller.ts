@@ -5107,6 +5107,18 @@ export class AncillaController {
     this.setPrefs({ collapsedCards: open ? collapsed.filter((k) => k !== key) : [...collapsed, key] });
   }
 
+  /**
+   * Remembers whether a run or plan card is open, per thread. These rest as a glance, so only the opened ones are
+   * kept, and the oldest are forgotten past a few hundred threads.
+   */
+  setCardExpanded(key: string, open: boolean): void {
+    const current = this.state.prefs.openCards;
+    if (open === current.includes(key)) {
+      return;
+    }
+    this.setPrefs({ openCards: open ? [...current, key].slice(-300) : current.filter((k) => k !== key) });
+  }
+
   /** Closes a dock card for good, or brings it back. The oldest are forgotten past a few hundred threads. */
   setCardHidden(key: string, hidden: boolean): void {
     const current = this.state.prefs.hiddenCards;

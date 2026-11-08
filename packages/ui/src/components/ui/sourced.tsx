@@ -57,13 +57,22 @@ export function PixelLoader(props: { className?: string }) {
 }
 
 const ROLL_MS = 360;
+/**
+ * The height of a rolling digit's window and of each glyph in its reel. A digit's ink is about three quarters of an em,
+ * so with this much room above and below it, the rounding of a fractional zoom cannot show a sliver of its neighbour.
+ */
+const ROLL_BOX = "1.3em";
+/** A value that changes again within this long of the last roll lands without one: a counter that races is not worth watching. */
+const ROLL_SETTLE_MS = 700;
 
 /**
  * Odometer digits: each changed character rolls up (or down when the number falls).
- * via Beautiful UI ApprovalCard RollingDigits. Adapted: typed, timings to the motion scale.
+ * via Beautiful UI ApprovalCard RollingDigits. Adapted: typed, timings to the motion scale; a number that keeps
+ * changing snaps instead of rolling, and the rolling cell is centred on the line like the digits that stand still.
  */
 export function RollingDigits(props: { value: string; className?: string }) {
   const previous = useRef(props.value);
+  const lastRoll = useRef(Number.NEGATIVE_INFINITY);
   const [from, setFrom] = useState(props.value);
   const [to, setTo] = useState(props.value);
   const [rolling, setRolling] = useState(false);
@@ -76,6 +85,16 @@ export function RollingDigits(props: { value: string; className?: string }) {
     }
     const old = previous.current;
     previous.current = props.value;
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    if (now - lastRoll.current < ROLL_SETTLE_MS) {
+      lastRoll.current = now;
+      setRolling(false);
+      setFrom(props.value);
+      setTo(props.value);
+      setShifted(false);
+      return;
+    }
+    lastRoll.current = now;
     const a = Number.parseInt(old, 10);
     const b = Number.parseInt(props.value, 10);
     setDirection(Number.isFinite(a) && Number.isFinite(b) && b < a ? "down" : "up");
@@ -114,21 +133,21 @@ export function RollingDigits(props: { value: string; className?: string }) {
         }
         const top = direction === "down" ? n : o;
         const bottom = direction === "down" ? o : n;
-        const rest = direction === "down" ? "0" : "-1em";
-        const start = direction === "down" ? "-1em" : "0";
+        const rest = direction === "down" ? "0" : `-${ROLL_BOX}`;
+        const start = direction === "down" ? `-${ROLL_BOX}` : "0";
         return (
           <span
             key={`${i}-${o}-${n}-${direction}`}
             aria-hidden="true"
             className="relative inline-block overflow-hidden whitespace-pre"
-            style={{ height: "1em", lineHeight: "1em", verticalAlign: "-0.05em" }}
+            style={{ height: ROLL_BOX, lineHeight: ROLL_BOX, alignSelf: "center" }}
           >
             <span
               className="flex flex-col"
               style={{ transition: "transform 320ms cubic-bezier(0.4, 0, 0.2, 1)", transform: `translateY(${shifted ? rest : start})` }}
             >
-              <span style={{ height: "1em", lineHeight: "1em" }}>{top}</span>
-              <span style={{ height: "1em", lineHeight: "1em" }}>{bottom}</span>
+              <span style={{ height: ROLL_BOX, lineHeight: ROLL_BOX }}>{top}</span>
+              <span style={{ height: ROLL_BOX, lineHeight: ROLL_BOX }}>{bottom}</span>
             </span>
           </span>
         );

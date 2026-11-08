@@ -23,6 +23,8 @@ export interface TaskPlanView {
   /** Only a live, associated turn or worker can animate a reported active step. */
   animate: boolean;
   updatedAt: number | null;
+  /** The turn whose report this plan is, when the fold knows; the run card takes a plan in only when it is the run's own. */
+  turnId: string | null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -126,5 +128,5 @@ export function taskPlanView(fold: ThreadFold, options: { stale?: boolean; crew?
     label = turn?.terminal && turn.terminal !== "unknown" ? "Turn finished" : "Not running";
     detail = `${count}. Muse has not marked them complete.`;
   }
-  return { items, done, cancelled, remaining, activeIndex, state, label, detail, animate: state === "working", updatedAt };
+  return { items, done, cancelled, remaining, activeIndex, state, label, detail, animate: state === "working", updatedAt, turnId: sourceTurn };
 }

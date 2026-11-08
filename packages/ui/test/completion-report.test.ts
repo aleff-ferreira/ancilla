@@ -22,19 +22,36 @@ function render(run: RunVM, overrides: Partial<CompletionReportProps> = {}): { m
   return { markup: renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CompletionReport, props) })), completion };
 }
 
+/** A finished prompt as the dock shows it: the run card, with the outcome as its first line. */
+function receipt(run: RunVM, expanded = false): string {
+  const completion = completionView(run);
+  assert.ok(completion, "a finished prompt has a summary");
+  const props = { sessionId: "s1", run, tasks: [], completion, sinceYouLeft: null, expanded, openPhase: null, selectedId: null, readOnly: false, onToggle: noop, onOpenPhase: noop, onInspect: noop, onOpenPanel: noop, onAction: noop, onStopRun: noop, onDismissReport: noop, onDismissRecap: noop, onReview: noop };
+  return renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CrewCard, props) }));
+}
+
 describe("CompletionReport", () => {
   it("keeps ordinary turn summaries compact without workflow reports or agent highlights", () => {
     const run = mkRun([mkAgent("Muse", "done", { kind: "lead" }), mkTask("npm run build", "done", {}, { background: false })], { kind: "turn", status: "finished", endedAt: S(1, 0) });
-    const { markup } = render(run);
+    const markup = receipt(run);
     assert.match(markup, /data-completion="turn"/);
     assert.match(text(markup), /Turn finished 1 tool completed/);
-    assert.match(text(markup), /View activity Timeline/);
+    assert.match(markup, /<span class="run-glyph ok"/, "a check where the ring was");
     assert.doesNotMatch(markup, /crew-landed|crew-stats|<h2>|Muse did not attach a report|Highlights|All 2 agents/);
     assert.match(markup, /aria-label="Dismiss turn summary"/);
+    assert.match(text(receipt(run, true)), /Activity Timeline 1 action/);
     const unknown = mkRun([mkAgent("Muse", "unknown", { kind: "lead" })], { kind: "turn", status: "finished", endedAt: S(1, 0) });
-    const provisional = render(unknown).markup;
+    const provisional = receipt(unknown);
     assert.match(text(provisional), /Turn ended.*1 outcome not reported/);
-    assert.doesNotMatch(provisional, /crew-tile ok/);
+    assert.doesNotMatch(provisional, /run-glyph ok/);
+  });
+
+  it("does not turn a prompt's failed call into a failure of the prompt", () => {
+    const run = mkRun([mkAgent("Muse", "done", { kind: "lead" }), mkTask("npm test", "failed", { failure: { text: "exited with code 1", at: S(0, 30) } }), mkTask("npm run build", "done")], { kind: "turn", status: "finished-with-failures", endedAt: S(1, 0) });
+    const markup = receipt(run);
+    assert.match(markup, /<span class="run-glyph ok"/, "the glyph is the turn's outcome, and the turn finished");
+    assert.match(text(markup), /Turn finished 1 tool completed · 1 failed/, "the second line counts what failed");
+    assert.doesNotMatch(markup, /crew-chip/, "and no red chip says it a second time");
   });
 
   it("opens with the seal, the serif headline and the fact line", () => {

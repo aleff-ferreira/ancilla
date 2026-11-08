@@ -13,15 +13,18 @@ import {
   summaryLine,
   type AgentVM,
   type CompletionVM,
+  type CrewVM,
   type PendingAction,
   type RunVM,
   type SinceYouLeftVM,
   type SummaryChip,
-  type CrewVM,
 } from "../../model/crew.js";
-import { CaretUpIcon, ChartBarIcon, ClockCounterClockwiseIcon, InfoIcon, RowsIcon, StopCircleIcon } from "../ui/icons.js";
-import { Modal } from "../ui/overlays.js";
-import { Button, IconButton, Spinner, cn } from "../ui/primitives.js";
+import { actionById, attentionOf, chipsOf, endedCount, glyphOf, planMerges, recentActions, stepSegs, subAction, subText, titleOf, trailOf, type Title } from "../../model/runCard.js";
+import type { TaskPlanView } from "../../model/taskPlan.js";
+import { CaretDownIcon, CaretUpIcon, ChartBarIcon, ClockCounterClockwiseIcon, InfoIcon, RowsIcon, StopCircleIcon, XCircleIcon } from "../ui/icons.js";
+import { Modal, Tip } from "../ui/overlays.js";
+import { Button, IconButton, cn } from "../ui/primitives.js";
+import { Collapse } from "../ui/sourced.js";
 import { AgentRow, type ConfirmAction, type RowAction } from "./AgentRow.js";
 import { AttentionList, needRowId } from "./AttentionList.js";
 import { BackgroundTaskRow } from "./BackgroundTaskRow.js";
@@ -31,12 +34,13 @@ import { Peek } from "./Peek.js";
 import { PhaseRail } from "./PhaseRail.js";
 import { SinceYouLeft } from "./SinceYouLeft.js";
 import { CrewAnnouncer } from "./CrewAnnouncer.js";
-import { MoreLine, CrewLine, TaskLine, rolling, taskLive } from "./CrewLine.js";
+import { LineChip, MoreLine, CrewLine, TaskLine, taskLive } from "./CrewLine.js";
+import { ActionLine, Hairline, Latest, PlanSteps, RunGlyph, Spine, Swap, Trail, useDwell } from "./RunParts.js";
 import { Ticking } from "./Ticking.js";
 import { plural, runKindWord } from "./cardCopy.js";
 import { useCardKeys } from "./useCardKeys.js";
 
-/** The key the card keeps its collapsed state under in `prefs.collapsedCards`. */
+/** The key the card keeps its open state under in `prefs.openCards`. */
 export function crewCardKey(sessionId: string): string {
   return `crew:${sessionId}`;
 }
@@ -47,6 +51,12 @@ export const REPORT_SHOWN_MS = 24 * 60 * 60_000;
 export const TASK_SHOWN_MS = 10 * 60_000;
 /** More lines than this fold into `+N more`. */
 export const LINE_LIMIT = 3;
+/** A title or a call holds this long before the next replaces it. */
+const TITLE_DWELL_MS = 900;
+const ACTION_DWELL_MS = 700;
+/** The latest calls the body lists: fewer beside a plan, which already fills it. */
+const LATEST_WITH_PLAN = 4;
+const LATEST_ALONE = 6;
 
 /** Whether a run that ended still shows its report: it ended within a day and nobody dismissed it. */
 export function reportVisible(run: RunVM, now: number, dismissed: boolean): boolean {
@@ -54,6 +64,16 @@ export function reportVisible(run: RunVM, now: number, dismissed: boolean): bool
   if (dismissed) return false;
   const endedAt = run.endedAt ?? run.clockAt;
   return now - endedAt < REPORT_SHOWN_MS;
+}
+
+/**
+ * The run the dock's card is about: the newest live one, else the newest report still on show. The thread view asks
+ * too, since a plan that belongs to this run is folded into the card and must not also be listed under it.
+ */
+export function primaryRun(view: CrewVM, sessionId: string, now: number, dismissedReports: readonly string[]): RunVM | null {
+  const visible = view.runs.filter((run) => runLive(run) || reportVisible(run, now, dismissedReports.includes(`${sessionId}:${run.itemId}`)));
+  const live = visible.filter(runLive);
+  return live[live.length - 1] ?? visible[visible.length - 1] ?? null;
 }
 
 /**
@@ -85,9 +105,9 @@ export function defaultOpenPhase(run: RunVM): string | null {
   return current.agents.every((agent) => listed.has(agent.id)) ? null : current.name;
 }
 
-/** Expands the thread's card and puts focus on it, from the transcript's anchor row. */
+/** Opens the thread's card and puts focus on it, from the transcript's anchor row. */
 export function focusCrewCard(controller: AncillaController, sessionId: string): void {
-  controller.setCardOpen(crewCardKey(sessionId), true);
+  controller.setCardExpanded(crewCardKey(sessionId), true);
   if (typeof document === "undefined") return;
   requestAnimationFrame(() => {
     const card = document.querySelector<HTMLElement>(`[data-crew-card="${sessionId}"]`);
@@ -97,35 +117,21 @@ export function focusCrewCard(controller: AncillaController, sessionId: string):
 }
 
 /**
- * The head's sub line: `Workflow · started 14:02 · 9 agents · 1 planned · 1.2M tokens so far (8 of 9 reported) · ~$1.94 est.`
+ * What a run is made of, as one line: `Workflow · started 14:02 · 9 agents · 1 planned · 1.2M tokens so far (8 of 9 reported) · ~$1.94 est.`
  * While the run goes the total says so far, and while some agents have sent no usage it says how many have: the
- * estimate beside it is built from the same agents.
+ * estimate beside it is built from the same agents. The card keeps it as the footer's tooltip, off the glance.
  */
-export function headSub(run: RunVM): { long: ReactNode; text: string } {
+export function headSub(run: RunVM): { text: string } {
   const scheduled = run.counts.total - run.counts.planned;
-  const parts: ReactNode[] = [runKindWord(run)];
   const texts: string[] = [runKindWord(run)];
-  if (run.startedAt !== null && !run.elapsedApprox) {
-    const started = `started ${formatClock(run.startedAt, run.clockAt)}`;
-    parts.push(started);
-    texts.push(started);
-  }
-  const agents = run.kind === "turn" ? `Muse · ${plural(run.agents.filter((agent) => agent.kind === "task").length, "tool")}` : `${plural(scheduled, "agent")}${run.counts.planned > 0 ? ` · ${run.counts.planned} planned` : ""}`;
-  parts.push(agents);
-  texts.push(agents);
+  if (run.startedAt !== null && !run.elapsedApprox) texts.push(`started ${formatClock(run.startedAt, run.clockAt)}`);
+  texts.push(run.kind === "turn" ? `Muse · ${plural(run.agents.filter((agent) => agent.kind === "task").length, "tool")}` : `${plural(scheduled, "agent")}${run.counts.planned > 0 ? ` · ${run.counts.planned} planned` : ""}`);
   if (run.tokens) {
     const coverage = reportCoverage(run);
-    const tokens = `${formatTokens(run.tokens.total)} tokens${runLive(run) ? " so far" : ""}${coverage ? ` (${coverage})` : ""}`;
-    parts.push(tokens);
-    texts.push(tokens);
+    texts.push(`${formatTokens(run.tokens.total)} tokens${runLive(run) ? " so far" : ""}${coverage ? ` (${coverage})` : ""}`);
   }
-  if (run.cost) {
-    const cost = `~${formatCost(run.cost.usd)} est.`;
-    parts.push(<span key="cost" className="opt">{cost}</span>);
-    texts.push(cost);
-  }
-  const long = parts.flatMap((part, index) => (index === 0 ? [part] : [" · ", part]));
-  return { long, text: texts.join(" · ") };
+  if (run.cost) texts.push(`~${formatCost(run.cost.usd)} est.`);
+  return { text: texts.join(" · ") };
 }
 
 /** The footer's counts while the run is live: `6 done · 1 failed · 2 running · 1 planned`. */
@@ -155,6 +161,15 @@ export function phaseHeadText(run: RunVM, name: string): string | null {
   return parts.join(" · ");
 }
 
+/** What the footer says beside its buttons: a prompt's calls and tokens, a workflow's counts. */
+export function footStats(run: RunVM): string {
+  if (run.kind !== "turn") return footMeta(run);
+  const calls = run.agents.filter((agent) => agent.kind === "task").length;
+  const parts = [plural(calls, "action")];
+  if (run.tokens) parts.push(`${formatTokens(run.tokens.total)} tokens${runLive(run) ? " so far" : ""}`);
+  return parts.join(" · ");
+}
+
 export interface CrewCardProps {
   sessionId: string;
   /** The run the card is about; null when the thread has only background tasks or subagents. */
@@ -167,6 +182,8 @@ export interface CrewCardProps {
   /** Present once the run ended: the card is the report. */
   completion: CompletionVM | null;
   sinceYouLeft: SinceYouLeftVM | null;
+  /** The plan Muse reported, when it belongs to this run: its steps become the card's spine and its body. */
+  plan?: TaskPlanView | null;
   expanded: boolean;
   /** Exactly one open phase or none (remembered per run by the caller). */
   openPhase: string | null;
@@ -199,10 +216,135 @@ interface Line {
   node: ReactNode;
 }
 
+interface HeadProps {
+  run: RunVM;
+  plan: TaskPlanView | null;
+  stale: boolean;
+  expanded: boolean;
+  /** The id of the body the head opens, which the phase rail's segments also control. */
+  rowsId: string;
+  /** A prompt that ended: its headline and fact line stand in for the live words, and the card can be dismissed. */
+  receipt: { title: string; sub: string } | null;
+  sheen: boolean;
+  onToggle: () => void;
+  onChip: (kind: SummaryChip["kind"]) => void;
+  onOpenPhase: (name: string | null) => void;
+  openPhase: string | null;
+  onDismiss?: () => void;
+}
+
 /**
- * The Crew card in the dock (SPEC §2, L1 and L2): one line per live run or task while collapsed; the head, phase
- * rail, attention list, one open phase, task rows and footer when expanded; the completion report once the run
- * ended. Every prop that is a view-model comes from model/crew.ts; this component only lays it out.
+ * The card's head: what is happening in a line, the call going now beneath it, the chips that need you, the time, and
+ * the spine. The whole head opens the body; only the chips answer on their own.
+ */
+function RunHead(props: HeadProps) {
+  const { run, plan, stale, expanded, receipt } = props;
+  const live = runLive(run);
+  const turn = run.kind === "turn";
+  const line = summaryLine(run);
+  const title: Title = receipt ? { text: receipt.title, source: "end" } : titleOf(run, plan);
+  const wanted = `${title.source}\u0001${title.text}`;
+  const shownKey = useDwell(wanted, !live || title.source === "need" ? 0 : TITLE_DWELL_MS);
+  const [shownSource, ...rest] = shownKey.split("\u0001");
+  const shownText = rest.join("\u0001");
+  // What sits under the first line follows the line that is on show, not the one waiting behind its dwell.
+  const shownTitle: Title = { text: shownText, source: shownSource as Title["source"] };
+  const action = live && !receipt && shownTitle.source !== "action" ? subAction(run) : null;
+  const shownActionId = useDwell(action ? action.id : null, ACTION_DWELL_MS);
+  const shownAction = action ? actionById(run, shownActionId ?? action.id) ?? action : null;
+  const sub = receipt ? receipt.sub : subText(run, shownTitle);
+  const merged = plan !== null && planMerges(run, plan);
+  const ticks = turn ? trailOf(run) : [];
+  const beat = turn ? endedCount(run) : 0;
+  const glyph = glyphOf(run);
+  const chips = chipsOf(run);
+  const elapsed = line.elapsed;
+  const label = `${shownText}${sub ? `, ${sub}` : ""}${shownAction ? `, ${shownAction.verb} ${shownAction.subject ?? ""}`.trimEnd() : ""}${elapsed ? `, ${elapsed}` : ""}`;
+  const done = merged ? plan.items.filter((item) => item.status === "completed").length : 0;
+  return (
+    <>
+      <div className="run-head">
+        <button
+          type="button"
+          className="run-hit after:absolute after:inset-0 after:content-['']"
+          aria-expanded={expanded}
+          aria-controls={props.rowsId}
+          aria-label={label}
+          data-crew-focus="head"
+          data-run={run.itemId}
+          onClick={props.onToggle}
+        >
+          <RunGlyph glyph={glyph} />
+          <span className="run-tx">
+            <Swap id={`${shownSource}:${shownText}`} className="run-title" title={shownText}>{shownText}</Swap>
+            <span className="run-sub">
+              {shownAction ? (
+                <Swap id={`${shownAction.id}:${shownAction.live}`} lite className="h-[18px] min-w-0 flex-[0_1_auto]">
+                  <ActionLine action={shownAction} />
+                </Swap>
+              ) : sub ? (
+                <span className="min-w-0 truncate">{sub}</span>
+              ) : null}
+              <Trail ticks={ticks} />
+              {/* Beside the first line while the card is wide; under it when it is narrow, where the title needs the room. */}
+              <span className="crew-el run-el-sub">{stale ? elapsed : <Ticking ms={run.elapsedMs} at={run.clockAt} live={live} approx={run.elapsedApprox && live} />}</span>
+            </span>
+          </span>
+        </button>
+        <span className="side">
+          {chips.map((chip) => (
+            <LineChip key={chip.kind} chip={chip} onClick={chip.kind !== "stale" ? () => props.onChip(chip.kind) : undefined} />
+          ))}
+          <span className="crew-el">
+            {stale ? elapsed : <Ticking ms={run.elapsedMs} at={run.clockAt} live={live} approx={run.elapsedApprox && live} />}
+          </span>
+          {props.onDismiss ? (
+            <Tip label="Dismiss">
+              <IconButton size="xs" label="Dismiss turn summary" className="text-subtle" onClick={props.onDismiss}>
+                <XCircleIcon size={14} />
+              </IconButton>
+            </Tip>
+          ) : null}
+          <span className="inline-flex size-5 items-center justify-center text-subtle" aria-hidden="true">
+            <CaretDownIcon size={13} className="run-car" />
+          </span>
+        </span>
+      </div>
+      {turn ? (
+        <div className="run-rail">
+          {merged ? (
+            <>
+              <Spine segs={stepSegs(plan)} label="Plan steps completed" />
+              <span className="cnt">{done}/{plan.items.length}</span>
+            </>
+          ) : (
+            <Hairline beat={beat} finished={!live} />
+          )}
+        </div>
+      ) : (
+        <div className="run-phases">
+          <PhaseRail
+            phases={run.phases}
+            openPhase={props.openPhase}
+            finale={!live}
+            stale={stale}
+            sheen={props.sheen}
+            rowsId={props.rowsId}
+            onOpen={(name) => {
+              if (!expanded) props.onToggle();
+              props.onOpenPhase(name);
+            }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The Crew card in the dock: one calm surface per run. A glance (what is happening, the call going now, a spine) is
+ * always there; opening it brings the steps, the latest calls, what needs you and the controls. Every view-model
+ * comes from model/crew.ts and model/runCard.ts; this component only lays it out.
  */
 export function CrewCard(props: CrewCardProps) {
   const { run, tasks, expanded, readOnly } = props;
@@ -235,7 +377,8 @@ export function CrewCard(props: CrewCardProps) {
     const target = chipTarget(kind);
     if (target) {
       props.onSelect?.(target);
-      requestAnimationFrame(() => rootRef.current?.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(target)}"]`)?.focus());
+      // The body opens over a quarter of a second; focus lands once the row is there to take it.
+      window.setTimeout(() => rootRef.current?.querySelector<HTMLElement>(`[data-agent-id="${CSS.escape(target)}"]`)?.focus(), expanded ? 0 : 280);
     }
   };
 
@@ -273,46 +416,45 @@ export function CrewCard(props: CrewCardProps) {
     if (peekId !== null && !agentsById.has(peekId)) setPeekId(null);
   }, [peekId, agentsById]);
 
-  // While expanded, the primary run's and the tasks' lines stay in the markup folded away: the narrowest container
-  // (SPEC §3.2, 360 px) shows them instead of the expanded body, and the expanded state survives for when it grows.
-  const fold = expanded ? "fold" : undefined;
+  const plan = run && props.plan && planMerges(run, props.plan) ? props.plan : null;
   const lines: Line[] = [];
+  // Lines beside the primary run: another run, and while the card is shut the tasks and subagents.
   for (const other of otherRuns) {
-    lines.push({ id: other.itemId, node: <CrewLine key={other.itemId} run={other} expanded={false} folded={expanded} onToggle={props.onToggle} onChip={onChip} /> });
+    lines.push({ id: other.itemId, node: <CrewLine key={other.itemId} run={other} expanded={false} folded onToggle={props.onToggle} onChip={onChip} /> });
   }
-  if (run) {
-    lines.push({ id: run.itemId, node: <CrewLine key={run.itemId} run={run} expanded={expanded} selected={props.selectedId === null || props.selectedId === run.itemId} className={fold} onToggle={props.onToggle} onChip={onChip} /> });
+  if (!expanded) {
+    for (const task of [...tasks, ...subagents]) {
+      lines.push({
+        id: task.id,
+        node: (
+          <TaskLine
+            key={task.id}
+            task={task}
+            clockAt={clockAt}
+            expanded={expanded}
+            selected={props.selectedId === task.id || (props.selectedId === null && !run && lines.length === 0)}
+            readOnly={readOnly}
+            onToggle={props.onToggle}
+            onStop={() => props.onAction(task.id, "stop")}
+          />
+        ),
+      });
+    }
   }
-  for (const task of [...tasks, ...subagents]) {
-    lines.push({
-      id: task.id,
-      node: (
-        <TaskLine
-          key={task.id}
-          task={task}
-          clockAt={clockAt}
-          expanded={expanded}
-          selected={props.selectedId === task.id || (props.selectedId === null && !run && lines.length === 0)}
-          readOnly={readOnly}
-          className={fold}
-          onToggle={props.onToggle}
-          onStop={() => props.onAction(task.id, "stop")}
-        />
-      ),
-    });
-  }
-  const foldedLines = lines.filter((entry) => !otherRuns.some((other) => other.itemId === entry.id)).map((entry) => entry.node);
+  const shownLines = lines.slice(0, LINE_LIMIT).map((line) => line.node);
+  const moreLines = lines.length > LINE_LIMIT ? <MoreLine count={lines.length - LINE_LIMIT} onClick={props.onToggle} /> : null;
 
   const peekFor = (id: string): ReactNode => {
     const agent = peekId === id ? agentsById.get(id) : undefined;
     return agent ? <Peek agent={agent} run={run} stale={stale} /> : null;
   };
 
-  const taskRows = (items: AgentVM[], title: string, hide: boolean): ReactNode => {
+  /** Rows for tasks or subagents; `hide` adds the link that shuts the card, for a thread that has no run to carry the head. */
+  const taskRows = (items: AgentVM[], title: string, hide = false): ReactNode => {
     if (items.length === 0) return null;
     return (
       <>
-        <div className="crew-sec">
+        <div className="run-sec">
           {title} <span className="n">{items.length}</span>
           {hide ? (
             <>
@@ -360,46 +502,41 @@ export function CrewCard(props: CrewCardProps) {
     );
   };
 
-  let body: ReactNode;
-  if (!expanded) {
-    const shown = lines.slice(0, LINE_LIMIT).map((line) => line.node);
-    body = (
-      <>
-        {shown}
-        {lines.length > LINE_LIMIT ? <MoreLine count={lines.length - LINE_LIMIT} onClick={props.onToggle} /> : null}
-      </>
+  let primary: ReactNode = null;
+  if (run && props.completion && run.kind !== "turn") {
+    primary = (
+      <CompletionReport
+        run={run}
+        completion={props.completion}
+        expanded={expanded}
+        sheen={props.sheen}
+        compact={props.compact}
+        onToggle={props.onToggle}
+        onOpenPanel={props.onOpenPanel}
+        onDismiss={props.onDismissReport}
+        onOpenTranscript={props.onOpenTranscript}
+      />
     );
-  } else if (run && props.completion) {
-    body = (
-      <>
-        {otherRuns.map((other) => lines.find((line) => line.id === other.itemId)?.node)}
-        <div className="crew-expanded">
-          <CompletionReport
-            run={run}
-            completion={props.completion}
-            expanded
-            sheen={props.sheen}
-            compact={props.compact}
-            onToggle={props.onToggle}
-            onOpenPanel={props.onOpenPanel}
-            onDismiss={props.onDismissReport}
-            onOpenTranscript={props.onOpenTranscript}
-          />
-          {tasks.length + subagents.length > 0 ? (
-            <div className="crew-body pt-0">
-              {taskRows(subagents, "Subagents", false)}
-              {taskRows(tasks, "Background", false)}
-            </div>
-          ) : null}
-        </div>
-        {foldedLines}
-      </>
-    );
+    if (expanded && tasks.length + subagents.length > 0) {
+      primary = (
+        <>
+          {primary}
+          <div className="crew-body pt-0">
+            {taskRows(subagents, "Subagents")}
+            {taskRows(tasks, "Background")}
+          </div>
+        </>
+      );
+    }
   } else if (run) {
-    const openPhase = props.openPhase ? run.phases.find((phase) => phase.name === props.openPhase) ?? null : null;
-    const listed = new Set(run.attention.map((agent) => agent.id));
+    const live = runLive(run);
+    const receipt = props.completion ? { title: props.completion.headline, sub: props.completion.factLine } : null;
+    // A prompt has no phases to open: the plan and the latest calls say what its rail would.
+    const openPhase = run.kind !== "turn" && props.openPhase ? run.phases.find((phase) => phase.name === props.openPhase) ?? null : null;
+    const attention = attentionOf(run);
+    const listed = new Set(attention.map((agent) => agent.id));
     const phaseRows = openPhase ? openPhase.agents.filter((agent) => !listed.has(agent.id)) : [];
-    const sub = headSub(run);
+    const recent = run.kind === "turn" ? recentActions(run, plan ? LATEST_WITH_PLAN : LATEST_ALONE) : [];
     const notice = stale ? (
       <div className="crew-note">
         <ClockCounterClockwiseIcon size={13} />
@@ -417,36 +554,29 @@ export function CrewCard(props: CrewCardProps) {
         </span>
       </div>
     ) : null;
-    body = (
-      <>
-        {otherRuns.map((other) => lines.find((line) => line.id === other.itemId)?.node)}
-        <div className="crew-run crew-expanded" data-run={run.itemId}>
-          <div className="crew-head">
-            <button type="button" className="toggle" aria-expanded aria-controls={rowsId} data-crew-focus="head" data-run={run.itemId} title={sub.text} onClick={props.onToggle}>
-              <span className={cn("crew-tile", stale && "mute")} aria-hidden="true">
-                {stale ? <ClockCounterClockwiseIcon size={15} /> : <Spinner size={12} />}
-              </span>
-              <span className="tt">
-                <span className="nm">{run.name}</span>
-                <span className="sub long">{sub.long}</span>
-                <span className="sub short">
-                  {runKindWord(run)} · <Ticking ms={run.elapsedMs} at={run.clockAt} live={!stale} approx={run.elapsedApprox} />
-                </span>
-              </span>
-            </button>
-            <span className="crew-el">
-              {stale ? summaryLine(run).elapsed : <Ticking ms={run.elapsedMs} at={run.clockAt} live approx={run.elapsedApprox} />}
-            </span>
-            <IconButton size="sm" label="Collapse" onClick={props.onToggle}>
-              <CaretUpIcon size={14} />
-            </IconButton>
-          </div>
-          <div id={rowsId} className={cn("crew-body", props.compact && "compact")}>
+    const stats = footStats(run);
+    primary = (
+      <div className="crew-run" data-run={run.itemId} data-completion={receipt && run.kind === "turn" ? "turn" : undefined}>
+        <RunHead
+          run={run}
+          plan={plan}
+          stale={stale}
+          expanded={expanded}
+          rowsId={rowsId}
+          receipt={receipt}
+          sheen={Boolean(props.sheen)}
+          onToggle={props.onToggle}
+          onChip={onChip}
+          onOpenPhase={props.onOpenPhase}
+          openPhase={props.openPhase}
+          onDismiss={receipt ? props.onDismissReport : undefined}
+        />
+        <Collapse open={expanded}>
+          <div id={rowsId} className={cn("crew-body run-body", props.compact && "compact")}>
             {notice}
-            <PhaseRail phases={run.phases} openPhase={props.openPhase} finale={false} stale={stale} rowsId={rowsId} onOpen={props.onOpenPhase} />
-            {!stale ? (
+            {!stale && live ? (
               <AttentionList
-                items={run.attention}
+                items={attention}
                 runNeeds={run.runNeeds}
                 clockAt={run.clockAt}
                 selectedId={props.selectedId}
@@ -459,14 +589,24 @@ export function CrewCard(props: CrewCardProps) {
                 onReview={props.onReview}
               />
             ) : null}
+            {plan ? (
+              <>
+                <div className="run-sec">
+                  Steps <span className="n">{plan.done} of {plan.items.length}</span>
+                </div>
+                <PlanSteps view={plan} />
+              </>
+            ) : null}
+            {recent.length > 0 ? (
+              <>
+                <div className="run-sec">Latest</div>
+                <Latest items={recent} />
+              </>
+            ) : null}
             {openPhase ? (
               <>
-                <div className="crew-sec">
+                <div className="run-sec">
                   {openPhase.name} <span className="n">{phaseHeadText(run, openPhase.name)}</span>
-                  <span className="min-w-0 flex-1" />
-                  <button type="button" className="lnk" onClick={() => props.onOpenPhase(null)}>
-                    Hide <CaretUpIcon size={11} />
-                  </button>
                 </div>
                 <div role="grid" aria-label={`${openPhase.name} agents`} className="flex flex-col">
                   {phaseRows.map((agent) => (
@@ -490,44 +630,42 @@ export function CrewCard(props: CrewCardProps) {
                 </div>
               </>
             ) : null}
-            {taskRows(subagents, "Subagents", false)}
-            {taskRows(tasks, "Background", false)}
-            <div className="crew-foot">
+            {taskRows(subagents, "Subagents")}
+            {taskRows(tasks, "Background")}
+            <div className="run-foot">
               <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("roster")}>
                 <RowsIcon size={12} />
-                <span className="lbl">{run.kind === "turn" ? "View activity" : <>All {rolling(String(run.counts.total))} agents</>}</span>
+                <span className="lbl">{run.kind === "turn" ? "Activity" : `All ${run.counts.total} agents`}</span>
               </Button>
               <Button size="xs" variant="ghost" onClick={() => props.onOpenPanel("timeline")}>
                 <ChartBarIcon size={12} />
                 <span className="lbl">Timeline</span>
               </Button>
-              <span className="min-w-0 flex-1" />
-              <span className="meta">{rolling(footMeta(run))}</span>
-              {runLive(run) && !readOnly && !stale ? (
+              <span className="stats" title={headSub(run).text}>{stats}</span>
+              {live && !readOnly && !stale ? (
                 <Button size="xs" variant="ghost" style={{ color: "var(--danger-text)" }} onClick={() => setStopAsk(true)}>
                   <StopCircleIcon size={12} />
-                  <span className="lbl">Stop run</span>
+                  <span className="lbl">Stop</span>
                 </Button>
               ) : null}
             </div>
           </div>
-        </div>
-        {foldedLines}
-      </>
+        </Collapse>
+      </div>
     );
   } else {
-    body = (
-      <>
-        <div className="crew-body compact crew-expanded">
+    primary = (
+      <Collapse open={expanded}>
+        <div className="crew-body compact">
           {taskRows(subagents, "Subagents", tasks.length === 0)}
           {taskRows(tasks, "Background", true)}
         </div>
-        {foldedLines}
-      </>
+      </Collapse>
     );
   }
 
   const working = run ? run.counts.working + run.counts.finishing + run.counts.noUpdate + run.counts.waiting : 0;
+  const waiting = run ? run.runNeeds.length > 0 || run.counts.waiting > 0 : false;
   return (
     <>
       {props.sinceYouLeft ? <SinceYouLeft recap={props.sinceYouLeft} clockAt={clockAt} onDismiss={props.onDismissRecap} /> : null}
@@ -535,13 +673,23 @@ export function CrewCard(props: CrewCardProps) {
         ref={rootRef}
         aria-label="Agents and tasks"
         data-crew-card={props.sessionId}
-        className={cn("crew-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel", stale && "crew-stale")}
+        data-open={expanded}
+        data-stale={stale || undefined}
+        data-wait={waiting || undefined}
+        className={cn("crew-card run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel", stale && "crew-stale")}
         onKeyDown={onKeyDown}
       >
-        {body}
+        {primary}
+        {shownLines}
+        {moreLines}
       </section>
       {run ? (
-        <Modal open={stopAsk} onOpenChange={setStopAsk} title={`Stop the run ${run.name}?`} description={`${plural(working, "working agent")} will be cancelled. Finished work stays.`}>
+        <Modal
+          open={stopAsk}
+          onOpenChange={setStopAsk}
+          title={run.kind === "turn" ? "Stop this turn?" : `Stop the run ${run.name}?`}
+          description={run.kind === "turn" ? "Muse stops working on your prompt. Finished work stays." : `${plural(working, "working agent")} will be cancelled. Finished work stays.`}
+        >
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setStopAsk(false)}>
               Keep
@@ -553,7 +701,7 @@ export function CrewCard(props: CrewCardProps) {
                 props.onStopRun();
               }}
             >
-              <StopCircleIcon size={13} /> Stop run
+              <StopCircleIcon size={13} /> {run.kind === "turn" ? "Stop turn" : "Stop run"}
             </Button>
           </div>
         </Modal>
@@ -574,6 +722,8 @@ export interface CrewDockCardProps {
   readOnly: boolean;
   /** A request panel sits under the card. */
   compact: boolean;
+  /** The thread's plan, already left out when the user closed it; the card folds it in when it is the run's own. */
+  plan?: TaskPlanView | null;
 }
 
 /**
@@ -585,15 +735,14 @@ export function CrewDockCard(props: CrewDockCardProps) {
   const controller = useController();
   const { sessionId, view } = props;
   const key = crewCardKey(sessionId);
-  const expanded = useApp((s) => !s.prefs.collapsedCards.includes(key));
+  const expanded = useApp((s) => s.prefs.openCards.includes(key));
   const dismissedReports = useApp((s) => s.crew.dismissedReports);
   const pending = useApp((s) => s.crew.pending);
   const leftAt = useApp((s) => s.crew.leftAt[sessionId] ?? null);
   const now = view.runs[0]?.clockAt ?? Date.now();
 
   const visibleRuns = view.runs.filter((run) => runLive(run) || reportVisible(run, now, dismissedReports.includes(`${sessionId}:${run.itemId}`)));
-  const liveRuns = visibleRuns.filter(runLive);
-  const primary = liveRuns[liveRuns.length - 1] ?? visibleRuns[visibleRuns.length - 1] ?? null;
+  const primary = primaryRun(view, sessionId, now, dismissedReports);
   const run = useMemo(() => (primary ? withPendingRetries(primary, sessionId, pending) : null), [primary, sessionId, pending]);
   const otherRuns = visibleRuns.filter((candidate) => candidate !== primary);
   const recent = (agent: AgentVM) => taskLive(agent) || (agent.endedAt !== null && now - agent.endedAt < TASK_SHOWN_MS);
@@ -675,6 +824,7 @@ export function CrewDockCard(props: CrewDockCardProps) {
         subagents={subagents}
         completion={completion}
         sinceYouLeft={recap}
+        plan={props.plan ?? null}
         expanded={expanded}
         openPhase={openPhase}
         selectedId={selectedId}
@@ -683,7 +833,7 @@ export function CrewDockCard(props: CrewDockCardProps) {
         compact={props.compact}
         sheen={sheen}
         outputOf={outputOf}
-        onToggle={() => controller.setCardOpen(key, !expanded)}
+        onToggle={() => controller.setCardExpanded(key, !expanded)}
         onOpenPhase={(name) => run && setPhaseChoice({ runId: run.itemId, name })}
         onSelect={onSelect}
         onInspect={(id) => controller.inspectAgent(sessionId, id)}

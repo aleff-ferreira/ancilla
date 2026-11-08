@@ -1312,37 +1312,44 @@
 
   .crew-head {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     min-height: 52px;
-    padding: 8px 8px 6px 14px;
+    padding: 11px 8px 8px 14px;
     white-space: nowrap;
   }
   .crew-head > .toggle {
     display: flex;
     flex: 1;
     min-width: 0;
-    align-items: center;
+    align-items: flex-start;
     gap: 10px;
     text-align: left;
   }
+  .crew-head > .crew-el,
+  .crew-head > button,
+  .crew-head > span:not(.toggle) {
+    align-self: flex-start;
+  }
+  .crew-head > .crew-el {
+    display: inline-flex;
+    height: 20px;
+    align-items: center;
+  }
+  /* The report's glyph is the run card's: the mark alone, with no tile behind it. */
   .crew-tile {
     display: inline-flex;
     flex-shrink: 0;
     align-items: center;
     justify-content: center;
-    width: 28px;
-    height: 28px;
-    border-radius: 8px;
-    background: var(--accent-soft);
+    width: 20px;
+    height: 20px;
     color: var(--accent-text);
   }
   .crew-tile.ok {
-    background: var(--ok-soft);
-    color: var(--ok-text);
+    color: var(--ok);
   }
   .crew-tile.mute {
-    background: var(--bg-sunken);
     color: var(--fg-subtle);
   }
   .crew-head .tt {
@@ -1353,10 +1360,10 @@
   }
   .crew-head .tt > .nm {
     overflow: hidden;
-    font-size: 13px;
+    font-size: 14px;
     line-height: 20px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
+    font-weight: 550;
+    letter-spacing: -0.012em;
     color: var(--fg);
     text-overflow: ellipsis;
   }
@@ -1383,11 +1390,496 @@
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
   }
-  .crew-body:not(:has(.crew-foot)) {
+  .crew-body:not(:has(.crew-foot, .run-foot)) {
     padding-bottom: 8px;
   }
   .crew-body.compact {
     max-height: min(40dvh, 400px);
+  }
+
+  /*
+   * The run card. One calm surface per run: the first line says what is happening, the second names the call going
+   * now, and the spine under them is the only progress there is. It is the plan's steps, a workflow's phases or,
+   * for a prompt with no plan, a hairline that answers each call as it ends. Nothing grows with the clock.
+   */
+  .run-card {
+    --spine-todo: color-mix(in oklch, var(--fg-subtle) 24%, transparent);
+    --spine-done: color-mix(in oklab, var(--ok) 82%, var(--bg-raised));
+    --spine-live: color-mix(in oklab, var(--accent) 36%, var(--bg-raised));
+    --spine-sweep: color-mix(in oklab, var(--accent) 90%, white);
+    --tick-idle: color-mix(in oklch, var(--fg-subtle) 38%, transparent);
+  }
+  :root[data-theme="dark"] .run-card {
+    box-shadow: 0 0 0 1px var(--border), inset 0 1px 0 oklch(1 0 0 / 0.04);
+  }
+  .run-head {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: 6px;
+    padding: 11px 8px 0 14px;
+  }
+  /* The whole head is the button: its hit area is stretched, and the chips alone sit above it. */
+  .run-head:has(.run-hit:focus-visible) {
+    border-radius: 12px 12px 0 0;
+    outline: 2px solid var(--focus-ring);
+    outline-offset: -2px;
+  }
+  .run-hit:focus-visible {
+    outline: none;
+  }
+  .run-hit {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 0;
+    border-radius: 8px;
+    text-align: left;
+  }
+  .run-glyph {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+  }
+  .run-glyph.work { color: var(--accent-text); }
+  .run-glyph.ok { color: var(--ok); }
+  .run-glyph.fail { color: var(--danger); }
+  .run-glyph.need { color: var(--warn); }
+  .run-glyph.mute { color: var(--fg-subtle); }
+  .run-tx {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .run-title {
+    position: relative;
+    height: 20px;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 550;
+    letter-spacing: -0.012em;
+    color: var(--fg);
+    white-space: nowrap;
+  }
+  .run-title > span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .run-sub {
+    display: flex;
+    min-width: 0;
+    height: 18px;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 18px;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+  .run-sub .act {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+  .run-sub .act > .v {
+    flex-shrink: 0;
+  }
+  .run-sub .act > .s {
+    min-width: 0;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    color: var(--fg-muted);
+    text-overflow: ellipsis;
+  }
+  .run-sub .act.live > .v {
+    color: var(--fg-muted);
+  }
+  .run-head > .side {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    height: 20px;
+    align-items: center;
+    gap: 6px;
+    pointer-events: none;
+  }
+  .run-head > .side > .crew-chip,
+  .run-head > .side button {
+    pointer-events: auto;
+  }
+  .run-phases {
+    padding: 8px 14px 10px;
+  }
+  .run-sub > .run-el-sub {
+    display: none;
+    margin-left: auto;
+  }
+  .run-sub > .run-el-sub + .run-trail,
+  .run-sub > .run-trail + .run-el-sub {
+    margin-left: 6px;
+  }
+  .run-car {
+    transition: transform var(--dur-collapse) var(--ease-out), color var(--dur-micro) var(--ease-out);
+  }
+  .run-head:hover .run-car {
+    color: var(--fg);
+  }
+  .run-card[data-open="true"] .run-car {
+    transform: rotate(180deg);
+  }
+  .run-rail {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 14px 12px 44px;
+  }
+  .run-rail > .cnt {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    line-height: 12px;
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The spine: equal segments that settle left to right; only the step Muse marked active moves. */
+  .run-spine {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    gap: 3px;
+    height: 4px;
+  }
+  .run-spine > i {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 2px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--spine-todo);
+  }
+  .run-spine > i > .dn,
+  .run-spine > i > .lv {
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .run-spine > i > .dn {
+    background: var(--spine-done);
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 440ms var(--ease-out);
+  }
+  .run-spine > i.done > .dn {
+    transform: scaleX(1);
+  }
+  .run-spine > i > .lv {
+    opacity: 0;
+    background: linear-gradient(90deg, var(--spine-live) 0%, var(--spine-sweep) 50%, var(--spine-live) 100%);
+    background-size: 220% 100%;
+    transition: opacity 240ms var(--ease-out);
+  }
+  .run-spine > i.live > .lv {
+    opacity: 1;
+    animation: run-flow 2.2s linear infinite;
+  }
+  .run-spine > i.hold > .lv {
+    opacity: 1;
+    background: var(--spine-live);
+  }
+  .run-spine > i.fail > .dn {
+    background: var(--danger);
+    transform: scaleX(1);
+  }
+  .run-spine > i.skip {
+    background: repeating-linear-gradient(135deg, var(--border-strong) 0 1px, transparent 1px 3px);
+  }
+  /* A step that has just landed: one soft glint runs along it. */
+  .run-spine > i.fresh > .dn::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent 0%, oklch(1 0 0 / 0.5) 50%, transparent 100%);
+    transform: translateX(-100%);
+    animation: run-glint 760ms var(--ease-out) 120ms 1 both;
+  }
+  /* With no plan the spine is a hairline, and each call that ends sends one pulse along it. */
+  .run-spine.rhythm > i {
+    background: color-mix(in oklch, var(--fg-subtle) 18%, transparent);
+  }
+  .run-spine.rhythm > i > .lv {
+    opacity: 1;
+    background: color-mix(in oklab, var(--accent) 26%, transparent);
+    animation: none;
+  }
+  .run-spine.rhythm > i > .pulse {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 26%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, transparent, var(--spine-sweep) 55%, transparent);
+    transform: translateX(-110%);
+    animation: run-pulse 1000ms var(--ease-out) 1 both;
+  }
+  .run-spine.rhythm.done > i {
+    background: var(--spine-done);
+  }
+  /* A feed that is not live: nothing moves, and what was live reads as last known. */
+  .run-card[data-stale="true"] .run-spine > i.live > .lv,
+  .run-card[data-stale="true"] .run-spine > i.hold > .lv {
+    animation: none;
+    background: color-mix(in oklch, var(--fg-subtle) 42%, transparent);
+  }
+  .run-card[data-stale="true"] .run-spine.rhythm > i > .lv {
+    background: color-mix(in oklch, var(--fg-subtle) 30%, transparent);
+  }
+  /* Waiting on you: the active step holds still in the warm colour, since nothing moves until you answer. */
+  .run-card[data-wait="true"] .run-spine > i.live > .lv,
+  .run-card[data-wait="true"] .run-spine > i.hold > .lv {
+    animation: none;
+    background: color-mix(in oklab, var(--warn) 70%, var(--bg-raised));
+  }
+
+  /* The heartbeat: one tick per call, the one running taller and blue, the ones that ended settling shorter. */
+  .run-trail {
+    display: inline-flex;
+    flex-shrink: 1;
+    min-width: 0;
+    height: 12px;
+    margin-left: auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+    overflow: hidden;
+    mask-image: linear-gradient(90deg, transparent, #000 40%);
+  }
+  .run-trail > i {
+    flex: none;
+    width: 3px;
+    height: 6px;
+    border-radius: 1.5px;
+    background: var(--tick-idle);
+    transition: height 220ms var(--ease-out), background-color 220ms var(--ease-out);
+    animation: run-tick-in 240ms var(--ease-out) both;
+  }
+  .run-trail > i.done {
+    height: 8px;
+    background: var(--spine-done);
+  }
+  .run-trail > i.work {
+    height: 12px;
+    background: var(--accent);
+    animation: run-tick-in 240ms var(--ease-out) both, run-tick-live 1.6s var(--ease-in-out) 240ms infinite;
+  }
+  .run-trail > i.need {
+    height: 12px;
+    background: var(--warn);
+  }
+  .run-trail > i.fail {
+    height: 12px;
+    background: var(--danger);
+  }
+  .run-card[data-stale="true"] .run-trail > i.work {
+    animation: none;
+    height: 8px;
+    background: var(--tick-idle);
+  }
+
+  /* The body: the steps, the latest calls, the rows that need you, and a footer that stays quiet. */
+  .run-sec {
+    display: flex;
+    height: 26px;
+    margin-top: 8px;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    line-height: 16px;
+    font-weight: 500;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+  .run-sec > .n {
+    font-variant-numeric: tabular-nums;
+  }
+  .run-sec > .lnk {
+    display: inline-flex;
+    height: 22px;
+    align-items: center;
+    gap: 4px;
+    padding: 0 6px;
+    border-radius: 6px;
+    color: var(--fg-subtle);
+  }
+  .run-sec > .lnk:hover {
+    background: var(--bg-hover);
+    color: var(--fg);
+  }
+  .run-steps {
+    display: flex;
+    margin: 0;
+    padding: 0;
+    flex-direction: column;
+    list-style: none;
+  }
+  .run-steps > li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 4px 0;
+    font-size: 13px;
+    line-height: 20px;
+    color: var(--fg-muted);
+  }
+  .run-steps > li > .mk {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+  }
+  .run-steps > li > .tx {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .run-steps > li.done {
+    color: var(--fg-subtle);
+  }
+  .run-steps > li.live {
+    font-weight: 500;
+    color: var(--fg);
+  }
+  .run-steps > li.fail {
+    color: var(--danger-text);
+  }
+  .run-steps > li > .tx > .tag {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--fg-subtle);
+  }
+  .run-pop {
+    animation: run-pop 320ms var(--ease-out) both;
+  }
+  .run-latest {
+    position: relative;
+    display: flex;
+    margin: 0;
+    padding: 0;
+    flex-direction: column;
+    list-style: none;
+  }
+  .run-latest > li {
+    display: flex;
+    height: 24px;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+  .run-latest > li > .mk {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+  }
+  .run-latest > li > .v {
+    flex-shrink: 0;
+    color: var(--fg-muted);
+  }
+  .run-latest > li > .s {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-feature-settings: "calt" 0;
+    font-size: 11.5px;
+    color: var(--fg-muted);
+    text-overflow: ellipsis;
+  }
+  .run-latest > li > .ms {
+    flex-shrink: 0;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-latest > li.fail > .v,
+  .run-latest > li.fail > .s {
+    color: var(--danger-text);
+  }
+  .run-latest > li.work > .v {
+    color: var(--fg);
+  }
+  .run-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: var(--spine-done);
+  }
+  .run-dot.fail { background: var(--danger); }
+  .run-dot.idle { background: var(--tick-idle); }
+  .run-card .run-foot {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    min-height: 40px;
+    margin-top: 6px;
+    padding: 6px 0 8px;
+    align-items: center;
+    gap: 2px;
+    background: var(--bg-raised);
+    box-shadow: inset 0 1px 0 var(--border);
+    white-space: nowrap;
+  }
+  .run-foot > .stats {
+    min-width: 0;
+    margin-left: auto;
+    padding: 0 6px;
+    overflow: hidden;
+    font-size: 11.5px;
+    color: var(--fg-subtle);
+    text-overflow: ellipsis;
+    font-variant-numeric: tabular-nums;
+  }
+  .run-more {
+    display: flex;
+    height: 34px;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px 0 14px;
+    font-size: 12px;
+    color: var(--fg-subtle);
+    box-shadow: inset 0 1px 0 var(--border);
+  }
+  /* The Timeline: a call brightens under the pointer, so the one a click inspects is the one you are looking at. */
+  [data-lane] .crew-lane-seg {
+    transition: filter var(--dur-micro) var(--ease-out);
+  }
+  [data-lane]:hover .crew-lane-seg {
+    filter: brightness(1.2);
+  }
+  /* Lines beside the primary run (another run, a task): the same grammar, one row each. */
+  .run-card > .crew-line {
+    height: 40px;
+    box-shadow: inset 0 1px 0 var(--border);
+  }
+  .run-card > .crew-line:first-child {
+    box-shadow: none;
   }
 
   /* The rail: equal-width segments, each a tab of the accordion; the open one sits on a plate with a pointer. */
@@ -2276,7 +2768,23 @@
       background: var(--danger);
     }
   }
+  @container (max-width: 440px) {
+    .run-head > .side > .crew-el {
+      display: none;
+    }
+    .run-sub > .run-el-sub {
+      display: inline;
+    }
+  }
+  @container (max-width: 400px) {
+    .run-sub > .run-trail {
+      display: none;
+    }
+  }
   @container (max-width: 560px) {
+    .run-foot > .stats {
+      display: none;
+    }
     .crew-ag > .crew-share {
       display: none;
     }
@@ -2292,6 +2800,7 @@
     .crew-chip > .lbl,
     .crew-att > .acts .lbl,
     .crew-task > .acts .lbl,
+    .run-foot .lbl,
     .crew-foot .lbl {
       display: none;
     }
@@ -2589,6 +3098,63 @@
   }
 }
 
+/* The run card: the active step flows, a landed step glints once, a call's tick grows in, a check pops. */
+@keyframes run-flow {
+  from {
+    background-position: 110% 0;
+  }
+  to {
+    background-position: -110% 0;
+  }
+}
+
+@keyframes run-glint {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes run-pulse {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+@keyframes run-tick-in {
+  from {
+    width: 0;
+    margin-left: -2px;
+    opacity: 0;
+  }
+}
+
+@keyframes run-tick-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes run-pop {
+  0% {
+    opacity: 0;
+    scale: 0.55;
+  }
+  60% {
+    opacity: 1;
+    scale: 1.12;
+  }
+  100% {
+    scale: 1;
+  }
+}
+
 /* Review lands on the request panel: its warm ring brightens once. */
 @keyframes crew-flash {
   to {
@@ -2651,6 +3217,21 @@
   .crew-flash {
     animation: none;
   }
+  /* The run card: the flow stops at a steady tint, the glint, pulse and pop are skipped, ticks appear in place. */
+  .run-spine > i.live > .lv,
+  .run-spine > i.fresh > .dn::after,
+  .run-spine.rhythm > i > .pulse,
+  .run-trail > i,
+  .run-trail > i.work,
+  .run-pop {
+    animation: none;
+  }
+  .run-spine > i.live > .lv {
+    background: var(--spine-live);
+  }
+  .run-spine.rhythm > i > .pulse {
+    display: none;
+  }
   *,
   *::before,
   *::after {
@@ -2688,5 +3269,25 @@
   .crew-cell.planned,
   .crew-cell.more {
     border-style: dashed;
+  }
+  /* The run card's spine and ticks: outlined shapes, the finished ones filled, the moving one striped. */
+  .run-spine > i,
+  .run-trail > i {
+    forced-color-adjust: none;
+    background: transparent;
+    border: 1px solid currentColor;
+  }
+  .run-spine > i.done,
+  .run-trail > i.done {
+    background: currentColor;
+  }
+  .run-spine > i > .dn,
+  .run-spine > i > .lv {
+    display: none;
+  }
+  .run-spine > i.live,
+  .run-spine > i.hold,
+  .run-trail > i.work {
+    background: repeating-linear-gradient(135deg, currentColor 0 2px, transparent 2px 4px);
   }
 }

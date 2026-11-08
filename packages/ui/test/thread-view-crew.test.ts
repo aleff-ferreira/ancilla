@@ -71,31 +71,35 @@ describe("ThreadView with the Crew card", () => {
     // The run's transcript row points at the dock.
     assert.match(text(markup), /Started workflow offline-sync-research-design · 10 agents in 4 phases in the dock/);
     assert.doesNotMatch(markup, /WorkflowCard|aria-label="Workflow"/);
-    // Expanded by default: the head, the rail and the footer.
-    assert.match(section, /class="crew-head"/);
+    // Resting as a glance: the head and the rail, and nothing of the body until the card is opened.
+    assert.match(section, /class="run-head"/);
     assert.match(section, /role="tablist"/);
-    assert.match(text(section), /All 10 agents/);
+    assert.doesNotMatch(text(section), /All 10 agents/);
+    const open = card(render({ threads: { s1: thread({ fold: running() }) } }, { openCards: ["crew:s1"] }));
+    assert.match(text(open), /All 10 agents/);
   });
 
   it("mounts the card for a live research run, labelled Deep research, with a rail segment per round", () => {
-    const markup = render({ threads: { s1: thread({ researchRuns: [runningResearch()] }) }, sessions: { s1: { ...SESSION, live: null } } });
+    const markup = render({ threads: { s1: thread({ researchRuns: [runningResearch()] }) }, sessions: { s1: { ...SESSION, live: null } } }, { openCards: ["crew:s1"] });
     const section = card(markup);
     assert.ok(section, "the card is there without any Muse item");
-    assert.match(text(section), /Deep research/);
+    assert.match(section, /title="Deep research · /, "the kind of run is the footer's tooltip; the head says the question and the round");
     assert.equal((section.match(/class="crew-strip rail"/g) ?? []).length, 2, "one segment per round");
     assert.match(section, /data-agent-kind="research"/);
     assert.match(text(section), /Round 1 of 12/);
     assert.match(text(section), /All 3 agents/);
-    assert.match(text(section), /Stop run/);
+    assert.match(section, /<span class="lbl">Stop<\/span>/);
     assert.match(markup, /class="n @max-\[700px\]:hidden" aria-hidden="true">3</, "the Crew toggle counts the workers");
     assert.doesNotMatch(markup, /No agents in this thread/);
   });
 
-  it("collapses to lines when the card is collapsed in the prefs", () => {
-    const markup = render({ threads: { s1: thread({ fold: running() }) } }, { collapsedCards: ["crew:s1"] });
-    const section = card(markup);
-    assert.match(section, /class="crew-line"/);
-    assert.doesNotMatch(section, /crew-head/);
+  it("rests as a glance and opens from the prefs", () => {
+    const shut = card(render({ threads: { s1: thread({ fold: running() }) } }));
+    assert.match(shut, /data-open="false"/);
+    assert.doesNotMatch(shut, /class="crew-body/);
+    const open = card(render({ threads: { s1: thread({ fold: running() }) } }, { openCards: ["crew:s1"] }));
+    assert.match(open, /data-open="true"/);
+    assert.match(open, /class="crew-body run-body"/);
   });
 
   it("puts the Crew toggle with its count before the files toggle, and the Working clock in the header", () => {
@@ -110,7 +114,7 @@ describe("ThreadView with the Crew card", () => {
 
   it("shows Needs you · N and Waiting for you while a request is open, and the run-level need row in the card", () => {
     const withApproval = fold([launch(), ...lantern().events, APPROVAL]);
-    const markup = render({ threads: { s1: thread({ fold: withApproval }) } });
+    const markup = render({ threads: { s1: thread({ fold: withApproval }) } }, { openCards: ["crew:s1"] });
     assert.match(markup, /aria-label="Needs you: 1 request"/);
     assert.match(text(markup), /Needs you · 1/);
     assert.match(markup, /Waiting for you<\/span><\/span>/);
@@ -118,7 +122,8 @@ describe("ThreadView with the Crew card", () => {
     assert.match(text(card(markup)), /Muse does not say which agent asked/);
     assert.ok(markup.indexOf('aria-label="Agents and tasks"') < markup.indexOf('aria-label="Approval needed"'), "the card sits above the request panel");
     assert.match(markup, /<section aria-label="Approval needed" data-request-id="ap1"/, "the panel carries its request id, so Review can find it");
-    assert.match(card(markup), /class="crew-body compact"/, "the body's cap drops with a request panel present");
+    assert.match(card(markup), /class="crew-body run-body compact"/, "the body's cap drops with a request panel present");
+    assert.match(card(markup), /data-wait="true"/, "the card holds its spine still in the warm colour while it waits");
   });
 
   it("switches the slot beside the thread: files, the Crew panel, or nothing", () => {
@@ -135,13 +140,15 @@ describe("ThreadView with the Crew card", () => {
       { method: "item/started", at: S(39, 53), params: { item: { itemId: "task-e2e", kind: "toolCall", status: "inProgress", revision: 1, turnId: "t1", tool: "shell", args: JSON.stringify({ command: "npm run test:e2e -- --grep sync" }) } } },
       { method: "item/updated", at: S(39, 54), params: { item: { itemId: "task-e2e", kind: "toolCall", status: "inProgress", revision: 2, turnId: "t1", tool: "shell", args: JSON.stringify({ command: "npm run test:e2e -- --grep sync" }), background: true, backgroundInitiator: "user", visibleOutput: "12 passed · 3 pending" } } },
     ];
-    const markup = render({ threads: { s1: thread({ fold: fold(events) }) } });
+    const lines = render({ threads: { s1: thread({ fold: fold(events) }) } });
+    assert.match(card(lines), /class="crew-line task"/, "resting, a task is one line");
+    assert.match(card(lines), /class="cmd"[^>]*>npm run test:e2e -- --grep sync</);
+    const markup = render({ threads: { s1: thread({ fold: fold(events) }) } }, { openCards: ["crew:s1"] });
     const section = card(markup);
     assert.match(section, /class="cmd"[^>]*>npm run test:e2e -- --grep sync</);
     assert.match(text(section), /Background 1/);
+    assert.doesNotMatch(section, /class="crew-line task"/, "opened, it is a row with its controls");
     assert.doesNotMatch(markup, /running in the background/);
-    const lines = render({ threads: { s1: thread({ fold: fold(events) }) } }, { collapsedCards: ["crew:s1"] });
-    assert.match(card(lines), /class="crew-line task"/);
   });
 
   it("says last known while the feed is not live, without a spinner", () => {

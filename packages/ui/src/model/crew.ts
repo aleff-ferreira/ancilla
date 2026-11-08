@@ -4,7 +4,7 @@ import type {
 } from "../types.js";
 import { agentNumbers, type AgentNumbers } from "./agents.js";
 import { uuidTime, type ChildTrace, type RequestTrace, type RunTrace, type TaskTrace, type ThreadFold, type TurnInfo } from "./fold.js";
-import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs } from "./format.js";
+import { describeApproval, describeTool, formatClock, formatTokens, lastLine, parseArgs, type ToolDescription } from "./format.js";
 import { costOf, formatCost, priceOf } from "./pricing.js";
 import { interruptedLine, phaseLine, researchEnded, researchLive, researchThreadTitle, sourcesLine } from "./research.js";
 import { projectForCwd } from "./status.js";
@@ -127,7 +127,12 @@ export interface AgentVM {
   /** The run this workflow agent belongs to, for the controls. */
   runItemId: string | null;
   workflowRunId: string | null;
-  taskInfo?: { command: string; tail: string | null; lastOutputAt: number | null; initiator: "user" | "timeout" | null; approvalId: string | null; background?: boolean; stoppable?: boolean; exitCode?: number | null; exitSignal?: number | null };
+  taskInfo?: {
+    command: string; tail: string | null; lastOutputAt: number | null; initiator: "user" | "timeout" | null; approvalId: string | null;
+    background?: boolean; stoppable?: boolean; exitCode?: number | null; exitSignal?: number | null;
+    /** What the call is, in the transcript's words: `Editing` and the path, `Ran` and the command. */
+    look?: Pick<ToolDescription, "kind" | "verb" | "subject" | "mono" | "note">;
+  };
   /** Present on a research worker: its counters, as the daemon reports them. */
   research?: ResearchAgentInfo;
 }
@@ -1680,7 +1685,11 @@ function taskView(item: MspItem, trace: TaskTrace | undefined, ctx: RunContext):
     needs,
     runItemId: null,
     workflowRunId: null,
-    taskInfo: { command, tail: lastLine(item.visibleOutput), lastOutputAt, initiator, approvalId: text(item.approvalId), background, stoppable: background || description.kind === "shell", exitCode: num(item.exitCode), exitSignal: num(item.exitSignal) },
+    taskInfo: {
+      command, tail: lastLine(item.visibleOutput), lastOutputAt, initiator, approvalId: text(item.approvalId), background,
+      stoppable: background || description.kind === "shell", exitCode: num(item.exitCode), exitSignal: num(item.exitSignal),
+      look: { kind: description.kind, verb: description.verb, subject: description.subject, mono: description.mono, note: description.note },
+    },
   };
 }
 

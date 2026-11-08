@@ -15,35 +15,55 @@ A thread with a live turn, workflow, research run, subagent or background task g
 above the request panel and composer. Recent completions remain available until dismissed or expired;
 a thread with no tracked activity gets no card or strip.
 
-**Ordinary prompts** use Lead and Tools groups in the same roster and timeline. Finished foreground tools
-remain inspectable, including their reported output and shell exit status. A tool without a terminal result
-when its turn ends reads **Outcome not reported**. Background tasks and native agents continue to show their
-own state after the lead finishes. The turn's completion card stays compact, with **View activity** and
-**Timeline** links; workflow and research runs retain their fuller completion reports.
+**Ordinary prompts** use Lead and Tools groups in the same roster and timeline, where a prompt's calls share
+rows when they did not overlap. Finished foreground tools remain inspectable, including their reported output and
+shell exit status. A tool without a terminal result when its turn ends reads **Outcome not reported**. Background
+tasks and native agents continue to show their own state after the lead finishes. In the dock the card names what
+Muse is doing, not its groups, and a finished prompt keeps it as a short summary (`Turn finished · 41 tools
+completed · 1 failed`, with **Activity** and **Timeline** in its footer); workflow and research runs retain their
+fuller completion reports.
 
-**Collapsed**, the card is one line per run or task, and that line answers three questions at once: is
-everything fine, what needs me, how far along is it. Left to right: a status glyph, the run's name (the name the
-launch was given, such as `v2-breaking-change-audit`), a strip with one cell per agent grouped by phase, the
-progress (`Judge · 6 of 10`), chips only when something needs attention, and the elapsed time. When everything is
-fine the line carries no chips; absence is the signal. The chips are `1 needs you` and `1 failed`; `1 no update`
-appears only when neither of the others does, since one chip is calmer than three. More than three lines fold
-into `+N more`.
+**At rest** the card is a glance, and it answers three questions at once: is everything fine, what is happening,
+how far along is it. Left to right and top to bottom: a state glyph, one line for what is happening, the time, and
+under them the spine. For a prompt the first line is the step Muse marked active in its plan (`Building stage 1:
+procedural textures + terrain`), or, with no plan, the call it is making (`Editing src/scene.ts`), or `Working on
+your prompt` while no call is going; a request waiting on you outranks both (`Waiting for your approval`). The
+second line names the call going now in the transcript's words, or the last one that ended, with a heartbeat of
+ticks at its right, one per call: tall and blue while it runs, shorter and green once it landed, red if it failed.
+For a workflow or a research run the first line is the run's name and the second its progress (`Judge · 6 of 10`),
+and the spine is the phase rail. Chips appear only when something needs attention: `1 needs you`, `1 no update`,
+and for a workflow `1 failed`; when everything is fine the card carries none, and absence is the signal. A call
+that failed while a prompt goes on does not get a chip or the first row of the attention list, since Muse reads
+the error and goes on; a finished prompt counts it in its second line. A first line holds for at least 0.9 seconds
+before the next sentence replaces it, so a prompt that makes a call every half second stays readable. More than
+three lines beside the card (other runs, tasks) fold into `+N more`.
 
-**Expanded** (click the line, or `Enter` on it), the card shows:
+The spine is the card's only progress, and it never grows with the clock. With a plan it is one segment per step:
+done in green, the active one flowing while Muse works (and held still in the warm colour while it waits on you),
+the rest faint, with the count (`2/6`) beside it; a step that lands fills from left to right with one glint. With no
+plan it is a hairline that sends one pulse along it for each call that ends. A plan belongs to the card when it is
+the prompt's own, so there is no second card under it; a plan from another turn, or one beside a workflow, keeps a
+card of its own in the same style.
 
-- a head with the run's name and a sub line (`Workflow · started 14:02 · 9 agents · 1 planned · 1.2M tokens so far
-  (8 of 9 reported) · ~$1.94 est.`): the total says `so far` while the run goes and says how many agents have sent
-  usage while some have not, because the estimate is built from the same agents;
-- the **phase rail**, an accordion of the run's phases (`Research 4 of 4 · Design 2 of 3 · Judge 0 of 2 ·
-  Synthesize 1 planned`) with exactly one phase open at a time, the current one by default;
-- the **attention list**: agents that are waiting on you, then failed, then quiet, each as a two-line row with the
-  reason and the action (`Review`, `Answer`, `Retry`, `Skip`, `Stop`, `Inspect`). A request Muse raised while the
-  run is live sits at the top of this list as a run-level row, because Muse does not say which agent asked;
-- the open phase's compact rows (sigil, name, state word, tokens, time, a share bar against the longest finished
-  agent), and one row per background task with the command, who sent it to the background, its last output line
-  and `Stop`, `Output`, `Run again` or `Bring back`;
-- a footer with the counts (`6 done · 1 failed · 2 running · 1 planned`), `All 10 agents` and `Timeline` (both
-  open the panel) and `Stop run`, which confirms first: `Stop the run offline-sync-research-design? 2 working
+**Opened** (click the head, or `Enter` on it; the card rests shut in every thread and remembers which you opened),
+the card shows:
+
+- what needs you: the **attention list**, with agents that are waiting on you, then quiet, then (for a workflow)
+  failed, each as a two-line row with the reason and the action (`Review`, `Answer`, `Retry`, `Skip`, `Stop`,
+  `Inspect`). A request Muse raised while the run is live sits at the top of this list as a run-level row, because
+  Muse does not say which agent asked;
+- for a prompt, the plan's **steps** with their marks, and the **latest** calls, each with its verb, what it acted
+  on and how long it took, newest at the bottom;
+- for a workflow, the phase rail's open phase: an accordion with exactly one phase open at a time, the current one
+  by default (`Research 4 of 4 · Design 2 of 3 · Judge 0 of 2 · Synthesize 1 planned`), with its compact rows (sigil,
+  name, state word, tokens, time, a share bar against the longest finished agent);
+- one row per background task with the command, who sent it to the background, its last output line and `Stop`,
+  `Output`, `Run again` or `Bring back`;
+- a footer with `Activity` (or `All 10 agents`) and `Timeline`, which open the panel, the counts and tokens (for a
+  workflow `6 done · 1 failed · 2 running · 1 planned`, with the run's facts as the tooltip: `Workflow · started
+  14:02 · 9 agents · 1 planned · 1.2M tokens so far (8 of 9 reported) · ~$1.94 est.`, where the total says `so far`
+  while the run goes and says how many agents have sent usage while some have not, because the estimate is built
+  from the same agents), and `Stop`, which confirms first: `Stop the run offline-sync-research-design? 2 working
   agents will be cancelled. Finished work stays.`
 
 After `Retry` the row reads `Retrying · attempt 3 starting · Muse has not confirmed yet` until a revision shows
@@ -206,10 +226,13 @@ The rules that follow from that:
 
 ## Task plans
 
-The Plan panel follows Muse's reported checklist, including its `in_progress` step states. It records which
+The plan follows Muse's reported checklist, including its `in_progress` step states. It records which
 turn updated the plan, so a later unrelated prompt cannot make an older plan look active. Approvals pause the
 activity indicator, and a disconnected feed shows **Last known**. Associated workers can keep a plan marked
-**Workers running** after the lead finishes.
+**Workers running** after the lead finishes. A plan that belongs to the prompt the dock is showing is part of the
+run card (its steps are the spine and the opened body's list); any other plan has a card of its own, resting as a
+line and a spine like the run card, with a **Hide** button that puts it away until the thread's top bar brings it
+back.
 
 Ending a turn does not complete its checklist. Unconfirmed steps remain visible with an explanation, and
 completed plans remain available as an expandable summary. Only a reported plan change completes a step.
@@ -245,7 +268,9 @@ audit thread plays the reference scenario: ten agents in four phases, 41m 16s in
 one quiet past the threshold, one finishing, one planned, a request Muse raised during Judge and a background
 task. `crew=stalled`, `failed`, `waiting`, `partial`, `reconnect`, `done`, `big` (two thousand agents) and
 `task` (three background tasks and no run) isolate the other states, and `workflow=done` lets whichever run is
-loaded finish as the page opens.
+loaded finish as the page opens. `crew=turn` plays an ordinary prompt live: a plan of six steps and about fifty
+tool calls over two and a half minutes, one of them failing, ending in its summary (`speed=3` plays it faster,
+`plan=0` plays it without the plan).
 
 With real Muse, ask for a task that delegates, for example a workflow that reads several parts of a project in
 parallel and then summarizes them. The strip fills as agents are scheduled and land, the phase word moves along

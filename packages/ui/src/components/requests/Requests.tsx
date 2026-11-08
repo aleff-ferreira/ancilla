@@ -1,13 +1,15 @@
-import { CaretDownIcon, CaretUpIcon, ChatCircleDotsIcon, CheckCircleIcon, CheckIcon, CircleIcon, ClockCounterClockwiseIcon, ClockIcon, ListChecksIcon, LockIcon, PencilSimpleIcon, PlugsIcon, ShieldWarningIcon, XCircleIcon, XIcon } from "../ui/icons.js";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { CaretDownIcon, CaretUpIcon, ChatCircleDotsIcon, CheckCircleIcon, CheckIcon, ClockCounterClockwiseIcon, ClockIcon, LockIcon, PencilSimpleIcon, PlugsIcon, ShieldWarningIcon, XIcon } from "../ui/icons.js";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { useApp, useController } from "../../app/context.js";
 import type { LocalEcho } from "../../model/fold.js";
 import { describeApproval, formatFullDate } from "../../model/format.js";
-import type { TaskPlanView, TaskStepStatus } from "../../model/taskPlan.js";
+import { stepSegs, type Glyph } from "../../model/runCard.js";
+import type { TaskPlanView } from "../../model/taskPlan.js";
 import type { ApprovalChoice, ApprovalRequest, UserInputAnswer, UserInputQuestion, UserInputRequest } from "../../types.js";
+import { PlanSteps, RunGlyph, Spine, Swap, useDwell } from "../crew/RunParts.js";
 import { Tip } from "../ui/overlays.js";
-import { Button, IconButton, Shortcut, Spinner, cn } from "../ui/primitives.js";
-import { RollingDigits } from "../ui/sourced.js";
+import { Button, IconButton, Shortcut, cn } from "../ui/primitives.js";
+import { Collapse, RollingDigits } from "../ui/sourced.js";
 
 /** True while the event is going to a text field, where a bare key belongs to the text and not to a shortcut. */
 export function isTyping(target: EventTarget | null): boolean {
@@ -416,128 +418,92 @@ export function QuestionPanel(props: { request: UserInputRequest; keyboard: bool
   );
 }
 
-function TodoMark(props: { status: TaskStepStatus; plan: TaskPlanView }) {
-  switch (props.status) {
-    case "completed":
-      return <CheckCircleIcon size={15} className="shrink-0 text-ok" aria-label="Done" />;
-    case "inProgress":
-      return props.plan.animate
-        ? <Spinner size={13} className="m-px text-accent-text" label="In progress" />
-        : <ClockIcon size={15} className="shrink-0 text-subtle" aria-label={props.plan.state === "waiting" ? "Waiting for you" : "Last reported active; completion unconfirmed"} />;
-    case "cancelled":
-      return <XCircleIcon size={15} className="shrink-0 text-subtle" aria-label="Cancelled" />;
-    case "failed":
-      return <XCircleIcon size={15} className="shrink-0 text-danger" aria-label="Failed" />;
-    case "unknown":
-      return <CircleIcon size={15} className="shrink-0 text-subtle" aria-label="Status not reported" />;
-    default:
-      return <CircleIcon size={15} className="shrink-0 text-[var(--border-strong)]" aria-label="To do" />;
-  }
-}
-
 /** Closes a dock card until the user brings it back from the thread's top bar. */
 export function CloseCard(props: { label: string; onClose: () => void }) {
   return (
     <Tip label={`${props.label}. Bring it back from the top bar.`}>
-      <IconButton size="sm" label={props.label} onClick={props.onClose} className="ml-1 shrink-0">
+      <IconButton size="xs" label={props.label} onClick={props.onClose} className="shrink-0 text-subtle">
         <XIcon size={13} />
       </IconButton>
     </Tip>
   );
 }
 
+/** The plan's state as the card's glyph: the ring while it runs, the outcome once it ended, the list when nothing moves. */
+function planGlyph(view: TaskPlanView): Glyph | "plan" {
+  switch (view.state) {
+    case "working": return "working";
+    case "waiting": return "waiting";
+    case "stale": return "stale";
+    case "complete": return "done";
+    case "stopped": return "stopped";
+    default: return "plan";
+  }
+}
+
+/**
+ * Muse's checklist as a card of its own, for a plan that does not belong to the run the dock is showing: one from an
+ * earlier turn, one beside a workflow, one the run card has been dismissed from. A plan that belongs to the running
+ * prompt is folded into the run card instead (see CrewCard). The card rests as a glance, a line and a spine.
+ */
 export function PlanPanel(props: { sessionId: string; view: TaskPlanView }) {
   const controller = useController();
   const { view } = props;
   // Kept in prefs, not here: this panel unmounts whenever the user looks at another thread.
   const cardKey = `plan:${props.sessionId}`;
-  const savedOpen = useApp((s) => !s.prefs.collapsedCards.includes(cardKey));
+  const open = useApp((s) => s.prefs.openCards.includes(cardKey));
   const hidden = useApp((s) => s.prefs.hiddenCards.includes(cardKey));
-  // Keep the final result available without filling the dock with an already finished checklist.
-  const [finishedOpen, setFinishedOpen] = useState(false);
-  const finished = view.state === "complete";
-  const open = finished ? finishedOpen : savedOpen;
   const active = view.activeIndex >= 0 ? view.items[view.activeIndex] : null;
-  const list = useRef<HTMLOListElement>(null);
-  useEffect(() => {
-    if (!finished) setFinishedOpen(false);
-  }, [finished]);
-  useEffect(() => {
-    const container = list.current;
-    const row = container?.children[view.activeIndex] as HTMLElement | undefined;
-    if (!open || !container || !row) return;
-    // Scroll only this checklist: a plan update must not move the user's transcript or focus.
-    const top = row.offsetTop;
-    if (top < container.scrollTop || top + row.offsetHeight > container.scrollTop + container.clientHeight) {
-      container.scrollTop = Math.max(0, top - 8);
-    }
-  }, [view.activeIndex, open, props.sessionId]);
+  const bodyId = useId();
+  const title = view.animate && active ? active.activeForm ?? active.text : "Plan";
+  const shown = useDwell(title, 900);
   if (hidden) {
     return null;
   }
   return (
-    <section aria-label="Plan" className="enter-up overflow-hidden rounded-2xl bg-raised shadow-card">
-      <div className="flex items-center pr-1.5 transition-colors hover:bg-hover">
+    <section aria-label="Plan" data-open={open} data-stale={view.state === "stale" || undefined} data-wait={view.state === "waiting" || undefined} className="run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel">
+      <div className="run-head">
         <button
           type="button"
+          className="run-hit after:absolute after:inset-0 after:content-['']"
           aria-expanded={open}
-          onClick={() => finished ? setFinishedOpen(!open) : controller.setCardOpen(cardKey, !open)}
-          className="flex h-10 min-w-0 flex-1 items-center gap-2.5 pl-3.5 text-left"
+          aria-controls={bodyId}
+          aria-label={`${shown}, ${view.label}, ${view.done} of ${view.items.length} steps complete`}
+          onClick={() => controller.setCardExpanded(cardKey, !open)}
         >
-          <ListChecksIcon size={15} className="shrink-0 text-subtle" />
-          <span className="text-sm font-medium text-fg">Plan</span>
-          <span className={cn("shrink-0 rounded-md px-1.5 py-px text-2xs font-medium",
-            view.animate ? "bg-accent-soft text-accent-text" : finished ? "bg-active text-ok-text"
-              : view.state === "waiting" || view.state === "stopped" ? "bg-warn-soft text-warn-text" : "bg-active text-muted")}>
-            {view.label}
+          <RunGlyph glyph={planGlyph(view)} />
+          <span className="run-tx">
+            <Swap id={shown} className="run-title" title={shown}>{shown}</Swap>
+            <span className="run-sub">
+              <span className="min-w-0 truncate">{view.label}</span>
+            </span>
           </span>
-          <span className="shrink-0 text-xs text-subtle tabular-nums">
-            <RollingDigits value={String(view.done)} />/{view.items.length}
-            <span className="sr-only"> steps complete</span>
-          </span>
-          {!open && active ? <span className="min-w-0 truncate text-xs text-muted">{view.animate ? active.activeForm ?? active.text : active.text}</span> : null}
-          <span className="flex-1" />
-          <CaretDownIcon size={14} className={cn("shrink-0 text-subtle transition-transform duration-200", !open && "-rotate-90")} />
         </button>
-        <CloseCard label="Hide the plan" onClose={() => controller.setCardHidden(cardKey, true)} />
+        <span className="side">
+          <CloseCard label="Hide the plan" onClose={() => controller.setCardHidden(cardKey, true)} />
+          <span className="inline-flex size-5 items-center justify-center text-subtle" aria-hidden="true">
+            <CaretDownIcon size={13} className="run-car" />
+          </span>
+        </span>
       </div>
-      <div className="h-px bg-line" role="progressbar" aria-label="Plan steps completed" aria-valuemin={0} aria-valuemax={view.items.length} aria-valuenow={view.done}>
-        <div className="h-full bg-ok transition-[width] duration-150 motion-reduce:transition-none" style={{ width: `${view.done / view.items.length * 100}%` }} />
+      <div className="run-rail">
+        <Spine segs={stepSegs(view)} label="Plan steps completed" />
+        <span className="cnt">{view.done}/{view.items.length}</span>
       </div>
-      {open ? (
-        <>
-          <ol ref={list} className="relative flex max-h-52 flex-col gap-1.5 overflow-y-auto px-3.5 py-3">
-            {view.items.map((item, index) => (
-              <li key={`${index}:${item.text}`} className="flex items-start gap-2.5 text-sm" aria-current={item.status === "inProgress" && view.animate ? "step" : undefined}>
-                <span className="mt-0.5 flex size-4 items-center justify-center">
-                  <TodoMark status={item.status} plan={view} />
-                </span>
-                <span
-                  className={cn(
-                    "min-w-0 [overflow-wrap:anywhere]",
-                    item.status === "completed" && "text-subtle line-through decoration-[var(--border-strong)]",
-                    item.status === "inProgress" && (view.animate ? "font-medium text-fg" : "text-muted"),
-                    item.status !== "completed" && item.status !== "inProgress" && "text-muted",
-                  )}
-                >
-                  {item.status === "inProgress" && view.animate ? (item.activeForm ?? item.text) : item.text}
-                  {item.status === "inProgress" && !view.animate ? <span className="ml-1.5 text-2xs text-subtle">{view.state === "waiting" ? "waiting" : "last active"}</span> : null}
-                </span>
-              </li>
-            ))}
-          </ol>
-          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-line px-3.5 py-2 text-2xs text-subtle">
-            <p role="status">{view.detail}</p>
-            {view.updatedAt !== null ? <time dateTime={new Date(view.updatedAt).toISOString()} title={formatFullDate(view.updatedAt)}>
+      <Collapse open={open}>
+        <div id={bodyId} className="crew-body run-body">
+          <PlanSteps view={view} />
+          <div className="run-foot">
+            <p role="status" className="min-w-0 truncate text-2xs text-subtle" title={view.detail}>{view.detail}</p>
+            {view.updatedAt !== null ? <time className="stats" dateTime={new Date(view.updatedAt).toISOString()} title={formatFullDate(view.updatedAt)}>
               Updated {new Date(view.updatedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
             </time> : null}
           </div>
-        </>
-      ) : null}
+        </div>
+      </Collapse>
     </section>
   );
 }
-
 export function QueuedList(props: { sessionId: string; items: LocalEcho[] }) {
   const controller = useController();
   return (

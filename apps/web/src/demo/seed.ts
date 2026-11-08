@@ -47,7 +47,7 @@ export const SIDE_ACCOUNT = "side";
  * agents in four phases; the others isolate one condition each, so every state the card, the panel and
  * the drawer can show has a page to load.
  */
-export const SCENARIOS = ["running", "stalled", "failed", "waiting", "partial", "reconnect", "done", "big", "task"] as const;
+export const SCENARIOS = ["running", "stalled", "failed", "waiting", "partial", "reconnect", "done", "big", "task", "turn"] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
 export function isScenario(value: string | null | undefined): value is Scenario {
@@ -1453,8 +1453,31 @@ function researchThread(now: number): { thread: SeedThread; runs: ResearchRunVie
   return { thread: built, runs: [done, running] };
 }
 
+/**
+ * The `turn` scenario's thread before its prompt runs: one short finished question, so the thread is not blank
+ * and the card has nothing to show until the live turn starts.
+ */
+function turnThread(now: number): { thread: SeedThread; streams: TaskStream[] } {
+  const s = new Script(THREADS.audit, PROJECTS.atlas, now - 20 * MIN, { branch: "main" });
+  s.begin("Where does the renderer set up the camera?");
+  s.tool(
+    "grep",
+    { pattern: "PerspectiveCamera", path: "src" },
+    "src/scene.ts:41:  const camera = new THREE.PerspectiveCamera(55, aspect, 0.1, 500);\n",
+    1800,
+  );
+  s.bill(9_400, 120);
+  s.say("The camera is created in `src/scene.ts`, line 41, with a 55 degree field of view.", 1400);
+  s.end(6_000);
+  return { thread: thread(s, "Terrain scene", 1, { live: live() }), streams: [] };
+}
+
 export function seed(now: number, scenario: Scenario = "running"): Seed {
-  const first = scenario === "task" ? { ...tasksThread(now), run: null } : scenario === "big" ? bigThread(now) : auditThread(now, scenario);
+  const first =
+    scenario === "task" ? { ...tasksThread(now), run: null }
+    : scenario === "turn" ? { ...turnThread(now), run: null }
+    : scenario === "big" ? bigThread(now)
+    : auditThread(now, scenario);
   const research = researchThread(now);
   return {
     threads: [

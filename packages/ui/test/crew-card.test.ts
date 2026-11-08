@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
-import { CrewCard, defaultOpenPhase, footMeta, headSub, phaseHeadText, reportVisible, withPendingRetries, type CrewCardProps } from "../src/components/crew/CrewCard.js";
+import { CrewCard, defaultOpenPhase, footMeta, footStats, headSub, phaseHeadText, reportVisible, withPendingRetries, type CrewCardProps } from "../src/components/crew/CrewCard.js";
 import { AnnouncementQueue } from "../src/components/crew/CrewAnnouncer.js";
 import { resolveCardKey } from "../src/components/crew/useCardKeys.js";
 import { railCount } from "../src/components/crew/PhaseRail.js";
@@ -37,7 +37,7 @@ function render(overrides: Partial<CrewCardProps> & { run: RunVM | null }): stri
   return renderToStaticMarkup(createElement(TooltipProvider, { children: createElement(CrewCard, props) }));
 }
 
-/** The collapsed line's words: the line is the whole card while collapsed. */
+/** The glance's words: the head and the phase rail are all of a card that rests shut. */
 function line(run: RunVM, extra: Partial<CrewCardProps> = {}): string {
   return text(render({ run, ...extra }));
 }
@@ -46,19 +46,20 @@ function chips(markup: string): string[] {
   return [...flatten(markup).matchAll(/class="crew-chip ([a-z-]+)"[^>]*>(?:<svg[\s\S]*?<\/svg>)?<span class="lbl">([^<]*)<\/span>/g)].map((m) => `${m[1]}:${m[2]}`);
 }
 
-describe("the collapsed line", () => {
-  it("reads glyph · name · strip · progress · elapsed with no chip while everything is fine", () => {
+describe("the glance", () => {
+  it("reads glyph · name · progress · elapsed with no chip while everything is fine, over the phase rail", () => {
     const agents = referenceAgents().map((agent) => (agent.state === "failed" ? { ...agent, state: "done" as const, attempt: 1, failure: null } : agent.state === "no-update" ? { ...agent, state: "working" as const, quiet: null } : agent));
     const run = mkRun(agents);
     const markup = render({ run });
     assert.match(markup, /aria-expanded="false"/);
-    assert.match(markup, /class="crew-strip"/, "the sm strip");
-    assert.match(markup, /spin-ring/, "the lead ring while live");
+    assert.match(markup, /data-open="false"/, "a card rests shut");
+    assert.equal((markup.match(/class="crew-strip rail"/g) ?? []).length, 4, "the rail is part of the glance, so it is there while the card is shut");
+    assert.match(markup, /spin-ring/, "the ring while live");
     assert.deepEqual(chips(markup), []);
-    const words = text(markup);
-    assert.match(words, /offline-sync-research-design Judge · 7 of 10 41m 16s/);
+    assert.match(text(markup), /^offline-sync-research-design Judge · 7 of 10 41m 16s/);
     assert.equal(summaryLine(run).progress, "Judge · 7 of 10");
-    assert.match(markup, /<span class="word">Judge · <\/span>/, "the phase word leaves before the count in a narrow card");
+    assert.match(markup, /aria-label="offline-sync-research-design, Judge · 7 of 10, 41m 16s"/, "the head's name carries the title, the progress and the time");
+    assert.doesNotMatch(markup, /class="run-body|class="run-foot/, "nothing of the body is there until the card opens");
   });
 
   it("chips only what needs attention: needs you, failed, both, and no update only on its own", () => {
@@ -79,29 +80,30 @@ describe("the collapsed line", () => {
     const agents = referenceAgents().filter((agent) => agent.state !== "planned");
     const noPlan = mkRun(agents, { plannedKnown: false });
     assert.match(line(noPlan), /6 done · 2 working · more may start/);
-    assert.match(render({ run: noPlan }), /crew-cell more/, "the strip ends with a dashed cell");
     const partial = mkRun(referenceAgents(), { elapsedApprox: true, partialHistory: true });
     assert.match(line(partial), /about 41m/);
     const stale = mkRun(referenceAgents(), { stale: true, staleAt: S(41, 16) });
-    const markup = render({ run: stale });
+    const markup = render({ run: stale, stale: true });
     assert.deepEqual(chips(markup), ["stale:Last known"], "last known replaces every other chip");
     assert.doesNotMatch(markup, /spin-ring/, "nothing spins while the feed is not live");
     assert.match(text(markup), /41m 16s · at /);
-    assert.match(markup, /class="crew-line stale"/);
+    assert.match(markup, /data-stale="true"/, "the card tells the theme to hold still");
+    assert.match(markup, /class="crew-card run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel crew-stale"/);
   });
 
   it("covers the endings: all landed, one skipped, stopped by you, and a run that failed", () => {
     const landed = mkRun(referenceAgents().map((agent) => ({ ...agent, state: "done" as const, failure: null, quiet: null })), { status: "finished", endedAt: S(45, 10), elapsedMs: S(45, 10) - S(0, 0) });
     const markup = render({ run: landed });
     assert.match(text(markup), /Done · 10 of 10 45m 10s/);
-    assert.match(markup, /class="crew-strip finale"/);
+    assert.match(markup, /class="crew-strip rail finale"/);
     assert.deepEqual(chips(markup), []);
     const skipped = mkRun(referenceAgents().map((agent) => (agent.name === "design:conflict-ledger" ? { ...agent, state: "skipped" as const, skippedBy: "you" as const } : { ...agent, state: "done" as const, quiet: null })), { status: "finished-with-failures", endedAt: S(43, 2), elapsedMs: S(43, 2) - S(0, 0) });
     assert.match(line(skipped), /Finished · 9 of 10/);
     assert.deepEqual(chips(render({ run: skipped })), ["quiet:1 skipped"]);
     const stopped = mkRun(referenceAgents().slice(0, 9).map((agent, index) => (index < 4 ? { ...agent, state: "done" as const } : { ...agent, state: "skipped" as const, skippedBy: "run" as const, quiet: null, failure: null })), { status: "stopped", endedAt: S(12, 10), elapsedMs: 12 * 60_000 + 10_000 });
-    // The model adds the skipped count as a chip on a stopped run; the line shows what the model says.
-    assert.match(line(stopped), /Stopped · 4 of 9 had landed 5 skipped 12m 10s/);
+    // The model adds the skipped count as a chip on a stopped run; the head shows what the model says.
+    assert.match(line(stopped), /Stopped · 4 of 9 had landed/);
+    assert.match(line(stopped), /5 skipped 12m 10s/);
     const failed = mkRun(referenceAgents(), { status: "failed", endedAt: S(3, 0) });
     assert.deepEqual(chips(render({ run: failed })), ["fail:run failed", "fail:1 failed"]);
     const starting = mkRun([], { status: "starting", elapsedMs: 4000 });
@@ -133,9 +135,14 @@ describe("the collapsed line", () => {
     const older = mkRun(referenceAgents().map((agent) => ({ ...agent, state: "done" as const, failure: null, quiet: null })), { itemId: "wf-0", name: "earlier-run", status: "finished", endedAt: S(20, 0) });
     const tasks = [mkTask("npm run a", "working", { id: "t1" }), mkTask("npm run b", "working", { id: "t2" }), mkTask("npm run c", "working", { id: "t3" })];
     const markup = render({ run, otherRuns: [older], tasks });
+    // The primary run is the head; the lines beside it are one run and three tasks, three of which show.
     const names = [...markup.matchAll(/class="name">([^<]*)<|class="cmd">([^<]*)</g)].map((m) => m[1] ?? m[2]);
-    assert.deepEqual(names, ["earlier-run", "offline-sync-research-design", "npm run a"]);
-    assert.match(text(markup), /\+2 more/);
+    assert.deepEqual(names, ["earlier-run", "npm run a", "npm run b"]);
+    assert.match(markup, /run-title/);
+    assert.match(text(markup), /\+1 more/);
+    const open = render({ run, otherRuns: [older], tasks, expanded: true });
+    assert.doesNotMatch(open, /class="crew-line task"/, "an open card lists its tasks as rows, not lines");
+    assert.match(open, /Background <span class="n">3<\/span>/);
   });
 
   it("keeps the progress phrase in step with the model's summary line for every status", () => {
@@ -150,15 +157,17 @@ describe("the collapsed line", () => {
 describe("the expanded card", () => {
   const run = runningRun({}, [APPROVAL]);
 
-  it("shows the head with the run's facts and the elapsed clock", () => {
+  it("shows the head with the run's facts kept for the footer, and opens the body", () => {
     const markup = render({ run, expanded: true });
-    assert.match(markup, /class="crew-tile"[^>]*><span[^>]*class="spin-ring/);
-    assert.match(markup, /class="nm">offline-sync-research-design</);
+    assert.match(markup, /<span class="run-glyph need"/, "this run has a request waiting on you, so its glyph is the warm one");
+    assert.match(render({ run: runningRun(), expanded: true }), /<span class="run-glyph work"[^>]*>[\s\S]*?class="spin-ring/, "and with none it is the ring");
+    assert.match(markup, /title="offline-sync-research-design"[^>]*>offline-sync-research-design</);
     const sub = headSub(run).text;
     assert.match(sub, /^Workflow · started [^·]+ · 9 agents · 1 planned · 1\.2M tokens so far \(8 of 9 reported\) · ~\$[\d.]+ est\.$/);
-    assert.match(markup, /<span class="opt">~\$/, "the cost leaves the sub line in a narrow card");
-    assert.match(markup, /class="sub short">Workflow · /);
-    assert.match(markup, /aria-label="Collapse"/);
+    assert.ok(markup.includes(`class="stats" title="${sub}"`), "the long form of what the run is made of is the footer's tooltip");
+    assert.match(markup, /aria-expanded="true"/);
+    assert.match(markup, /data-open="true"/);
+    assert.doesNotMatch(markup, /crew-tile|class="crew-head"/, "the old tile and head are gone");
   });
 
   it("draws the rail as tabs with one phase open by default, the current one", () => {
@@ -217,7 +226,7 @@ describe("the expanded card", () => {
     const rows = [...flatten(markup).matchAll(/class="crew-ag"[^>]*aria-label="([^"]*)"/g)].map((m) => m[1]);
     assert.deepEqual(rows, ["design:crdt-ledger, Done, 226k tokens, 12m 40s", "design:op-log, Done, 160k tokens, 9m 12s"]);
     assert.match(markup, /class="crew-share" aria-hidden="true"><span class="" style="width:100%">/, "the longest agent fills its bar");
-    assert.match(markup, />Hide </);
+    assert.match(markup, /Design <span class="n">3 agents · 2 done · 1 failed · 1 listed above · 12m 40s · 445k<\/span>/, "the section says who is listed above");
     const judge = render({ run, expanded: true, openPhase: "Judge" });
     assert.match(text(judge), /judge:correctness Finishing · usage reported 53s ago/);
     assert.match(judge, /class="crew-share" aria-hidden="true"><span class="work" style="width:100%"><\/span><span class="over"/, "past the longest agent the bar hatches");
@@ -239,13 +248,16 @@ describe("the expanded card", () => {
     assert.match(ended, /disabled=""[^>]*aria-label="Run pnpm vitest run packages\/sync again"/, "not routed yet, so it is offered disabled");
   });
 
-  it("ends with the footer: the panel buttons, the counts, and Stop run", () => {
+  it("ends with the footer: the panel buttons, the counts, and Stop", () => {
     const markup = render({ run, expanded: true });
     assert.equal(footMeta(run), "6 done · 1 failed · 2 running · 1 planned");
-    assert.match(text(markup), /All 10 agents Timeline 6 done · 1 failed · 2 running · 1 planned Stop run/);
-    assert.doesNotMatch(render({ run, expanded: true, readOnly: true }), /Stop run/);
+    assert.equal(footStats(run), "6 done · 1 failed · 2 running · 1 planned");
+    assert.match(text(markup), /All 10 agents Timeline 6 done · 1 failed · 2 running · 1 planned Stop/);
+    const stop = /<span class="lbl">Stop<\/span>/;
+    assert.match(markup, stop);
+    assert.doesNotMatch(render({ run, expanded: true, readOnly: true }), stop);
     const finished = mkRun(referenceAgents(), { status: "finished-with-failures", endedAt: S(45, 0) });
-    assert.doesNotMatch(render({ run: finished, expanded: true }), /Stop run/);
+    assert.doesNotMatch(render({ run: finished, expanded: true }), stop);
   });
 
   it("freezes the card when the feed is stale: a note, no spinner, no attention list, no actions", () => {
@@ -254,16 +266,16 @@ describe("the expanded card", () => {
     assert.doesNotMatch(markup, /spin-ring/);
     assert.doesNotMatch(markup, /Needs attention/);
     assert.match(text(markup), /Last known at [^·]+ · Muse is not reachable, nothing has been lost/);
-    assert.doesNotMatch(markup, /aria-label="Stop judge:perf"|Stop run/);
+    assert.doesNotMatch(markup, /aria-label="Stop judge:perf"|<span class="lbl">Stop<\/span>/);
     assert.match(text(markup), /judge:perf Last known · working/);
   });
 
   it("carries the container hooks the theme adapts to, and no live region of its own", () => {
     const markup = render({ run, expanded: true, openPhase: "Judge" });
-    assert.match(markup, /<section aria-label="Agents and tasks" data-crew-card="s1" class="crew-card @container/);
-    for (const hook of ['class="sub long"', 'class="sub short"', 'class="opt"', 'class="lbl"', 'class="crew-body"']) assert.ok(markup.includes(hook), hook);
+    assert.match(markup, /<section aria-label="Agents and tasks" data-crew-card="s1" data-open="true"( data-wait="true")? class="crew-card run-card @container/);
+    for (const hook of ['class="run-sub"', 'class="crew-el run-el-sub"', 'class="lbl"', 'class="crew-body run-body"', 'class="run-foot"']) assert.ok(markup.includes(hook), hook);
     assert.doesNotMatch(markup, /aria-live|role="status"/);
-    assert.match(render({ run, expanded: true, compact: true }), /class="crew-body compact"/);
+    assert.match(render({ run, expanded: true, compact: true }), /class="crew-body run-body compact"/);
   });
 
   it("shows the recap above the card and a thread with only tasks without a head", () => {

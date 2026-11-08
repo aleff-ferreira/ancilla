@@ -48,7 +48,7 @@ export function FilterChips(props: FilterChipsProps) {
             onClick={() => props.onFilter(filter)}
             className={cn(
               "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium whitespace-nowrap transition-colors duration-100",
-              on ? "bg-active text-fg" : cn("text-muted shadow-[inset_0_0_0_1px_var(--border)] hover:bg-hover", TONES[filter]),
+              on ? "bg-active text-fg" : cn("text-muted hover:bg-hover", TONES[filter]),
             )}
           >
             {ICONS[filter]}
@@ -59,7 +59,7 @@ export function FilterChips(props: FilterChipsProps) {
       })}
       <label
         className={cn(
-          "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md pr-1.5 pl-2 text-xs text-subtle shadow-[inset_0_0_0_1px_var(--border)] focus-within:shadow-[inset_0_0_0_1px_var(--focus-ring)]",
+          "group inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-sunken pr-1.5 pl-2 text-xs text-subtle focus-within:shadow-[inset_0_0_0_1px_var(--focus-ring)]",
           props.narrow ? "" : "ml-auto",
         )}
       >
@@ -86,7 +86,7 @@ export function FilterChips(props: FilterChipsProps) {
           }}
           className={cn("min-w-0 bg-transparent text-xs text-fg outline-none placeholder:text-subtle", open ? "w-[88px]" : "w-0")}
         />
-        <Kbd className="h-4 min-w-4 text-[10.5px]">/</Kbd>
+        <Kbd className="h-4 min-w-4 text-[10.5px] opacity-0 transition-opacity duration-100 group-focus-within:opacity-100 group-hover:opacity-100">/</Kbd>
       </label>
     </div>
   );

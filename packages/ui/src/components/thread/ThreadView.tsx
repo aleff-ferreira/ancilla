@@ -16,7 +16,8 @@ import { ApprovalPanel, PlanPanel, QuestionPanel, QueuedList, ReadOnlyNotice, St
 import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
 import { NeedsYouChip, CrewStatus, CrewToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../crew/HeaderChips.js";
-import { CrewDockCard } from "../crew/CrewCard.js";
+import { CrewDockCard, primaryRun } from "../crew/CrewCard.js";
+import { planMerges } from "../../model/runCard.js";
 import { CrewPanel } from "../crew/CrewPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, MOD } from "../ui/primitives.js";
@@ -305,6 +306,12 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
   const inputs = fold ? Object.values(fold.userInputs) : [];
   const queued = fold ? fold.echoes.filter((e) => e.disposition === "queued") : [];
   const plan = fold ? taskPlanView(fold, { stale: props.crewStale, crew: props.crew }) : null;
+  // A plan that belongs to the run the card shows is one of its parts: its steps are the card's spine and body, so it
+  // does not also get a card of its own, unless the user closed it.
+  const planHidden = useApp((s) => s.prefs.hiddenCards.includes(`plan:${session.sessionId}`));
+  const dismissedReports = useApp((s) => s.crew.dismissedReports);
+  const primary = props.crew ? primaryRun(props.crew, session.sessionId, props.crew.runs[0]?.clockAt ?? Date.now(), dismissedReports) : null;
+  const folded = !planHidden && planMerges(primary, plan);
   return (
     <div className="shrink-0">
       <div className="mx-auto flex w-full max-w-[776px] flex-col gap-2 px-4 pb-2 @min-[520px]:px-6">
@@ -329,6 +336,7 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
             stale={props.crewStale}
             readOnly={Boolean(thread?.readOnly)}
             compact={approvals.length + inputs.length > 0}
+            plan={planHidden ? null : plan}
           />
         ) : null}
         {approvals.map((request, index) => (
@@ -338,7 +346,7 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
           <QuestionPanel key={request.userInputId} request={request} keyboard={approvals.length === 0 && index === 0} />
         ))}
         <GoalPanel sessionId={session.sessionId} running={props.running} readOnly={Boolean(thread?.readOnly)} />
-        {plan ? <PlanPanel key={session.sessionId} sessionId={session.sessionId} view={plan} /> : null}
+        {plan && !folded ? <PlanPanel key={session.sessionId} sessionId={session.sessionId} view={plan} /> : null}
         {queued.length > 0 ? <QueuedList sessionId={session.sessionId} items={queued} /> : null}
         <TelemetryPills sessionId={session.sessionId} />
         <Composer
