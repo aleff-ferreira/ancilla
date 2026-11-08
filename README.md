@@ -14,7 +14,7 @@ in one place, with an opt-in assistant that remembers what you tell it. It uses 
 extra API keys, on Windows, macOS or Linux.
 
 **[Download Ancilla](https://github.com/aleff-ferreira/ancilla/releases/latest)** ·
-[Watch the tour](#see-it-in-90-seconds) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
+[See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
 > **New in 0.24.0:** an assistant with a face, a voice and a first meeting that you choose, shown in the sidebar, on its
@@ -25,13 +25,13 @@ extra API keys, on Windows, macOS or Linux.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
 > are trademarks of Meta, used here only to describe what this client connects to.
 
-## See it in 90 seconds
+## See it in action
 
-[![Choosing the assistant's face in its first meeting. Click to watch the whole tour.](docs/assets/ancilla-tour.gif)](docs/assets/ancilla-tour.mp4)
+![Choosing the assistant's face in its first meeting: a form, a colour, then a voice](docs/assets/ancilla-tour.gif)
 
-The first meeting with the assistant, what it remembers, a run card with the plan folded in, a cited research report,
-the Crew panel and the usage meter, on sample data.
-[Watch the whole tour](docs/assets/ancilla-tour.mp4) (1 min 32 s, no sound, 10 MB).
+That is the assistant's first meeting. The whole tour (1 min 32 s, no sound, on sample data) goes on to what the
+assistant remembers, a run card with the plan folded in, a cited research report, the Crew panel and the usage meter:
+[download the tour](https://github.com/aleff-ferreira/ancilla/raw/main/docs/assets/ancilla-tour.mp4) (MP4, 10 MB).
 
 ## Deep Research
 
@@ -82,7 +82,7 @@ surfaces. Research mode is not required.
 Each prompt gets a calm card above the composer. It rests shut with one line of what is happening and opens to the plan
 and the latest calls; its progress moves only when Muse reports, with no clock-driven estimate.
 
-![A running prompt's card opened to its plan, the steps ticked off as Muse reports them, and the latest calls](docs/assets/run-card.png)
+![A running prompt's card opened to its plan: the steps tick off as Muse reports them, the turn finishes, and the assistant's face says so beside the composer](docs/assets/run-card.gif)
 
 ![The Crew panel showing workflow phases, agent timeline, attention states and a searchable roster](docs/assets/agents.png)
 

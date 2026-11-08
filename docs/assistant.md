@@ -92,7 +92,8 @@ An assistant that was switched on before it had a face gets the same meeting.
 
 ![The first meeting's Look step: a form, a colour and a glow, with the face changing as you choose](assets/assistant-meeting.png)
 
-The [90-second tour](assets/ancilla-tour.mp4) starts with this meeting.
+The [tour video](https://github.com/aleff-ferreira/ancilla/raw/main/docs/assets/ancilla-tour.mp4) (a download, 1 min 32 s)
+starts with this meeting.
 
 ### The face
 

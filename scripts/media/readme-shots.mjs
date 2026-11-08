@@ -60,12 +60,3 @@ await scene("assistant-meeting", async (b, shot) => {
   await sleep(900);
   await shot();
 });
-await scene("run-card", async (b, shot) => {
-  await b.goto(`${base}?crew=turn&speed=4&${q}`, 1800);
-  await sleep(15500);
-  const r = await b.eval(`(() => { const e = Array.from(document.querySelectorAll('*')).find((n) => n.children.length === 0 && /^(Building|Stage|Performance|Write the|Setting)/.test(n.textContent.trim()) && n.getBoundingClientRect().y > 600); if (!e) return null; const rc = e.getBoundingClientRect(); return { x: rc.x + 40, y: rc.y + rc.height / 2, t: e.textContent.trim().slice(0, 40) }; })()`);
-  console.log("card head:", JSON.stringify(r));
-  if (r) await b.click(r.x, r.y);
-  await sleep(1600);
-  await shot();
-});

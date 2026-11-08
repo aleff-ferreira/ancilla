@@ -139,23 +139,27 @@ export async function clip(name, { query = "", hash = "", settle = 1800 } = {}, 
   const frames = [];
   b.on("Page.screencastFrame", (p) => {
     const file = `${dir}/f${String(frames.length).padStart(6, "0")}.jpg`;
-    frames.push({ t: p.metadata.timestamp, file });
+    // "m" is when the frame arrived on a monotonic clock. "t" is the screencast's own stamp, on the wall clock, which the
+    // machine can set back (WSL2 does, by about two seconds); encode.py uses "m" and repairs recordings that have only "t".
+    frames.push({ t: p.metadata.timestamp, m: performance.now() / 1000, file });
     writeFileSync(file, Buffer.from(p.data, "base64"));
     b.send("Page.screencastFrameAck", { sessionId: p.sessionId }).catch(() => {});
   });
   let tEnd = 0;
+  let tEndM = 0;
   try {
     await b.goto(`${BASE}?${query}${query ? "&" : ""}theme=dark&zoom=${ZOOM}${hash}`, settle);
     await b.eval(OVERLAY);
-    const t0 = Date.now() / 1000;
+    const m0 = performance.now() / 1000;
     await b.send("Page.startScreencast", { format: "jpeg", quality: 92, everyNthFrame: 2 });
     await script(stage(b));
     tEnd = Date.now() / 1000;
+    tEndM = performance.now() / 1000;
     await b.send("Page.stopScreencast");
-    console.log(`timing: script ${(tEnd - t0).toFixed(2)} s, first frame at +${((frames[0]?.t ?? t0) - t0).toFixed(2)} s, last frame at +${((frames.at(-1)?.t ?? t0) - t0).toFixed(2)} s`);
+    console.log(`timing: script ${(tEndM - m0).toFixed(2)} s, first frame at +${((frames[0]?.m ?? m0) - m0).toFixed(2)} s, last frame at +${((frames.at(-1)?.m ?? m0) - m0).toFixed(2)} s`);
   } finally {
     await b.close();
   }
-  writeFileSync(`${dir}/frames.json`, JSON.stringify({ tEnd, frames }));
-  console.log(`${name}: ${frames.length} frames over ${(tEnd - frames[0].t).toFixed(1)} s`);
+  writeFileSync(`${dir}/frames.json`, JSON.stringify({ tEnd, tEndM, frames }));
+  console.log(`${name}: ${frames.length} frames over ${(tEndM - frames[0].m).toFixed(1)} s`);
 }

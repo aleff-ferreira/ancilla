@@ -33,10 +33,31 @@ def run(cmd):
     return p
 
 
+def timeline(data):
+    """The frames of a recording with their times on one clock that only moves forward, and the time it ended.
+
+    A recording made by the current tour-lib carries a monotonic time ("m") for each frame and nothing needs repairing. An
+    older one has only the wall clock, and WSL2 now and then sets that back by about two seconds: one frame is then stamped
+    earlier than the frame before it and every frame after is on the shifted clock. Reading the step as a stall would freeze
+    the clip for the gap, and dropping the frames after it would lose them, so the clock is carried on from where it was.
+    """
+    frames = data["frames"]
+    if "tEndM" in data and all("m" in f for f in frames):
+        return [{**f, "t": f["m"]} for f in frames], data["tEndM"]
+    stamped, offset = [], 0.0
+    for f in frames:
+        t = f["t"] + offset
+        if stamped and t <= stamped[-1]["t"]:
+            offset += stamped[-1]["t"] - t + 0.033
+            t = stamped[-1]["t"] + 0.033
+        stamped.append({**f, "t": t})
+    return stamped, data["tEnd"] + offset
+
+
 def clip(name):
     d = f"{ROOT}/{name}"
     data = json.load(open(f"{d}/frames.json"))
-    frames, t_end = data["frames"], data["tEnd"]
+    frames, t_end = timeline(data)
     lines = []
     for i, f in enumerate(frames):
         nxt = frames[i + 1]["t"] if i + 1 < len(frames) else t_end
@@ -56,7 +77,8 @@ def clip(name):
 def sheet(name, tiles=12):
     out = f"{ROOT}/{name}-sheet.png"
     data = json.load(open(f"{ROOT}/{name}/frames.json"))
-    dur = data["tEnd"] - data["frames"][0]["t"]
+    frames, t_end = timeline(data)
+    dur = t_end - frames[0]["t"]
     run([FF, "-y", "-hide_banner", "-loglevel", "error", "-i", f"{ROOT}/{name}.mp4", "-vf",
          f"fps={tiles / max(dur, 1):.4f},scale=640:-1,tile=3x4:padding=6:color=0x202024", "-frames:v", "1", out])
     print(out, f"(one thumbnail per {dur / tiles:.1f} s)")

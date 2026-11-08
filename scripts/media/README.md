@@ -6,7 +6,7 @@ changes, so the screenshots and the tour do not drift from what ships.
 
 | File | What it makes |
 | --- | --- |
-| `readme-shots.mjs` | The screenshots: `home`, `thread`, `agents`, `usage`, `research`, `research-report`, `run-card` and the four assistant pages. 1440 x 950, dark theme. |
+| `readme-shots.mjs` | The screenshots: `home`, `thread`, `agents`, `usage`, `research`, `research-report` and the four assistant pages. 1440 x 950, dark theme. |
 | `social-card.mjs` | The 1280 x 640 social card (the picture GitHub shows when the link is shared), drawn in the brand's type and colours. |
 | `tour.mjs`, `tour-lib.mjs`, `tour-overlay.js` | The tour video, one clip at a time: a cursor that moves to real elements and clicks them, captions, fades, a title and a closing card. |
 | `encode.py` | Turns recorded frames into clips, joins the clips into the film, cuts the GIF preview and finishes the social card. |
@@ -31,7 +31,7 @@ npm run demo --workspace @ancilla/web
 The screenshots:
 
 ```bash
-node scripts/media/readme-shots.mjs /tmp/shots            # all of them, or name one: ... /tmp/shots run-card
+node scripts/media/readme-shots.mjs /tmp/shots            # all of them, or name one: ... /tmp/shots home
 cp /tmp/shots/*.png docs/assets/
 ```
 
@@ -42,9 +42,12 @@ node scripts/media/tour.mjs intro meeting memory run research crew usage outro
 python3 scripts/media/encode.py clip intro meeting memory run research crew usage outro
 python3 scripts/media/encode.py final docs/assets/ancilla-tour.mp4 26      # the second argument is the quality (lower is better)
 python3 scripts/media/encode.py gif docs/assets/ancilla-tour.mp4 docs/assets/ancilla-tour.gif 11 7.4
+python3 scripts/media/encode.py gif $TOUR_DIR/run.mp4 docs/assets/run-card.gif 9.2 5.6    # a turn finishing, from the run clip
 ```
 
-To look at a clip without playing it: `encode.py sheet meeting` (twelve thumbnails) or `encode.py strip meeting 20 1 3 2`.
+To look at a clip without playing it: `encode.py sheet meeting` (twelve thumbnails) or `encode.py strip meeting 20 1 3 2`;
+pick a GIF's start and length from a strip. GitHub plays GIFs in a README but never a video from the repository (it strips
+`<video>` and will not preview a large file), so the README shows GIFs and links the MP4 as a download.
 
 The social card (GitHub has no way to set it from a script: upload it in the repository's Settings, under Social preview):
 
@@ -60,5 +63,9 @@ A clip fades up from the brand's forest colour and back into it, so clips join w
 clicks are real mouse events at the element's position, so hover states and menus behave as for a person; captions, cards
 and the cursor are drawn by `tour-overlay.js` over the page, outside the app's zoom. When the interface changes, a clip
 that cannot find its target stops with the selector it was looking for: fix the selector in `tour.mjs`.
+
+Frames are timed by a monotonic clock. The screencast's own stamps are on the wall clock, which WSL2 sometimes sets back by
+about two seconds in the middle of a recording; `encode.py` carries such a step on instead of reading it as a stall, so a
+recording made before this fix still comes out at its real length.
 
 The demo is a development page only, and nothing here ships in the app.
