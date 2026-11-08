@@ -38,6 +38,11 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
 - **Tasks in the background.** Ask it to look into something ("research the open issues and summarise them") and it
   starts a task and carries on talking. You can ask how it is going, pause it, resume it or cancel it. When a task
   finishes, fails or needs you, it says so in a pause. It never interrupts you to say it.
+- **What changed while you were away.** A call opens with the work that finished, failed or waits on you since you last
+  talked ("While you were away: the release notes need your approval. The issue summary is done."): what waits on you
+  first, two named and the rest counted. It is said once, after about two and a half seconds of quiet, and not at all if
+  you speak first, so it never lands on a topic you chose. It goes on in the language of the conversation, and the same
+  setting as the rest turns it off (Assistant, Voice, Speaks up by itself).
 - **Languages.** English and Brazilian Portuguese, switching when you do.
 
 ## What it will and will not do by voice

@@ -315,6 +315,46 @@ describe("saying something nobody asked for", () => {
     assert.equal(rig.tts.said.at(-1)?.text, "The backup finished.");
   });
 
+  const hello = { type: "hello", v: 1, mode: "hands-free", lang: null, echoCancelled: true, resume: null, thread: null } as const;
+  const NEWS = "While you were away: Weekly report is done.";
+
+  it("opens with the news that was waiting, once, after a moment's quiet", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, script: simple(), open: false });
+    rig.host.openingText = NEWS;
+    await rig.session.start(hello);
+    await rig.client.quiet(1500);
+    assert.equal(rig.tts.said.length, 0, "not at once: the person may want to speak first");
+    await rig.client.quiet(1500);
+    assert.equal(rig.tts.said.map((s) => s.text).join(" "), NEWS);
+    await finished(rig);
+    assert.deepEqual(rig.host.records.map((r) => [r.role, r.source, r.text]), [["assistant", "event", NEWS]], "kept in the conversation, so that it is not said again");
+    await rig.client.quiet(6000);
+    assert.equal(rig.tts.said.map((s) => s.text).join(" "), NEWS, "and not again");
+  });
+
+  it("does not open with it when the person speaks first", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, script: simple(), open: false });
+    rig.host.openingText = NEWS;
+    await rig.session.start(hello);
+    await rig.client.speak(1, 1000);
+    await rig.client.quiet(100);
+    await finished(rig);
+    await rig.client.quiet(6000);
+    assert.equal(rig.tts.said.some((s) => /While you were away/.test(s.text)), false, "they chose the topic; the news is not laid over it");
+  });
+
+  it("opens without news when the host cannot say what is waiting", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, script: simple(), open: false });
+    rig.host.opening = () => {
+      throw new Error("the tasks could not be read");
+    };
+    await rig.session.start(hello);
+    assert.equal(rig.client.of("ready").length, 1, "the call opened");
+    await rig.client.quiet(6000);
+    assert.equal(rig.tts.said.length, 0);
+    assert.ok(rig.logs.some((l) => /could not be read/.test(l)));
+  });
+
   it("shows a task without saying it when there is nothing to say", async () => {
     const rig = await makeRig({ sentences: SENTENCES, script: simple() });
     rig.host.emit({ id: "t3", kind: "task", title: "Index", status: "running", say: null, needsUser: false });

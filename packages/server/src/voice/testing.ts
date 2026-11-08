@@ -254,6 +254,8 @@ export class FakeHost implements VoiceHost {
   toolResult: ToolResult = { ok: true, text: "done", narration: "Starting that now." };
   persona$: Persona = { name: "Vesper", callsUser: "Alex", language: null, tone: null, voice: null };
   memory: string | null = null;
+  /** What the host would say as a call opens. */
+  openingText: string | null = null;
 
   persona(): Persona {
     return this.persona$;
@@ -280,6 +282,9 @@ export class FakeHost implements VoiceHost {
   }
   history(): ChatMessage[] {
     return [];
+  }
+  opening(): string | null {
+    return this.openingText;
   }
   emit(event: HostEvent): void {
     this.handler?.(event);

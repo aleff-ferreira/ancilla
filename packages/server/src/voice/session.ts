@@ -158,6 +158,8 @@ export class VoiceSession {
   private pendingMerge: { text: string; turn: number } | null = null;
   private recentSpoken: Array<{ at: number; words: string[] }> = [];
   private readonly pendingSay: HostEvent[] = [];
+  /** The news waiting for the call to open, said once after a moment's quiet; dropped if the person speaks first. */
+  private openingSay: string | null = null;
   private unsubscribe: (() => void) | null = null;
   private cancelTick: (() => void) | null = null;
   /** With `debug` on, the audio the call received, as raw 16 kHz PCM, for listening to what the server heard. */
@@ -204,6 +206,11 @@ export class VoiceSession {
     const voice = pickVoice(engines.tts.voices, this.langCode(), host.persona().voice);
     this.send({ type: "ready", session: this.id, sampleRate: engines.tts.sampleRate, engine: `${engines.asr.id} + ${engines.tts.id}`, voice: voice?.id ?? "", lang: this.lang, resumed: this.history.length > 0 });
     this.send({ type: "state", state: "listening" });
+    try {
+      this.openingSay = host.opening?.() ?? null;
+    } catch (error) {
+      this.deps.log(`the news for the opening of the call could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
     this.scheduleTick();
   }
 
@@ -561,6 +568,9 @@ export class VoiceSession {
 
   private beginUserTurn(text: string, source: "voice" | "text", trace: TurnTrace | null): void {
     if (text === "") return;
+    // The person has the floor, in words that could be made out (a cough does not take it): what the call would have opened
+    // with is not said now, over the topic they chose, as if it were fresh.
+    this.openingSay = null;
     let turn: number;
     let said = text;
     if (this.pendingMerge) {
@@ -820,8 +830,15 @@ export class VoiceSession {
   }
 
   private async maybeSpeakPending(): Promise<void> {
-    if (this.pendingSay.length === 0 || this.reply || this.agent !== "idle" || this.taker.inTurn || this.muted) return;
+    if ((this.pendingSay.length === 0 && this.openingSay === null) || this.reply || this.agent !== "idle" || this.taker.inTurn || this.muted) return;
     if (this.taker.quietForMs(this.nowMs()) < this.cfg.proactiveQuietMs) return;
+    // What was waiting when the call opened comes first; it is said once.
+    if (this.openingSay !== null) {
+      const text = this.openingSay;
+      this.openingSay = null;
+      this.sayDirect(text, true);
+      return;
+    }
     const event = this.pendingSay.shift() as HostEvent;
     this.sayDirect(event.say as string, true);
   }

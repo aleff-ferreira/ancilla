@@ -406,7 +406,7 @@ function Sound(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
           onChange={(mode) => void props.save({ mode })}
         />
       </Row>
-      <Row label="Speaks up by itself" description="When a task you gave it finishes or needs you, it says so in a pause in the conversation. It never interrupts you.">
+      <Row label="Speaks up by itself" description="When a task you gave it finishes or needs you, it says so in a pause in the conversation, and a call opens with what changed since you last talked. It never interrupts you, and says nothing if you speak first.">
         <Toggle checked={settings.proactive} onChange={(proactive) => void props.save({ proactive })} label="Let it speak up about tasks" />
       </Row>
       <Row label="Reads each turn twice" description={status.pack.refine ? "Uses the accuracy booster to write down what you said. Slower to load, much better with names and numbers." : "Needs the accuracy booster, which is not installed."}>

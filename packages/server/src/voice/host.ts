@@ -62,4 +62,10 @@ export interface VoiceHost {
   subscribe(handler: (event: HostEvent) => void): () => void;
   /** The earlier turns of a thread, to go on from; empty when there are none. */
   history(thread: string | null): ChatMessage[];
+  /**
+   * What is worth saying as a call opens: work that finished, failed or waits on the person since they last talked. Null
+   * when there is none, or when the person asked for nothing unprompted. It is said once, after a moment's quiet, and not at
+   * all if the person speaks first.
+   */
+  opening?(): string | null;
 }

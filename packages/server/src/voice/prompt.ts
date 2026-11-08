@@ -93,6 +93,17 @@ export function taskPhrase(lang: Lang, kind: TaskNotice, title: string): string 
   return TASK[pick(lang)][kind](sayable(title));
 }
 
+const AWAY: Record<"en" | "pt", { lead: string; more: (n: number) => string }> = {
+  en: { lead: "While you were away:", more: (n) => `And ${n} more.` },
+  pt: { lead: "Enquanto você esteve fora:", more: (n) => `E mais ${n}.` },
+};
+
+/** What a call opens with when work finished, failed or waits on the person since they last talked: the first few, then how many more. */
+export function openingPhrase(lang: Lang, items: readonly { notice: TaskNotice; title: string }[], more = 0): string {
+  const bank = AWAY[pick(lang)];
+  return [bank.lead, ...items.map((item) => taskPhrase(lang, item.notice, item.title)), ...(more > 0 ? [bank.more(more)] : [])].join(" ");
+}
+
 /** A short phrase to say while a model or a tool takes its time. It varies with the turn so that it is not always the same. */
 export function thinkingPhrase(lang: Lang, turn: number): string {
   const bank = THINKING[pick(lang)];

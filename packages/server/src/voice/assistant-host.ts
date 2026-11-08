@@ -4,7 +4,7 @@ import { VOICES } from "../assistant/context.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
 import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
-import { taskPhrase, type TaskNotice } from "./prompt.js";
+import { openingPhrase, taskPhrase, type TaskNotice } from "./prompt.js";
 import type { VoiceSettings } from "./settings.js";
 import { guessLanguage, type Lang } from "./text.js";
 import { VoiceTools } from "./tools.js";
@@ -152,6 +152,33 @@ export class AssistantVoiceHost implements VoiceHost {
   }
 
   history(thread: string | null): ChatMessage[] {
-    return this.deps.conversations.history(thread ?? this.deps.conversationId);
+    const messages = this.deps.conversations.history(thread ?? this.deps.conversationId);
+    // A conversation goes on in the language it was in, so that what is said before anyone speaks is too.
+    if (this.userLang === "unknown") {
+      const last = [...messages].reverse().find((m) => m.role === "user");
+      const guess = last ? guessLanguage(last.content) : "unknown";
+      if (guess !== "unknown") this.userLang = guess;
+    }
+    return messages;
+  }
+
+  /**
+   * What is worth saying as a call opens: work that finished, failed or waits on the person since they last talked (or, if
+   * they never have, only what waits on them). The first two, then how many more. Null when there is none, or when they
+   * asked for nothing unprompted.
+   */
+  opening(): string | null {
+    if (!this.deps.settings().proactive) return null;
+    const { assistant, conversations } = this.deps;
+    // When they last talked: the latest conversation with anything in it (a new one for this call has nothing yet).
+    const last = conversations.list(5).find((c) => c.turns > 0)?.updatedAt ?? null;
+    const rank: Record<string, number> = { needs: 0, failed: 1, unverified: 2, done: 3 };
+    const news = assistant.tasks
+      .list("all", 50)
+      .map((task) => ({ task, notice: noticeOf(task) }))
+      .filter((n): n is { task: Task; notice: TaskNotice } => n.notice !== null && n.notice in rank && (last === null ? n.notice === "needs" : n.task.updatedAt > last))
+      .sort((a, b) => (rank[a.notice] as number) - (rank[b.notice] as number) || b.task.updatedAt - a.task.updatedAt);
+    if (news.length === 0) return null;
+    return openingPhrase(this.lang(), news.slice(0, 2).map((n) => ({ notice: n.notice, title: n.task.title })), news.length - 2);
   }
 }
