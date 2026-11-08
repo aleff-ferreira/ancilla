@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { identifiersOf } from "../src/assistant/text.js";
+import { identifiersOf, isPastQuestion, parseAsOf } from "../src/assistant/text.js";
 import { MIGRATIONS, LATEST_VERSION, migrate, rollbackTo, schemaVersion } from "../src/assistant/schema.js";
 import { ConflictError, MemoryStore, ValidationError, type CaptureResult, type Change } from "../src/assistant/store.js";
 import { GLOBAL, type Candidate } from "../src/assistant/types.js";
@@ -111,8 +111,8 @@ describe("the assistant's profile", () => {
     const p = r.store.getProfile();
     assert.equal(p.enabled, false);
     assert.equal(p.autonomy, "ask");
-    assert.equal(p.policy.allowCommands, false);
     assert.equal(p.policy.allowProjectWrites, false);
+    assert.equal("allowCommands" in p.policy, false, "there is no setting for a permission that nothing enforces");
     const out = r.say("Remember that I prefer tabs over spaces");
     assert.equal(out.skipped, "disabled");
     assert.equal(out.durable, false);
@@ -604,6 +604,134 @@ describe("retrieval", () => {
     const b = MemoryStore.open(path, { now: () => T0 + DAY });
     assert.match(b.retrieve({ text: "where is the staging server?", thread: "s1", now: T0 + DAY }).text, /app-1\.example\.com/);
     b.close();
+  });
+});
+
+describe("in a large memory", () => {
+  it("still finds what a correction, a forget, a slot and a repeat are about among hundreds of other notes", () => {
+    const r = rig();
+    const words = ["amber", "basalt", "cobalt", "ember", "garnet", "harbor", "indigo", "jasper", "kestrel", "lantern", "marble", "nickel"];
+    for (let i = 0; i < 600; i += 1) r.say(`Remember that the ${words[i % 12]} ${words[(i * 5) % 12]} depot ${i} is on shelf ${i * 7}`, T0 + (i + 1) * 1000);
+    const total = r.store.stats().items.active;
+    assert.ok(total >= 400, `${total} notes in the store`);
+    const rule = created(r.say("Remember that the release notes go in docs/NOTES.md", T0 + DAY));
+    const tz1 = created(r.say("My timezone is America/Belem", T0 + DAY + MIN));
+    const tz2 = created(r.say("My timezone is Europe/Lisbon", T0 + DAY + 2 * MIN));
+    assert.deepEqual(tz2.supersedes, [tz1.id], "a new value for a slot replaces the old one");
+    const fix = created(r.say("Actually, the release notes go in CHANGELOG.md instead of docs/NOTES.md", T0 + DAY + 3 * MIN));
+    assert.deepEqual(fix.supersedes, [rule.id], "a correction finds the memory it is about");
+    const again = r.say("Remember that the release notes go in CHANGELOG.md instead of docs/NOTES.md", T0 + DAY + 4 * MIN);
+    assert.equal(again.changes[0]?.type, "corroborated", "a repeat is recognised, not duplicated");
+    const gone = r.say("Forget the release notes", T0 + DAY + 5 * MIN);
+    assert.equal(gone.changes[0]?.type, "forgotten");
+    assert.equal(r.store.stats().items.active, total + 1, "the timezone stays, the rule and its earlier version are gone, the other notes are untouched");
+  });
+});
+
+describe("a question about the past", () => {
+  const DEC10 = Date.UTC(2026, 11, 10, 12, 0, 0);
+
+  it("reads the moment a question is about, and nothing when it names none", () => {
+    assert.equal(new Date(parseAsOf("what was it on 2026-09-15?", DEC10) as number).toISOString(), "2026-09-15T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was my timezone in September?", DEC10) as number).toISOString(), "2026-09-30T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what did we pick back in March 2025", DEC10) as number).toISOString(), "2025-03-31T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it last month?", DEC10) as number).toISOString(), "2026-11-30T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it last year?", DEC10) as number).toISOString(), "2025-12-31T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it yesterday?", DEC10) as number).toISOString(), "2026-12-09T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it last week?", DEC10) as number).toISOString(), "2026-12-06T23:59:59.999Z");
+    assert.equal(parseAsOf("what was it three weeks ago?", DEC10), DEC10 - 21 * DAY);
+    assert.equal(new Date(parseAsOf("what was it in March?", DEC10) as number).toISOString(), "2026-03-31T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it in January?", Date.UTC(2026, 1, 10)) as number).toISOString(), "2026-01-31T23:59:59.999Z");
+    assert.equal(new Date(parseAsOf("what was it in March?", Date.UTC(2026, 1, 10)) as number).toISOString(), "2025-03-31T23:59:59.999Z", "a month that has not come yet this year is last year's");
+    assert.equal(parseAsOf("what was it in December?", DEC10), DEC10, "this month, so far");
+    assert.equal(parseAsOf("I may go to the shop", DEC10), null, "'may' the verb is not a month");
+    assert.equal(parseAsOf("what should I do next?", DEC10), null);
+    assert.equal(new Date(parseAsOf("what was it yesterday?", DEC10, -180) as number).toISOString(), "2026-12-10T02:59:59.999Z", "the day ends at the user's midnight");
+    assert.ok(isPastQuestion("what was my timezone") && isPastQuestion("what did we pick last month") && !isPastQuestion("what is my timezone"));
+  });
+
+  it("answers as of then: what held at that time, not what holds now, not what had not been said yet", () => {
+    const r = rig();
+    r.say("My timezone is America/Belem", T0 + MIN);
+    r.say("My timezone is Europe/Lisbon", T0 + 40 * DAY);
+    const now = T0 + 70 * DAY;
+    r.clock.t = now;
+    const question = "what was my timezone in October?";
+    const then = r.store.retrieve({ text: question, thread: "s1", now, asOf: parseAsOf(question, now) as number });
+    assert.ok(then.text.includes("America/Belem") && !then.text.includes("Europe/Lisbon"), then.text);
+    assert.match(then.text, /earlier, replaced on 2026-11-10/);
+    const current = r.store.retrieve({ text: "what is my timezone?", thread: "s1", now });
+    assert.ok(current.text.includes("Europe/Lisbon") && !current.text.includes("America/Belem"));
+    const before = r.store.retrieve({ text: "what was my timezone then?", thread: "s1", now, asOf: T0 - DAY });
+    assert.equal(before.noEvidence, true, "before anything was said, there is nothing, and it says so");
+    const later = r.store.retrieve({ text: "what was my timezone in November?", thread: "s1", now, asOf: parseAsOf("in November", now) as number });
+    assert.ok(later.text.includes("Europe/Lisbon") && !later.text.includes("America/Belem"), "by the end of November the newer one had replaced it");
+  });
+});
+
+describe("tidying", () => {
+  /** A copy of an item under another id, as a race or an old bug could leave one. */
+  function duplicate(r: Rig, from: string, id: string, excerpt: string): void {
+    const s = raw(r.store);
+    s.db.exec(`INSERT INTO memory_items (id, assistant_id, kind, scope_kind, scope_key, status, slot, pinned, text, basis, confidence, observed_at, valid_from, valid_to, due_at, commitment, revalidate_after_ms, last_confirmed_at, superseded_by, rev, identifiers, digest, created_at, updated_at) SELECT '${id}', assistant_id, kind, scope_kind, scope_key, status, slot, pinned, text, basis, confidence, observed_at, valid_from, valid_to, due_at, commitment, revalidate_after_ms, last_confirmed_at, superseded_by, rev, identifiers, digest, created_at + 1, updated_at FROM memory_items WHERE id = '${from}'`);
+    s.db.exec(`INSERT INTO memory_sources (id, kind, excerpt, observed_at, trust, digest, created_at) VALUES ('src_${id}', 'user_message', '${excerpt}', ${T0 + 9 * MIN}, 'user', 'x${id}', ${T0})`);
+    s.db.exec(`INSERT INTO memory_evidence (item_id, source_id, rev) VALUES ('${id}', 'src_${id}', 1)`);
+    s.db.exec(`INSERT INTO memory_fts (ref, text) SELECT '${id}', text FROM memory_items WHERE id = '${id}'`);
+  }
+
+  it("makes one memory of identical copies, keeps what each came from, and does not erase the words", () => {
+    const r = rig();
+    const a = created(r.say("Remember that the staging server is at app-1.example.com", T0 + MIN));
+    duplicate(r, a.id, "m_copy", "Remember that the staging server is at app-1.example.com");
+    assert.equal(r.store.stats().items.active, 2);
+    const done = r.store.consolidate(T0 + DAY);
+    assert.deepEqual(done, { merged: 1, expired: 0, rolledUp: 0 });
+    assert.equal(r.store.stats().items.active, 1);
+    const detail = r.store.detail(a.id);
+    assert.equal(detail.sources.length, 2);
+    assert.ok(detail.sources.every((s) => s.excerpt.includes("app-1.example.com")), "the words are still there");
+    assert.equal(r.store.stats().tombstones, 0, "a merge is not an erasure");
+    assert.equal(r.store.consolidate(T0 + 2 * DAY).merged, 0, "and doing it again changes nothing");
+  });
+
+  it("drops working notes long past their time", () => {
+    const r = rig();
+    r.store.propose(candidate("we are in the middle of the migration", { kind: "working", validTo: T0 - 20 * DAY, at: T0 + MIN }), { sourceKey: "w1", thread: "s1" });
+    r.store.propose(candidate("we are in the middle of the cutover", { kind: "working", validTo: T0 + 20 * DAY, at: T0 + MIN }), { sourceKey: "w2", thread: "s1" });
+    assert.equal(r.store.stats().items.active, 2);
+    assert.equal(r.store.consolidate(T0 + DAY).expired, 1);
+    assert.equal(r.store.stats().items.active, 1);
+  });
+
+  it("rolls up old history as a derived summary that is never a source, and erases it with any note it was made from", () => {
+    const r = rig();
+    const ids: string[] = [];
+    const now = T0 + 90 * DAY;
+    const topics = ["zebrafish tank", "saturn rocket", "copper kettle", "violin recital", "granite counter", "paper lantern"];
+    topics.forEach((topic, i) => {
+      const out = r.store.propose(candidate(`we deployed the ${topic} release to staging`, { kind: "event", basis: "observed", at: T0 + (i + 1) * DAY }), { sourceKey: `e${i}`, thread: "s1" });
+      ids.push(created(out).id);
+    });
+    assert.equal(r.store.consolidate(now).rolledUp, 1);
+    const rows = () => raw(r.store).all("SELECT period, text, derived_from FROM memory_summaries");
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0]?.period, "2026-10");
+    assert.equal((JSON.parse(String(rows()[0]?.derived_from)) as string[]).length, 6);
+
+    const question = "what happened in October?";
+    const asked = r.store.retrieve({ text: question, thread: "s1", now, asOf: parseAsOf(question, now) as number });
+    assert.match(asked.text, /Earlier, in summary \(made by Ancilla from older notes, not a source/);
+    assert.match(asked.text, /2026-10: 6 notes, among them/);
+    const plain = r.store.retrieve({ text: "what is the capital of France?", thread: "s1", now });
+    assert.ok(!/in summary/.test(plain.text), "a summary appears only when the past is asked about");
+
+    r.store.forget([ids[0] as string]);
+    assert.equal(rows().length, 0, "the roll-up made from an erased note is gone at once");
+    assert.equal(r.store.consolidate(now).rolledUp, 1, "a new one is made from what is left");
+    assert.ok(!JSON.stringify(rows()).includes("zebrafish"), "and it does not carry the erased words");
+    r.store.forget([ids[1] as string, ids[2] as string]);
+    assert.equal(r.store.consolidate(now).rolledUp, 0, "too few left to be worth summarising");
+    assert.equal(rows().length, 0);
   });
 });
 

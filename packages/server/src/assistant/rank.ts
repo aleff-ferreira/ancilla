@@ -69,6 +69,14 @@ export function visibleScopes(parts: { account?: string; project?: string; threa
 /** Whether an item may be considered for this question at all. */
 export function eligible(item: MemoryItem, query: RetrievalQuery): boolean {
   if (item.status === "deleted" || item.status === "pending") return false;
+  if (query.asOf !== undefined) {
+    // A question about a past moment: whatever existed then and had not been replaced yet, whatever its status is now.
+    if (!new Set(query.scopes.map(scopeKey)).has(scopeKey(item.scope))) return false;
+    if (item.observedAt > query.asOf) return false;
+    if (item.validFrom !== null && item.validFrom > query.asOf) return false;
+    if (item.validTo !== null && item.validTo <= query.asOf) return false;
+    return true;
+  }
   if (item.status === "superseded" && !query.history) return false;
   if (item.status !== "superseded" && item.commitment && item.commitment !== "open") return false;
   const visible = new Set(query.scopes.map(scopeKey));
@@ -133,14 +141,15 @@ export function rankMemories(query: RetrievalQuery, hits: readonly Hit[]): Retri
     if (item.kind === "constraint") why.push("standing rule");
     score += SCOPE_BOOST[item.scope.kind] + KIND_BOOST[item.kind];
     const half = HALF_LIFE_DAYS[item.kind];
-    const age = Math.max(0, (query.now - item.observedAt) / DAY);
+    const age = Math.max(0, ((query.asOf ?? query.now) - item.observedAt) / DAY);
     const decay = half === Infinity ? 1 : Math.max(0.3, Math.pow(0.5, age / half));
     score *= decay * (0.6 + 0.4 * item.confidence);
     if (item.basis === "inferred") {
       score *= 0.6;
       why.push("tentative");
     }
-    const stale = isStale(item, query.now);
+    // Said about the past, a note is not "out of date": it is what held then.
+    const stale = query.asOf === undefined && isStale(item, query.now);
     if (stale) {
       score *= 0.85;
       why.push("may be out of date");

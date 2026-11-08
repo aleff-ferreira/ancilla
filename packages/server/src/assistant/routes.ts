@@ -286,6 +286,11 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
       service.announce({ reason: "memory" });
       return { status: 201, body: { id: made.id, change: made.change, item: made.id ? store.getItem(made.id) : null, epoch: store.epoch() } };
     }
+    if (req.method === "POST" && sub === "/consolidate") {
+      const done = store.consolidate();
+      if (done.merged + done.expired + done.rolledUp > 0) service.announce({ reason: "memory" });
+      return { status: 200, body: { ...done, epoch: store.epoch() } };
+    }
     if (req.method === "POST" && sub === "/wipe") {
       const body = await req.body();
       if (body["confirm"] !== "wipe everything") bad('send {"confirm":"wipe everything"} to erase all memories', "confirm");

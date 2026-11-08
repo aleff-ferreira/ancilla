@@ -18,7 +18,7 @@ import { MuseSubscriptionCard } from "./MuseSignIn.js";
 import { LinuxSetupCard } from "./LinuxSetup.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
-function Pick<T extends string | number | null>(props: {
+export function Pick<T extends string | number | null>(props: {
   value: T;
   options: readonly { value: T; label: string; hint?: string }[];
   onChange: (value: T) => void;
@@ -125,7 +125,7 @@ function ModelPick(props: { value: string | null; onChange: (modelId: string | n
   );
 }
 
-function Section(props: { title: string; children: ReactNode }) {
+export function Section(props: { title: string; children: ReactNode }) {
   return (
     <section className="mt-6">
       <h2 className="mb-2 text-xs leading-4 font-medium tracking-[0.04em] text-muted uppercase">{props.title}</h2>
@@ -134,7 +134,7 @@ function Section(props: { title: string; children: ReactNode }) {
   );
 }
 
-function Row(props: { label: ReactNode; description?: string; descriptionClassName?: string; children?: ReactNode }) {
+export function Row(props: { label: ReactNode; description?: string; descriptionClassName?: string; children?: ReactNode }) {
   return (
     <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-t border-line px-4 py-3 first:border-t-0">
       {/* A floor on the label, or a wide row of choices squeezes it to one word per line instead of wrapping. */}
@@ -154,7 +154,7 @@ function Row(props: { label: ReactNode; description?: string; descriptionClassNa
  * not on every keystroke, so a half-typed number never reaches the server; one past the range lands on its edge,
  * which is where the server would put it, and an empty field goes back to what it was.
  */
-function Num(props: { value: number; min: number; max: number; step?: number; unit?: string; label: string; onChange: (value: number) => void; disabled?: boolean }) {
+export function Num(props: { value: number; min: number; max: number; step?: number; unit?: string; label: string; onChange: (value: number) => void; disabled?: boolean }) {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft === null) return;

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { AncillaError, type EventHandler, type AncillaClient } from "../src/client.js";
-import { AncillaController, staleThreadReason, type Platform } from "../src/model/controller.js";
+import { AncillaController, hashToRoute, routeToHash, staleThreadReason, type Platform } from "../src/model/controller.js";
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
 import { crewBusy, crewView } from "../src/model/crew.js";
@@ -322,6 +322,12 @@ class FakeClient implements AncillaClient {
     const run = this.researchRuns.find((r) => r.runId === runId);
     if (!run) throw new Error("Unknown run.");
     return { ...run, report: run.report ?? "# Report\n\nA line [1].\n\n## Sources\n\n[1] A (https://example.com)" };
+  }
+  assistantCalls: { method: string; path: string; body?: unknown }[] = [];
+  assistantReply: unknown = {};
+  async assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    this.assistantCalls.push({ method, path, ...(body === undefined ? {} : { body }) });
+    return this.assistantReply as T;
   }
   async getResearchSettings(): Promise<ResearchSettings> {
     return this.researchSettings;
@@ -6375,6 +6381,53 @@ describe("guided Linux setup", () => {
     assert.equal(await controller.send("Keep this draft"), false);
     assert.equal(controller.store.get().toasts.at(-1)?.title, "Could not start a thread");
     assert.equal(controller.store.get().toasts.at(-1)?.action, undefined, "other platforms cannot open Linux setup");
+    stop();
+  });
+});
+
+describe("the assistant page", () => {
+  it("has a route of its own, an address for it, and keeps the page it came from for Back", async () => {
+    assert.equal(routeToHash({ kind: "assistant" }), "#/assistant");
+    assert.deepEqual(hashToRoute("#/assistant"), { kind: "assistant" });
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    controller.navigate({ kind: "assistant" });
+    assert.deepEqual(controller.store.get().route, { kind: "assistant" });
+    controller.goBack();
+    assert.deepEqual(controller.store.get().route, { kind: "thread", sessionId: "s1" });
+    stop();
+  });
+
+  it("passes a call of the assistant's surface to the server unchanged", async () => {
+    const client = new FakeClient();
+    client.assistantReply = { available: true };
+    const { controller, stop } = await started(client);
+    assert.deepEqual(await controller.assistant("PATCH", "/profile", { enabled: true }), { available: true });
+    assert.deepEqual(client.assistantCalls, [{ method: "PATCH", path: "/profile", body: { enabled: true } }]);
+    stop();
+  });
+
+  it("makes an open page read again when the server says something changed, and says in words what was written", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const before = controller.store.get().assistantRev;
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 4, saved: [{ id: "m1", kind: "constraint", text: "never use emojis in commit messages", status: "active", replaced: 0 }] });
+    assert.equal(controller.store.get().assistantRev, before + 1);
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Remembered");
+    assert.equal(controller.store.get().toasts.at(-1)?.detail, "never use emojis in commit messages");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 5, saved: [{ id: "m2", kind: "fact", text: "the staging server is at app-2.example.com", status: "active", replaced: 1 }] });
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Remembered, replacing an earlier note");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 6, forgotten: 1 });
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Forgotten");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 7, declined: [{ reason: "secret: password" }] });
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Not saved");
+    assert.match(controller.store.get().toasts.at(-1)?.detail ?? "", /credential/);
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 8, question: { about: "staging", options: [{ id: "a", text: "x" }, { id: "b", text: "y" }] } });
+    assert.equal(controller.store.get().toasts.at(-1)?.title, "Which one did you mean?");
+    const toasts = controller.store.get().toasts.length;
+    client.handler?.({ type: "assistant", reason: "task", epoch: 9, taskId: "t1" });
+    assert.equal(controller.store.get().toasts.length, toasts, "a task changing is for the page, not a toast");
+    assert.equal(controller.store.get().assistantRev, before + 6);
     stop();
   });
 });

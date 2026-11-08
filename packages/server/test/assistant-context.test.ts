@@ -19,7 +19,7 @@ function item(id: string, text: string, extra: Partial<MemoryItem> = {}): Memory
 const profile: AssistantProfile = {
   id: "default", enabled: true, name: "Ancilla", persona: "A careful engineering partner.", autonomy: "ask", capturePaused: false, contextBudgetTokens: 1200, updatedAt: NOW,
   communication: { verbosity: "concise", tone: "plain", language: "English", notes: "" },
-  policy: { allowReadOnly: true, allowProjectWrites: false, allowCommands: false, maxConcurrent: 1, maxTurnsPerTask: 8, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
+  policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 1, maxTurnsPerTask: 8, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
 };
 
 function query(text: string, extra: Partial<RetrievalQuery> = {}): RetrievalQuery {

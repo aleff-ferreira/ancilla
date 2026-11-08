@@ -6,6 +6,7 @@ import { BootError, BootScreen, NewThread, Onboarding, Welcome } from "../compon
 import { CommandPalette } from "../components/palette/CommandPalette.js";
 import { isTyping } from "../components/requests/Requests.js";
 import { ActivityDrawerHost } from "../components/crew/ActivityDrawer.js";
+import { AssistantPage } from "../components/assistant/AssistantPage.js";
 import { SettingsPage } from "../components/settings/SettingsPage.js";
 import { DeviceLoginModal } from "../components/settings/MuseSignIn.js";
 import { Sidebar } from "../components/sidebar/Sidebar.js";
@@ -307,6 +308,9 @@ function Main() {
   }
   if (route.kind === "settings") {
     return <SettingsPage />;
+  }
+  if (route.kind === "assistant") {
+    return <AssistantPage />;
   }
   if (route.kind === "thread") {
     return <ThreadView key={route.sessionId} sessionId={route.sessionId} />;

@@ -221,6 +221,12 @@ export interface AncillaClient {
   openFileExternally(cwd: string, path: string): Promise<void>;
   /** Where the browser loads a project file's bytes from, for images, video, audio and PDFs. */
   fileUrl(cwd: string, path: string): string;
+  /**
+   * The assistant's own HTTP surface (`/api/assistant/...`), one method for all of it: memory, goals, tasks,
+   * suggestions and schedules. `path` is what follows `/api/assistant`. A refusal is an error whose `kind` and message
+   * are the server's, and the same shape as every other call.
+   */
+  assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
   /** Subscribe to server events; returns an unsubscribe function. */
   subscribe(handler: EventHandler): () => void;
 }

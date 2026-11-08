@@ -751,7 +751,226 @@ export interface TranscriptLoad {
   viewHealth?: { status: string; reason: string | null } | null;
 }
 
+// ------------------------------------------------------------------------------------------------ the assistant
+
+export type MemoryKind = "fact" | "preference" | "constraint" | "event" | "decision" | "procedure" | "commitment" | "working";
+export type MemoryStatus = "active" | "superseded" | "contested" | "pending" | "deleted";
+export type MemoryBasis = "explicit" | "observed" | "inferred";
+export type AssistantAutonomy = "ask" | "suggest" | "act";
+
+export interface MemoryScopeView {
+  kind: "global" | "account" | "project" | "thread";
+  key: string;
+}
+
+export interface MemoryItemView {
+  id: string;
+  kind: MemoryKind;
+  scope: MemoryScopeView;
+  status: MemoryStatus;
+  slot: string | null;
+  pinned: boolean;
+  text: string;
+  basis: MemoryBasis;
+  confidence: number;
+  observedAt: number;
+  validFrom: number | null;
+  validTo: number | null;
+  dueAt: number | null;
+  commitment: "open" | "done" | "dropped" | null;
+  revalidateAfterMs: number | null;
+  lastConfirmedAt: number;
+  supersededBy: string | null;
+  rev: number;
+  identifiers: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemorySourceView {
+  id: string;
+  kind: string;
+  excerpt: string;
+  observedAt: number;
+  trust: "user" | "verified" | "unverified" | "untrusted";
+  sessionId?: string;
+}
+
+export interface MemoryRevisionView {
+  rev: number;
+  text: string;
+  basis: MemoryBasis;
+  actor: "capture" | "user" | "consolidation" | "task";
+  reason: string;
+  createdAt: number;
+}
+
+export interface MemoryDetailView {
+  item: MemoryItemView;
+  revisions: MemoryRevisionView[];
+  sources: MemorySourceView[];
+  lineage: { id: string; text: string; status: MemoryStatus; observedAt: number }[];
+  /** For a waiting correction: the memories it could replace. */
+  mayCorrect: { id: string; text: string }[];
+}
+
+export interface MemoryListView {
+  items: MemoryItemView[];
+  total: number;
+  epoch: number;
+}
+
+export interface AssistantProfileView {
+  id: string;
+  enabled: boolean;
+  name: string;
+  persona: string;
+  communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
+  autonomy: AssistantAutonomy;
+  policy: { allowReadOnly: boolean; allowProjectWrites: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };
+  capturePaused: boolean;
+  contextBudgetTokens: number;
+  updatedAt: number;
+}
+
+export interface AssistantGoalView {
+  id: string;
+  text: string;
+  priority: number;
+  status: "active" | "paused" | "done";
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AssistantStatusView {
+  available: true;
+  /** Nothing has been written yet: no file exists. */
+  fresh?: boolean;
+  profile: AssistantProfileView;
+  goals: AssistantGoalView[];
+  stats: { items: Record<MemoryStatus, number>; kinds: Record<string, number>; sources: number; revisions: number; tombstones: number; bytes: number; ftsEnabled: boolean };
+  epoch: number;
+  executive?: boolean;
+  tasks?: { open: number; needsYou: number; running: number };
+}
+
+export type AssistantTaskStatus = "queued" | "running" | "waiting" | "paused" | "blocked" | "completed" | "unverified" | "failed" | "cancelled";
+export type AssistantStepStatus = "pending" | "running" | "done" | "failed" | "skipped" | "cancelled" | "unknown";
+export type AssistantVerifier = { type: "file_exists"; path: string } | { type: "file_contains"; path: string; text: string } | { type: "manual" };
+
+export interface AssistantStepView {
+  id: string;
+  ord: number;
+  title: string;
+  prompt: string | null;
+  effect: "read" | "write";
+  verifier: AssistantVerifier | null;
+  status: AssistantStepStatus;
+  evidence: string;
+  verified: boolean;
+  attempts: number;
+}
+
+export interface AssistantAttemptView {
+  id: string;
+  stepId: string;
+  number: number;
+  fence: number;
+  turnId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  outcome: "running" | "succeeded" | "failed" | "cancelled" | "stale" | "unknown" | "timeout";
+  detail: string;
+}
+
+export interface AssistantTaskView {
+  id: string;
+  title: string;
+  goal: string;
+  status: AssistantTaskStatus;
+  reason: string;
+  origin: "user" | "suggestion" | "schedule";
+  cwd: string;
+  sessionId: string | null;
+  allowWrites: boolean;
+  maxTurns: number;
+  maxMinutes: number;
+  turnsUsed: number;
+  retryAt: number | null;
+  startedAt: number | null;
+  finishedAt: number | null;
+  result: string;
+  createdAt: number;
+  updatedAt: number;
+  progress: { done: number; total: number };
+}
+
+export interface AssistantTaskDetailView {
+  task: AssistantTaskView;
+  steps: AssistantStepView[];
+  attempts: AssistantAttemptView[];
+  events: { id: number; at: number; kind: string; detail: string }[];
+}
+
+export interface AssistantScheduleView {
+  id: string;
+  title: string;
+  goal: string;
+  cwd: string;
+  kind: "interval" | "daily" | "once";
+  everyMinutes: number | null;
+  atMinute: number | null;
+  tz: string;
+  endAt: number | null;
+  maxRuns: number | null;
+  runs: number;
+  enabled: boolean;
+  note: string;
+  nextRunAt: number | null;
+  lastRunAt: number | null;
+}
+
+export interface AssistantSuggestionView {
+  id: string;
+  kind: "due-commitment" | "stale-memory" | "goal-idle" | "task-needs-you";
+  title: string;
+  why: string;
+  action: { type: "task"; goal: string; project: string | null } | { type: "confirm-memory"; memoryId: string } | { type: "open-task"; taskId: string };
+  autonomous: boolean;
+}
+
+export interface AssistantPreviewView {
+  text: string;
+  tokens: number;
+  wouldAdd: boolean;
+  noEvidence: boolean;
+  omitted: string[];
+  memories: { id: string; text: string; kind: MemoryKind; score: number; why: string[]; stale: boolean }[];
+}
+
+export interface AssistantActivityView {
+  id: number;
+  at: number;
+  itemId: string | null;
+  action: string;
+  actor: string;
+  detail: string;
+}
+
+/** What the server says after memory or a task changed: a save is announced only after it was written. */
+export interface AssistantEventView {
+  type: "assistant";
+  reason: "memory" | "profile" | "goal" | "task";
+  epoch: number;
+  saved?: { id: string; kind: MemoryKind; text: string; status: MemoryStatus; replaced: number }[];
+  forgotten?: number;
+  question?: { about: string; options: { id: string; text: string }[]; pendingId?: string };
+  declined?: { reason: string }[];
+  taskId?: string;
+}
+
 export type AncillaEvent =
+  | AssistantEventView
   | { type: "hello"; version: string }
   | { type: "msp"; sessionId: string; method: string; params: Record<string, unknown>; at: number }
   | { type: "session-status"; sessionId: string; live: LiveView | null }

@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { Executive, type ExecutiveHost, type RecoverySummary } from "./executive.js";
-import { digest, tokens } from "./text.js";
+import { digest, isPastQuestion, parseAsOf, tokens } from "./text.js";
 import { MemoryStore, type Change, type CaptureResult } from "./store.js";
 import { DEFAULT_PROFILE } from "./profile.js";
 import { startAutonomous } from "./suggest.js";
@@ -138,10 +138,25 @@ export class AssistantService {
       this.deps.log(`assistant: recovering tasks after a restart failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (!this.timer) {
-      this.timer = setInterval(() => void executive.tick().catch((error) => this.deps.log(`assistant: a tick failed: ${error instanceof Error ? error.message : String(error)}`)), this.deps.tickMs ?? 15_000);
+      this.timer = setInterval(() => {
+        this.maybeConsolidate();
+        void executive.tick().catch((error) => this.deps.log(`assistant: a tick failed: ${error instanceof Error ? error.message : String(error)}`));
+      }, this.deps.tickMs ?? 15_000);
       this.timer.unref?.();
     }
     return summary;
+  }
+
+  /** Once a day while Ancilla is open: merge copies, drop expired working notes, roll up old history. */
+  private maybeConsolidate(): void {
+    try {
+      const last = Number(this.store.getMeta("consolidated_at") ?? 0);
+      if (this.now() - last < 24 * 3_600_000 || !this.store.getProfile().enabled) return;
+      const done = this.store.consolidate(this.now());
+      if (done.merged + done.expired + done.rolledUp > 0) this.announce({ reason: "memory" });
+    } catch (error) {
+      this.deps.log(`assistant: tidying the memory failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** The key a folder is known by in memory scopes and on tasks. */
@@ -284,7 +299,9 @@ export class AssistantService {
       const queryText = words(input.text) < SHORT_QUESTION_WORDS && previous ? `${input.text} ${previous}` : input.text;
       this.lastQuery.set(input.sessionId, input.text.slice(0, 400));
       if (this.lastQuery.size > 200) this.lastQuery.delete(this.lastQuery.keys().next().value as string);
-      const out = this.context(input, queryText, profile);
+      // A question about a past moment ("what was my timezone in September?") is answered as of then.
+      const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
+      const out = this.context(input, queryText, profile, asOf);
       const goals = this.store.activeGoals();
       const inject = out.memories.length > 0 || out.noEvidence || hasIdentity(profile, goals);
       const used = out.memories.map((m) => m.item.id);
@@ -298,9 +315,9 @@ export class AssistantService {
     }
   }
 
-  private context(input: TurnInput, queryText: string, profile: AssistantProfile): AssembledContext & { epoch: number } {
+  private context(input: TurnInput, queryText: string, profile: AssistantProfile, asOf: number | null): AssembledContext & { epoch: number } {
     const epoch = this.store.epoch();
-    const key = [epoch, input.sessionId, input.project ?? "", input.account ?? "", profile.contextBudgetTokens, digest(queryText)].join("|");
+    const key = [epoch, input.sessionId, input.project ?? "", input.account ?? "", profile.contextBudgetTokens, asOf ?? "", digest(queryText)].join("|");
     const now = this.now();
     const hit = this.cache.get(key);
     if (hit && hit.epoch === epoch && now - hit.at < CACHE_TTL_MS) return hit.out;
@@ -311,6 +328,7 @@ export class AssistantService {
       ...(input.account ? { account: input.account } : {}),
       budgetTokens: profile.contextBudgetTokens,
       now,
+      ...(asOf !== null ? { asOf } : {}),
     });
     this.cache.set(key, { at: now, epoch, out });
     if (this.cache.size > CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value as string);
@@ -320,6 +338,7 @@ export class AssistantService {
   /** What the model would be told for this question, without sending anything: so the user can see it. */
   preview(input: TurnInput): AssembledContext & { epoch: number; wouldAdd: boolean } {
     const profile = this.store.getProfile();
+    const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
     const out = this.store.retrieve({
       text: input.text,
       thread: input.sessionId,
@@ -327,6 +346,7 @@ export class AssistantService {
       ...(input.account ? { account: input.account } : {}),
       budgetTokens: profile.contextBudgetTokens,
       now: this.now(),
+      ...(asOf !== null ? { asOf } : {}),
     });
     const inject = profile.enabled && (out.memories.length > 0 || out.noEvidence || hasIdentity(profile, this.store.activeGoals()));
     return { ...out, wouldAdd: inject };

@@ -306,6 +306,10 @@ export class WebAncillaClient implements AncillaClient {
     return call<ResearchSettings>("PATCH", "/api/research-settings", patch);
   }
 
+  async assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    return call<T>(method, `/api/assistant${path}`, body);
+  }
+
   async runShellProxy(sessionId: string, command: string): Promise<ShellRun> {
     // The server lets a command run for two minutes, so this must outlast that rather than abandon it early.
     const result = await call<{ run: ShellRun }>("POST", `/api/sessions/${enc(sessionId)}/shell-proxy`, { command }, SHELL_TIMEOUT_MS);

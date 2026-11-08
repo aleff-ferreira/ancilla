@@ -118,7 +118,9 @@ export function resolve(candidate: Candidate, neighbors: readonly MemoryItem[], 
   if (ctx.tombstoned && candidate.basis !== "explicit") return { kind: "suppress", reason: "tombstone" };
   if (ctx.paused) return { kind: "suppress", reason: "paused" };
 
-  const same = live.find((n) => n.status !== "superseded" && digest(n.text) === digest(candidate.text) && `${n.scope.kind}:${n.scope.key}` === `${candidate.scope.kind}:${candidate.scope.key}`);
+  const wanted = digest(candidate.text);
+  const digestOf = (n: MemoryItem): string => n.digest ?? digest(n.text);
+  const same = live.find((n) => n.status !== "superseded" && digestOf(n) === wanted && `${n.scope.kind}:${n.scope.key}` === `${candidate.scope.kind}:${candidate.scope.key}`);
   if (same && candidate.intent !== "correct") return { kind: "corroborate", target: same.id };
 
   if (candidate.intent === "correct") {
@@ -135,7 +137,7 @@ export function resolve(candidate: Candidate, neighbors: readonly MemoryItem[], 
     return { kind: "create", status: "active", supersedes: [], contests: [], reason: "a correction with nothing on file to correct" };
   }
 
-  const others = rivals(candidate, live).filter((n) => digest(n.text) !== digest(candidate.text));
+  const others = rivals(candidate, live).filter((n) => digestOf(n) !== wanted);
   if (others.length === 0) return { kind: "create", status: "active", supersedes: [], contests: [], reason: "new" };
 
   const newer = others.find((o) => o.observedAt > candidate.source.observedAt && standing(o.basis, "user") >= mine);

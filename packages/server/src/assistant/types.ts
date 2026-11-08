@@ -127,6 +127,8 @@ export interface MemoryItem {
   /** Every change moves this, so an edit made on a stale view is refused instead of overwriting a newer one. */
   rev: number;
   identifiers: string[];
+  /** A digest of the words, ignoring case and spacing, kept so that finding a statement already on file is a lookup. */
+  digest?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -137,6 +139,8 @@ export interface MemoryDetail {
   sources: SourceRecord[];
   /** Items this one replaced or was replaced by, newest first. */
   lineage: { id: string; text: string; status: MemoryStatus; observedAt: number }[];
+  /** For a correction that is waiting for the user: the memories it could replace. */
+  mayCorrect: { id: string; text: string }[];
 }
 
 // ------------------------------------------------------------------------------------------------ the assistant
@@ -154,7 +158,7 @@ export interface AssistantProfile {
   communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
   autonomy: Autonomy;
   /** What an autonomous task may do without asking, and how much it may spend. */
-  policy: { allowReadOnly: boolean; allowProjectWrites: boolean; allowCommands: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };
+  policy: { allowReadOnly: boolean; allowProjectWrites: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };
   /** Capture is the only thing pausing stops: what is already remembered is still used. */
   capturePaused: boolean;
   /** How much context memory may add to a turn, in estimated tokens. */
@@ -181,6 +185,8 @@ export interface RetrievalQuery {
   budgetTokens: number;
   /** Include superseded memories, for a question about the past. */
   history?: boolean;
+  /** The moment a question about the past is about: what existed then is eligible, what came later is not. */
+  asOf?: number;
   limit?: number;
 }
 

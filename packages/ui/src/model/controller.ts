@@ -2,6 +2,7 @@ import { errorKind, errorMessage, noAnswer, type AncillaClient } from "../client
 import type {
   ApprovalMode,
   ApprovalRequest,
+  AssistantEventView,
   AttachmentView,
   GoalAction,
   LinuxDesktopStatus,
@@ -248,6 +249,8 @@ export function routeToHash(route: Route): string {
       return "#/usage";
     case "settings":
       return "#/settings";
+    case "assistant":
+      return "#/assistant";
   }
 }
 
@@ -258,6 +261,9 @@ export function hashToRoute(hash: string): Route {
   }
   if (h === "/settings") {
     return { kind: "settings" };
+  }
+  if (h === "/assistant") {
+    return { kind: "assistant" };
   }
   const thread = h.match(/^\/t\/(.+)$/);
   if (thread) {
@@ -1595,8 +1601,8 @@ export class AncillaController {
     if (route.kind === "thread" && this.state.sessionsLoaded && !this.state.sessions[route.sessionId]) {
       route = { kind: "home" };
     }
-    const overlay = route.kind === "usage" || route.kind === "settings";
-    const wasOverlay = previous.kind === "usage" || previous.kind === "settings";
+    const overlay = route.kind === "usage" || route.kind === "settings" || route.kind === "assistant";
+    const wasOverlay = previous.kind === "usage" || previous.kind === "settings" || previous.kind === "assistant";
     if (overlay) {
       if (!wasOverlay) {
         this.returnRoute = previous;
@@ -2058,6 +2064,9 @@ export class AncillaController {
       case "research-run":
         this.applyResearchRuns(event.sessionId, [event.run]);
         break;
+      case "assistant":
+        this.assistantChanged(event);
+        break;
       case "sessions-changed":
         this.scheduleRefresh();
         break;
@@ -2080,6 +2089,31 @@ export class AncillaController {
         }
         break;
     }
+  }
+
+  /**
+   * The assistant's memory, goals or tasks changed. An open page reads them again (the counter moves), and what was just
+   * written is said once, in words: the server only sends `saved` after the write was committed.
+   */
+  private assistantChanged(event: AssistantEventView): void {
+    this.update((s) => ({ ...s, assistantRev: s.assistantRev + 1 }));
+    if (event.reason !== "memory") return;
+    for (const note of event.saved ?? []) {
+      const text = note.text.length > 120 ? `${note.text.slice(0, 117)}...` : note.text;
+      if (note.status === "pending") this.toast("info", "Waiting for your approval", text);
+      else this.toast("success", note.replaced > 0 ? "Remembered, replacing an earlier note" : "Remembered", text);
+    }
+    if (event.forgotten) this.toast("info", event.forgotten === 1 ? "Forgotten" : `Forgot ${event.forgotten} notes`, "The words are erased everywhere the assistant kept them.");
+    if (event.question) this.toast("info", "Which one did you mean?", `${event.question.options.length} notes match. Open the Assistant page to choose.`);
+    for (const refusal of event.declined ?? []) {
+      if (refusal.reason.startsWith("secret")) this.toast("info", "Not saved", "That looks like a credential or an ID number, and the assistant does not keep those.");
+      else if (refusal.reason === "paused") this.toast("info", "Not saved", "Capture is paused.");
+    }
+  }
+
+  /** One call of the assistant's HTTP surface, for its page. */
+  assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    return this.client.assistant<T>(method, path, body);
   }
 
   private queueEvent(sessionId: string, event: ViewEvent): void {

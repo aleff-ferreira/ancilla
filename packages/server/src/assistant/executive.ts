@@ -177,6 +177,7 @@ export class Executive {
     for (const step of this.tasks.steps(taskId)) {
       if (step.status === "failed" || step.status === "unknown") this.tasks.updateStep(step.id, { status: "pending", evidence: "", verified: false });
     }
+    this.tasks.event(taskId, "retried", null, "the user asked for it to be tried again");
     const out = this.tasks.setStatus(taskId, "queued", "Trying again.", { retryAt: null, failures: 0 });
     this.opts.changed(taskId);
     this.kick();

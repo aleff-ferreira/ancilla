@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArrowClockwiseIcon, ArrowLineDownIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, CaretRightIcon, ChartBarIcon, CheckIcon, CodeIcon, CopyIcon, DotsThreeIcon, DownloadSimpleIcon, FolderIcon, FolderOpenIcon, FolderPlusIcon, FunnelSimpleIcon, GearSixIcon, GitBranchIcon, MagnifyingGlassIcon, MonitorIcon, MoonIcon, NotePencilIcon, PauseIcon, PencilSimpleIcon, PlayIcon, PushPinIcon, PushPinSlashIcon, ShieldSlashIcon, SidebarSimpleIcon, StackIcon, SunIcon, TargetIcon, XIcon } from "../ui/icons.js";
+import { ArchiveIcon, ArrowClockwiseIcon, ArrowLineDownIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, BrainIcon, CaretRightIcon, ChartBarIcon, CheckIcon, CodeIcon, CopyIcon, DotsThreeIcon, DownloadSimpleIcon, FolderIcon, FolderOpenIcon, FolderPlusIcon, FunnelSimpleIcon, GearSixIcon, GitBranchIcon, MagnifyingGlassIcon, MonitorIcon, MoonIcon, NotePencilIcon, PauseIcon, PencilSimpleIcon, PlayIcon, PushPinIcon, PushPinSlashIcon, ShieldSlashIcon, SidebarSimpleIcon, StackIcon, SunIcon, TargetIcon, XIcon } from "../ui/icons.js";
 import { memo, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { shallowEqual, useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps, useTitlebarOverlay } from "../../app/frame.js";
@@ -894,6 +894,11 @@ function SidebarFooter() {
         </IconButton>
       </Tip>
       <PlanPill />
+      <Tip label="Assistant: memory and tasks" side="top">
+        <IconButton label="Assistant" onClick={() => controller.navigate({ kind: "assistant" })}>
+          <BrainIcon size={14} />
+        </IconButton>
+      </Tip>
       <Tip label="Usage and cost" side="top">
         <IconButton label="Usage and cost" onClick={() => controller.navigate({ kind: "usage" })}>
           <ChartBarIcon size={14} />

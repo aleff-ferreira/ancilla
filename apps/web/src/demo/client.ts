@@ -46,6 +46,7 @@ import type {
   ResearchSettings,
   ResearchWorkerView,
 } from "@ancilla/ui";
+import { DemoAssistant } from "./assistant.js";
 import { BUILD_END_AT, BUILD_PROMPT, BUILD_REPLY, BUILD_STEPS, BUILD_STEP_AT, BUILD_TOOLS } from "./build.js";
 import { DemoFiles } from "./files.js";
 import { DAY, HOUR, MIN, MODEL, Script, iso, sampleId } from "./script.js";
@@ -1351,6 +1352,11 @@ export class DemoAncillaClient implements AncillaClient {
       throw Object.assign(new Error("No such research run."), { status: 404 });
     }
     return { ...run };
+  }
+
+  private readonly assistantDemo = new DemoAssistant();
+  async assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    return this.assistantDemo.handle<T>(method, path, body);
   }
 
   async getResearchSettings(): Promise<ResearchSettings> {

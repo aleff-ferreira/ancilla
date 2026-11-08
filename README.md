@@ -87,6 +87,23 @@ The display stays explicit about what is known. Missing token counts remain unre
 at run level when Muse does not identify the requesting agent. Cost figures are list-price estimates.
 See [Agents and tasks](docs/agent-activity.md) for the full interaction model and Muse's reporting limits.
 
+## An assistant that remembers, and works on what you approve
+
+Switch on the **Assistant** page (the brain icon in the sidebar footer) and threads stop starting from nothing. It reads
+what you type, keeps rules, preferences, decisions, deadlines and facts with your exact words and where each came from,
+and puts the notes that bear on a message in front of the prompt. It adds no model of its own and costs no extra: Muse
+still does the thinking, on your plan. It is **off until you switch it on**.
+
+| Capability | What it does |
+| --- | --- |
+| **Memory you can read** | Every note shows who said it and when, with its earlier versions. Correct it, pin it, confirm it, settle a dispute, export everything, pause remembering, or erase a note, and the same old words are not learned again. |
+| **Honest about what it knows** | A guess never replaces what you said, a note that may be out of date says so, and when nothing saved answers a question it says that. Passwords, keys and ID numbers are never kept. |
+| **Tasks** | Give it work and it runs through Muse in a thread you can open, one step at a time, inside limits you set. It is marked done only when a check that reads a file passed. A step that may already have changed files is not run again after a restart. |
+| **Initiative, within limits** | Ask first, suggest, or act on its own for work that only reads, a couple of times a day at most. Memory never grants permission: settings and Muse's approvals do. |
+
+See [the assistant](docs/assistant.md) for setup, the API and how to roll back, and
+[how it is measured](docs/assistant-evaluation.md) for what it does well and where it is weak.
+
 ## Subscription usage, alongside local activity
 
 The Usage page shows your **5-hour window and weekly limits**, including used and remaining percentages, reset
@@ -320,6 +337,9 @@ flowchart LR
   Browser[Web browser] --> UI
   UI --> Server[Ancilla server]
   Server --> Store[(SQLite)]
+  Server --> Assistant[Assistant: memory and tasks]
+  Assistant --> Notes[(assistant.db)]
+  Assistant --> Muse
   Server --> Research[Research coordinator]
   Server --> Muse[Muse Code CLI]
   Research --> Muse
@@ -335,16 +355,18 @@ flowchart LR
 | [`packages/daemon/src/research`](packages/daemon/src/research) | Research supervision, budgets, prompts and citation processing. |
 | [`packages/server`](packages/server) | HTTP/SSE API, accounts, project files and research job coordination. |
 | [`packages/server/src/research`](packages/server/src/research) | Muse research adapters, job lifecycle and PDF/DOCX/HTML export. |
+| [`packages/server/src/assistant`](packages/server/src/assistant) | The assistant's memory, task executive, schedules and the measurements in `eval/`. |
 | [`apps/web`](apps/web) | Browser entry point, API client, theme tokens and demo fixtures. |
 | [`apps/desktop`](apps/desktop) | Tauri shell, bundled server and desktop updater. |
 
-Start with [Product](docs/PRODUCT.md), [Design](docs/DESIGN.md), [agent monitoring](docs/agent-activity.md) or
-[Muse recovery](docs/muse-recovery.md). Release maintenance is documented in [Releasing](docs/RELEASING.md).
+Start with [Product](docs/PRODUCT.md), [Design](docs/DESIGN.md), [agent monitoring](docs/agent-activity.md),
+[the assistant](docs/assistant.md) or [Muse recovery](docs/muse-recovery.md). Release maintenance is documented in [Releasing](docs/RELEASING.md).
 
 ## Data and connections
 
 Ancilla keeps project metadata and activity history in its server's local SQLite database, with research reports in
-the project folder. Muse maintains its own sessions and login. There is no Ancilla-hosted account service, telemetry
+the project folder. The assistant, once switched on, keeps its notes and tasks in a second file, `assistant.db`, in the
+same folder; it is not created before that and is not encrypted at rest. Muse maintains its own sessions and login. There is no Ancilla-hosted account service, telemetry
 or analytics in the app. **Running Muse can send prompts, code and other context to Meta's services and enabled
 tools**; local storage does not mean model execution stays on your machine.
 

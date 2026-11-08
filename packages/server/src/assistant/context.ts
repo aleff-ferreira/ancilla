@@ -103,6 +103,8 @@ export interface AssembleInput {
   broad?: boolean;
   /** The exact words behind some notes, present only when the question asks where a belief came from. */
   evidence?: ReadonlyMap<string, readonly SourceRecord[]>;
+  /** Derived roll-ups of older notes, for a question about the distant past. Never a source of belief. */
+  summaries?: readonly { period: string; count: number; text: string }[];
 }
 
 export function assembleContext(input: AssembleInput): AssembledContext {
@@ -126,6 +128,16 @@ export function assembleContext(input: AssembleInput): AssembledContext {
     }
   }
 
+  const sums: string[] = [];
+  for (const s of input.summaries ?? []) {
+    const line = `- ${s.text.replace(/\s+/g, " ").replace(/<\/?assistant-memory[^>]*>/gi, "")}`;
+    const cost = estimateTokens(line) + 1;
+    if (cost <= room) {
+      sums.push(line);
+      room -= cost;
+    }
+  }
+
   const rules = chosen.filter((m) => m.item.status !== "superseded" && (m.item.kind === "constraint" || m.item.kind === "preference" || m.item.pinned));
   const commitments = chosen.filter((m) => !rules.includes(m) && m.item.kind === "commitment");
   const notes = chosen.filter((m) => !rules.includes(m) && !commitments.includes(m));
@@ -139,6 +151,7 @@ export function assembleContext(input: AssembleInput): AssembledContext {
   if (rules.length > 0) out.push("Standing rules and preferences:", ...rules.map(line));
   if (commitments.length > 0) out.push("Open commitments:", ...commitments.map(line));
   if (notes.length > 0) out.push("Relevant notes:", ...notes.map(line));
+  if (sums.length > 0) out.push("Earlier, in summary (made by Ancilla from older notes, not a source: check the notes before relying on it):", ...sums);
   if (noEvidence) out.push(NO_EVIDENCE);
   out.push(FOOTER);
   const text = out.join("\n");

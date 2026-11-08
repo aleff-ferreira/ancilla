@@ -236,7 +236,8 @@ export type Route =
   | { kind: "new"; cwd: string | null }
   | { kind: "thread"; sessionId: string }
   | { kind: "usage" }
-  | { kind: "settings" };
+  | { kind: "settings" }
+  | { kind: "assistant" };
 
 export interface ThreadState {
   load: "idle" | "loading" | "ready" | "error";
@@ -306,6 +307,8 @@ export interface AppState {
   yoloSettings: YoloSettings | null;
   /** Server-owned DeepResearch defaults and switch; null until the first boot load answers. */
   researchSettings: ResearchSettings | null;
+  /** Moves each time the server says the assistant's memory, goals or tasks changed, so an open page reads them again. */
+  assistantRev: number;
   /** What Stop does on a research run: write a report from what it has, or drop it. Set from the composer popover. */
   researchStopWrites: boolean;
   /**
@@ -418,6 +421,7 @@ export function initialState(prefs: Prefs): AppState {
     sandboxSettings: null,
     yoloSettings: null,
     researchSettings: null,
+    assistantRev: 0,
     researchStopWrites: true,
     researchStopping: {},
     researchMode: false,

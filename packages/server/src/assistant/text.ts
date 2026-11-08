@@ -153,6 +153,59 @@ export function identifiersOf(text: string): string[] {
   return found.filter((id) => !found.some((other) => other !== id && other.length > id.length && other.includes(id)));
 }
 
+// ---------------------------------------------------------------------------------------------- the past
+
+/** A question is about the past when it says so: "what was", "back then", "last month", "three weeks ago". */
+export function isPastQuestion(text: string): boolean {
+  return /\b(?:was|were|had|did|used to|back then|at that time|ago|last (?:week|month|year)|previously|yesterday|as of)\b/i.test(text);
+}
+
+const PAST_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const UNIT_MS: Record<string, number> = { day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000, year: 365 * 86_400_000 };
+const NUMBER_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+
+/**
+ * The moment a question about the past is about, or null when it names none: an ISO date, "yesterday", "last week",
+ * "last month", "last year", "three weeks ago", or a month ("in September", "back in March 2026"). A day or a month
+ * means its last instant, so what was said that day or that month counts. `offsetMinutes` is the local clock's
+ * distance east of UTC.
+ */
+export function parseAsOf(text: string, now: number, offsetMinutes = 0): number | null {
+  const t = fold(text);
+  const off = offsetMinutes * 60_000;
+  const local = new Date(now + off);
+  const y = local.getUTCFullYear();
+  const m = local.getUTCMonth();
+  const d = local.getUTCDate();
+  const endOf = (year: number, month: number, day: number): number => Date.UTC(year, month, day, 23, 59, 59, 999) - off;
+
+  const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/.exec(t);
+  if (iso) return endOf(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  const ago = /\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (day|week|month|year)s? ago\b/.exec(t);
+  if (ago) {
+    const count = /^\d+$/.test(ago[1] as string) ? Number(ago[1]) : (NUMBER_WORDS[ago[1] as string] ?? 1);
+    return now - count * (UNIT_MS[ago[2] as string] as number);
+  }
+  if (/\byesterday\b/.test(t)) return endOf(y, m, d - 1);
+  if (/\blast week\b/.test(t)) {
+    const sinceMonday = (local.getUTCDay() + 6) % 7;
+    return Date.UTC(y, m, d - sinceMonday) - off - 1;
+  }
+  if (/\blast month\b/.test(t)) return endOf(y, m, 0);
+  if (/\blast year\b/.test(t)) return endOf(y - 1, 11, 31);
+  const named = new RegExp(`\\b(${PAST_MONTHS.join("|")})(?:,? (\\d{4}))?\\b`).exec(t);
+  if (named) {
+    // "may" is also a verb: it counts as a month only with a year or after a word that says "in" or "of".
+    if (named[1] === "may" && !named[2] && !/\b(?:in|of|during|since|until|before|by) may\b/.test(t)) return null;
+    const month = PAST_MONTHS.indexOf(named[1] as string);
+    let year = named[2] ? Number(named[2]) : y;
+    // With no year, a month later than this one is last year's ("in March", said in February), and this month is this month.
+    if (!named[2] && month > m) year -= 1;
+    return Math.min(endOf(year, month + 1, 0), now);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------------------------- when
 
 const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];

@@ -121,6 +121,8 @@ export interface RetrieveInput {
   now?: number;
   budgetTokens?: number;
   history?: boolean;
+  /** A question about a past moment: what existed then is what is eligible. */
+  asOf?: number;
   limit?: number;
 }
 
@@ -180,6 +182,7 @@ function toItem(r: Row): MemoryItem {
     supersededBy: r.superseded_by === null || r.superseded_by === undefined ? null : String(r.superseded_by),
     rev: Number(r.rev),
     identifiers: JSON.parse(String(r.identifiers)) as string[],
+    digest: String(r.digest ?? ""),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at),
   };
@@ -518,7 +521,8 @@ export class MemoryStore {
        ORDER BY i.observed_at DESC`,
       [itemId, itemId],
     ).map((r) => ({ id: String(r.id), text: String(r.text), status: r.status as MemoryStatus, observedAt: Number(r.observed_at) }));
-    return { item, revisions, sources, lineage };
+    const mayCorrect = this.all("SELECT i.id, i.text FROM memory_links l JOIN memory_items i ON i.id = l.to_id WHERE l.from_id = ? AND l.kind = 'may-correct' AND i.status NOT IN ('deleted','superseded')", [itemId]).map((r) => ({ id: String(r.id), text: String(r.text) }));
+    return { item, revisions, sources, lineage, mayCorrect };
   }
 
   list(filter: ListFilter = {}): { items: MemoryItem[]; total: number } {
@@ -757,10 +761,29 @@ export class MemoryStore {
     });
   }
 
+  /**
+   * The memories a statement could be about: the ones that share its words (or the words of what it corrects or forgets),
+   * the ones in its slot, and what was just used. Not the whole store: a capture costs about the same at ten thousand
+   * memories as at a hundred. Without the text index, every visible memory.
+   */
+  private neighborsFor(c: Candidate, scopes: readonly Scope[], recent: ReadonlySet<string>): MemoryItem[] {
+    const statuses: MemoryStatus[] = ["active", "contested", "pending"];
+    if (!this.fts) return this.itemsIn(scopes, statuses);
+    const keys = scopes.map(scopeKey);
+    const ids = new Set<string>(recent);
+    const words = queryWords(`${c.text} ${c.about ?? ""}`);
+    for (const hit of this.textSearch(words, keys, false, 200)) ids.add(hit.id);
+    if (c.slot) for (const r of this.all("SELECT id FROM memory_items WHERE assistant_id = ? AND slot = ? AND status IN ('active','contested','pending')", [ASSISTANT_ID, c.slot])) ids.add(String(r.id));
+    if (ids.size === 0) return [];
+    const marks = [...ids].map(() => "?").join(",");
+    const rows = this.all(`SELECT * FROM memory_items WHERE assistant_id = ? AND id IN (${marks}) AND status IN ('active','contested','pending') AND (scope_kind || ':' || scope_key) IN (${keys.map(() => "?").join(",")})`, [ASSISTANT_ID, ...ids, ...keys]);
+    return rows.map(toItem);
+  }
+
   private apply(c: Candidate, ctx: CaptureInput["ctx"], now: number, paused: boolean, erasedHere: Set<string>, touched: string[]): { changes: Change[]; wrote: boolean } {
     const scopes = visibleScopes({ ...(ctx.account ? { account: ctx.account } : {}), ...(ctx.project ? { project: ctx.project } : {}), ...(ctx.thread ? { thread: ctx.thread } : {}) });
     if (!scopes.some((s) => scopeKey(s) === scopeKey(c.scope))) scopes.push(c.scope);
-    const neighbors = this.itemsIn(scopes, ["active", "contested", "pending"]);
+    const neighbors = this.neighborsFor(c, scopes, this.recentIds(ctx.thread, now));
 
     if (c.intent !== "forget") {
       // A credential or a personal identifier is never kept, and its words are not echoed back anywhere.
@@ -1049,7 +1072,7 @@ export class MemoryStore {
     });
   }
 
-  private erase(ids: readonly string[], opts: { actor: string; reason: string; at: number; lineage: boolean; tombstone: boolean }, erasedHere: Set<string>): string[] {
+  private erase(ids: readonly string[], opts: { actor: string; reason: string; at: number; lineage: boolean; tombstone: boolean; keepSharedSources?: boolean }, erasedHere: Set<string>): string[] {
     const all = new Set<string>();
     const queue = [...ids];
     while (queue.length > 0) {
@@ -1096,6 +1119,8 @@ export class MemoryStore {
         this.run("DELETE FROM memory_sources WHERE id = ?", [sourceId]);
         continue;
       }
+      // Merging two copies of one memory leaves the words where they are: nothing is being erased, only joined.
+      if (opts.keepSharedSources) continue;
       // Another memory still rests on these words, so the source stays, minus whatever was erased from it.
       const row = this.get("SELECT excerpt FROM memory_sources WHERE id = ?", [sourceId]);
       let excerpt = String(row?.excerpt ?? "");
@@ -1190,7 +1215,7 @@ export class MemoryStore {
       if (!cur || lexical > cur.lexical) byId.set(item.id, { item, lexical });
     };
 
-    const found = this.textSearch(queryWords(query.text), keys, query.history === true, 60);
+    const found = this.textSearch(queryWords(query.text), keys, query.history === true || query.asOf !== undefined, 60);
     const maxAbs = found.reduce((m, f) => Math.max(m, Math.abs(f.rank)), 0);
     for (const f of found) {
       const item = this.getItem(f.id);
@@ -1206,8 +1231,10 @@ export class MemoryStore {
 
     // Always on: what the user pinned, their standing rules, what they owe, and the working notes of this thread.
     const keySql = keys.map(() => "?").join(",");
+    // A question about a past moment also sees the rules that were replaced since: it is what held then.
+    const statuses = query.asOf !== undefined ? "'active','contested','superseded'" : "'active','contested'";
     const always = this.all(
-      `SELECT * FROM memory_items WHERE assistant_id = ? AND status IN ('active','contested') AND (scope_kind || ':' || scope_key) IN (${keySql}) AND (pinned = 1 OR kind = 'constraint' OR kind = 'working' OR (kind = 'commitment' AND commitment = 'open')) LIMIT 400`,
+      `SELECT * FROM memory_items WHERE assistant_id = ? AND status IN (${statuses}) AND (scope_kind || ':' || scope_key) IN (${keySql}) AND (pinned = 1 OR kind = 'constraint' OR kind = 'working' OR (kind = 'commitment' AND commitment = 'open')) LIMIT 400`,
       [ASSISTANT_ID, ...keys],
     );
     for (const row of always) add(toItem(row), 0);
@@ -1216,6 +1243,15 @@ export class MemoryStore {
 
   /** What the assistant knows that bears on this question, as the block that is added to the turn. */
   retrieve(input: RetrieveInput): AssembledContext & { epoch: number } {
+    return this.retrieveWith(input);
+  }
+
+  /**
+   * `retrieve`, with a hook that may add to or change the candidates before they are scored. The shipped path passes
+   * none; the evaluation passes the techniques it is deciding whether to adopt (query expansion, vectors, a graph), so
+   * that each is compared on exactly the same ranking, filtering and budget.
+   */
+  retrieveWith(input: RetrieveInput, tweak?: (hits: Hit[], query: RetrievalQuery) => Hit[]): AssembledContext & { epoch: number } {
     const profile = this.getProfile();
     const now = input.now ?? this.now();
     const query: RetrievalQuery = {
@@ -1224,12 +1260,91 @@ export class MemoryStore {
       now,
       budgetTokens: input.budgetTokens ?? profile.contextBudgetTokens,
       ...(input.history ? { history: true } : {}),
+      ...(input.asOf !== undefined ? { asOf: input.asOf } : {}),
       ...(input.limit ? { limit: input.limit } : {}),
     };
-    const ranked = rankMemories(query, this.hitsFor(query)).slice(0, input.limit ?? 40);
+    const base = this.hitsFor(query);
+    const ranked = rankMemories(query, tweak ? tweak(base, query) : base).slice(0, input.limit ?? 40);
     const evidence = WHY.test(input.text) ? this.evidenceFor(ranked.slice(0, 6).map((r) => r.item.id)) : undefined;
-    const out = assembleContext({ profile, goals: this.activeGoals(), ranked, query, asksMemory: asksAboutMemory(input.text) || asksForEverything(input.text), broad: asksForEverything(input.text), ...(evidence ? { evidence } : {}) });
+    const summaries = query.history || query.asOf !== undefined ? this.summariesFor(query) : [];
+    const out = assembleContext({ profile, goals: this.activeGoals(), ranked, query, asksMemory: asksAboutMemory(input.text) || asksForEverything(input.text), broad: asksForEverything(input.text), ...(evidence ? { evidence } : {}), ...(summaries.length > 0 ? { summaries } : {}) });
     return { ...out, epoch: this.epoch() };
+  }
+
+  /** Roll-ups that bear on a question about the past, for the one place they are used: older history, labelled as derived. */
+  private summariesFor(query: RetrievalQuery): { period: string; count: number; text: string }[] {
+    const keys = query.scopes.map(scopeKey);
+    if (keys.length === 0) return [];
+    const rows = this.all(`SELECT period, text, derived_from FROM memory_summaries WHERE (scope_kind || ':' || scope_key) IN (${keys.map(() => "?").join(",")}) ORDER BY period DESC LIMIT 24`, keys);
+    const words = new Set(queryWords(query.text));
+    const asOf = query.asOf !== undefined ? new Date(query.asOf).toISOString().slice(0, 7) : null;
+    return rows
+      .filter((r) => (asOf !== null && String(r.period) === asOf) || [...words].some((w) => String(r.text).toLowerCase().includes(w)) || words.has(String(r.period).toLowerCase()))
+      .slice(0, 2)
+      .map((r) => ({ period: String(r.period), count: (JSON.parse(String(r.derived_from)) as string[]).length, text: String(r.text) }));
+  }
+
+  // ------------------------------------------------------------------------------------------------ consolidation
+
+  /**
+   * Tidies what accumulates: identical memories become one (their sources kept), working notes long past their time go,
+   * and old events and decisions are rolled up month by month into a derived summary. A summary is a convenience for
+   * a question about the distant past, labelled as derived wherever it is shown, never a source of belief, and erased
+   * with any memory it was made from. Safe to run at any time and as often as wanted.
+   */
+  consolidate(now = this.now()): { merged: number; expired: number; rolledUp: number } {
+    return this.write(() => {
+      let merged = 0;
+      const groups = this.all(
+        "SELECT scope_kind, scope_key, kind, digest FROM memory_items WHERE assistant_id = ? AND status IN ('active','contested','pending') AND digest != '' GROUP BY scope_kind, scope_key, kind, digest HAVING COUNT(*) > 1",
+        [ASSISTANT_ID],
+      );
+      for (const g of groups) {
+        const items = this.all("SELECT * FROM memory_items WHERE assistant_id = ? AND status IN ('active','contested','pending') AND scope_kind = ? AND scope_key = ? AND kind = ? AND digest = ? ORDER BY created_at, rowid", [ASSISTANT_ID, String(g.scope_kind), String(g.scope_key), String(g.kind), String(g.digest)]).map(toItem);
+        const keeper = items[0];
+        if (!keeper) continue;
+        const others = items.slice(1);
+        for (const other of others) this.run("INSERT OR IGNORE INTO memory_evidence (item_id, source_id, rev) SELECT ?, source_id, ? FROM memory_evidence WHERE item_id = ?", [keeper.id, keeper.rev, other.id]);
+        const explicit = items.some((i) => i.basis === "explicit");
+        this.run("UPDATE memory_items SET last_confirmed_at = ?, basis = ?, pinned = ?, status = CASE WHEN status = 'pending' AND ? = 1 THEN 'active' ELSE status END, rev = rev + 1, updated_at = ? WHERE id = ?", [
+          Math.max(...items.map((i) => i.lastConfirmedAt)), explicit ? "explicit" : keeper.basis, items.some((i) => i.pinned) ? 1 : 0, explicit ? 1 : 0, this.now(), keeper.id,
+        ]);
+        this.erase(others.map((o) => o.id), { actor: "consolidation", reason: "the same memory twice", at: now, lineage: false, tombstone: false, keepSharedSources: true }, new Set());
+        merged += others.length;
+        this.audit("merge", keeper.id, "consolidation", `${others.length} copy(ies)`);
+      }
+      const old = this.all("SELECT id FROM memory_items WHERE assistant_id = ? AND kind = 'working' AND status != 'deleted' AND valid_to IS NOT NULL AND valid_to <= ?", [ASSISTANT_ID, now - 14 * 86_400_000]).map((r) => String(r.id));
+      if (old.length > 0) this.erase(old, { actor: "consolidation", reason: "a working note past its time", at: now, lineage: false, tombstone: false }, new Set());
+      const rolledUp = this.rollUp(now);
+      if (merged + old.length + rolledUp > 0) this.bump();
+      this.setMeta("consolidated_at", String(now));
+      return { merged, expired: old.length, rolledUp };
+    });
+  }
+
+  /** One derived line per scope and month for events and decisions older than a month, once there are enough to be worth it. */
+  private rollUp(now: number): number {
+    const rows = this.all("SELECT id, text, scope_kind, scope_key, observed_at FROM memory_items WHERE assistant_id = ? AND kind IN ('event','decision') AND status IN ('active','superseded') AND observed_at < ? ORDER BY observed_at, rowid", [ASSISTANT_ID, now - 30 * 86_400_000]);
+    const groups = new Map<string, { scope: Scope; period: string; ids: string[]; texts: string[] }>();
+    for (const r of rows) {
+      const period = new Date(Number(r.observed_at)).toISOString().slice(0, 7);
+      const scope: Scope = { kind: r.scope_kind as Scope["kind"], key: String(r.scope_key) };
+      const key = `${scopeKey(scope)}|${period}`;
+      const g = groups.get(key) ?? { scope, period, ids: [], texts: [] };
+      g.ids.push(String(r.id));
+      g.texts.push(String(r.text));
+      groups.set(key, g);
+    }
+    let made = 0;
+    // Rebuilt from what exists now: a roll-up of a memory that has since been erased is gone, and a new one says only what is left.
+    this.run("DELETE FROM memory_summaries");
+    for (const g of groups.values()) {
+      if (g.ids.length < 5) continue;
+      const heads = g.texts.slice(0, 3).map((t) => (t.length > 80 ? `${t.slice(0, 77)}...` : t)).join("; ");
+      this.run("INSERT INTO memory_summaries (id, scope_kind, scope_key, period, text, derived_from, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [id("sum"), g.scope.kind, g.scope.key, g.period, `${g.period}: ${g.ids.length} notes, among them: ${heads}`, JSON.stringify(g.ids), this.now()]);
+      made += 1;
+    }
+    return made;
   }
 
   /** The exact words behind some memories, for a question about where a belief came from. */
