@@ -4,7 +4,7 @@ import type { AssistantAutonomy, AssistantGoalView, AssistantProfileView } from 
 import { Button, Toggle } from "../ui/primitives.js";
 import { Num, Pick, Row, Section } from "../settings/SettingsPage.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
-import { Chip, Notice, TextField } from "./parts.js";
+import { Chip, Notice } from "./parts.js";
 
 const AUTONOMY: { value: AssistantAutonomy; label: string; hint: string }[] = [
   { value: "ask", label: "Ask first", hint: "Starts nothing. Only says what is waiting on you." },
@@ -12,7 +12,7 @@ const AUTONOMY: { value: AssistantAutonomy; label: string; hint: string }[] = [
   { value: "act", label: "Act within limits", hint: "Starts work that only reads and rests on something you said in a project, a couple a day at most." },
 ];
 
-/** Who the assistant is, how it talks, what it is working toward, and what it may do on its own. */
+/** What the assistant is working toward, what it may do on its own, and how much it may spend. Who it is lives in the Persona tab. */
 export function ProfilePanel(props: { profile: AssistantProfileView; changed: () => void; bump: number }) {
   const call = useAssistantCall();
   const [error, setError] = useState<string | null>(null);
@@ -30,30 +30,6 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
   return (
     <div>
       {error ? <div className="mt-6"><Notice tone="error">{error}</Notice></div> : null}
-      <Section title="Who it is">
-        <Row label="Name" description="What it calls itself, and how the model is told to think of it.">
-          <TextField value={p.name} label="Name" maxLength={60} onCommit={(name) => void save({ name })} className="w-full @min-[520px]:w-64" />
-        </Row>
-        <Row label="Character" description="A line or two about how it should come across. It is added to every prompt, so keep it short.">
-          <TextField value={p.persona} label="Character" multiline maxLength={1000} onCommit={(persona) => void save({ persona })} className="w-full @min-[520px]:w-96" />
-        </Row>
-      </Section>
-
-      <Section title="How it talks">
-        <Row label="Tone">
-          <Pick value={p.communication.tone} options={[{ value: "plain", label: "Plain" }, { value: "warm", label: "Warm" }, { value: "formal", label: "Formal" }]} onChange={(tone) => void save({ communication: { tone } })} />
-        </Row>
-        <Row label="Length">
-          <Pick value={p.communication.verbosity} options={[{ value: "concise", label: "Short" }, { value: "balanced", label: "Balanced" }, { value: "detailed", label: "Detailed" }]} onChange={(verbosity) => void save({ communication: { verbosity } })} />
-        </Row>
-        <Row label="Language" description="Leave empty to follow the language you write in.">
-          <TextField value={p.communication.language} label="Language" maxLength={40} placeholder="Portuguese" onCommit={(language) => void save({ communication: { language } })} className="w-full @min-[520px]:w-48" />
-        </Row>
-        <Row label="Anything else about how to talk to you">
-          <TextField value={p.communication.notes} label="Notes on how to talk to you" multiline maxLength={600} onCommit={(notes) => void save({ communication: { notes } })} className="w-full @min-[520px]:w-96" />
-        </Row>
-      </Section>
-
       <Goals bump={props.bump} changed={props.changed} />
 
       <Section title="What it may do on its own">

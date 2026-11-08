@@ -3325,6 +3325,703 @@
   }
 }
 
+/*
+ * The assistant's face. `.av` is an SVG drawn by components/assistant/companion/Avatar.tsx; its hue and glow arrive as
+ * `--h` and `--g`, and every colour below is made from them, so one spec is one face in any theme. A mood is the
+ * `data-mood` on the root: idle, working, attention (warm: it needs you), delight and concern (brief, with a burst),
+ * asleep. Reduced motion holds every face still and lit.
+ */
+.av {
+  --av-1: oklch(0.86 0.12 var(--h));
+  --av-2: oklch(0.7 0.15 var(--h));
+  --av-3: oklch(0.46 0.12 var(--h));
+  --av-d: oklch(0.2 0.05 var(--h));
+  --av-hot: oklch(0.97 0.035 var(--h));
+  --av-bloom: oklch(0.76 0.15 var(--h) / calc(0.6 * var(--g)));
+  --av-ink: oklch(0.14 0.03 var(--h));
+  --lx: 0;
+  --ly: 0;
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+.av[data-mood="attention"] {
+  --av-1: color-mix(in oklab, var(--warn) 82%, white);
+  --av-2: var(--warn);
+  --av-3: color-mix(in oklab, var(--warn) 55%, black);
+  --av-hot: color-mix(in oklab, var(--warn) 28%, white);
+  --av-bloom: color-mix(in oklab, var(--warn) 52%, transparent);
+}
+.av[data-mood="concern"] {
+  --av-1: oklch(0.8 0.07 var(--h));
+  --av-2: oklch(0.64 0.09 var(--h));
+}
+.av[data-mood="asleep"] {
+  opacity: 0.58;
+  filter: saturate(0.5);
+}
+.av[data-mood="asleep"] * {
+  animation-play-state: paused;
+}
+.av-stage {
+  fill: oklch(0.2 0.03 var(--h));
+  stroke: color-mix(in oklab, var(--av-2) 38%, transparent);
+  stroke-width: 1;
+}
+.av-o {
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+}
+.av-bloom {
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  animation: av-bloom calc(var(--breath) * 1.4) ease-in-out infinite;
+}
+
+/* One-shot rays: glad for delight, a dotted shiver for concern. */
+.av-burst line {
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  stroke: var(--av-hot);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  opacity: 0;
+  animation: av-ray 950ms var(--ease-out) both;
+}
+.av-burst.concern line {
+  stroke: var(--av-2);
+  stroke-dasharray: 2 5;
+}
+
+/* ---------------------------------------------------------------- halo */
+.av-ring {
+  fill: none;
+  stroke: var(--av-2);
+  stroke-linecap: round;
+}
+.av-ring.a { stroke-width: 1.6; stroke-dasharray: 52 12 20 12; opacity: 0.9; }
+.av-ring.b { stroke: var(--av-1); stroke-width: 3; stroke-dasharray: 78 16; }
+.av-ring.c { stroke-width: 1.2; stroke-dasharray: 3 6; opacity: 0.8; }
+.av-ring.d { stroke: var(--av-1); stroke-width: 1.8; stroke-dasharray: 34 10; opacity: 0.8; }
+.av-ticks {
+  fill: none;
+  stroke: var(--av-2);
+  stroke-width: 3.4;
+  stroke-dasharray: 1.2 6.2;
+  opacity: 0.4;
+}
+.av-ticks.fine {
+  stroke-width: 2;
+  stroke-dasharray: 0.8 2.2;
+}
+.av-bead {
+  fill: var(--av-hot);
+  filter: drop-shadow(0 0 4px var(--av-1));
+}
+.av-spin-a { animation: av-spin 34s linear infinite; }
+.av-spin-b { animation: av-spin 21s linear infinite reverse; }
+.av-spin-c { animation: av-spin 46s linear infinite; }
+.av-spin-d { animation: av-spin 15s linear infinite reverse; }
+.av-spin-t { animation: av-spin 80s linear infinite reverse; }
+.av-spin-slow { animation: av-spin 90s linear infinite; }
+.av-spin-rev { animation: av-spin 30s linear infinite reverse; }
+.av-core {
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  animation: av-breathe var(--breath) ease-in-out infinite;
+  filter: drop-shadow(0 0 calc(10px * var(--g) + 2px) var(--av-1));
+}
+.av-corehalo {
+  fill: none;
+  stroke: var(--av-1);
+  stroke-width: 1;
+  opacity: 0.5;
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  animation: av-breathe var(--breath) ease-in-out infinite reverse;
+}
+.av[data-mood="working"] .av-spin-a { animation-duration: 8s; }
+.av[data-mood="working"] .av-spin-b { animation-duration: 5s; }
+.av[data-mood="working"] .av-spin-c { animation-duration: 11s; }
+.av[data-mood="working"] .av-spin-d { animation-duration: 4s; }
+.av[data-mood="working"] .av-spin-slow { animation-duration: 24s; }
+.av[data-mood="working"] .av-spin-rev { animation-duration: 8s; }
+.av[data-mood="working"] .av-core { animation-duration: 1.3s; }
+.av[data-mood="attention"] .av-core,
+.av[data-mood="attention"] .av-corehalo { animation: av-throb 0.9s ease-in-out infinite; }
+.av[data-mood="concern"] .av-ring.a { stroke-dasharray: 20 30 14 30; }
+.av[data-mood="concern"] .av-core { animation-duration: 7s; opacity: 0.8; }
+.av[data-mood="delight"] .av-core { animation-duration: 1.8s; }
+.av[data-mood="asleep"] .av-core { transform: scale(0.55); animation: none; }
+
+/* ---------------------------------------------------------------- optic */
+.av-bezel { fill: var(--av-d); stroke: var(--av-3); stroke-width: 1.6; }
+.av-groove { fill: none; stroke: oklch(0.1 0.03 var(--h)); stroke-width: 3; }
+.av-notches { fill: none; stroke: var(--av-2); stroke-width: 3; stroke-dasharray: 0.55 4.45; opacity: 0.55; }
+.av-lensrim { fill: none; stroke: var(--av-2); stroke-width: 1.4; opacity: 0.85; }
+.av-irisrim { fill: none; stroke: var(--av-1); stroke-width: 1.2; opacity: 0.8; }
+.av-blade { stroke: var(--av-1); stroke-width: 1.7; stroke-linecap: round; opacity: 0.5; }
+.av-iris { animation: av-spin 60s linear infinite; }
+.av[data-mood="working"] .av-iris { animation-duration: 9s; }
+.av-iris-wrap {
+  transform: translate(calc(var(--lx) * 4px), calc(var(--ly) * 3.4px));
+}
+.av-pupilwrap {
+  transform: translate(calc(var(--lx) * 4px), calc(var(--ly) * 3.4px));
+}
+.av-pupil {
+  fill: oklch(0.07 0.02 var(--h));
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: transform 420ms var(--ease-out);
+}
+.av[data-mood="attention"] .av-pupil { transform: scale(1.32); }
+.av[data-mood="working"] .av-pupil { transform: scale(0.82); }
+.av-spec { fill: white; opacity: 0.9; }
+.av-spec2 { fill: white; opacity: 0.5; }
+.av-lid rect { fill: oklch(0.13 0.03 var(--h)); }
+.av-lid line { stroke: var(--av-3); stroke-width: 1.2; }
+.av-lid.top {
+  transform: translateY(-62px);
+  animation: av-blink-top var(--blink) var(--blink-at) infinite;
+}
+.av-lid.bottom {
+  transform: translateY(62px);
+  animation: av-blink-bottom var(--blink) var(--blink-at) infinite;
+}
+.av[data-mood="delight"] .av-lid.top { animation: none; transform: translateY(-48px); transition: transform 300ms var(--ease-out); }
+.av[data-mood="delight"] .av-lid.bottom { animation: none; transform: translateY(20px); transition: transform 300ms var(--ease-out); }
+.av[data-mood="concern"] .av-lid.top {
+  animation: none;
+  transform: translateY(-38px) rotate(7deg);
+  transform-box: view-box;
+  transform-origin: 80px 82px;
+  transition: transform 300ms var(--ease-out);
+}
+.av[data-mood="asleep"] .av-lid.top { animation: none; transform: translateY(-1px); }
+.av[data-mood="asleep"] .av-lid.bottom { animation: none; transform: translateY(1px); }
+.av-scan {
+  fill: var(--av-1);
+  opacity: 0;
+}
+.av[data-mood="working"] .av-scan {
+  opacity: 0.4;
+  animation: av-scan 1.7s ease-in-out infinite alternate;
+}
+
+/* ---------------------------------------------------------------- hologram */
+.av-edge {
+  fill: none;
+  stroke: var(--av-1);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
+}
+.av-edge.strong { stroke-width: 2.2; }
+.av-edge.cup { fill: color-mix(in oklab, var(--av-2) 28%, transparent); }
+.av-figure {
+  animation: av-flicker 9s steps(1) infinite, av-float 6.4s ease-in-out infinite;
+}
+.av-band {
+  fill: var(--av-1);
+  opacity: 0.24;
+  animation: av-sweep 3.6s linear infinite;
+}
+.av-cone { fill: var(--av-bloom); opacity: 0.42; }
+.av-base { fill: color-mix(in oklab, var(--av-2) 32%, transparent); stroke: var(--av-1); stroke-width: 1.2; }
+.av-base2 { fill: none; stroke: var(--av-1); stroke-width: 0.8; opacity: 0.6; }
+.av-eye { fill: var(--av-hot); filter: drop-shadow(0 0 3px var(--av-1)); transform-box: fill-box; transform-origin: center; }
+.av-visor { fill: var(--av-1); filter: drop-shadow(0 0 4px var(--av-1)); opacity: 0.95; transform-box: fill-box; transform-origin: center; }
+.av-eyearc { fill: none; stroke: var(--av-hot); stroke-width: 2; stroke-linecap: round; opacity: 0; }
+.av-holo .av-eyes { transform: translate(calc(var(--lx) * 3.4px), calc(var(--ly) * 2.2px)); }
+.av-dot { fill: var(--av-hot); opacity: 0; animation: av-rise 5s var(--ease-out) infinite; }
+.av[data-mood="working"] .av-band { animation-duration: 1.5s; }
+.av[data-mood="working"] .av-holo .av-eyes { animation: av-scanx 1.3s ease-in-out infinite alternate; }
+.av[data-mood="delight"] .av-eye { opacity: 0; }
+.av[data-mood="delight"] .av-eyearc { opacity: 1; }
+.av[data-mood="delight"] .av-visor { transform: scaleY(1.45); }
+.av[data-mood="concern"] .av-eye:nth-of-type(1) { transform: rotate(14deg); }
+.av[data-mood="concern"] .av-eye:nth-of-type(2) { transform: rotate(-14deg); }
+.av[data-mood="concern"] .av-figure { animation: av-flicker 1.4s steps(1) infinite; }
+.av[data-mood="asleep"] .av-eye,
+.av[data-mood="asleep"] .av-visor { transform: scaleY(0.3); }
+.av[data-mood="asleep"] .av-figure { opacity: 0.5; }
+
+/* ---------------------------------------------------------------- critter */
+.av-shadow { fill: oklch(0 0 0 / 0.3); }
+.av-shell, .av-ear, .av-arm { stroke: color-mix(in oklab, var(--av-3) 65%, transparent); stroke-width: 1.3; }
+.av-earin { fill: color-mix(in oklab, var(--av-hot) 70%, var(--av-2)); opacity: 0.55; }
+.av-belly { fill: var(--av-hot); opacity: 0.22; }
+.av-cheek { fill: oklch(0.82 0.12 20); opacity: 0.3; transition: opacity 300ms var(--ease-out); }
+.av-ball { fill: var(--av-ink); }
+.av-stalk { stroke: var(--av-2); stroke-width: 3; stroke-linecap: round; fill: none; }
+.av-stalk.thin { stroke-width: 2; }
+.av-bulb { fill: var(--av-hot); filter: drop-shadow(0 0 5px var(--av-1)); animation: av-breathe var(--breath) ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.av-body {
+  transform-box: view-box;
+  transform-origin: 80px 138px;
+  animation: av-chest var(--breath) ease-in-out infinite;
+}
+.av-hop {
+  transform-box: view-box;
+  transform-origin: 80px 138px;
+}
+.av-eyes {
+  transform-box: fill-box;
+  transform-origin: 50% 55%;
+}
+.av-critter .av-eyes { animation: av-blink-y var(--blink) var(--blink-at) infinite; }
+.av-eye-l, .av-eye-r { transform: translate(calc(var(--lx) * 3.4px), calc(var(--ly) * 2.6px)); }
+.av-closed { fill: none; stroke: var(--av-ink); stroke-width: 2.4; stroke-linecap: round; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.av-mouth path, .av-mouth ellipse { fill: none; stroke: var(--av-ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
+.av-mouth .m-idle { opacity: 1; }
+.av-mouth .m-o { fill: var(--av-ink); stroke: none; }
+.av-mouth .m-glad { fill: var(--av-ink); }
+.av-brows { fill: none; stroke: var(--av-ink); stroke-width: 2.2; stroke-linecap: round; opacity: 0; }
+.av-think circle { fill: var(--av-1); opacity: 0; }
+.av-z { fill: var(--av-1); font: 700 14px var(--font-display, sans-serif); opacity: 0; }
+.av-bang { fill: none; stroke: var(--av-1); stroke-width: 3.4; stroke-linecap: round; opacity: 0; }
+.av-twitch { transform-box: fill-box; transform-origin: 50% 100%; animation: av-twitch 9s ease-in-out infinite; }
+.av-twitch.r { animation-delay: 4s; }
+.av[data-mood="working"] .m-idle { opacity: 0; }
+.av[data-mood="working"] .m-work { opacity: 1; }
+.av[data-mood="working"] .av-eye-l, .av[data-mood="working"] .av-eye-r { transform: translate(calc(var(--lx) * 2px + 2px), calc(var(--ly) * 2px + 2.6px)); }
+.av[data-mood="working"] .av-think circle { animation: av-think 1.4s ease-in-out infinite; }
+.av[data-mood="working"] .av-think circle:nth-child(2) { animation-delay: 0.22s; }
+.av[data-mood="working"] .av-think circle:nth-child(3) { animation-delay: 0.44s; }
+.av[data-mood="attention"] .m-idle { opacity: 0; }
+.av[data-mood="attention"] .m-o { opacity: 1; }
+.av[data-mood="attention"] .av-hop { animation: av-hop 1.15s ease-in-out infinite; }
+.av[data-mood="attention"] .av-bang { opacity: 1; animation: ancilla-pulse 1s ease-in-out infinite; }
+.av[data-mood="delight"] .m-idle { opacity: 0; }
+.av[data-mood="delight"] .m-glad { opacity: 1; }
+.av[data-mood="delight"] .av-eyes { opacity: 0; animation: none; }
+.av[data-mood="delight"] .av-closed { opacity: 1; }
+.av[data-mood="delight"] .av-cheek { opacity: 0.6; }
+.av[data-mood="delight"] .av-hop { animation: av-bounce 0.62s var(--ease-out) 3; }
+.av[data-mood="delight"] .av-arm.l { animation: av-wave-l 0.4s ease-in-out 4; transform-box: fill-box; transform-origin: 80% 20%; }
+.av[data-mood="delight"] .av-arm.r { animation: av-wave-r 0.4s ease-in-out 4; transform-box: fill-box; transform-origin: 20% 20%; }
+.av[data-mood="concern"] .m-idle { opacity: 0; }
+.av[data-mood="concern"] .m-sad { opacity: 1; }
+.av[data-mood="concern"] .av-brows { opacity: 1; }
+.av[data-mood="concern"] .av-body { animation: av-shiver 0.12s linear 8; }
+.av[data-mood="asleep"] .av-eyes { opacity: 0; animation: none; }
+.av[data-mood="asleep"] .av-closed { opacity: 1; transform: scaleY(-1); }
+.av[data-mood="asleep"] .av-body { animation: av-chest 7s ease-in-out infinite; }
+.av[data-mood="asleep"] .av-z.a { animation: av-zzz 4.6s ease-in-out infinite; }
+.av[data-mood="asleep"] .av-z.b { animation: av-zzz 4.6s ease-in-out 1.6s infinite; }
+
+/* ---------------------------------------------------------------- cipher */
+.av-poly {
+  fill: color-mix(in oklab, var(--av-2) 9%, transparent);
+  stroke: var(--av-1);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+.av-poly.ghost { fill: none; stroke: var(--av-2); opacity: 0.45; transform: translate(1.6px, -1.2px); animation: av-glitch 7s steps(1) infinite; }
+.av-poly.inner { fill: none; stroke: var(--av-2); stroke-width: 1.3; opacity: 0.85; }
+.av-spoke { stroke: var(--av-2); stroke-width: 0.9; opacity: 0.35; }
+.av-node { fill: var(--av-1); filter: drop-shadow(0 0 3px var(--av-1)); animation: av-twinkle 3.2s ease-in-out infinite; }
+.av-pupilring { fill: none; stroke: var(--av-1); stroke-width: 1.5; }
+.av[data-mood="working"] .av-node { animation-duration: 1s; }
+.av[data-mood="attention"] .av-node { animation: av-throb 0.9s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.av[data-mood="concern"] .av-poly.ghost { transform: translate(3.4px, -2.4px); animation: av-glitch 0.9s steps(1) infinite; }
+.av[data-mood="asleep"] .av-node { animation: none; opacity: 0.4; }
+
+/* ---------------------------------------------------------------- motion */
+@keyframes av-spin { to { transform: rotate(360deg); } }
+@keyframes av-breathe {
+  0%, 100% { transform: scale(0.93); opacity: 0.92; }
+  50% { transform: scale(1.07); opacity: 1; }
+}
+@keyframes av-throb {
+  0%, 100% { transform: scale(0.9); opacity: 0.85; }
+  50% { transform: scale(1.18); opacity: 1; }
+}
+@keyframes av-bloom {
+  0%, 100% { opacity: 0.72; transform: scale(0.96); }
+  50% { opacity: 1; transform: scale(1.04); }
+}
+@keyframes av-ray {
+  0% { opacity: 0; transform: scale(0.72); }
+  28% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.22); }
+}
+@keyframes av-blink-top {
+  0%, 95%, 100% { transform: translateY(-62px); }
+  97.5% { transform: translateY(-1px); }
+}
+@keyframes av-blink-bottom {
+  0%, 95%, 100% { transform: translateY(62px); }
+  97.5% { transform: translateY(1px); }
+}
+@keyframes av-blink-y {
+  0%, 94%, 100% { transform: scaleY(1); }
+  97% { transform: scaleY(0.08); }
+}
+@keyframes av-scan {
+  from { transform: translateY(0); }
+  to { transform: translateY(84px); }
+}
+@keyframes av-sweep {
+  from { transform: translateY(18px); }
+  to { transform: translateY(124px); }
+}
+@keyframes av-scanx {
+  from { transform: translate(-5px, 0); }
+  to { transform: translate(5px, 0); }
+}
+@keyframes av-flicker {
+  0%, 92%, 96%, 100% { opacity: 1; }
+  93% { opacity: 0.7; }
+  94% { opacity: 1; }
+  95% { opacity: 0.55; }
+}
+@keyframes av-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2.6px); }
+}
+@keyframes av-rise {
+  0% { transform: translateY(0); opacity: 0; }
+  14% { opacity: 0.9; }
+  100% { transform: translateY(-88px); opacity: 0; }
+}
+@keyframes av-chest {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.015, 1.035); }
+}
+@keyframes av-hop {
+  0%, 100% { transform: translateY(0); }
+  35% { transform: translateY(-13px); }
+  60% { transform: translateY(0) scale(1.04, 0.94); }
+}
+@keyframes av-bounce {
+  0% { transform: translateY(0) scale(1.05, 0.92); }
+  45% { transform: translateY(-16px) scale(0.97, 1.05); }
+  100% { transform: translateY(0) scale(1); }
+}
+@keyframes av-wave-l { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(-28deg); } }
+@keyframes av-wave-r { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(28deg); } }
+@keyframes av-shiver { 0%, 100% { transform: translateX(0); } 50% { transform: translateX(1.4px); } }
+@keyframes av-think { 0%, 100% { opacity: 0.15; } 50% { opacity: 1; } }
+@keyframes av-twitch { 0%, 94%, 100% { transform: rotate(0); } 96% { transform: rotate(-7deg); } 98% { transform: rotate(3deg); } }
+@keyframes av-zzz {
+  0% { transform: translate(0, 6px); opacity: 0; }
+  25% { opacity: 0.85; }
+  100% { transform: translate(8px, -16px); opacity: 0; }
+}
+@keyframes av-glitch {
+  0%, 90%, 100% { transform: translate(1.6px, -1.2px); opacity: 0.45; }
+  91% { transform: translate(-3px, 1px); opacity: 0.7; }
+  93% { transform: translate(3px, -2px); opacity: 0.3; }
+}
+@keyframes av-twinkle {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .av *,
+  .av *::before,
+  .av *::after {
+    animation: none !important;
+  }
+  .av-dot { opacity: 0; }
+}
+
+/*
+ * The assistant in the sidebar, and beside the composer. Until it is set up its card asks, with a light that goes round
+ * its edge (a conic gradient whose angle is animated; where `@property` is not known the edge simply stays lit), and a
+ * "not now" stops the light. Once it is set up the card is quiet: the face, the name and one plain line.
+ */
+@property --cc-a {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.companion-chip {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px 7px 8px;
+  border-radius: 12px;
+  text-align: left;
+  background: color-mix(in oklab, var(--bg-raised) 72%, transparent);
+  box-shadow: 0 0 0 1px var(--border);
+  transition: background-color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+}
+.companion-chip:hover {
+  background: var(--bg-hover);
+}
+.companion-chip.active {
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+.companion-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+.cc-face {
+  display: inline-flex;
+  flex: none;
+}
+.cc-tx {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+.cc-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 17px;
+  letter-spacing: -0.008em;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cc-sub {
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 15px;
+  color: var(--fg-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.companion-chip[data-state="needs"] .cc-sub {
+  color: var(--warn-text);
+}
+.cc-badge {
+  display: inline-flex;
+  min-width: 18px;
+  height: 18px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--warn);
+  color: oklch(0.2 0.05 70);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.cc-go {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.companion-chip[data-state="invite"] {
+  background: linear-gradient(135deg, color-mix(in oklab, var(--accent) 13%, var(--bg-raised)), var(--bg-raised) 70%);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, var(--border));
+}
+.companion-chip[data-state="invite"] .cc-name {
+  font-weight: 650;
+}
+.companion-chip[data-state="invite"][data-invite="pulse"]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  padding: 1.5px;
+  border-radius: 13px;
+  pointer-events: none;
+  background: conic-gradient(from var(--cc-a), transparent 0 52%, var(--accent) 74%, color-mix(in oklab, var(--accent) 35%, white) 88%, transparent 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  animation: cc-turn 3.6s linear infinite;
+}
+.companion-chip[data-state="invite"][data-invite="pulse"] .cc-go {
+  animation: ancilla-pulse 2.2s var(--ease-in-out) infinite;
+}
+@keyframes cc-turn {
+  to {
+    --cc-a: 360deg;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .companion-chip[data-state="invite"][data-invite="pulse"]::before,
+  .companion-chip[data-state="invite"][data-invite="pulse"] .cc-go {
+    animation: none;
+  }
+}
+
+/* The line beside the composer's face: a small bubble that slides out to its right and stays a few seconds. It rests on the
+   folder and branch beside it, which can wait, and never on the composer's own controls above. */
+.presence-bubble {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 8px);
+  z-index: 5;
+  max-width: 260px;
+  margin-top: -13px;
+  overflow: hidden;
+  padding: 5px 11px;
+  border-radius: 13px;
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 1px var(--border-strong), 0 6px 18px -8px oklch(0 0 0 / 0.35);
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: presence-in 220ms var(--ease-out) both;
+}
+@keyframes presence-in {
+  from {
+    opacity: 0;
+    transform: translateX(-6px) scale(0.97);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .presence-bubble {
+    animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------- the assistant's home */
+/* The stage its face stands on: a lit screen whatever the theme, tinted by its own hue, with a faint grid and a glow on the floor. */
+.ch-stage {
+  position: relative;
+  display: flex;
+  min-height: 224px;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 18px 34px;
+  isolation: isolate;
+  background:
+    radial-gradient(120% 80% at 50% -10%, oklch(0.34 0.09 var(--h) / 0.6), transparent 65%),
+    linear-gradient(180deg, oklch(0.19 0.035 var(--h)), oklch(0.135 0.02 var(--h)));
+}
+.ch-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: linear-gradient(oklch(1 0 0 / 0.05) 1px, transparent 1px), linear-gradient(90deg, oklch(1 0 0 / 0.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+  -webkit-mask-image: radial-gradient(65% 60% at 50% 45%, #000 20%, transparent 85%);
+  mask-image: radial-gradient(65% 60% at 50% 45%, #000 20%, transparent 85%);
+}
+.ch-stage::after {
+  content: "";
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  z-index: -1;
+  width: 160px;
+  height: 26px;
+  border-radius: 50%;
+  transform: translateX(-50%);
+  background: radial-gradient(50% 50% at 50% 50%, oklch(0.75 0.15 var(--h) / calc(0.5 * var(--g, 0.6))), transparent 72%);
+  filter: blur(7px);
+  animation: ch-floor 5.4s ease-in-out infinite;
+}
+@keyframes ch-floor {
+  50% {
+    opacity: 0.7;
+    transform: translateX(-50%) scale(0.9);
+  }
+}
+.companion-assemble {
+  animation: companion-assemble 1.3s var(--ease-out) both;
+}
+@keyframes companion-assemble {
+  from {
+    opacity: 0;
+    transform: scale(0.88);
+    filter: blur(10px);
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
+/* A shorter stage, for the preview beside the editors: the face, a little floor and no more. */
+.ch-stage.compact {
+  min-height: 176px;
+  padding: 18px 14px 32px;
+}
+.companion-preview {
+  overflow: hidden;
+  border-radius: 16px;
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 1px var(--border), 0 10px 28px -14px oklch(0 0 0 / 0.35);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ch-stage::after,
+  .companion-assemble {
+    animation: none;
+  }
+}
+
+/* A range the way the rest of the app draws one: a thin track that fills to the thumb. */
+.companion-range {
+  --v: 50%;
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+.companion-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent) var(--v), var(--border-strong) var(--v));
+}
+.companion-range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent) var(--v), var(--border-strong) var(--v));
+}
+.companion-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 2px var(--accent), 0 1px 3px oklch(0 0 0 / 0.3);
+  transition: transform 120ms var(--ease-out);
+}
+.companion-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.companion-range:active::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.companion-range:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.companion-range.hue::-webkit-slider-runnable-track {
+  background: linear-gradient(90deg, oklch(0.74 0.15 0), oklch(0.74 0.15 45), oklch(0.74 0.15 90), oklch(0.74 0.15 135), oklch(0.74 0.15 180), oklch(0.74 0.15 225), oklch(0.74 0.15 270), oklch(0.74 0.15 315), oklch(0.74 0.15 360));
+}
+.companion-range.hue::-moz-range-track {
+  background: linear-gradient(90deg, oklch(0.74 0.15 0), oklch(0.74 0.15 45), oklch(0.74 0.15 90), oklch(0.74 0.15 135), oklch(0.74 0.15 180), oklch(0.74 0.15 225), oklch(0.74 0.15 270), oklch(0.74 0.15 315), oklch(0.74 0.15 360));
+}
+
 @media (prefers-reduced-motion: reduce) {
   .spin-ring,
   .attention-pulse,

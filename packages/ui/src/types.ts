@@ -820,11 +820,39 @@ export interface MemoryListView {
   epoch: number;
 }
 
+export type AvatarForm = "halo" | "optic" | "hologram" | "critter" | "cipher";
+export type VoiceArchetype = "steady" | "warm" | "dry" | "sharp" | "playful" | "formal" | "curious" | "custom";
+export type CharacterPresence = "off" | "tone" | "full";
+
+/** The assistant as a character: a face, a voice and a few habits. It changes how it looks and sounds, never what it may do. */
+export interface AssistantCharacterView {
+  avatar: { form: AvatarForm; hue: number; glow: number; detail: number; seed: number };
+  voice: { archetype: VoiceArchetype; warmth: number; humor: number; directness: number; curiosity: number; formality: number };
+  callsUser: string;
+  quirks: string[];
+  presence: CharacterPresence;
+  showBond: boolean;
+  /** When the user made it theirs; null while it has the default look and voice, which is when it asks to be set up. */
+  setupAt: number | null;
+}
+
+/** What the user and the assistant have shared, read off what is stored. It carries no word of any note. */
+export interface AssistantBondView {
+  since: number | null;
+  daysTogether: number;
+  remembered: number;
+  replaced: number;
+  finished: number;
+  unchecked: number;
+  milestones: { id: string; at: number }[];
+}
+
 export interface AssistantProfileView {
   id: string;
   enabled: boolean;
   name: string;
   persona: string;
+  character: AssistantCharacterView;
   communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
   autonomy: AssistantAutonomy;
   policy: { allowReadOnly: boolean; allowProjectWrites: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };
@@ -849,6 +877,7 @@ export interface AssistantStatusView {
   profile: AssistantProfileView;
   goals: AssistantGoalView[];
   stats: { items: Record<MemoryStatus, number>; kinds: Record<string, number>; sources: number; revisions: number; tombstones: number; bytes: number; ftsEnabled: boolean };
+  bond: AssistantBondView;
   epoch: number;
   executive?: boolean;
   tasks?: { open: number; needsYou: number; running: number };

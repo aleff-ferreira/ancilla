@@ -76,7 +76,7 @@ export function TasksPanel(props: { profile: AssistantProfileView; changed: () =
   );
 }
 
-function Suggestion(props: { suggestion: AssistantSuggestionView; autonomy: AssistantProfileView["autonomy"]; changed: () => void }) {
+export function Suggestion(props: { suggestion: AssistantSuggestionView; autonomy: AssistantProfileView["autonomy"]; changed: () => void }) {
   const call = useAssistantCall();
   const controller = useController();
   const [error, setError] = useState<string | null>(null);

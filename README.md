@@ -100,6 +100,8 @@ still does the thinking, on your plan. It is **off until you switch it on**.
 | **Honest about what it knows** | A guess never replaces what you said, a note that may be out of date says so, and when nothing saved answers a question it says that. Passwords, keys and ID numbers are never kept. |
 | **Tasks** | Give it work and it runs through Muse in a thread you can open, one step at a time, inside limits you set. It is marked done only when a check that reads a file passed. A step that may already have changed files is not run again after a restart. |
 | **Initiative, within limits** | Ask first, suggest, or act on its own for work that only reads, a couple of times a day at most. Memory never grants permission: settings and Muse's approvals do. |
+| **A character of your own** | A short first meeting, or the Persona tab later, gives it a name, a face (five forms you can recolour and tune), a voice (eight temperaments and five dials) and up to four habits. Its face is in the sidebar, on the Home tab and beside the composer, where it works while a turn runs, wants you when something waits and is pleased when it finishes. It changes how it sounds, never what it may do or what is true, and it says it is an AI if you ask. |
+| **What you have shared** | Days together, what it remembers, what you finished together and a few round numbers, read from what is stored. No streaks and nothing that counts the days you were away, and you can hide it. |
 
 See [the assistant](docs/assistant.md) for setup, the API and how to roll back, and
 [how it is measured](docs/assistant-evaluation.md) for what it does well and where it is weak.
@@ -365,8 +367,8 @@ Start with [Product](docs/PRODUCT.md), [Design](docs/DESIGN.md), [agent monitori
 ## Data and connections
 
 Ancilla keeps project metadata and activity history in its server's local SQLite database, with research reports in
-the project folder. The assistant, once switched on, keeps its notes and tasks in a second file, `assistant.db`, in the
-same folder; it is not created before that and is not encrypted at rest. Muse maintains its own sessions and login. There is no Ancilla-hosted account service, telemetry
+the project folder. The assistant, once switched on, keeps its notes, tasks and character (name, face and voice) in a
+second file, `assistant.db`, in the same folder; it is not created before that and is not encrypted at rest. Muse maintains its own sessions and login. There is no Ancilla-hosted account service, telemetry
 or analytics in the app. **Running Muse can send prompts, code and other context to Meta's services and enabled
 tools**; local storage does not mean model execution stays on your machine.
 

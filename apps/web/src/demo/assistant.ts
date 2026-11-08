@@ -1,6 +1,8 @@
 import type {
   AssistantActivityView,
   AssistantAttemptView,
+  AssistantBondView,
+  AssistantCharacterView,
   AssistantGoalView,
   AssistantPreviewView,
   AssistantProfileView,
@@ -32,15 +34,39 @@ interface Note extends MemoryItemView {
   options?: string[];
 }
 
+/** What a first-time user sees: the default face and voice, not yet made theirs. */
+const NEW_CHARACTER: AssistantCharacterView = {
+  avatar: { form: "halo", hue: 232, glow: 60, detail: 1, seed: 1 },
+  voice: { archetype: "steady", warmth: 2, humor: 1, directness: 3, curiosity: 1, formality: 1 },
+  callsUser: "",
+  quirks: [],
+  presence: "tone",
+  showBond: true,
+  setupAt: null,
+};
+
 export class DemoAssistant {
+  /** `?assistant=new` is a first visit (nothing set up, switched off, nothing kept); `?assistant=off` is one set up and switched off. */
+  private readonly mode = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("assistant") : null;
   private seq = 100;
   private epoch = 1;
   private readonly t0 = Date.now();
   private profile: AssistantProfileView = {
     id: "default",
-    enabled: true,
-    name: "Ancilla",
-    persona: "Dry and precise. Says what it knows and what it does not.",
+    enabled: this.mode !== "new" && this.mode !== "off",
+    name: this.mode === "new" ? "Ancilla" : "Vesper",
+    persona: this.mode === "new" ? "" : "Dry and precise. Says what it knows and what it does not.",
+    character: this.mode === "new"
+      ? NEW_CHARACTER
+      : {
+          avatar: { form: "optic", hue: 195, glow: 70, detail: 1, seed: 4242 },
+          voice: { archetype: "dry", warmth: 1, humor: 4, directness: 3, curiosity: 1, formality: 2 },
+          callsUser: "Alex",
+          quirks: ["Signs off with 'Standing by.'"],
+          presence: "tone",
+          showBond: true,
+          setupAt: Date.now() - 12 * DAY,
+        },
     communication: { verbosity: "concise", tone: "plain", language: "", notes: "Show the exact path or version, never a paraphrase." },
     autonomy: "suggest",
     policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 1, maxTurnsPerTask: 12, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
@@ -48,7 +74,7 @@ export class DemoAssistant {
     contextBudgetTokens: 900,
     updatedAt: Date.now() - DAY,
   };
-  private goals: AssistantGoalView[] = [
+  private goals: AssistantGoalView[] = this.mode === "new" ? [] : [
     { id: "g1", text: "Ship the personal assistant this month", priority: 90, status: "active", createdAt: Date.now() - 6 * DAY, updatedAt: Date.now() - 6 * DAY },
     { id: "g2", text: "Cut the build time below five minutes", priority: 40, status: "paused", createdAt: Date.now() - 20 * DAY, updatedAt: Date.now() - 9 * DAY },
   ];
@@ -59,6 +85,7 @@ export class DemoAssistant {
   private dismissed = new Set<string>();
 
   constructor() {
+    if (this.mode === "new") return;
     const note = (id: string, kind: MemoryKind, text: string, daysAgo: number, extra: Partial<Note> = {}): void => {
       const at = this.t0 - daysAgo * DAY;
       this.notes.set(id, {
@@ -121,6 +148,31 @@ export class DemoAssistant {
     return { items, kinds, sources: this.notes.size, revisions: this.notes.size, tombstones: 0, bytes: 90_000, ftsEnabled: true };
   }
 
+  /** What the user and the assistant have shared, read off the sample notes and tasks the way the server reads it off what it keeps. */
+  private bond(): AssistantBondView {
+    if (this.notes.size === 0 && this.tasks.length === 0) return { since: null, daysTogether: 0, remembered: 0, replaced: 0, finished: 0, unchecked: 0, milestones: [] };
+    const since = this.t0 - 12 * DAY;
+    const notes = [...this.notes.values()].sort((a, b) => a.createdAt - b.createdAt);
+    const milestones: AssistantBondView["milestones"] = [];
+    if (notes[0]) milestones.push({ id: "first-note", at: notes[0].createdAt });
+    if (notes[9]) milestones.push({ id: "notes-10", at: notes[9].createdAt });
+    const changed = notes.find((n) => n.status === "superseded");
+    if (changed) milestones.push({ id: "first-change", at: changed.updatedAt });
+    const done = this.tasks.find((t) => t.task.status === "completed");
+    if (done?.task.finishedAt) milestones.push({ id: "first-task", at: done.task.finishedAt });
+    milestones.push({ id: "week", at: since + 7 * DAY });
+    milestones.sort((a, b) => a.at - b.at);
+    return {
+      since,
+      daysTogether: 12,
+      remembered: notes.filter((n) => n.status === "active" || n.status === "contested").length,
+      replaced: notes.filter((n) => n.status === "superseded").length,
+      finished: this.tasks.filter((t) => t.task.status === "completed").length,
+      unchecked: this.tasks.filter((t) => t.task.status === "unverified").length,
+      milestones,
+    };
+  }
+
   async handle<T>(method: string, path: string, body?: unknown): Promise<T> {
     const out = this.route(method, path, (body ?? {}) as Record<string, unknown>);
     return JSON.parse(JSON.stringify(out)) as T;
@@ -134,13 +186,23 @@ export class DemoAssistant {
     };
     if (method === "GET" && path === "") {
       const needs = this.tasks.filter((t) => ["blocked", "unverified", "paused"].includes(t.task.status)).length;
-      return { available: true, profile: this.profile, goals: this.goals, stats: this.stats(), epoch: this.epoch, executive: true, tasks: { open: this.tasks.filter((t) => !["completed", "unverified", "failed", "cancelled"].includes(t.task.status)).length, needsYou: needs, running: this.tasks.filter((t) => t.task.status === "running").length } } satisfies AssistantStatusView;
+      return { available: true, profile: this.profile, goals: this.goals, stats: this.stats(), bond: this.bond(), epoch: this.epoch, executive: true, tasks: { open: this.tasks.filter((t) => !["completed", "unverified", "failed", "cancelled"].includes(t.task.status)).length, needsYou: needs, running: this.tasks.filter((t) => t.task.status === "running").length } } satisfies AssistantStatusView;
     }
     if (method === "PATCH" && path === "/profile") {
-      const { expectedUpdatedAt: _e, ...patch } = body;
+      const { expectedUpdatedAt: _e, character: patchedCharacter, ...patch } = body;
       void _e;
+      const change = (patchedCharacter ?? {}) as Record<string, unknown>;
+      const { configured, avatar, voice, ...flat } = change;
+      const character: AssistantCharacterView = {
+        ...this.profile.character,
+        ...(flat as Partial<AssistantCharacterView>),
+        avatar: { ...this.profile.character.avatar, ...((avatar as object) ?? {}) },
+        voice: { ...this.profile.character.voice, ...((voice as object) ?? {}) },
+        setupAt: configured === undefined ? this.profile.character.setupAt : configured ? (this.profile.character.setupAt ?? Date.now()) : null,
+      };
       this.profile = {
         ...this.profile, ...(patch as Partial<AssistantProfileView>),
+        character,
         communication: { ...this.profile.communication, ...((patch["communication"] as object) ?? {}) },
         policy: { ...this.profile.policy, ...((patch["policy"] as object) ?? {}) },
         updatedAt: Date.now(),
@@ -276,6 +338,8 @@ export class DemoAssistant {
       return { task: t.task };
     }
     if (method === "GET" && path === "/suggestions") {
+      // A new assistant has kept nothing yet, so it has nothing to suggest: the sample list refers to notes and tasks it does not have.
+      if (this.mode === "new") return { suggestions: [], autonomy: this.profile.autonomy };
       const list: AssistantSuggestionView[] = [
         { id: "due-commitment:m5", kind: "due-commitment", title: "remind me to renew the domain by 2026-11-12 (due in 2 days)", why: `You said on ${new Date(this.t0 - 9 * DAY).toISOString().slice(0, 10)}: "remind me to renew the domain by 2026-11-12"`, action: { type: "task", goal: "Gather what is needed to renew the domain, and report what is ready and what is missing.", project: "/work/atlas" }, autonomous: true },
         { id: "stale-memory:m3", kind: "stale-memory", title: "Still true? the staging server is at app-4.example.com", why: "Saved 12 days ago. It is about something that changes.", action: { type: "confirm-memory", memoryId: "m3" }, autonomous: false },

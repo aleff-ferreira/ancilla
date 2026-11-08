@@ -12,3 +12,6 @@ export { AncillaApp, type AncillaAppProps } from "./app/AncillaApp.js";
 export type { WindowFrame } from "./app/frame.js";
 export * from "./model/updates.js";
 export * from "./model/notify.js";
+
+export { Avatar, type AvatarProps } from "./components/assistant/companion/Avatar.js";
+export { AvatarGallery } from "./components/assistant/companion/AvatarGallery.js";

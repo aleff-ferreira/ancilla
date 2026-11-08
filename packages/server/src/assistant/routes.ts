@@ -1,6 +1,6 @@
 import { DEFAULT_PROFILE } from "./profile.js";
 import type { AssistantService } from "./service.js";
-import { ConflictError, NotFoundError, ValidationError, type ListFilter } from "./store.js";
+import { ConflictError, EMPTY_BOND, NotFoundError, ValidationError, type ListFilter } from "./store.js";
 import { dismissSuggestion, suggest } from "./suggest.js";
 import { parseScheduleSpec, parseTaskSpec } from "./tasks.js";
 import { MEMORY_KINDS, type MemoryKind, type Scope } from "./types.js";
@@ -98,7 +98,7 @@ const NO_STATS = { schemaVersion: 0, ftsEnabled: false, epoch: 0, items: { activ
 
 /** What looking at an assistant that has not been used yet shows: its defaults, and nothing stored. */
 function untouched(req: AssistantRequest, sub: string): AssistantReply {
-  if (req.method === "GET" && sub === "") return { status: 200, body: { available: true, fresh: true, profile: DEFAULT_PROFILE, goals: [], stats: NO_STATS, epoch: 0 } };
+  if (req.method === "GET" && sub === "") return { status: 200, body: { available: true, fresh: true, profile: DEFAULT_PROFILE, goals: [], stats: NO_STATS, bond: EMPTY_BOND, epoch: 0, executive: false, tasks: { open: 0, needsYou: 0, running: 0 } } };
   if (req.method === "GET" && sub === "/goals") return { status: 200, body: { goals: [] } };
   if (req.method === "GET" && sub === "/tasks") return { status: 200, body: { tasks: [], summary: { open: 0, needsYou: 0, running: 0 } } };
   if (req.method === "GET" && sub === "/suggestions") return { status: 200, body: { suggestions: [], autonomy: DEFAULT_PROFILE.autonomy } };
@@ -223,7 +223,7 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
   try {
     // ---- status and settings
     if (req.method === "GET" && sub === "") {
-      return { status: 200, body: { available: true, profile: store.getProfile(), goals: store.listGoals(), stats: store.stats(), epoch: store.epoch(), executive: service.executive !== null, tasks: service.taskSummary() } };
+      return { status: 200, body: { available: true, profile: store.getProfile(), goals: store.listGoals(), stats: store.stats(), bond: store.bond(), epoch: store.epoch(), executive: service.executive !== null, tasks: service.taskSummary() } };
     }
     if (req.method === "PATCH" && sub === "/profile") {
       const body = await req.body();

@@ -138,6 +138,25 @@ export interface StoreStats {
   bytes: number;
 }
 
+/** The history the user and the assistant share, read off what is stored. It carries no word of any note. */
+export interface Bond {
+  /** When the assistant was first switched on, or failing that the oldest thing it holds; null when there is no history yet. */
+  since: number | null;
+  daysTogether: number;
+  /** Notes it holds now (current and disputed). */
+  remembered: number;
+  /** Beliefs that were changed, each kept as history. */
+  replaced: number;
+  /** Tasks that ended with a check that passed. */
+  finished: number;
+  /** Tasks that ended without a check. */
+  unchecked: number;
+  /** Round numbers and anniversaries, oldest first: `first-note`, `notes-10`, `first-change`, `first-task`, `week`... */
+  milestones: { id: string; at: number }[];
+}
+
+export const EMPTY_BOND: Bond = { since: null, daysTogether: 0, remembered: 0, replaced: 0, finished: 0, unchecked: 0, milestones: [] };
+
 export interface StoreOptions {
   /** The clock for created and updated times; tests and the simulated months of the evaluation set it. */
   now?: () => number;
@@ -441,6 +460,8 @@ export class MemoryStore {
       this.run("UPDATE assistant_profile SET json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(next), next.updatedAt, ASSISTANT_ID]);
       // Words said while capture was off, or before the assistant was switched on, are not read when it comes back.
       if ((current.capturePaused && !next.capturePaused) || (!current.enabled && next.enabled)) this.setMeta("capture_floor", String(now));
+      // The day it was first switched on is where the shared history starts, and it stays when it is switched off and on.
+      if (!current.enabled && next.enabled && this.getMeta("enabled_first_at") === null) this.setMeta("enabled_first_at", String(now));
       this.audit("profile", null, "user", Object.keys(patch).join(","));
       this.bump();
       return next;
@@ -564,6 +585,53 @@ export class MemoryStore {
     return this.all("SELECT id, at, item_id, action, actor, detail FROM memory_audit ORDER BY id DESC LIMIT ?", [Math.min(500, Math.max(1, Math.floor(limit)))]).map((r) => ({
       id: Number(r.id), at: Number(r.at), itemId: r.item_id === null ? null : String(r.item_id), action: String(r.action), actor: String(r.actor), detail: String(r.detail),
     }));
+  }
+
+  /**
+   * The history the user and the assistant share, as facts read off what is stored: since when, how much it remembers,
+   * how many beliefs were changed, how many tasks it finished, and the dates of a few round numbers. It holds no words
+   * of any note, so it can be shown anywhere. Nothing here is a score, and nothing counts days missed.
+   */
+  bond(now = this.now()): Bond {
+    const DAY = 86_400_000;
+    const value = (sql: string, params: Param[] = []): number | null => {
+      const row = this.get(sql, params);
+      return row && row.v !== null && row.v !== undefined ? Number(row.v) : null;
+    };
+    const first = Number(this.getMeta("enabled_first_at") ?? 0) || null;
+    const others = [value("SELECT MIN(created_at) AS v FROM memory_items WHERE assistant_id = ? AND status != 'deleted'", [ASSISTANT_ID]), value("SELECT MIN(created_at) AS v FROM tasks")].filter((v): v is number => v !== null);
+    const since = first ?? (others.length > 0 ? Math.min(...others) : null);
+    const milestones: { id: string; at: number }[] = [];
+    const nthNote = (n: number): number | null => value("SELECT created_at AS v FROM memory_items WHERE assistant_id = ? AND status != 'deleted' ORDER BY created_at, rowid LIMIT 1 OFFSET ?", [ASSISTANT_ID, n - 1]);
+    const nthDone = (n: number): number | null => value("SELECT finished_at AS v FROM tasks WHERE status = 'completed' AND finished_at IS NOT NULL ORDER BY finished_at, rowid LIMIT 1 OFFSET ?", [n - 1]);
+    const note = nthNote(1);
+    if (note !== null) milestones.push({ id: "first-note", at: note });
+    for (const n of [10, 50, 100]) {
+      const at = nthNote(n);
+      if (at !== null) milestones.push({ id: `notes-${n}`, at });
+    }
+    const changed = value("SELECT MIN(updated_at) AS v FROM memory_items WHERE assistant_id = ? AND status = 'superseded'", [ASSISTANT_ID]);
+    if (changed !== null) milestones.push({ id: "first-change", at: changed });
+    const task = nthDone(1);
+    if (task !== null) milestones.push({ id: "first-task", at: task });
+    const tenth = nthDone(10);
+    if (tenth !== null) milestones.push({ id: "tasks-10", at: tenth });
+    if (since !== null) {
+      for (const [id, days] of [["week", 7], ["month", 30], ["quarter", 90]] as const) {
+        if (now - since >= days * DAY) milestones.push({ id, at: since + days * DAY });
+      }
+    }
+    milestones.sort((a, b) => a.at - b.at);
+    const count = (sql: string): number => value(sql) ?? 0;
+    return {
+      since,
+      daysTogether: since === null ? 0 : Math.max(0, Math.floor((now - since) / DAY)),
+      remembered: count(`SELECT COUNT(*) AS v FROM memory_items WHERE assistant_id = '${ASSISTANT_ID}' AND status IN ('active','contested')`),
+      replaced: count(`SELECT COUNT(*) AS v FROM memory_items WHERE assistant_id = '${ASSISTANT_ID}' AND status = 'superseded'`),
+      finished: count("SELECT COUNT(*) AS v FROM tasks WHERE status = 'completed'"),
+      unchecked: count("SELECT COUNT(*) AS v FROM tasks WHERE status = 'unverified'"),
+      milestones,
+    };
   }
 
   stats(): StoreStats {

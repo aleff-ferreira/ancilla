@@ -1433,9 +1433,10 @@ function SpeedReadout(props: { sessionId: string }) {
   );
 }
 
-export function ComposerFooter(props: { cwd: string | null; branch: string | null; running: boolean }) {
+export function ComposerFooter(props: { cwd: string | null; branch: string | null; running: boolean; lead?: ReactNode }) {
   return (
     <div className="flex h-8 items-center gap-3 px-2 text-xs text-subtle">
+      {props.lead}
       {props.cwd ? (
         <Tip label={props.cwd} side="top" align="start">
           <span className="flex min-w-0 items-center gap-1.5" tabIndex={0}>

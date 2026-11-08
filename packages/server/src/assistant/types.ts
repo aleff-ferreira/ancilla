@@ -147,6 +147,40 @@ export interface MemoryDetail {
 
 export type Autonomy = "ask" | "suggest" | "act";
 
+export type AvatarForm = "halo" | "optic" | "hologram" | "critter" | "cipher";
+export type VoiceArchetype = "steady" | "warm" | "dry" | "sharp" | "playful" | "formal" | "curious" | "custom";
+/** How much of the character reaches a prompt: nothing (it only speaks in Ancilla's own words), a line of tone, or the whole character. */
+export type CharacterPresence = "off" | "tone" | "full";
+
+/**
+ * The assistant as a character: a face, a voice and a few habits the user chose. It changes how the assistant looks and
+ * sounds and nothing it is allowed to do: permissions come from the settings and from Muse, never from here.
+ */
+export interface AssistantCharacter {
+  avatar: {
+    form: AvatarForm;
+    /** Hue in degrees, 0 to 359. */
+    hue: number;
+    /** How much light it gives off, 0 to 100. */
+    glow: number;
+    /** Which variant of the form: ears, blades, rings, a visor, sides. 0 to 3. */
+    detail: number;
+    /** What the small random touches of the form (blink timing, particle positions, proportions) are drawn from. */
+    seed: number;
+  };
+  /** The voice: a starting archetype, and dials from 0 to 4 that bend it. */
+  voice: { archetype: VoiceArchetype; warmth: number; humor: number; directness: number; curiosity: number; formality: number };
+  /** What it calls the user; empty means it does not use a name. */
+  callsUser: string;
+  /** Up to four habits in the user's own words ("Signs off with 'Standing by.'"). */
+  quirks: string[];
+  presence: CharacterPresence;
+  /** Whether the page shows the shared history (days together, what it remembers, what it finished). */
+  showBond: boolean;
+  /** When the user finished making it theirs; null while it still has the default look and voice, which is when it asks to be set up. */
+  setupAt: number | null;
+}
+
 export interface AssistantProfile {
   /** One assistant per data folder; the id is fixed. */
   id: string;
@@ -154,6 +188,7 @@ export interface AssistantProfile {
   /** What the assistant calls itself and how it is described to the model every turn. */
   name: string;
   persona: string;
+  character: AssistantCharacter;
   /** How it talks to the user. */
   communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
   autonomy: Autonomy;

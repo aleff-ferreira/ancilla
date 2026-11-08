@@ -3,7 +3,9 @@
 Ancilla's assistant is a memory and a task executive that sit beside Muse. The memory keeps what you told it, with the
 exact words, so a thread no longer starts from nothing. The executive takes work you approve and sees it through, one
 step at a time, in a thread you can open. It adds no model of its own and no second runtime: Muse still does all the
-thinking, on your plan.
+thinking, on your plan. It is also someone: you give it a name, a face and a voice in a short first meeting, and it is
+the same character in the sidebar, on its own page and beside the composer (see [the assistant as a
+character](#the-assistant-as-a-character)).
 
 It is **off until you switch it on**, and until you do there is no file on disk and no code of it running.
 
@@ -28,10 +30,15 @@ and the refusal says why without repeating them.
 
 ## The Assistant page
 
-Open it from the sidebar footer (the brain icon) or at `#/assistant`. The switch at the top turns the assistant on and
-off. Off, the page says what it is and what it keeps, and a notice says how many saved notes are waiting unused. On, it
-has three tabs.
+Open it from the card under Search in the sidebar, from the brain icon in the footer, or at `#/assistant`. The switch at
+the top turns the assistant on and off. Before it has been set up, the page opens on its first meeting (see below). Off,
+the page says what it is and what it keeps, and a notice says how many saved notes are waiting unused. On, it has five
+tabs.
 
+- **Home.** The assistant itself: its face on a lit stage, its name, what kind of voice it has, and the line it opens with,
+  worked out from what is true now (what waits on you, what it is doing, or that all is quiet). Under it, what the two of
+  you have shared, what it would do next, the standing rules it follows (the rules in its memory, in your words) and your
+  history together.
 - **Memory.**
   - *What it keeps*: pause or resume remembering, add a note yourself, export everything as a file, tidy up (merge
     duplicates, let passing notes expire, write the monthly roll-ups), or erase everything.
@@ -47,12 +54,93 @@ has three tabs.
   what it would do next (or what is waiting on you, when initiative is Ask first), and watch open tasks with Pause,
   Resume, Cancel, Try again, Give it more room and "It is right". Finished tasks say whether the result was checked.
   Repeating work lives here too, each with its time zone and an end.
-- **Settings.** Name and character, tone, length and language, goals, initiative (Ask first, Suggest, Act within
-  limits), whether it may start read-only work on its own, whether a task may be given write access, the limits on how
-  much it may spend, and how large the notes block may be.
+- **Persona.** Who it is, saved as you go: name, a few words of your own about it, its look (form, variant, colour, glow),
+  its voice (a temperament and five dials, with sample lines that answer the dials at once), what it calls you, up to four
+  habits, how it replies in threads (tone, length, language, notes) and where it shows up. A preview of its face and
+  opening line follows you down the page when the window is tall enough, and each of its moods can be tried on it.
+- **Settings.** Goals, initiative (Ask first, Suggest, Act within limits), whether it may start read-only work on its
+  own, whether a task may be given write access, the limits on how much it may spend, and how large the notes block may be.
 
 The page reads again on its own when the server announces a change. In any page, a save, a replacement, a refusal (a
 credential, or remembering paused) and a question about which of two notes you meant show as a short message.
+
+## The assistant as a character
+
+The assistant has a name, a face and a voice that you choose, so the thing that remembers for you is also someone you
+recognise. It is the same character in the sidebar, on its page and beside the composer. None of it changes what the
+assistant may do or what is true.
+
+### The first meeting
+
+Until an assistant has been set up, the sidebar shows a card under Search that says "Meet your assistant", with a light
+moving round its border (the small cross on the card says "not now": it stops the light and the card keeps asking in
+words). The Assistant page opens on four steps:
+
+1. **Hello**: what it is, what it may keep, and what to call it.
+2. **Look**: a form, its variant, a colour and how much it glows, with the face in front of you changing as you choose.
+3. **Voice**: a temperament and five dials, with sample lines that change as you move them.
+4. **Wake it**: what is stored and where, and how much it may do on its own.
+
+**Nothing is saved, and nothing is switched on, until the last step**, so leaving half way leaves everything as it was.
+An assistant that was switched on before it had a face gets the same meeting.
+
+### The face
+
+A face is a small description (a form, a variant, a hue, a glow and a seed) that the interface draws as a living thing.
+There are five forms, each with four variants: **Halo** (a core of light held by turning rings), **Optic** (a lens that
+blinks and follows the pointer), **Hologram** (a figure drawn in light), **Critter** (a small creature that speaks with
+its eyes) and **Cipher** (a sigil that wakes when it has something to tell you). Any hue and any glow can be chosen, and
+a few touches, such as when it blinks, come from the seed, so two faces side by side do not move as one.
+
+It has six moods and they are the plain facts of the moment: resting, working (a turn or a task is running), wanting you
+(an approval, a question or a task waits on you), pleased (a note was kept, a turn finished), concerned (a turn failed, a
+note was refused) and asleep (the assistant is switched off). It sleeps only after it has been set up and switched off:
+before that it is awake and waiting for you. A pleased or concerned face shows for a few seconds and then returns to
+what it was doing.
+
+It is drawn as SVG and CSS, so there are no images to download and nothing leaves the machine. It is named for a screen
+reader ("Ancilla, an ice halo with a bright glow, resting"), and with reduced motion it keeps its colours and its mood
+and stops moving.
+
+### The voice
+
+A voice is a **temperament** (steady, warm, dry, sharp, playful, formal, curious, or your own words) and five **dials**,
+each from 0 to 4: warmth, humor, directness, curiosity and formality. Choosing a temperament sets the dials to its own,
+and each dial can then be moved. You can also set what it calls you and up to four **habits** in your own words (for
+example, "Signs off with 'Standing by.'"), each at most 80 characters.
+
+What the assistant says in the interface (an opening line, a line when a turn finishes, the card in the sidebar) is
+**written in advance**: for each moment and each temperament there is a plain line and a warmer or wittier one, and the
+dials choose between them. No model is asked, so these lines cost nothing, say the same thing every time for the same
+state, and cannot invent anything. They are plain ASCII, and none of them claims a feeling as a fact.
+
+### Where it shows up
+
+- **The sidebar**: the card under Search, with its face and one plain line ("Ready", "Working", "2 need you"), and a badge
+  when something waits on you. It can be hidden (then a small icon in the footer opens the page).
+- **Home**: its face on a stage, its name, its voice in a few words and the line it opens with.
+- **Beside the composer**: a small face that works while a turn runs, wants you when something waits, is pleased when a
+  turn finishes and concerned when it fails, with a short line in its voice for a few seconds. It says nothing the run
+  card does not, and it can be switched off on the Persona tab.
+
+### What Muse is told
+
+The Persona tab sets how much of the character reaches the model: **Off** (the voice stays in Ancilla's own words),
+**A line of tone** (the default: one line, such as "Voice: dry and understated. Accuracy comes first.") or **The whole
+character** (its name, the voice, the dials, what it calls you and the habits). An assistant that has not been set up
+adds nothing to a prompt. The whole character also tells Muse that the assistant is an AI, that it must not claim to be
+human, to have a body or to feel things as fact (warmth and humor in tone are fine), and that code, commands and technical
+output stay plain. The character is how it sounds: it never grants permission, never changes what Muse may do, and
+never changes what is true.
+
+### What you have shared
+
+Home can show, as facts read from what is stored: the days since the assistant was first switched on, how many notes it
+holds, how many beliefs you changed (each kept as history), how many tasks finished with a check that passed, and a
+short history of round numbers (the first note, the tenth, fiftieth and hundredth, the first change of mind, the first
+and tenth task finished together, a week, a month and a quarter). It holds no word of any note, so it is safe to show.
+There are no streaks and no scores, nothing counts the days you were away, and the assistant never says it missed you.
+It can be hidden on the Persona tab.
 
 ## How the memory works
 
@@ -171,14 +259,17 @@ flowchart LR
   uses, so a task is an ordinary thread with the same approvals) and the event stream. The data folder's lock, the host
   and origin checks and the token cover its routes like the rest.
 - **`packages/ui` holds no assistant logic.** One generic client call, a page of views and a toast for the stream's
-  events. The browser demo answers the same routes from fixtures.
+  events, plus how the character looks and sounds: the faces and the lines written in advance. The browser demo answers
+  the same routes from fixtures.
 - **Muse is the only model.** The assistant makes no call of its own, so there is no second runtime to install and no
   second subscription.
 
 ## Where things live
 
 - `assistant.db` (and `-wal`, `-shm`) in the data folder. Own migrations (`PRAGMA user_version`, each step with an `up`
-  and a `down`), write-ahead log, full synchronous commit, `secure_delete` on. Tables: profile and goals; memory items,
+  and a `down`), write-ahead log, full synchronous commit, `secure_delete` on. The profile, with the character (face,
+  voice, what it calls you, habits, when it was set up), is one JSON value, so a character needs no migration and a
+  field an older file lacks takes its default. Tables: profile and goals; memory items,
   revisions, sources, evidence links, links between items, tombstones, a capture log, summaries and an audit log of what
   changed and who changed it (ids and rule names, never the words); tasks, steps, attempts, events, checkpoints and
   schedules; and an FTS5 index that is rebuilt from the items whenever it disagrees with them.
@@ -191,8 +282,8 @@ All under `/api/assistant`, behind the same host check, origin check and token a
 
 | Route | Does |
 | --- | --- |
-| `GET /` | status: profile, goals, counts, open tasks |
-| `PATCH /profile` | change identity, style, autonomy, limits, pause capture; refuses a stale view |
+| `GET /` | status: profile (with its character), goals, counts, open tasks, and `bond` (days together, counts and milestones) |
+| `PATCH /profile` | change identity, character (`avatar`, `voice`, `callsUser`, `quirks`, `presence`, `showBond`, `configured`), style, autonomy, limits, pause capture; refuses a stale view and any field it does not know |
 | `GET /memories`, `POST /memories` | list (status, kind, scope, search) and add |
 | `GET /memories/:id`, `PATCH`, `DELETE` | read with sources, revisions and lineage; edit (refused if stale); erase |
 | `POST /memories/:id/{pin,unpin,confirm,settle,approve,commitment}` | the rest of what you can do to one |
@@ -236,3 +327,7 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
 - `assistant.db` is not encrypted at rest, like `ancilla.db`, and the desktop server runs without a token on loopback, so
   a local process that can reach the port can read it as it can read threads.
 - One assistant per data folder. Notes can be scoped to an account, but there is no separate assistant per account.
+- The character is a look and a tone, not a mind. The lines it says in the interface are written in advance, so it does
+  not learn your phrasing or comment on what you are doing, and it has no voice or sound. Faces are chosen from five
+  forms and drawn from a description; there is no image upload. The honest limit of the history is that it counts what
+  is stored: a note you erased no longer counts.

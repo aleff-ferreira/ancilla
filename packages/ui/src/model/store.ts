@@ -1,5 +1,6 @@
 import type {
   ApprovalMode,
+  AssistantCharacterView,
   AttachmentView,
   EnvironmentStatus,
   ModelOption,
@@ -61,6 +62,17 @@ export type CodeTheme = (typeof CODE_THEMES)[number];
 export const ZOOM_STEPS = [0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.35, 1.5, 1.75, 2] as const;
 export const ZOOM_MIN = ZOOM_STEPS[0];
 export const ZOOM_MAX = ZOOM_STEPS[ZOOM_STEPS.length - 1];
+
+/** The little the sidebar's card and the dock's face need to know about the assistant. */
+export interface AssistantGlance {
+  enabled: boolean;
+  name: string;
+  character: AssistantCharacterView;
+  /** Open tasks, and how many of them wait on the user. */
+  open: number;
+  needsYou: number;
+  running: number;
+}
 
 export interface Prefs {
   groupBy: GroupBy;
@@ -126,6 +138,14 @@ export interface Prefs {
   lastSeenVersion: string | null;
   /** Session statistics pills above the composer: turns, speed and token usage for the open thread. */
   showTelemetry: boolean;
+  /**
+   * How the assistant asks to be set up in the sidebar until it has been: with a light moving round its card (`pulse`),
+   * as a still card the user said "not now" to (`calm`), or not at all (`hidden`, which puts its icon in the footer).
+   * Once it is set up the card is its quiet self whatever this says, unless it is hidden.
+   */
+  assistantInvite: "pulse" | "calm" | "hidden";
+  /** Show the assistant's face beside the composer, where it reacts to the thread: working, waiting on you, done. */
+  assistantPresence: boolean;
   /**
    * Approval modes from before YOLO was armed, survived across a reload so switching YOLO off still
    * restores them instead of falling back to onRequest. Null when YOLO has never been armed here.
@@ -227,6 +247,8 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     crewWidth: DEFAULT_CREW_WIDTH,
     lastSeenVersion: null,
     showTelemetry: false,
+    assistantInvite: "pulse",
+    assistantPresence: true,
     preYolo: null,
   };
 }
@@ -309,6 +331,10 @@ export interface AppState {
   researchSettings: ResearchSettings | null;
   /** Moves each time the server says the assistant's memory, goals or tasks changed, so an open page reads them again. */
   assistantRev: number;
+  /** What the sidebar's card and the dock's face need of the assistant, read once and again when it changes; null until the first answer. */
+  assistantGlance: AssistantGlance | null;
+  /** The last event its face should react to (a note kept, a refusal, a question) and when it happened. */
+  assistantReaction: { mood: "delight" | "concern" | "attention"; at: number } | null;
   /** What Stop does on a research run: write a report from what it has, or drop it. Set from the composer popover. */
   researchStopWrites: boolean;
   /**
@@ -422,6 +448,8 @@ export function initialState(prefs: Prefs): AppState {
     yoloSettings: null,
     researchSettings: null,
     assistantRev: 0,
+    assistantGlance: null,
+    assistantReaction: null,
     researchStopWrites: true,
     researchStopping: {},
     researchMode: false,
@@ -534,6 +562,8 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     crewWidth: pick("crewWidth", (v) => typeof v === "number" && v >= CREW_WIDTH_MIN && v <= CREW_WIDTH_MAX),
     lastSeenVersion: pick("lastSeenVersion", (v) => v === null || typeof v === "string"),
     showTelemetry: pick("showTelemetry", (v) => typeof v === "boolean"),
+    assistantInvite: pick("assistantInvite", (v) => v === "pulse" || v === "calm" || v === "hidden"),
+    assistantPresence: pick("assistantPresence", (v) => typeof v === "boolean"),
     preYolo: pick("preYolo", isPreYolo),
   };
 }

@@ -2,23 +2,27 @@ import { useState } from "react";
 import { useApp, useController } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { errorMessage } from "../../client.js";
-import type { AssistantStatusView } from "../../types.js";
+import type { AssistantStatusView, AssistantSuggestionView } from "../../types.js";
 import { TopBar } from "../chrome.js";
-import { Pick } from "../settings/SettingsPage.js";
+import { Pick, Section } from "../settings/SettingsPage.js";
 import { ArrowLeftIcon } from "../ui/icons.js";
 import { Modal } from "../ui/overlays.js";
 import { Button, Toggle } from "../ui/primitives.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
+import { CompanionHero, History, IdentityBar, Rules } from "./companion/Companion.js";
 import { MemoryPanel } from "./MemoryPanel.js";
+import { Onboarding } from "./Onboarding.js";
 import { Notice } from "./parts.js";
+import { PersonaPanel } from "./PersonaPanel.js";
 import { ProfilePanel } from "./ProfilePanel.js";
-import { TasksPanel } from "./TasksPanel.js";
+import { Suggestion, TasksPanel } from "./TasksPanel.js";
 
-type Tab = "memory" | "tasks" | "profile";
+type Tab = "home" | "memory" | "tasks" | "persona" | "settings";
 
 /**
- * The assistant: a memory that keeps what you told it with the exact words, can be read, corrected and erased, and a
- * task executive that works on what you approve and says what it does not know. Off until you switch it on.
+ * The assistant's home. A first visit is an introduction: a face, a voice, a name, and only then is it switched on. After
+ * that, Home is the assistant itself with what waits on you and what the two of you have done; then its memory, its tasks,
+ * who it is, and what it may do alone.
  */
 export function AssistantPage() {
   const controller = useController();
@@ -27,12 +31,19 @@ export function AssistantPage() {
   const call = useAssistantCall();
   const [bump, setBump] = useState(0);
   const status = useAssistantData<AssistantStatusView>("", bump);
-  const [tab, setTab] = useState<Tab>("memory");
+  const [tab, setTab] = useState<Tab>("home");
+  const [making, setMaking] = useState(false);
   const [confirmOn, setConfirmOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const changed = () => setBump((n) => n + 1);
+  const changed = () => {
+    setBump((n) => n + 1);
+    void controller.loadAssistantGlance();
+  };
   const data = status.data;
   const profile = data?.profile;
+  const configured = profile ? profile.character.setupAt !== null : false;
+  const firstVisit = Boolean(data && profile && !profile.enabled && !configured);
+  const meeting = firstVisit || making;
 
   const setEnabled = async (enabled: boolean) => {
     if (!profile) return;
@@ -59,7 +70,7 @@ export function AssistantPage() {
               <h1 className="text-lg font-semibold text-fg">Assistant</h1>
               <p className="text-xs text-muted">Remembers what you tell it, with your exact words, and works on what you approve. Kept on this device, in its own file.</p>
             </div>
-            {profile ? (
+            {profile && configured && !meeting ? (
               <div className="order-2 ml-auto @min-[520px]:order-3 @min-[520px]:ml-0">
                 <Toggle checked={profile.enabled} label="Switch the assistant on" onChange={(on) => (on ? setConfirmOn(true) : void setEnabled(false))} />
               </div>
@@ -71,24 +82,46 @@ export function AssistantPage() {
           {status.error && !data ? <div className="mt-6"><Notice tone="error">{status.error}</Notice></div> : null}
           {!data && !status.error ? <p className="mt-6 text-sm text-subtle">Opening the assistant...</p> : null}
           {error ? <div className="mt-6"><Notice tone="error">{error}</Notice></div> : null}
-          {data && profile && !profile.enabled ? <Intro data={data} onEnable={() => setConfirmOn(true)} changed={changed} /> : null}
-          {data && profile?.enabled ? (
+
+          {data && profile && meeting ? (
+            <Onboarding
+              profile={profile}
+              onDone={() => {
+                setMaking(false);
+                setTab("home");
+                changed();
+              }}
+              onCancel={() => (firstVisit ? controller.goBack() : setMaking(false))}
+            />
+          ) : null}
+
+          {data && profile && !meeting ? (
             <>
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <Pick<Tab>
                   value={tab}
                   options={[
+                    { value: "home", label: "Home" },
                     { value: "memory", label: `Memory (${data.stats.items.active + data.stats.items.contested})` },
                     { value: "tasks", label: `Tasks${data.tasks && data.tasks.needsYou > 0 ? ` (${data.tasks.needsYou} need you)` : data.tasks && data.tasks.open > 0 ? ` (${data.tasks.open})` : ""}` },
-                    { value: "profile", label: "Settings" },
+                    { value: "persona", label: "Persona" },
+                    { value: "settings", label: "Settings" },
                   ]}
                   onChange={setTab}
                 />
-                {profile.capturePaused ? <span className="text-xs text-warn-text">Not remembering new things: capture is paused.</span> : null}
+                {profile.enabled && profile.capturePaused ? <span className="text-xs text-warn-text">Not remembering new things: capture is paused.</span> : null}
               </div>
-              {tab === "memory" ? <MemoryPanel profile={profile} changed={changed} bump={bump} /> : null}
-              {tab === "tasks" ? (data.executive === false ? <div className="mt-6"><Notice>Tasks need a Muse host, and this server was not given one.</Notice></div> : <TasksPanel profile={profile} changed={changed} bump={bump} />) : null}
-              {tab === "profile" ? <ProfilePanel profile={profile} changed={changed} bump={bump} /> : null}
+
+              {tab === "home" ? <Home status={data} bump={bump} changed={changed} onMake={() => setMaking(true)} onWake={() => setConfirmOn(true)} onTab={setTab} /> : null}
+              {tab === "memory" ? <><IdentityBar status={data} />{profile.enabled ? <MemoryPanel profile={profile} changed={changed} bump={bump} /> : <Asleep onWake={() => setConfirmOn(true)} />}</> : null}
+              {tab === "tasks" ? (
+                <>
+                  <IdentityBar status={data} />
+                  {!profile.enabled ? <Asleep onWake={() => setConfirmOn(true)} /> : data.executive === false ? <div className="mt-6"><Notice>Tasks need a Muse host, and this server was not given one.</Notice></div> : <TasksPanel profile={profile} changed={changed} bump={bump} />}
+                </>
+              ) : null}
+              {tab === "persona" ? <PersonaPanel profile={profile} changed={changed} /> : null}
+              {tab === "settings" ? <><IdentityBar status={data} /><ProfilePanel profile={profile} changed={changed} bump={bump} /></> : null}
             </>
           ) : null}
         </div>
@@ -97,7 +130,7 @@ export function AssistantPage() {
       <Modal
         open={confirmOn}
         onOpenChange={setConfirmOn}
-        title="Switch the assistant on?"
+        title={`Switch ${profile?.name ?? "the assistant"} on?`}
         description="From now on it reads what you type in threads for things worth keeping, and puts the notes that apply in front of your messages. It makes no model call of its own, and nothing leaves this device through it."
       >
         <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-muted">
@@ -125,30 +158,36 @@ export function AssistantPage() {
   );
 }
 
-function Intro(props: { data: AssistantStatusView; onEnable: () => void; changed: () => void }) {
-  const kept = props.data.stats.items.active + props.data.stats.items.contested;
+function Asleep(props: { onWake: () => void }) {
   return (
-    <div className="mt-6 space-y-4 rounded-xl bg-raised p-5 shadow-panel">
-      <h2 className="text-base font-semibold text-fg">An assistant that keeps what you told it</h2>
-      <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted">
-        <li>
-          <span className="text-fg">It remembers.</span> Rules, preferences, decisions, deadlines and facts, in your own words, with where each came from. A change of mind replaces a note and keeps the old one as history.
-        </li>
-        <li>
-          <span className="text-fg">It stays honest.</span> A guess never replaces what you said, a note that may be out of date says so, and when nothing it saved answers a question, it says that.
-        </li>
-        <li>
-          <span className="text-fg">It forgets when you say.</span> Forgetting erases the words everywhere, and the same old words are not learned again.
-        </li>
-        <li>
-          <span className="text-fg">It works for you.</span> Tasks run one step at a time in a thread you can open, within limits you set, and finish as &quot;done&quot; only when something it can read confirms the result.
-        </li>
-        <li>It costs no extra: no model call of its own, no account, nothing sent anywhere.</li>
-      </ul>
-      {kept > 0 ? <Notice>{kept} saved note{kept === 1 ? " is" : "s are"} kept and not used while it is off. Switch it on to use them again.</Notice> : null}
-      <Button variant="accent" onClick={props.onEnable}>
-        Switch it on
-      </Button>
+    <div className="mt-6 rounded-xl bg-raised p-5 shadow-panel">
+      <p className="text-sm text-fg">It is switched off, so it keeps nothing new and starts nothing. What it already holds is still here, and unused.</p>
+      <div className="mt-3">
+        <Button variant="accent" onClick={props.onWake}>
+          Switch it on
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** Home: the assistant, what waits on you, the rules it follows and what the two of you have done. */
+function Home(props: { status: AssistantStatusView; bump: number; changed: () => void; onMake: () => void; onWake: () => void; onTab: (tab: Tab) => void }) {
+  const { status } = props;
+  const suggestions = useAssistantData<{ suggestions: AssistantSuggestionView[] }>(status.profile.enabled ? "/suggestions" : null, props.bump);
+  const waiting = suggestions.data?.suggestions.slice(0, 4) ?? [];
+  return (
+    <div className="mt-6">
+      <CompanionHero status={status} onMake={props.onMake} onWake={props.onWake} onPersona={() => props.onTab("persona")} />
+      {status.profile.enabled && waiting.length > 0 ? (
+        <Section title={status.profile.autonomy === "ask" ? "Waiting on you" : "What it would do next"}>
+          {waiting.map((s) => (
+            <Suggestion key={s.id} suggestion={s} autonomy={status.profile.autonomy} changed={props.changed} />
+          ))}
+        </Section>
+      ) : null}
+      {status.profile.enabled ? <Rules bump={props.bump} onMemory={() => props.onTab("memory")} /> : null}
+      {status.profile.enabled ? <History status={status} /> : null}
     </div>
   );
 }

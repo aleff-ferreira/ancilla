@@ -3,6 +3,7 @@ import type {
   ApprovalMode,
   ApprovalRequest,
   AssistantEventView,
+  AssistantStatusView,
   AttachmentView,
   GoalAction,
   LinuxDesktopStatus,
@@ -673,6 +674,7 @@ export class AncillaController {
   private sandboxSettingsRev = 0;
   /** Bumped by every research-settings request, so only the latest completion or rollback lands. */
   private researchSettingsRev = 0;
+  private assistantGlanceRev = 0;
   /** Sandbox PATCHes queue behind each other so rapid opposite flips land in order. */
   private sandboxSettingsChain: Promise<void> = Promise.resolve();
   /** Bumped by every yolo-settings request, so only the latest completion or rollback lands. */
@@ -894,6 +896,7 @@ export class AncillaController {
       void this.loadResearchSettings();
       void this.loadPlanUsage();
       void this.loadAccounts();
+      void this.loadAssistantGlance();
     } catch (error) {
       if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, boot: "error", bootError: errorMessage(error) }));
@@ -1499,6 +1502,26 @@ export class AncillaController {
     }
   }
 
+  /**
+   * What the sidebar's card and the dock's face need of the assistant: whether it is on, what it looks like, and how many
+   * tasks wait on the user. Read at boot and again whenever the server says something changed. A server that does not
+   * have the assistant, or an answer that is not one, leaves it unknown, and nothing is shown for it.
+   */
+  async loadAssistantGlance(): Promise<void> {
+    const rev = ++this.assistantGlanceRev;
+    try {
+      const status = await this.client.assistant<AssistantStatusView>("GET", "");
+      const profile = status?.profile;
+      if (rev !== this.assistantGlanceRev || !profile?.character) return;
+      this.update((s) => ({
+        ...s,
+        assistantGlance: { enabled: profile.enabled, name: profile.name, character: profile.character, open: status.tasks?.open ?? 0, needsYou: status.tasks?.needsYou ?? 0, running: status.tasks?.running ?? 0 },
+      }));
+    } catch {
+      /* an older server answers 404: there is no assistant to show */
+    }
+  }
+
   private async loadResearchSettings(): Promise<void> {
     const rev = ++this.researchSettingsRev;
     try {
@@ -2096,7 +2119,10 @@ export class AncillaController {
    * written is said once, in words: the server only sends `saved` after the write was committed.
    */
   private assistantChanged(event: AssistantEventView): void {
-    this.update((s) => ({ ...s, assistantRev: s.assistantRev + 1 }));
+    // Its face reacts to what just happened: pleased to keep a note, waiting when it needs an answer, concerned at a refusal.
+    const mood = (event.saved ?? []).some((n) => n.status === "pending") || event.question ? "attention" : (event.saved ?? []).length > 0 ? "delight" : (event.declined ?? []).length > 0 ? "concern" : null;
+    this.update((s) => ({ ...s, assistantRev: s.assistantRev + 1, assistantReaction: mood ? { mood, at: Date.now() } : s.assistantReaction }));
+    void this.loadAssistantGlance();
     if (event.reason !== "memory") return;
     for (const note of event.saved ?? []) {
       const text = note.text.length > 120 ? `${note.text.slice(0, 117)}...` : note.text;

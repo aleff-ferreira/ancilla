@@ -18,6 +18,7 @@ import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
 import { NeedsYouChip, CrewStatus, CrewToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../crew/HeaderChips.js";
 import { CrewDockCard, primaryRun } from "../crew/CrewCard.js";
+import { ThreadPresence } from "../assistant/companion/ThreadPresence.js";
 import { planPlace } from "../../model/runCard.js";
 import { CrewPanel } from "../crew/CrewPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
@@ -371,7 +372,12 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
           variant="thread"
           autoFocus
         />
-        <ComposerFooter cwd={session.cwd} branch={fold?.meta.branch ?? null} running={props.running} />
+        <ComposerFooter
+          cwd={session.cwd}
+          branch={fold?.meta.branch ?? null}
+          running={props.running}
+          lead={<ThreadPresence fold={fold} running={props.running} waiting={approvals.length + inputs.length} />}
+        />
       </div>
     </div>
   );

@@ -151,6 +151,111 @@ describe("the assistant's profile", () => {
   });
 });
 
+describe("the assistant as a character", () => {
+  it("starts with the default look and voice and asks to be set up, which is when setupAt is empty", () => {
+    const p = rig({ enabled: false }).store.getProfile();
+    assert.equal(p.character.setupAt, null);
+    assert.equal(p.character.avatar.form, "halo");
+    assert.equal(p.character.presence, "tone");
+    assert.equal(p.character.showBond, true);
+  });
+
+  it("changes a field at a time, keeps the rest, and says the user made it theirs only when told to", () => {
+    const r = rig({ enabled: false });
+    const a = r.store.saveProfile({ character: { avatar: { form: "optic", hue: 28 }, voice: { archetype: "dry", humor: 4 }, callsUser: "Captain", quirks: ["Signs off with 'Standing by.'"] } });
+    assert.equal(a.character.avatar.form, "optic");
+    assert.equal(a.character.avatar.hue, 28);
+    assert.equal(a.character.avatar.glow, 60, "a field not mentioned keeps its value");
+    assert.equal(a.character.voice.archetype, "dry");
+    assert.equal(a.character.voice.humor, 4);
+    assert.equal(a.character.voice.warmth, 2);
+    assert.equal(a.character.callsUser, "Captain");
+    assert.equal(a.character.setupAt, null, "choosing things is not the same as being done");
+    r.clock.t += MIN;
+    const done = r.store.saveProfile({ character: { configured: true } });
+    assert.equal(done.character.setupAt, r.clock.t, "stamped when the user finishes");
+    r.clock.t += MIN;
+    assert.equal(r.store.saveProfile({ character: { callsUser: "Cap" } }).character.setupAt, done.character.setupAt, "and not moved by a later edit");
+    assert.equal(r.store.saveProfile({ character: { configured: false } }).character.setupAt, null, "unless the user asks to be asked again");
+    assert.deepEqual(r.store.getProfile().character.quirks, ["Signs off with 'Standing by.'"], "the habits survive");
+  });
+
+  it("checks every field of it, and refuses what is out of range, unknown, too long, or a credential", () => {
+    const r = rig({ enabled: false });
+    const bad = (character: unknown, message: RegExp): void => assert.throws(() => r.store.saveProfile({ character }), message);
+    bad(null, /character must be an object/);
+    bad({ colour: 1 }, /unknown field character\.colour/);
+    bad({ avatar: { form: "dragon" } }, /character\.avatar\.form must be one of/);
+    bad({ avatar: { hue: 400 } }, /character\.avatar\.hue must be between 0 and 359/);
+    bad({ avatar: { glow: "a lot" } }, /character\.avatar\.glow must be a number/);
+    bad({ avatar: { shape: 1 } }, /unknown field character\.avatar\.shape/);
+    bad({ voice: { archetype: "pirate" } }, /character\.voice\.archetype must be one of/);
+    bad({ voice: { warmth: 9 } }, /character\.voice\.warmth must be between 0 and 4/);
+    bad({ voice: { sass: 1 } }, /unknown field character\.voice\.sass/);
+    bad({ presence: "loud" }, /character\.presence must be one of/);
+    bad({ quirks: "one" }, /character\.quirks must be a list/);
+    bad({ quirks: ["a", "b", "c", "d", "e"] }, /at most 4 habits/);
+    bad({ quirks: ["x".repeat(81)] }, /longer than 80 characters/);
+    bad({ callsUser: "ghp_abcdefghijklmnopqrstuvwxyz0123456789" }, /does not keep credentials/);
+    bad({ quirks: ["my key is sk-abcdefghijklmnopqrstuvwxyz0123456789"] }, /does not keep credentials/);
+    assert.deepEqual(r.store.getProfile().character, rig({ enabled: false }).store.getProfile().character, "nothing was stored by a refused change");
+  });
+
+  it("remembers the day it was first switched on, and keeps it when it is switched off and on", () => {
+    const r = rig({ enabled: false });
+    assert.equal(r.store.getMeta("enabled_first_at"), null);
+    r.clock.t = T0 + DAY;
+    r.store.saveProfile({ enabled: true });
+    const first = r.store.getMeta("enabled_first_at");
+    assert.equal(first, String(T0 + DAY));
+    r.clock.t = T0 + 5 * DAY;
+    r.store.saveProfile({ enabled: false });
+    r.clock.t = T0 + 9 * DAY;
+    r.store.saveProfile({ enabled: true });
+    assert.equal(r.store.getMeta("enabled_first_at"), first);
+  });
+});
+
+describe("what the assistant and the user have shared", () => {
+  it("is empty before anything happened", () => {
+    const b = rig({ enabled: false }).store.bond();
+    assert.deepEqual(b, { since: null, daysTogether: 0, remembered: 0, replaced: 0, finished: 0, unchecked: 0, milestones: [] });
+  });
+
+  it("counts what is stored, from the day it was switched on, with the dates of round numbers, and holds no word of any note", () => {
+    const r = rig();
+    for (let i = 1; i <= 10; i++) r.say(`Remember that the staging host number ${i} is app-${i}.example.com`, T0 + i * DAY);
+    r.say("Actually, the staging host number 3 is app-33.example.com", T0 + 11 * DAY);
+    const now = T0 + 40 * DAY;
+    const b = r.store.bond(now);
+    assert.equal(b.since, T0, "the day it was switched on");
+    assert.equal(b.daysTogether, 40);
+    assert.ok(b.remembered >= 10, `remembered ${b.remembered}`);
+    assert.ok(b.replaced >= 1, "a belief the user changed is counted, and kept as history");
+    const ids = b.milestones.map((m) => m.id);
+    assert.ok(ids.includes("first-note") && ids.includes("notes-10") && ids.includes("first-change") && ids.includes("week") && ids.includes("month"), ids.join(","));
+    assert.ok(!ids.includes("quarter"), "a quarter has not passed");
+    assert.deepEqual(b.milestones.map((m) => m.at), [...b.milestones.map((m) => m.at)].sort((x, y) => x - y), "oldest first");
+    assert.doesNotMatch(JSON.stringify(b), /staging|app-\d/, "no word of a note is in it");
+  });
+
+  it("counts a task that ended with a passed check as finished, and one that ended without a check as unchecked", () => {
+    const r = rig();
+    const db = raw(r.store).db;
+    const insert = (id: string, status: string, finishedAt: number | null): void => {
+      db.prepare("INSERT INTO tasks (id, title, goal, status, origin, cwd, project, max_turns, max_minutes, finished_at, created_at, updated_at) VALUES (?, 't', 'g', ?, 'user', '/w', '/w', 4, 10, ?, ?, ?)").run(id, status, finishedAt, T0, T0);
+    };
+    insert("a", "completed", T0 + DAY);
+    insert("b", "completed", T0 + 2 * DAY);
+    insert("c", "unverified", T0 + 3 * DAY);
+    insert("d", "running", null);
+    const b = r.store.bond(T0 + 4 * DAY);
+    assert.equal(b.finished, 2);
+    assert.equal(b.unchecked, 1);
+    assert.deepEqual(b.milestones.filter((m) => m.id === "first-task"), [{ id: "first-task", at: T0 + DAY }]);
+  });
+});
+
 describe("capture", () => {
   it("saves what the user asked to be remembered, with the exact words as its source, and says so only after it is written", () => {
     const r = rig();

@@ -6403,7 +6403,67 @@ describe("the assistant page", () => {
     client.assistantReply = { available: true };
     const { controller, stop } = await started(client);
     assert.deepEqual(await controller.assistant("PATCH", "/profile", { enabled: true }), { available: true });
-    assert.deepEqual(client.assistantCalls, [{ method: "PATCH", path: "/profile", body: { enabled: true } }]);
+    assert.deepEqual(client.assistantCalls.filter((c) => c.method !== "GET"), [{ method: "PATCH", path: "/profile", body: { enabled: true } }]);
+    stop();
+  });
+
+  const CHARACTER = {
+    avatar: { form: "optic", hue: 195, glow: 70, detail: 1, seed: 7 },
+    voice: { archetype: "dry", warmth: 1, humor: 4, directness: 3, curiosity: 1, formality: 2 },
+    callsUser: "Alex", quirks: [], presence: "tone", showBond: true, setupAt: 1,
+  };
+  const status = (profile: Record<string, unknown>, tasks = { open: 3, needsYou: 2, running: 1 }) => ({ available: true, profile: { enabled: true, name: "Vesper", character: CHARACTER, ...profile }, tasks });
+
+  it("reads a glance of the assistant at boot, and again when the server says something changed", async () => {
+    const client = new FakeClient();
+    client.assistantReply = status({});
+    const { controller, stop } = await started(client);
+    await settle();
+    assert.deepEqual(controller.store.get().assistantGlance, { enabled: true, name: "Vesper", character: CHARACTER, open: 3, needsYou: 2, running: 1 });
+    client.assistantReply = status({ enabled: false, name: "Vesper" }, { open: 0, needsYou: 0, running: 0 });
+    client.handler?.({ type: "assistant", reason: "profile", epoch: 2 });
+    await settle();
+    assert.equal(controller.store.get().assistantGlance?.enabled, false);
+    assert.equal(controller.store.get().assistantGlance?.needsYou, 0);
+    stop();
+  });
+
+  it("leaves the glance unknown when the server has no assistant, so nothing is shown for it", async () => {
+    const client = new FakeClient();
+    client.assistantReply = { error: "not found" };
+    const { controller, stop } = await started(client);
+    await settle();
+    assert.equal(controller.store.get().assistantGlance, null);
+    stop();
+  });
+
+  it("gives its face something to react to: pleased at a note kept, waiting at a question or a note to approve, concerned at a refusal", async () => {
+    const client = new FakeClient();
+    client.assistantReply = status({});
+    const { controller, stop } = await started(client);
+    assert.equal(controller.store.get().assistantReaction, null);
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 2, saved: [{ id: "m1", kind: "fact", text: "x is y", status: "active", replaced: 0 }] });
+    assert.equal(controller.store.get().assistantReaction?.mood, "delight");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 3, saved: [{ id: "m2", kind: "fact", text: "from a web page", status: "pending", replaced: 0 }] });
+    assert.equal(controller.store.get().assistantReaction?.mood, "attention");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 4, declined: [{ reason: "secret: password" }] });
+    assert.equal(controller.store.get().assistantReaction?.mood, "concern");
+    client.handler?.({ type: "assistant", reason: "memory", epoch: 5, question: { about: "staging", options: [{ id: "a", text: "x" }, { id: "b", text: "y" }] } });
+    assert.equal(controller.store.get().assistantReaction?.mood, "attention");
+    const last = controller.store.get().assistantReaction;
+    client.handler?.({ type: "assistant", reason: "task", epoch: 6, taskId: "t1" });
+    assert.deepEqual(controller.store.get().assistantReaction, last, "a task changing is not an occasion for the face: its card shows the count");
+    stop();
+  });
+
+  it("keeps the new preferences, and refuses a value it does not know", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    assert.equal(controller.store.get().prefs.assistantInvite, "pulse");
+    assert.equal(controller.store.get().prefs.assistantPresence, true);
+    controller.setPrefs({ assistantInvite: "calm", assistantPresence: false });
+    assert.equal(controller.store.get().prefs.assistantInvite, "calm");
+    assert.equal(controller.store.get().prefs.assistantPresence, false);
     stop();
   });
 

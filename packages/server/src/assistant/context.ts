@@ -1,4 +1,4 @@
-import type { AssembledContext, AssistantProfile, Goal, MemoryItem, RetrievalQuery, RetrievedMemory, SourceRecord } from "./types.js";
+import type { AssembledContext, AssistantProfile, Goal, MemoryItem, RetrievalQuery, RetrievedMemory, SourceRecord, VoiceArchetype } from "./types.js";
 import { estimateTokens } from "./types.js";
 
 /**
@@ -74,9 +74,50 @@ export function formatLine(m: RetrievedMemory, evidence?: ReadonlyMap<string, re
   return [`- [${m.item.id}] ${exactText(m.item)} (${label(m)})`, ...evidenceLines(evidence?.get(m.item.id))].join("\n");
 }
 
+/** What each archetype sounds like, as the model is told it: a short tone, and a longer guide for the full character. */
+export const VOICES: Record<VoiceArchetype, { tone: string; guide: string }> = {
+  steady: { tone: "calm and precise", guide: "calm, precise and unhurried: it says what it knows and what it does not, and is never dramatic" },
+  warm: { tone: "warm and encouraging", guide: "warm, encouraging and gently proactive: it notices effort and is kind without flattery" },
+  dry: { tone: "dry and understated", guide: "deadpan and economical: wry understatement and the occasional raised eyebrow, never sarcasm at the user's expense" },
+  sharp: { tone: "blunt and efficient", guide: "blunt, efficient and direct: no filler, it says plainly when a plan is weak and then helps anyway" },
+  playful: { tone: "light and playful", guide: "light, quick and a little mischievous: a joke where it fits, never at the cost of clarity" },
+  formal: { tone: "courteous and formal", guide: "courteous, measured and formal: complete sentences and evident respect for the user" },
+  curious: { tone: "curious and attentive", guide: "curious and attentive: it asks one good question when something is unclear and says what it noticed" },
+  custom: { tone: "", guide: "" },
+};
+
+const DIAL_WORDS = {
+  warmth: ["cool", "reserved", "friendly", "warm", "very warm"],
+  humor: ["no jokes", "rare dry humor", "some humor", "frequent humor", "joking often"],
+  formality: ["casual", "relaxed", "neutral", "formal", "very formal"],
+  directness: ["gentle", "tactful", "balanced", "direct", "very blunt"],
+  curiosity: ["asks questions rarely", "asks when it must", "asks sometimes", "asks often", "asks a lot"],
+} as const;
+
+/**
+ * The character as the model is told it, by how much of it the user lets into prompts. Never a permission and never a
+ * fact about the user: it is how to sound. The last sentence is the same at every setting, so a character cannot be
+ * built that claims to be human, or that bends what is true to stay in role.
+ */
+export function characterLines(profile: AssistantProfile): string[] {
+  const ch = profile.character;
+  // A character the user has not made theirs is the default, which is a choice nobody made, so it adds nothing.
+  if (ch.presence === "off" || ch.setupAt === null) return [];
+  const voice = VOICES[ch.voice.archetype];
+  if (ch.presence === "tone") return voice.tone ? [`Voice: ${voice.tone}. Accuracy comes first.`] : [];
+  const v = ch.voice;
+  const dials = [DIAL_WORDS.warmth[v.warmth], DIAL_WORDS.humor[v.humor], DIAL_WORDS.formality[v.formality], DIAL_WORDS.directness[v.directness], DIAL_WORDS.curiosity[v.curiosity]].join(", ");
+  const lines = [`Character: you are ${profile.name}, the user's long-term assistant${voice.guide ? `, ${voice.guide}` : ""}.`, `Dials: ${dials}.`];
+  if (ch.callsUser) lines.push(`Address the user as "${ch.callsUser}".`);
+  if (ch.quirks.length > 0) lines.push(`Habits: ${ch.quirks.join("; ")}.`);
+  lines.push("The character is how you sound, never what is true or what you do: you are an AI assistant, so do not claim to be human, to have a body or to feel things as fact (warmth and humor in tone are fine), and keep code, commands and technical output plain.");
+  return lines;
+}
+
 export function profileLines(profile: AssistantProfile, goals: readonly Goal[] = []): string[] {
   const c = profile.communication;
   const lines = [`Assistant: ${profile.name}.${profile.persona ? ` ${profile.persona.trim()}` : ""}`];
+  lines.push(...characterLines(profile));
   const style = [`${c.tone} tone`, `${c.verbosity} answers`, c.language ? `reply in ${c.language}` : ""].filter(Boolean).join(", ");
   lines.push(`Style: ${style}.${c.notes ? ` ${c.notes.trim()}` : ""}`);
   const active = goals.filter((g) => g.status === "active").slice(0, 3);

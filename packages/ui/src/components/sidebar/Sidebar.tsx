@@ -24,6 +24,7 @@ import { StatusGlyph } from "../ui/StatusGlyph.js";
 import type { SidebarCrewSummary } from "../../model/crew.js";
 import { ActivityButton } from "../crew/ActivityBadge.js";
 import { SidebarCrewRow, useSidebarCrew } from "../crew/SidebarCrewRow.js";
+import { CompanionChip } from "../assistant/companion/CompanionChip.js";
 
 const PROJECT_PREVIEW = 6;
 const STATUS_PREVIEW = 30;
@@ -98,6 +99,9 @@ function SidebarTop() {
         onClick={() => controller.newThread()}
       />
       <NavRow icon={<MagnifyingGlassIcon size={15} />} label="Search" keys={[MOD, "K"]} onClick={() => controller.setPaletteOpen(true)} />
+      <div className="mt-2">
+        <CompanionChip />
+      </div>
     </div>
   );
 }
@@ -866,6 +870,8 @@ function GroupByMenu() {
 
 function SidebarFooter() {
   const controller = useController();
+  // The assistant's card in the sidebar's top is its door; only when the user hides that card does a small icon take its place here.
+  const chipHidden = useApp((s) => s.prefs.assistantInvite === "hidden");
   const env = useApp((s) => s.env);
   const connection = useApp((s) => s.connection);
   const discovering = useApp((s) => s.discovering);
@@ -894,11 +900,13 @@ function SidebarFooter() {
         </IconButton>
       </Tip>
       <PlanPill />
-      <Tip label="Assistant: memory and tasks" side="top">
-        <IconButton label="Assistant" onClick={() => controller.navigate({ kind: "assistant" })}>
-          <BrainIcon size={14} />
-        </IconButton>
-      </Tip>
+      {chipHidden ? (
+        <Tip label="Assistant: memory and tasks" side="top">
+          <IconButton label="Assistant" onClick={() => controller.navigate({ kind: "assistant" })}>
+            <BrainIcon size={14} />
+          </IconButton>
+        </Tip>
+      ) : null}
       <Tip label="Usage and cost" side="top">
         <IconButton label="Usage and cost" onClick={() => controller.navigate({ kind: "usage" })}>
           <ChartBarIcon size={14} />

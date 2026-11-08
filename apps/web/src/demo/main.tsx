@@ -28,7 +28,7 @@
  */
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { AncillaApp, browserPlatform, type Platform } from "@ancilla/ui";
+import { AncillaApp, AvatarGallery, browserPlatform, type Platform } from "@ancilla/ui";
 import { DemoAncillaClient } from "./client.js";
 import { MIN } from "./script.js";
 import { PROJECTS, THREADS, isScenario } from "./seed.js";
@@ -110,8 +110,18 @@ if (!root) {
   throw new Error("Ancilla demo: missing #root element.");
 }
 
-createRoot(root).render(
-  <StrictMode>
-    <AncillaApp client={client} platform={platform} />
-  </StrictMode>,
-);
+if (params.get("gallery") === "avatars") {
+  // The assistant's faces side by side, outside the app: `gallery=avatars&theme=dark&hue=232`.
+  document.documentElement.dataset["theme"] = theme === "light" ? "light" : "dark";
+  createRoot(root).render(
+    <StrictMode>
+      <AvatarGallery hue={Number(params.get("hue")) || undefined} glow={Number(params.get("glow")) || undefined} />
+    </StrictMode>,
+  );
+} else {
+  createRoot(root).render(
+    <StrictMode>
+      <AncillaApp client={client} platform={platform} />
+    </StrictMode>,
+  );
+}

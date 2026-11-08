@@ -95,6 +95,8 @@ export function hasIdentity(profile: AssistantProfile, goals: readonly Goal[]): 
     c.language.trim() !== "" ||
     c.tone !== d.tone ||
     c.verbosity !== d.verbosity ||
+    // A character the user made theirs is told to the model even when no note applies; one left at its default is not.
+    (profile.character.setupAt !== null && profile.character.presence !== "off") ||
     goals.some((g) => g.status === "active")
   );
 }
