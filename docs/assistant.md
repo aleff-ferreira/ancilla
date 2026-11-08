@@ -216,6 +216,10 @@ measured settings: Strict (the bar only), Balanced (both, the default) and Loose
   the note is forgotten or edited (and made again from the new words), when everything is erased, and when meaning search
   is switched off or its model is changed, because a vector can be turned back into much of the words that made it. The
   settings are in `embeddings.json` in the data folder and hold the name of the variable that holds a key, never a key.
+- **A question is looked up as it is.** A short message is looked up on its own first, and only when that finds nothing
+  is it tried again with the question before it, which is what lets "yes, do that" mean something. By meaning, mixing in
+  the earlier question would pull the vector toward the earlier topic ("when does my salary arrive?" after "which car do I
+  have?" would stop finding the salary), so a message of more than two words is always embedded alone.
 - **It can only help.** A server that is down, slow or refuses costs a turn at most a short wait (400 ms for a message,
   250 ms in a call), and the words answer as they always did. A server that fails is left alone for 15 seconds, then 30,
   up to five minutes, so no turn waits on it again and again. A note the server refuses (too long, say) is left to the

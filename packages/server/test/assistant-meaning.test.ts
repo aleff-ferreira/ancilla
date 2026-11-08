@@ -195,12 +195,22 @@ describe("finding a note by what it means", () => {
     r.service.close();
   });
 
-  it("looks a short follow-up up by meaning with the question before it", async () => {
+  it("looks a message with next to nothing in it up by meaning together with the question before it", async () => {
     const r = await filled();
     await r.ask("what vehicle do I own?");
-    const follow = await r.ask("and the colour?");
-    assert.ok(r.embedder.queries.some((q) => q.includes("vehicle") && q.includes("colour")), JSON.stringify(r.embedder.queries));
+    const follow = await r.ask("and why?");
+    assert.ok(r.embedder.queries.some((q) => q.includes("vehicle") && q.includes("why")), JSON.stringify(r.embedder.queries));
     assert.ok(follow.prefix?.includes("Subaru"), follow.prefix ?? "(no block)");
+    r.service.close();
+  });
+
+  it("looks a question with something in it up as it is, not mixed with the one before it", async () => {
+    const r = await filled();
+    await r.ask("what vehicle do I own?");
+    const out = await r.ask("what is my wage?");
+    // Mixed with the car, its vector would be pulled toward the car: a call, where every question is short, asked on.
+    assert.equal(r.embedder.queries.at(-1), "what is my wage?", "the vector is of this question alone");
+    assert.ok(out.prefix?.includes("salary"), "and it finds the note about pay, which shares no word with it");
     r.service.close();
   });
 });

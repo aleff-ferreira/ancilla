@@ -61,7 +61,7 @@ export interface PreparedTurn {
 }
 
 /** A turn that has been read and is waiting for its notes; or one that needs none (the assistant is off, or it was a command). */
-type Pending = { done?: undefined; profile: AssistantProfile; captured: Change[]; queryText: string; asOf: number | null };
+type Pending = { done?: undefined; profile: AssistantProfile; captured: Change[]; queryText: string; followUpText: string | null; meaningText: string; asOf: number | null };
 type Begun = Pending | { done: PreparedTurn };
 
 export interface UsedContext {
@@ -121,6 +121,8 @@ export const NO_EMBEDDING: EmbeddingStatus = {
 const CACHE_LIMIT = 64;
 const CACHE_TTL_MS = 5 * 60_000;
 const SHORT_QUESTION_WORDS = 5;
+/** A message of this many words or fewer is looked up by meaning together with the question before it. */
+const MEANING_FOLLOW_UP_WORDS = 2;
 /** How long a turn waits for the question's vector before it goes on with words alone. */
 export const MEANING_TIMEOUT_MS = 400;
 const QUERY_VECTOR_LIMIT = 32;
@@ -129,6 +131,16 @@ const INDEX_ROUNDS = 50;
 
 function words(text: string): number {
   return tokens(text).length;
+}
+
+/** Whether any note is here because of the question (its words, an identifier, its meaning), and not only because it is always there (a rule, a pinned note, a due task). */
+function foundByQuery(out: AssembledContext): boolean {
+  return out.memories.some((m) => m.why.some((w) => w === "text match" || w === "words in common" || w === "close in meaning" || w.startsWith("identifier ")));
+}
+
+/** Every word, small ones too: "when does my salary arrive?" is five, though little of it is a word to look anything up by. */
+function totalWords(text: string): number {
+  return (text.match(/[\p{L}\p{N}']+/gu) ?? []).length;
 }
 
 export function hasIdentity(profile: AssistantProfile, goals: readonly Goal[]): boolean {
@@ -374,7 +386,7 @@ export class AssistantService {
   async prepareTurnAsync(input: TurnInput, options: { timeoutMs?: number } = {}): Promise<PreparedTurn> {
     const begun = this.beginTurn(input);
     if (begun.done) return begun.done;
-    const meaning = await this.meaningFor(begun.queryText, options.timeoutMs ?? MEANING_TIMEOUT_MS);
+    const meaning = await this.meaningFor(begun.meaningText, options.timeoutMs ?? MEANING_TIMEOUT_MS);
     return this.finishTurn(input, begun, meaning);
   }
 
@@ -392,13 +404,19 @@ export class AssistantService {
     const captured = this.noteMessage(input);
     try {
       const previous = this.lastQuery.get(input.sessionId) ?? "";
-      // "Yes, do that" has no words to look anything up by, so it is looked up with the question before it.
-      const queryText = words(input.text) < SHORT_QUESTION_WORDS && previous ? `${input.text} ${previous}` : input.text;
+      const withPrevious = `${input.text} ${previous}`;
+      // A message is looked up as it is. Mixed with the question before it, a short question loses its own note: its words
+      // are a smaller part of the whole ("when does my salary arrive?" after "where is the staging server?" no longer covers
+      // enough of the query to match the salary), and by meaning its vector is pulled toward the earlier topic. But "yes, do
+      // that" has no words to look anything up by, so a short message that finds nothing of its own is tried again with the
+      // question before it (`followUpText`), and by meaning a message of two words or fewer is looked up that way at once.
+      const followUpText = words(input.text) < SHORT_QUESTION_WORDS && previous ? withPrevious : null;
+      const meaningText = totalWords(input.text) <= MEANING_FOLLOW_UP_WORDS && previous ? withPrevious : input.text;
       this.lastQuery.set(input.sessionId, input.text.slice(0, 400));
       if (this.lastQuery.size > 200) this.lastQuery.delete(this.lastQuery.keys().next().value as string);
       // A question about a past moment ("what was my timezone in September?") is answered as of then.
       const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
-      return { profile, captured, queryText, asOf };
+      return { profile, captured, queryText: input.text, followUpText, meaningText, asOf };
     } catch (error) {
       this.deps.log(`assistant: choosing notes for a turn failed: ${error instanceof Error ? error.message : String(error)}`);
       return { done: { ...nothing, captured } };
@@ -407,9 +425,11 @@ export class AssistantService {
 
   /** The second half: the notes for the question (by meaning too when `meaning` is given), and the block they make. */
   private finishTurn(input: TurnInput, begun: Pending, meaning: MeaningOptions | null): PreparedTurn {
-    const { profile, captured, queryText, asOf } = begun;
+    const { profile, captured, queryText, followUpText, asOf } = begun;
     try {
-      const out = this.context(input, queryText, profile, asOf, meaning);
+      let out = this.context(input, queryText, profile, asOf, meaning);
+      // A short message that found nothing of its own may be a follow-up ("yes, do that"): it is looked up again with the question before it.
+      if (followUpText !== null && !foundByQuery(out)) out = this.context(input, followUpText, profile, asOf, meaning);
       const goals = this.store.activeGoals();
       const inject = out.memories.length > 0 || out.noEvidence || hasIdentity(profile, goals);
       const used = out.memories.map((m) => m.item.id);

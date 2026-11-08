@@ -18,6 +18,10 @@
 - **A note found by meaning says so.** In "What the model is told" and the audit trail it is marked "close in meaning" instead of "text match".
 - **The voice warms up when you reach for it.** The first call after Ancilla starts used to spend three to six seconds loading the speech models while you waited for the first word. A pointer over a Talk button (or the focus on it) now asks the server to load them, at most once in a couple of minutes and only when the voice is installed; they are let go again after ten idle minutes, whether or not a call came.
 
+### Fixed
+
+- **A short question asked right after another no longer loses its own note.** The assistant looked a short message up together with the question before it, so that "yes, do that" had something to go on. But a short question of its own, such as "when does my salary arrive?" after "where is the staging server?", was then one word in four of what was searched for, too few to match its note, and the note was left out. In a call, where every question is short, that was the common case. A message is now looked up as it is, and only a short one that finds nothing of its own is tried again with the question before it.
+
 ## 0.24.0
 
 ### New

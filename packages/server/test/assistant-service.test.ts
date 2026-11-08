@@ -85,6 +85,17 @@ describe("what a turn gets from the assistant", () => {
     assert.ok(!(other.prefix ?? "").includes("app-1.example.com"));
   });
 
+  it("looks a short question up as it is, so that it keeps its own note after another question", () => {
+    const r = rig();
+    r.turn("Remember that the staging server is at app-1.example.com");
+    r.turn("Remember that the user earns a salary paid on the fifth");
+    r.turn("where is the staging server?");
+    // Mixed with the question before it, "salary" would be one word in four, too few to match the note.
+    const out = r.turn("when does my salary arrive?");
+    assert.ok(out.prefix?.includes("salary paid on the fifth"), out.prefix ?? "(no block)");
+    assert.ok(!(out.prefix ?? "").includes("app-1.example.com"), "and the note of the question before it is not added to a question that found its own");
+  });
+
   it("includes the assistant's identity and goals even when no note applies", () => {
     const r = rig();
     r.store.saveProfile({ name: "Jarvis", communication: { tone: "formal" } });
