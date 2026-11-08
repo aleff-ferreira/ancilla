@@ -119,6 +119,7 @@ reproduces the call numbers.
 | End of your speech to the first sound, with a model that takes 0.35 s to start | 1.2 to 1.4 s, in the browser and over the socket; the pause that ends your turn (0.5 s) and the model's first word are the two largest parts |
 | The same, with everything on this computer: a 4-billion-parameter model (Qwen3-4B-Instruct, 4-bit) on the laptop's graphics card through llama.cpp, the speech on the processor | about 1.0 to 1.2 s at the median; the model loads in 3.5 to 6.6 s the first time |
 | Finding a note by meaning, with a local embedding model, during that wait | 6 ms for the question's vector; a call never waits more than 0.25 s for it, and the words answer alone when it is late |
+| A whole call on this computer, spoken by a synthetic voice over the socket: five questions, four of them about notes the assistant holds ("which car do I have?" against "drives a Subaru Outback") and one of general knowledge | All five heard word for word; the four were answered from the notes and the fifth from the model; 1.0 to 1.3 s from the end of speech to the first sound, 1.07 s at the median. A first run found a flaw this way: a short question was looked up together with the one before it, which pulled its meaning toward the earlier topic and, for the words, made its own word too small a part of the search to match its note (the text box had the same fault), so it is now looked up on its own, and with the question before it only when that finds nothing |
 | Interrupting | the voice dips 0.06 s after you start, stops about 0.25 s after |
 | First call after starting Ancilla | 4 to 6 s to load the models; they stay loaded for ten minutes after a call |
 
@@ -139,8 +140,10 @@ Muse thread as the model (its speed is Muse's), and a quiet or noisy room other 
 - Real engines: `node scripts/voice/bench.mjs --runtime <dir> --models <dir> --clips <dir>` runs calls on a real clock and
   prints the timings (`--llm-url` and `--llm-model` use a real model server, such as a local llama.cpp, instead of the
   stand-in); `scripts/voice/mock-llm.mjs` is a stand-in model that speaks the chat protocol, for running a call with no
-  key; `scripts/voice/replay.mjs` replays a recorded call (start the server with `ANCILLA_VOICE_DEBUG=1` and the
-  audio it receives is written to the temp folder; it is your voice, so delete it when you are done).
+  key; `scripts/voice/call.mjs` makes a whole call to a running server with questions spoken by the engines' own voice
+  and prints what was heard, what was answered and how long the first sound took, with no microphone;
+  `scripts/voice/replay.mjs` replays a recorded call (start the server with `ANCILLA_VOICE_DEBUG=1` and the audio it
+  receives is written to the temp folder; it is your voice, so delete it when you are done).
 - Adding a model: implement `BrainProvider` (`stream` returns text, tool calls and how it ended) and add it to `brains.ts`.
   Adding an engine: implement `VadEngine`, `AsrEngine` or `TtsEngine` from `engines.ts`.
 
