@@ -5,7 +5,7 @@ import { Section } from "../../settings/SettingsPage.js";
 import { ago, day, useAssistantData } from "../api.js";
 import { Chip } from "../parts.js";
 import { Avatar } from "./Avatar.js";
-import { looksLike, withArticle } from "./avatar.js";
+import { looksLike, withArticle } from "./faces.js";
 import { stateOf, useFaceMood } from "./mood.js";
 import { ARCHETYPES, DIALS, dialWord, greeting, milestoneText, say } from "./voice.js";
 import type { AssistantGlance } from "../../../model/store.js";

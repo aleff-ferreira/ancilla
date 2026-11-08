@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AssistantGlance } from "../../../model/store.js";
-import type { AvatarMood } from "./avatar.js";
+import type { AvatarMood } from "./faces.js";
 
 /** How long a reaction (a note kept, a refusal, a question) shows on the face before it goes back to what it was doing. */
 export const REACTION_MS = 2600;

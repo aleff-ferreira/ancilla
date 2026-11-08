@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApp } from "../../../app/context.js";
 import type { ThreadFold } from "../../../model/fold.js";
 import { Avatar } from "./Avatar.js";
-import type { AvatarMood } from "./avatar.js";
+import type { AvatarMood } from "./faces.js";
 import { say, type LineKind } from "./voice.js";
 
 type Flash = { kind: "start" | "done" | "failed"; at: number };

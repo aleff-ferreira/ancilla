@@ -1,4 +1,4 @@
-import { FORMS, HUES, MOODS, type AvatarMood } from "./avatar.js";
+import { FORMS, HUES, MOODS, type AvatarMood } from "./faces.js";
 import { Avatar } from "./Avatar.js";
 
 /**

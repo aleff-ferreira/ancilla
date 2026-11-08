@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, type CSSProperties, type ReactNode, type RefObject } from "react";
-import { avatarVars, describeAvatar, particles, polygon, pointsOf, type AvatarMood, type AvatarSpec } from "./avatar.js";
+import { avatarVars, describeAvatar, particles, polygon, pointsOf, type AvatarMood, type AvatarSpec } from "./faces.js";
 
 /**
  * The assistant's face, drawn as SVG and moved by CSS (see `.av` in the stylesheet). One component, five forms, six

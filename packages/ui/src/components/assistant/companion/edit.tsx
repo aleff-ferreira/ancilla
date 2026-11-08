@@ -2,7 +2,7 @@ import { useId, useState, type ReactNode } from "react";
 import type { AssistantCharacterView, AvatarForm, VoiceArchetype } from "../../../types.js";
 import { Button, cn } from "../../ui/primitives.js";
 import { Avatar } from "./Avatar.js";
-import { FORMS, HUES, MOODS, formInfo, hueName, looksLike, randomSpec, type AvatarMood } from "./avatar.js";
+import { FORMS, HUES, MOODS, formInfo, hueName, looksLike, randomSpec, type AvatarMood } from "./faces.js";
 import { ARCHETYPES, DIALS, archetypeInfo, dialWord, greeting, say } from "./voice.js";
 
 /**

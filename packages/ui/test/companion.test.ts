@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { FORMS, HUES, MOODS, avatarVars, describeAvatar, hueName, looksLike, particles, pointsOf, polygon, randomSpec, rng, withArticle, type AvatarSpec } from "../src/components/assistant/companion/avatar.js";
+import { FORMS, HUES, MOODS, avatarVars, describeAvatar, hueName, looksLike, particles, pointsOf, polygon, randomSpec, rng, withArticle, type AvatarSpec } from "../src/components/assistant/companion/faces.js";
 import { Avatar } from "../src/components/assistant/companion/Avatar.js";
 import { ARCHETYPES, DIALS, LINE_KINDS, dayOfYear, dialWord, greeting, milestoneText, say } from "../src/components/assistant/companion/voice.js";
 import type { AssistantCharacterView } from "../src/types.js";
