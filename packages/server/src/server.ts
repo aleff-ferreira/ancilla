@@ -93,6 +93,8 @@ import {
   type WorkerUpdate,
 } from "./research/index.js";
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
+import { handleAssistant, isAssistantPath, type AssistantReply } from "./assistant/routes.js";
+import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
 import { loginIdentity, MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
@@ -396,6 +398,8 @@ const TITLE_BACKFILL_LIMIT = 30;
 const ENV_CACHE_MS = 30_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
 const AUTO_SETTLE_SWEEP_MS = 60_000;
+/** How long after an assistant file failed to open before another try: a message is not worth a retry each. */
+const ASSISTANT_RETRY_MS = 30_000;
 const LOGIN_TIMEOUT_MS = 30_000;
 const LOGIN_COMPLETE_TIMEOUT_MS = 10 * 60_000;
 
@@ -999,6 +1003,10 @@ export class AncillaServer {
   private readonly loginStartGenerations = new Map<string, number>();
   /** Opened with the store, by `openStore()`. */
   private researchJobs!: ResearchJobManager;
+  /** The personal assistant: durable memory and its settings, in a file of its own. Null when it could not be opened, which costs the turns their notes and nothing else. */
+  private assistant: AssistantService | null = null;
+  private assistantUnavailable: string | null = null;
+  private assistantFailedAt = 0;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1156,6 +1164,69 @@ export class AncillaServer {
       writeReport: (thread, run, report, state) => this.writeResearchReport(thread, run, report, state),
       log: (message) => this.log(message),
     });
+  }
+
+  /**
+   * The assistant's memory lives in `assistant.db` beside the conversation database, so it can be exported, rolled back
+   * or removed on its own. The file is made the first time something is written to it: until then there is nothing on
+   * disk and nothing running, and looking at the page creates nothing. It is optional: one that cannot be opened is
+   * reported where the user looks (its page) and logged, and every turn goes on without notes. A failed open is not
+   * tried again for a while, so a locked or damaged file is not hit on every message.
+   */
+  private assistantFor(create: boolean): AssistantService | null {
+    if (this.assistant) {
+      return this.assistant;
+    }
+    if (this.closed || this.storeClosed) {
+      return null;
+    }
+    const now = Date.now();
+    if (this.assistantUnavailable !== null && now - this.assistantFailedAt < ASSISTANT_RETRY_MS) {
+      return null;
+    }
+    if (!create && this.options.dataDir !== ":memory:" && !existsSync(join(this.options.dataDir, ASSISTANT_DB_FILE))) {
+      return null;
+    }
+    try {
+      this.assistant = AssistantService.open(this.options.dataDir, {
+        log: (line) => this.log(line),
+        emit: (event) => this.emit("ancilla", event),
+        offsetMinutes: () => -new Date().getTimezoneOffset(),
+      });
+      this.assistantUnavailable = null;
+    } catch (error) {
+      this.assistant = null;
+      this.assistantUnavailable = error instanceof Error ? error.message : String(error);
+      this.assistantFailedAt = now;
+      this.log(`the assistant could not be opened, so turns go without notes: ${this.assistantUnavailable}`);
+    }
+    return this.assistant;
+  }
+
+  private readonly assistantAccess = {
+    get: (create: boolean): AssistantService | null => this.assistantFor(create),
+    unavailable: (): string | null => this.assistantUnavailable,
+  };
+
+  private sendAssistant(res: ServerResponse, reply: AssistantReply): void {
+    if (reply.download) {
+      const text = JSON.stringify(reply.body, null, 2);
+      res.writeHead(reply.status, {
+        "content-type": "application/json; charset=utf-8",
+        "content-disposition": `attachment; filename="${reply.download.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
+        "cache-control": "no-store",
+        ...FRAME_HEADERS,
+      });
+      res.end(text);
+      return;
+    }
+    this.json(res, reply.status, reply.body);
+  }
+
+  /** What the assistant needs to know about the thread a message belongs to: its project and the account it runs under. */
+  private assistantScope(sessionId: string): { project: string | null; account: string | null } {
+    const found = this.store.findSession(sessionId);
+    return { project: found?.cwd ? normalizeCwd(found.cwd) : null, account: found?.session.accountId ?? null };
   }
 
   async listen(): Promise<{ port: number; host: string }> {
@@ -1341,6 +1412,8 @@ export class AncillaServer {
     }
     // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
     this.storeClosed = true;
+    this.assistant?.close();
+    this.assistant = null;
     this.store?.close();
     // After the store: the folder is another server's only once nothing here can write to it.
     this.ownerLock.release();
@@ -2296,6 +2369,13 @@ export class AncillaServer {
       this.json(res, 200, this.store.getTitleSettings());
       return true;
     }
+    if (isAssistantPath(path)) {
+      const reply = await handleAssistant(this.assistantAccess, { method, path, query: url.searchParams, body: () => this.readBody(req) });
+      if (reply) {
+        this.sendAssistant(res, reply);
+        return true;
+      }
+    }
     if (path === "/api/research" || path.startsWith("/api/research/") || path === "/api/research-settings") {
       if (await this.routeResearch(method, path, url, req, res)) {
         return true;
@@ -2551,11 +2631,18 @@ export class AncillaServer {
         await this.applyEffort(manager, sessionId, effort);
       }
       const prepared = await this.prepareAttachments(sessionId, this.store.findSession(sessionId)?.cwd ?? "", files);
+      // The assistant reads what the user said (so a correction in this message applies first), then picks the notes
+      // for it. They go in front of the prompt as reference data and the thread keeps showing the user's own words.
+      // Whatever goes wrong in there costs the turn its notes, never the turn.
+      const typed = str(body["displayText"]) ?? text;
+      const assistant = typed ? this.assistantFor(false) : null;
+      const memory = assistant ? assistant.prepareTurn({ sessionId, text: typed, ...this.assistantScope(sessionId) }) : null;
+      const prompt = memory?.prefix ? `${memory.prefix}\n\n${prepared.prompt(text)}` : prepared.prompt(text);
       this.wake(sessionId);
       const live = this.liveFor(sessionId);
       const sentAtRevision = ++live.activityRevision;
-      const ack = await manager.sendTurn(sessionId, prepared.prompt(text), {
-        displayText: str(body["displayText"]) ?? undefined,
+      const ack = await manager.sendTurn(sessionId, prompt, {
+        displayText: str(body["displayText"]) ?? (memory?.prefix ? text : undefined),
         ifBusy: typeof ifBusy === "string" ? ifBusy : undefined,
         reasoningEffort: typeof effort === "string" ? effort : undefined,
         images: prepared.images,
@@ -2634,6 +2721,8 @@ export class AncillaServer {
           throw new HttpError(400, "turnId and text are required to steer.");
         }
         await manager.steerTurn(sessionId, turnId, text);
+        // What the user says to a running turn is still what they said: it can be a correction.
+        this.assistantFor(false)?.noteMessage({ sessionId, text, ...this.assistantScope(sessionId) });
       } else if (action === "interrupt") {
         await manager.interruptTurn(sessionId, turnId ?? undefined, body["retract"] === true);
       } else if (action === "cancel") {
