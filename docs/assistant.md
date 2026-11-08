@@ -9,7 +9,7 @@ character](#the-assistant-as-a-character)).
 
 It is **off until you switch it on**, and until you do there is no file on disk and no code of it running.
 
-Related: [what it is measured against](assistant-baseline.md), [how well it does](assistant-evaluation.md).
+Related: [what it is measured against](assistant-baseline.md), [how well it does](assistant-evaluation.md), [talking to it](assistant-voice.md).
 
 ![The assistant's home: its face on a lit stage, what it would do next, the rules it follows and what you have shared](assets/assistant-home.png)
 
@@ -323,7 +323,7 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
 4. **Downgrade Ancilla**: an older Ancilla does not open `assistant.db`, so it ignores it. A newer file than the program
    understands is refused, never altered, with a message saying which version to restore.
 5. **Step the schema back** without removing the file: `scripts/assistant-rollback.mjs <data folder> <version>` writes an
-   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks).
+   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks; version 3 adds the voice's conversations; version 4 adds the Muse thread of a conversation).
 
 ## What it does not do
 

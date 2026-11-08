@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **You can call the assistant.** A microphone beside its name in the sidebar, and a Talk button on its page, start a voice call. It listens while you talk, works out when you have finished (a finished sentence is answered after about half a second, a sentence that trails off is given time, a one-word command is answered at once), answers aloud a sentence at a time, and goes on from where the last call stopped. A card in the corner shows its face, the words as they are said, the tasks working behind the conversation and how long the last reply took, and a line to type in if you would rather. Push to talk is there for a noisy room. English and Brazilian Portuguese, switching when you do. It is off until you install it.
+- **Cut it off, and it goes on from what you heard.** Start to speak over it and its voice dips at once; once it is really you (not a cough, a laugh, or its own voice coming back through your speakers) it stops within about a quarter of a second, and what it remembers of the reply is only the part you heard. "Stop", "wait" and "para" stop it without waiting for more.
+- **The speech runs on your computer.** Recognition and the voice are local models (a speech detector, a streaming recogniser, a larger model that re-reads each pause for names and numbers and for punctuation, and a voice with ten styles), run on a thread of their own. The sound of your voice is turned into words and dropped: nothing is recorded. Installing is a download you start from Assistant, Voice, after reading each model's licence, about 0.6 GB and half a gigabyte more for the accuracy booster; every file is checked against a fixed checksum before it is used, a stopped download resumes, and Remove deletes it all.
+- **You choose the model that answers.** Your Muse plan (one Muse thread per conversation, visible in the sidebar, stopped if it asks to use a tool since a call cannot approve one), or any server that speaks the common chat protocol: OpenAI, OpenRouter, Groq, or one running on your computer through Ollama, LM Studio or llama.cpp. A key is kept in a file only you can read and is never shown again. A model that is slow to answer is covered by a short "one moment".
+- **Ask for work while you talk.** It can start a task in the background and carry on, tell you how it is going, pause, resume or cancel it, and say so in a pause when one finishes, fails or needs you. A task started by voice can read and research and **cannot change files**, and nothing is ever approved by voice: a spoken sentence may have been misheard or may not have been yours, so a change is a click on the screen.
+- **Conversations are kept as words.** What you said and what it said (and how much of a cut-off reply you heard) is kept next to the memory in `assistant.db`, so the next call, or the next device, goes on from it. You can read, rename and delete conversations in Assistant, Voice, set how long they are kept, and delete them all. `docs/assistant-voice.md` has how it works, why it was built this way, what was measured and what was not.
+
+### Changed
+
+- **`assistant.db` is at schema version 4** (the voice's conversations, and the Muse thread of each). `scripts/assistant-rollback.mjs` steps back over them and keeps the tasks. A new server dependency: `ws` (MIT) for the call's WebSocket, which is checked for host, origin and token like the rest of the API before the handshake.
+
 ## 0.24.0
 
 ### New
