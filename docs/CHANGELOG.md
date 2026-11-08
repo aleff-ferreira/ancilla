@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The progress card moves like something alive, and never like a finished bar.** The glyph is now the same drifting pixel grid the transcript shows beside "Working", with a soft halo, instead of a spinning ring. A prompt with no plan gets a thread under its head: a dim track with a light that glides along it and a brighter pulse after each call that ends, where it used to be a tinted bar the full width of the card that looked done. With a plan, the step Muse is on rises a little and gives off light while the ones it left settle back to the line. While the work is live a faint light drifts behind the card's head, and it is gone when the card waits on you, when its feed is stale and when the run ended. A finished prompt rings once at its check and fills its thread green from the left, and the next prompt starts from a clean thread. Reduced motion keeps the grid, the glow and the light still.
+
+### Fixed
+
+- **A finished plan no longer sits beside the next prompt saying Complete.** The plan of the last prompt stayed in the dock as a green "Complete 6/6" card for as long as the next prompt ran, because a plan with every step done was labelled Complete before anything checked whether a newer prompt had begun. A plan is now the record of one prompt: when a newer prompt begins, or has just been sent, a plan settled for an earlier one leaves the dock at once with a short collapse. A plan with steps nobody confirmed stays as "Previous plan" so open work is not hidden, and a steer or a queued follow-up does not count as a new prompt.
+
 ## 0.23.0
 
 ### New

@@ -17,6 +17,7 @@ import {
   liveActions,
   oneLine,
   planMerges,
+  planPlace,
   recentActions,
   stepSegs,
   subAction,
@@ -147,6 +148,19 @@ describe("the plan inside the card", () => {
     assert.equal(planMerges(run, null), false);
   });
 
+  it("puts a plan in the run card, in a card of its own, or nowhere: a plan settled for an earlier prompt goes when a newer one begins", () => {
+    const { run, fold } = build([started, plan([{ text: "Build it", status: "in_progress" }]), editing]);
+    const own = taskPlanView(fold)!;
+    assert.equal(planPlace(run, own), "run", "the prompt's own plan is part of its card");
+    assert.equal(planPlace(run, null), "none");
+    const earlier = { ...own, turnId: "t0" };
+    assert.equal(planPlace(run, { ...earlier, superseded: true, remaining: 2 }), "own", "an earlier prompt's unfinished steps are worth knowing about");
+    assert.equal(planPlace(run, { ...earlier, superseded: false, remaining: 0 }), "own", "a finished plan with nothing newer stays as the record");
+    assert.equal(planPlace(run, { ...earlier, superseded: true, remaining: 0 }), "none", "a finished plan of an earlier prompt does not stand beside the new work saying Complete");
+    assert.equal(planPlace(null, { ...earlier, superseded: true, remaining: 0 }), "none");
+    assert.equal(planPlace(null, { ...earlier, superseded: false, remaining: 0 }), "own");
+  });
+
   it("turns the steps into spine segments: only an active step of a running plan moves", () => {
     const view = taskPlanView(build([started, plan([
       { text: "One", status: "completed" },
@@ -202,9 +216,10 @@ describe("the spine, the hairline, the heartbeat and the steps as markup", () =>
     assert.match(markup, /aria-valuemax="90" aria-valuenow="30"/, "the count is still of the steps, not the segments");
   });
 
-  it("is a hairline with a pulse for each call that ended, none when it has ended nothing or the run is over", () => {
+  it("is a thread with a light, a pulse for each call that ended, none when it has ended nothing or the run is over", () => {
     const quiet = renderToStaticMarkup(createElement(Hairline, { beat: 0 }));
     assert.match(quiet, /class="run-spine rhythm" aria-hidden="true"/);
+    assert.match(quiet, /<i class="live"><b class="dn"><\/b><b class="lv"><\/b><\/i>/, "a track to fill when it ends, and the light that travels it");
     assert.doesNotMatch(quiet, /class="pulse"/);
     assert.match(renderToStaticMarkup(createElement(Hairline, { beat: 3 })), /<b class="pulse">/);
     const over = renderToStaticMarkup(createElement(Hairline, { beat: 3, finished: true }));

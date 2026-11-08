@@ -666,6 +666,8 @@ export function CrewCard(props: CrewCardProps) {
 
   const working = run ? run.counts.working + run.counts.finishing + run.counts.noUpdate + run.counts.waiting : 0;
   const waiting = run ? run.runNeeds.length > 0 || run.counts.waiting > 0 : false;
+  // Live and fine: the only state in which the card gives off light.
+  const glowing = run !== null && runLive(run) && !stale && !waiting;
   return (
     <>
       {props.sinceYouLeft ? <SinceYouLeft recap={props.sinceYouLeft} clockAt={clockAt} onDismiss={props.onDismissRecap} /> : null}
@@ -674,6 +676,7 @@ export function CrewCard(props: CrewCardProps) {
         aria-label="Agents and tasks"
         data-crew-card={props.sessionId}
         data-open={expanded}
+        data-live={glowing || undefined}
         data-stale={stale || undefined}
         data-wait={waiting || undefined}
         className={cn("crew-card run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel", stale && "crew-stale")}

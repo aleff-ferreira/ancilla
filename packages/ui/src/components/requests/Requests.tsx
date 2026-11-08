@@ -461,7 +461,7 @@ export function PlanPanel(props: { sessionId: string; view: TaskPlanView }) {
     return null;
   }
   return (
-    <section aria-label="Plan" data-open={open} data-stale={view.state === "stale" || undefined} data-wait={view.state === "waiting" || undefined} className="run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel">
+    <section aria-label="Plan" data-open={open} data-live={view.animate || undefined} data-stale={view.state === "stale" || undefined} data-wait={view.state === "waiting" || undefined} className="run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel">
       <div className="run-head">
         <button
           type="button"

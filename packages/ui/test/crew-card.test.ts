@@ -54,7 +54,8 @@ describe("the glance", () => {
     assert.match(markup, /aria-expanded="false"/);
     assert.match(markup, /data-open="false"/, "a card rests shut");
     assert.equal((markup.match(/class="crew-strip rail"/g) ?? []).length, 4, "the rail is part of the glance, so it is there while the card is shut");
-    assert.match(markup, /spin-ring/, "the ring while live");
+    assert.match(markup, /class="run-glyph work"[^>]*>[\s\S]{0,400}?class="pixel-loader/, "the drifting pixel grid while live, the same mark the transcript shows beside Working");
+    assert.match(markup, /data-live="true"/, "and the card gives off its light");
     assert.deepEqual(chips(markup), []);
     assert.match(text(markup), /^offline-sync-research-design Judge · 7 of 10 41m 16s/);
     assert.equal(summaryLine(run).progress, "Judge · 7 of 10");
@@ -85,7 +86,7 @@ describe("the glance", () => {
     const stale = mkRun(referenceAgents(), { stale: true, staleAt: S(41, 16) });
     const markup = render({ run: stale, stale: true });
     assert.deepEqual(chips(markup), ["stale:Last known"], "last known replaces every other chip");
-    assert.doesNotMatch(markup, /spin-ring/, "nothing spins while the feed is not live");
+    assert.doesNotMatch(markup, /spin-ring|pixel-loader|data-live/, "nothing moves and nothing glows while the feed is not live");
     assert.match(text(markup), /41m 16s · at /);
     assert.match(markup, /data-stale="true"/, "the card tells the theme to hold still");
     assert.match(markup, /class="crew-card run-card @container enter-up overflow-hidden rounded-xl bg-raised shadow-panel crew-stale"/);
@@ -160,7 +161,8 @@ describe("the expanded card", () => {
   it("shows the head with the run's facts kept for the footer, and opens the body", () => {
     const markup = render({ run, expanded: true });
     assert.match(markup, /<span class="run-glyph need"/, "this run has a request waiting on you, so its glyph is the warm one");
-    assert.match(render({ run: runningRun(), expanded: true }), /<span class="run-glyph work"[^>]*>[\s\S]*?class="spin-ring/, "and with none it is the ring");
+    assert.match(render({ run: runningRun(), expanded: true }), /<span class="run-glyph work"[^>]*>[\s\S]{0,400}?class="pixel-loader/, "and with none it is the pixel grid");
+    assert.doesNotMatch(markup, /data-live/, "a card waiting on you does not give off light");
     assert.match(markup, /title="offline-sync-research-design"[^>]*>offline-sync-research-design</);
     const sub = headSub(run).text;
     assert.match(sub, /^Workflow · started [^·]+ · 9 agents · 1 planned · 1\.2M tokens so far \(8 of 9 reported\) · ~\$[\d.]+ est\.$/);
@@ -263,7 +265,7 @@ describe("the expanded card", () => {
   it("freezes the card when the feed is stale: a note, no spinner, no attention list, no actions", () => {
     const stale = runningRun({ stale: true, staleAt: S(41, 16) });
     const markup = render({ run: stale, expanded: true, stale: true, openPhase: "Judge" });
-    assert.doesNotMatch(markup, /spin-ring/);
+    assert.doesNotMatch(markup, /spin-ring|pixel-loader/);
     assert.doesNotMatch(markup, /Needs attention/);
     assert.match(text(markup), /Last known at [^·]+ · Muse is not reachable, nothing has been lost/);
     assert.doesNotMatch(markup, /aria-label="Stop judge:perf"|<span class="lbl">Stop<\/span>/);

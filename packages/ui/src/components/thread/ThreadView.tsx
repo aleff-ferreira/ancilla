@@ -1,4 +1,5 @@
 import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, TreeStructureIcon } from "../ui/icons.js";
+import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { CaptionSpacer, useOverlayDragProps } from "../../app/frame.js";
@@ -17,7 +18,7 @@ import { GoalPanel } from "./GoalPanel.js";
 import { revealLabel } from "../sidebar/Sidebar.js";
 import { NeedsYouChip, CrewStatus, CrewToggle, focusRequestPanel, headerRun, staleAge, useLanded } from "../crew/HeaderChips.js";
 import { CrewDockCard, primaryRun } from "../crew/CrewCard.js";
-import { planMerges } from "../../model/runCard.js";
+import { planPlace } from "../../model/runCard.js";
 import { CrewPanel } from "../crew/CrewPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, MOD } from "../ui/primitives.js";
@@ -311,7 +312,9 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
   const planHidden = useApp((s) => s.prefs.hiddenCards.includes(`plan:${session.sessionId}`));
   const dismissedReports = useApp((s) => s.crew.dismissedReports);
   const primary = props.crew ? primaryRun(props.crew, session.sessionId, props.crew.runs[0]?.clockAt ?? Date.now(), dismissedReports) : null;
-  const folded = !planHidden && planMerges(primary, plan);
+  // Where the plan goes: into the run card, to a card of its own, or nowhere, which is where a plan that was settled
+  // for an earlier prompt goes the moment a newer one is sent.
+  const place = planHidden ? "none" : planPlace(primary, plan);
   return (
     <div className="shrink-0">
       <div className="mx-auto flex w-full max-w-[776px] flex-col gap-2 px-4 pb-2 @min-[520px]:px-6">
@@ -346,7 +349,18 @@ function Dock(props: { session: SessionSummary; thread: ThreadState | null; runn
           <QuestionPanel key={request.userInputId} request={request} keyboard={approvals.length === 0 && index === 0} />
         ))}
         <GoalPanel sessionId={session.sessionId} running={props.running} readOnly={Boolean(thread?.readOnly)} />
-        {plan && !folded ? <PlanPanel key={session.sessionId} sessionId={session.sessionId} view={plan} /> : null}
+        {/* The card folds away when its plan stops belonging: a short collapse, with the gap above it taken back. */}
+        <AnimatePresence initial={false} key={session.sessionId}>
+          {plan && place === "own" ? (
+            <motion.div
+              key="plan"
+              exit={{ height: 0, opacity: 0, marginTop: -8, overflow: "hidden" }}
+              transition={{ duration: 0.24, ease: [0.23, 1, 0.32, 1] }}
+            >
+              <PlanPanel sessionId={session.sessionId} view={plan} />
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
         {queued.length > 0 ? <QueuedList sessionId={session.sessionId} items={queued} /> : null}
         <TelemetryPills sessionId={session.sessionId} />
         <Composer

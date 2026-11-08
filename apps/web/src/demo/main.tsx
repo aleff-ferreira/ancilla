@@ -20,7 +20,8 @@
  *       task       no run, only three background tasks: printing, silent for four minutes, and failed
  *       turn       an ordinary prompt already running: a plan of six steps and about fifty tool calls over two and a
  *                  half minutes, one of them failing; send a prompt to play it again, `speed=3` to play it faster,
- *                  `plan=0` to play it without the plan
+ *                  `plan=0` to play it without the plan, `plan=first` to keep the plan for the first prompt only
+ *                  (the second then runs beside the first one's finished plan, which must be gone the moment it starts)
  *   theme=light|dark   zoom=1.25   sidebar=0   files=1   telemetry=1   palette=1   workflow=done
  * `workflow=done` lets whatever run is loaded finish as the page opens. The app's own routes work as well:
  * #/usage, #/settings and #/t/<thread id>. Nothing is saved: a reload always starts from the same sample state.

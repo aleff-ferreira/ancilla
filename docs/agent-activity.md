@@ -39,11 +39,17 @@ before the next sentence replaces it, so a prompt that makes a call every half s
 three lines beside the card (other runs, tasks) fold into `+N more`.
 
 The spine is the card's only progress, and it never grows with the clock. With a plan it is one segment per step:
-done in green, the active one flowing while Muse works (and held still in the warm colour while it waits on you),
-the rest faint, with the count (`2/6`) beside it; a step that lands fills from left to right with one glint. With no
-plan it is a hairline that sends one pulse along it for each call that ends. A plan belongs to the card when it is
-the prompt's own, so there is no second card under it; a plan from another turn, or one beside a workflow, keeps a
-card of its own in the same style.
+done in green, the active one raised a little and flowing while Muse works (held still in the warm colour while it
+waits on you), the rest faint, with the count (`2/6`) beside it; a step that lands fills from left to right with one
+glint. With no plan it is a thread: a dim track with a light that travels it, which says the prompt is alive and
+nothing about how far along it is (the light never fills the track, so it cannot read as a bar that is done), with one
+brighter pulse after it for each call that ends. When the prompt ends the thread fills green from the left, and the
+next prompt starts from a clean one. The glyph at the left is the same drifting pixel grid the transcript shows beside
+`Working`, and while the work is live and fine a faint light drifts behind the card's head; waiting on you, a stale
+feed and a finished run give off none, and reduced motion holds the grid, the light and the glow still. A plan belongs
+to the card when it is the prompt's own, so there is no second card under it; a plan from another turn, or one beside
+a workflow, keeps a card of its own in the same style, except a plan that was settled for an earlier prompt, which
+leaves the dock the moment a newer prompt is sent.
 
 **Opened** (click the head, or `Enter` on it; the card rests shut in every thread and remembers which you opened),
 the card shows:
@@ -236,6 +242,13 @@ back.
 
 Ending a turn does not complete its checklist. Unconfirmed steps remain visible with an explanation, and
 completed plans remain available as an expandable summary. Only a reported plan change completes a step.
+
+A plan is the record of one prompt. It stays with that prompt, as the spine of the card that reports it, until a newer
+prompt begins or has just been sent. From then on a plan whose every step was reported done or cancelled for an earlier
+prompt is no longer shown, since it would stand beside the new work saying Complete, and it goes at once, not when the
+next plan arrives. A plan with steps nobody confirmed stays as a card of its own, **Previous plan**, so open work is
+not hidden, and a plan the newer prompt reports replaces it. A queued follow-up or a steer is not a new prompt: it
+leaves the running prompt's plan where it is.
 
 ## Reporting limits
 

@@ -15,7 +15,7 @@ import {
   XCircleIcon,
 } from "../ui/icons.js";
 import { Spinner, cn } from "../ui/primitives.js";
-import { SwapIcon } from "../ui/sourced.js";
+import { PixelLoader, SwapIcon } from "../ui/sourced.js";
 
 /** The pieces the run card and the plan card are made of: the glyph, the swapping line, the spine, the heartbeat, the steps. */
 
@@ -80,13 +80,30 @@ export function Swap(props: { id: string; className?: string; title?: string; li
   );
 }
 
-/** The state glyph at the card's left: the ring while it runs, the outcome once it ended; a change blurs from one to the next. */
+/**
+ * The state glyph at the card's left: the same drifting pixel grid the transcript shows beside "Working" while Muse is
+ * at it, the outcome once it ended; a change blurs from one to the next, and a run that lands rings once.
+ */
 export function RunGlyph({ glyph }: { glyph: Glyph | "plan" }) {
+  const before = useRef(glyph);
+  const [landed, setLanded] = useState(false);
+  useEffect(() => {
+    const was = before.current;
+    before.current = glyph;
+    if (glyph !== "done") {
+      setLanded(false);
+      return undefined;
+    }
+    if (was !== "working" && was !== "waiting") return undefined;
+    setLanded(true);
+    const timer = window.setTimeout(() => setLanded(false), 1200);
+    return () => window.clearTimeout(timer);
+  }, [glyph]);
   let tone: string;
   let icon: ReactNode;
   switch (glyph) {
     case "plan": tone = "mute"; icon = <ListChecksIcon size={16} />; break;
-    case "working": tone = "work"; icon = <Spinner size={14} />; break;
+    case "working": tone = "work"; icon = <PixelLoader />; break;
     case "waiting": tone = "need"; icon = <ShieldWarningIcon size={16} className="attention-pulse" />; break;
     case "stale": tone = "mute"; icon = <ClockCounterClockwiseIcon size={16} />; break;
     case "done": tone = "ok"; icon = <CheckCircleIcon size={17} weight="fill" />; break;
@@ -95,7 +112,7 @@ export function RunGlyph({ glyph }: { glyph: Glyph | "plan" }) {
     default: tone = "mute"; icon = <MinusCircleIcon size={17} />;
   }
   return (
-    <span className={cn("run-glyph", tone)} aria-hidden="true">
+    <span className={cn("run-glyph", tone)} data-landed={landed || undefined} aria-hidden="true">
       <SwapIcon value={glyph}>{icon}</SwapIcon>
     </span>
   );
@@ -162,11 +179,16 @@ export function Spine({ segs, label, className }: SpineProps) {
   );
 }
 
-/** With no plan the spine is a hairline that answers each call that ends with one pulse; `beat` counts the calls that have. */
+/**
+ * With no plan the spine is a thread: a dim track with a light that travels it, which says the prompt is alive and
+ * nothing about how far along it is. It answers each call that ends with one brighter pulse (`beat` counts the calls
+ * that have), and when the prompt ends the thread fills green from the left.
+ */
 export function Hairline({ beat, finished }: { beat: number; finished?: boolean }) {
   return (
     <div className={cn("run-spine rhythm", finished && "done")} aria-hidden="true">
       <i className="live">
+        <b className="dn" />
         <b className="lv" />
         {beat > 0 && !finished ? <b key={beat} className="pulse" /> : null}
       </i>
@@ -195,7 +217,7 @@ export function StepMark(props: { status: TaskStepStatus; plan: Pick<TaskPlanVie
       return <CheckCircleIcon size={17} weight="fill" className={cn("text-ok", props.fresh && "run-pop")} aria-label="Done" />;
     case "inProgress":
       return props.plan.animate
-        ? <Spinner size={13} className="text-accent-text" label="In progress" />
+        ? <span role="img" aria-label="In progress" className="inline-flex size-[17px] items-center justify-center text-accent-text"><PixelLoader small /></span>
         : <ClockIcon size={16} className="text-subtle" aria-label={props.plan.state === "waiting" ? "Waiting for you" : "Last reported active; completion unconfirmed"} />;
     case "cancelled":
       return <XCircleIcon size={16} className="text-subtle" aria-label="Cancelled" />;

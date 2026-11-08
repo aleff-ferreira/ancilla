@@ -25,6 +25,11 @@ export interface TaskPlanView {
   updatedAt: number | null;
   /** The turn whose report this plan is, when the fold knows; the run card takes a plan in only when it is the run's own. */
   turnId: string | null;
+  /**
+   * A newer prompt has begun, or has just been sent, since this plan was reported: it is the record of an earlier one.
+   * A plan is about one prompt, so what was settled for the last prompt must not stand beside the new work saying Complete.
+   */
+  superseded: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -71,6 +76,18 @@ function workersRunning(fold: ThreadFold, crew: CrewVM | null | undefined, turnI
 }
 
 /**
+ * Whether a prompt newer than the one that reported the plan is running, was sent just now, or has already run. The
+ * plan's own running prompt is the caller's to exclude: a steer or a queued follow-up is not a new prompt.
+ */
+function newerPrompt(fold: ThreadFold, sourceTurn: string | null, since: number | null): boolean {
+  if (fold.activeTurnId !== null) return true;
+  // A prompt on its way: the thread holds its local copy as soon as it is sent, before Muse says the turn began.
+  if (fold.echoes.some((echo) => echo.disposition === "sending" || echo.disposition === "started")) return true;
+  if (since === null) return false;
+  return Object.values(fold.turns).some((turn) => turn.turnId !== sourceTurn && turn.retracted !== true && turn.startedAt !== undefined && turn.startedAt > since);
+}
+
+/**
  * The task plan and its execution context. An ended turn does not prove an unfinished step succeeded; an
  * unrelated new prompt does not resume the old plan. Keep the reported work visible and explain the difference.
  */
@@ -90,6 +107,7 @@ export function taskPlanView(fold: ThreadFold, options: { stale?: boolean; crew?
   const associated = sourceTurn ? sourceTurn === fold.activeTurnId : Boolean(fold.activeTurnId && updatedAt !== null &&
     activeTurn?.startedAt !== undefined && updatedAt >= activeTurn.startedAt);
   const current = associated && !fold.closed;
+  const superseded = !(fold.activeTurnId !== null && associated) && newerPrompt(fold, sourceTurn, turn?.startedAt ?? updatedAt);
   const workers = !fold.closed && workersRunning(fold, options.crew, sourceTurn);
   const pendingRequest = [...Object.values(fold.approvals), ...Object.values(fold.userInputs)].some((request) => {
     const requestTurn = request.turnId ?? (request.itemId ? fold.items[request.itemId]?.turnId : undefined);
@@ -99,7 +117,12 @@ export function taskPlanView(fold: ThreadFold, options: { stale?: boolean; crew?
   let state: TaskPlanState;
   let label: string;
   let detail: string;
-  if (remaining === 0) {
+  if (remaining === 0 && superseded) {
+    // Settled for an earlier prompt: it is not this prompt's work, and it is not shown as if it were (see planPlace).
+    state = "previous";
+    label = "Previous plan";
+    detail = cancelled > 0 ? `${done} completed · ${cancelled} cancelled, for an earlier prompt.` : "Muse marked every step complete, for an earlier prompt.";
+  } else if (remaining === 0) {
     state = "complete";
     label = cancelled > 0 ? "Settled" : "Complete";
     detail = cancelled > 0 ? `${done} completed · ${cancelled} cancelled` : "Muse marked every step complete.";
@@ -128,5 +151,5 @@ export function taskPlanView(fold: ThreadFold, options: { stale?: boolean; crew?
     label = turn?.terminal && turn.terminal !== "unknown" ? "Turn finished" : "Not running";
     detail = `${count}. Muse has not marked them complete.`;
   }
-  return { items, done, cancelled, remaining, activeIndex, state, label, detail, animate: state === "working", updatedAt, turnId: sourceTurn };
+  return { items, done, cancelled, remaining, activeIndex, state, label, detail, animate: state === "working", updatedAt, turnId: sourceTurn, superseded };
 }

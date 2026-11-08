@@ -128,6 +128,20 @@ export function planMerges(run: Pick<RunVM, "kind" | "runId"> | null, plan: Pick
   return run !== null && plan !== null && run.kind === "turn" && plan.turnId !== null && plan.turnId === run.runId;
 }
 
+export type PlanPlace = "run" | "own" | "none";
+
+/**
+ * Where the plan is shown. Inside the run card when it is the prompt's own; as a card of its own when it is an earlier
+ * prompt's and still has steps nobody confirmed (that is worth knowing); nowhere when it is an earlier prompt's and
+ * every step was settled, since a plan is the record of one prompt, and a green "Complete" beside the work now going
+ * on reads as if that work were done. It goes the moment the newer prompt is sent, not when the next plan arrives.
+ */
+export function planPlace(run: Pick<RunVM, "kind" | "runId"> | null, plan: Pick<TaskPlanView, "turnId" | "superseded" | "remaining"> | null): PlanPlace {
+  if (plan === null) return "none";
+  if (planMerges(run, plan)) return "run";
+  return plan.superseded && plan.remaining === 0 ? "none" : "own";
+}
+
 export type SegTone = "done" | "live" | "hold" | "fail" | "skip" | "todo";
 
 export interface Seg {

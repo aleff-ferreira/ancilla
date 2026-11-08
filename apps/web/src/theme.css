@@ -1408,9 +1408,35 @@
     --spine-live: color-mix(in oklab, var(--accent) 36%, var(--bg-raised));
     --spine-sweep: color-mix(in oklab, var(--accent) 90%, white);
     --tick-idle: color-mix(in oklch, var(--fg-subtle) 38%, transparent);
+    position: relative;
+    isolation: isolate;
   }
   :root[data-theme="dark"] .run-card {
+    --aura-a: 15%;
     box-shadow: 0 0 0 1px var(--border), inset 0 1px 0 oklch(1 0 0 / 0.04);
+  }
+  /*
+   * The aura: while the card's work is live a faint light drifts behind its head, the way a screen glows in a dim room.
+   * It says nothing the glyph and the thread do not; it is what makes the card read as alive rather than as a label.
+   * It is a gradient on a wide layer that only moves sideways, so it costs the compositor nothing, and it is gone the
+   * moment the work is not live (waiting on you, stale, finished).
+   */
+  .run-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -30%;
+    z-index: -1;
+    width: 150%;
+    pointer-events: none;
+    opacity: 0;
+    background: radial-gradient(38% 120% at 30% 0%, color-mix(in oklab, var(--accent) var(--aura-a, 11%), transparent), transparent 70%);
+    transition: opacity 700ms var(--ease-out);
+  }
+  .run-card[data-live="true"]::before {
+    opacity: 1;
+    animation: run-aura 11s var(--ease-in-out) infinite alternate;
   }
   .run-head {
     position: relative;
@@ -1446,8 +1472,25 @@
     width: 20px;
     height: 20px;
   }
+  .run-glyph {
+    position: relative;
+  }
   .run-glyph.work { color: var(--accent-text); }
+  /* A soft halo, so the grid reads as a light source rather than as a spinner. */
+  .run-glyph.work .pixel-loader {
+    filter: drop-shadow(0 0 4px color-mix(in oklab, currentColor 55%, transparent));
+  }
   .run-glyph.ok { color: var(--ok); }
+  /* A run that lands rings once, where the grid was. */
+  .run-glyph[data-landed]::after {
+    content: "";
+    position: absolute;
+    inset: 1px;
+    border-radius: 9999px;
+    border: 1.5px solid var(--ok);
+    pointer-events: none;
+    animation: run-ripple 1100ms var(--ease-out) 1 both;
+  }
   .run-glyph.fail { color: var(--danger); }
   .run-glyph.need { color: var(--warn); }
   .run-glyph.mute { color: var(--fg-subtle); }
@@ -1544,7 +1587,7 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 9px 14px 12px 44px;
+    padding: 8px 14px 11px 44px;
   }
   .run-rail > .cnt {
     flex-shrink: 0;
@@ -1560,15 +1603,24 @@
     min-width: 0;
     flex: 1;
     gap: 3px;
-    height: 4px;
+    height: 6px;
+    align-items: center;
   }
   .run-spine > i {
     position: relative;
     flex: 1 1 0;
+    height: 4px;
     min-width: 2px;
     overflow: hidden;
     border-radius: 2px;
     background: var(--spine-todo);
+    transition: height 320ms var(--ease-out), box-shadow 320ms var(--ease-out);
+  }
+  /* The step Muse is on rises a little and gives off light; the ones it left settle back to the line. */
+  .run-spine > i.live {
+    height: 6px;
+    border-radius: 3px;
+    box-shadow: 0 0 10px color-mix(in oklab, var(--accent) 42%, transparent);
   }
   .run-spine > i > .dn,
   .run-spine > i > .lv {
@@ -1615,28 +1667,65 @@
     transform: translateX(-100%);
     animation: run-glint 760ms var(--ease-out) 120ms 1 both;
   }
-  /* With no plan the spine is a hairline, and each call that ends sends one pulse along it. */
+  /*
+   * With no plan the spine is a thread: a dim track with a light that travels it. The light says the prompt is alive and
+   * nothing about how far along it is, and it never fills the track, so it cannot be mistaken for a bar that is done.
+   * Each call that ends sends one brighter pulse after it, and when the prompt ends the thread fills green from the left.
+   */
   .run-spine.rhythm > i {
-    background: color-mix(in oklch, var(--fg-subtle) 18%, transparent);
+    overflow: visible;
+    /* Clipped at its two ends, open above and below, so the light's glow is not cut to the thread's height. */
+    clip-path: inset(-10px 0 -10px 0);
+    background: color-mix(in oklch, var(--fg-subtle) 20%, transparent);
+  }
+  /* A prompt that ends fills its thread green from the left; the next prompt starts from a clean thread at once. */
+  .run-spine.rhythm > i > .dn {
+    transition: none;
+  }
+  .run-spine.rhythm.done > i > .dn {
+    transition: transform 640ms var(--ease-out);
   }
   .run-spine.rhythm > i > .lv {
+    inset: 0 auto 0 0;
+    width: 36%;
     opacity: 1;
-    background: color-mix(in oklab, var(--accent) 26%, transparent);
-    animation: none;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent 0%, var(--spine-live) 62%, var(--spine-sweep) 100%);
+    transform: translateX(-105%);
+    animation: run-drift 3s cubic-bezier(0.42, 0.04, 0.26, 1) infinite;
+    transition: opacity 320ms var(--ease-out);
+  }
+  /* The bead at the light's head. */
+  .run-spine.rhythm > i > .lv::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 7px;
+    height: 7px;
+    margin: -3.5px -3px 0 0;
+    border-radius: 9999px;
+    background: var(--spine-sweep);
+    box-shadow: 0 0 9px 1px color-mix(in oklab, var(--accent) 65%, transparent);
   }
   .run-spine.rhythm > i > .pulse {
     position: absolute;
-    top: 0;
-    bottom: 0;
+    top: -1px;
+    bottom: -1px;
     left: 0;
-    width: 26%;
-    border-radius: inherit;
-    background: linear-gradient(90deg, transparent, var(--spine-sweep) 55%, transparent);
+    width: 30%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--accent) 55%, white) 60%, transparent);
     transform: translateX(-110%);
-    animation: run-pulse 1000ms var(--ease-out) 1 both;
+    animation: run-pulse 820ms var(--ease-out) 1 both;
   }
-  .run-spine.rhythm.done > i {
-    background: var(--spine-done);
+  .run-spine.rhythm.done > i > .dn {
+    transform: scaleX(1);
+  }
+  .run-spine.rhythm.done > i > .lv,
+  .run-spine.rhythm.done > i > .pulse {
+    opacity: 0;
+    animation: none;
   }
   /* A feed that is not live: nothing moves, and what was live reads as last known. */
   .run-card[data-stale="true"] .run-spine > i.live > .lv,
@@ -1644,14 +1733,34 @@
     animation: none;
     background: color-mix(in oklch, var(--fg-subtle) 42%, transparent);
   }
+  .run-card[data-stale="true"] .run-spine > i.live {
+    height: 4px;
+    box-shadow: none;
+  }
   .run-card[data-stale="true"] .run-spine.rhythm > i > .lv {
-    background: color-mix(in oklch, var(--fg-subtle) 30%, transparent);
+    opacity: 0;
+    animation: none;
   }
   /* Waiting on you: the active step holds still in the warm colour, since nothing moves until you answer. */
   .run-card[data-wait="true"] .run-spine > i.live > .lv,
   .run-card[data-wait="true"] .run-spine > i.hold > .lv {
     animation: none;
     background: color-mix(in oklab, var(--warn) 70%, var(--bg-raised));
+  }
+  .run-card[data-wait="true"] .run-spine > i.live {
+    box-shadow: 0 0 10px color-mix(in oklab, var(--warn) 40%, transparent);
+  }
+  /* The thread's light stops where it was and breathes in the warm colour: nothing moves until you answer. */
+  .run-card[data-wait="true"] .run-spine.rhythm > i > .lv {
+    width: 22%;
+    transform: translateX(0);
+    animation: none;
+    background: linear-gradient(90deg, color-mix(in oklab, var(--warn) 55%, transparent), color-mix(in oklab, var(--warn) 22%, transparent));
+  }
+  .run-card[data-wait="true"] .run-spine.rhythm > i > .lv::after {
+    background: var(--warn);
+    box-shadow: 0 0 9px 1px color-mix(in oklab, var(--warn) 60%, transparent);
+    animation: ancilla-pulse 1.8s var(--ease-in-out) infinite;
   }
 
   /* The heartbeat: one tick per call, the one running taller and blue, the ones that ended settling shorter. */
@@ -3123,6 +3232,46 @@
   }
 }
 
+/* The thread's light: it arrives from beyond the left end, glides through, and is gone past the right end. */
+@keyframes run-drift {
+  0% {
+    transform: translateX(-105%);
+    opacity: 0;
+  }
+  14% {
+    opacity: 1;
+  }
+  86% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(292%);
+    opacity: 0;
+  }
+}
+
+/* The aura slides a third of its width and back, slowly enough to be felt rather than watched. */
+@keyframes run-aura {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(34%);
+  }
+}
+
+/* A run that landed: one ring leaves the glyph and fades. */
+@keyframes run-ripple {
+  from {
+    opacity: 0.7;
+    scale: 0.7;
+  }
+  to {
+    opacity: 0;
+    scale: 2.1;
+  }
+}
+
 @keyframes run-tick-in {
   from {
     width: 0;
@@ -3229,8 +3378,19 @@
   .run-spine > i.live > .lv {
     background: var(--spine-live);
   }
-  .run-spine.rhythm > i > .pulse {
+  .run-spine.rhythm > i > .pulse,
+  .run-glyph[data-landed]::after {
     display: none;
+  }
+  /* The thread's light holds still as a bead at its start, which says it is lit and nothing about how far along it is. */
+  .run-spine.rhythm > i > .lv {
+    animation: none;
+    transform: none;
+    width: 7px;
+    background: none;
+  }
+  .run-card[data-live="true"]::before {
+    animation: none;
   }
   *,
   *::before,

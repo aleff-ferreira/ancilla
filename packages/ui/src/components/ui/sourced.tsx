@@ -46,11 +46,11 @@ const DRIVE_DELAYS = Array.from({ length: 9 }, (_, i) => {
  * A 3x3 pixel grid with a chevron wavefront driving right: the live "Muse is working" mark.
  * via Beautiful UI LoadingState ("Drive"). Adapted: currentColor, CSS-only, reduced motion dims.
  */
-export function PixelLoader(props: { className?: string }) {
+export function PixelLoader(props: { className?: string; small?: boolean }) {
   return (
-    <span aria-hidden="true" className={cn("pixel-loader grid shrink-0 grid-cols-[repeat(3,4px)] gap-[1.5px]", props.className)}>
+    <span aria-hidden="true" className={cn("pixel-loader grid shrink-0 gap-[1.5px]", props.small ? "grid-cols-[repeat(3,3px)] !gap-px" : "grid-cols-[repeat(3,4px)]", props.className)}>
       {DRIVE_DELAYS.map((delay, index) => (
-        <span key={index} className="size-[4px] rounded-[1px] bg-current" style={{ animationDelay: `${delay}ms` }} />
+        <span key={index} className={cn("rounded-[1px] bg-current", props.small ? "size-[3px]" : "size-[4px]")} style={{ animationDelay: `${delay}ms` }} />
       ))}
     </span>
   );

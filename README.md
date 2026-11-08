@@ -127,7 +127,7 @@ establish subscription allowance. See [subscription data sources](docs/subscript
 | --- | --- |
 | **Projects and threads** | Group folders into projects, pin and archive threads, and discover sessions started from the `muse` terminal. |
 | **Conversation control** | Read streamed replies and diffs; approve, steer, stop, queue and resend prompts using Muse's approval modes. |
-| **Plans** | Follow the latest reported steps alongside their turn and workers. Completed plans remain available; unfinished steps are not marked complete just because a turn ended. |
+| **Plans** | Follow the latest reported steps alongside their turn and workers. A plan stays with its prompt, finished or not, until you send the next one; unfinished steps are not marked complete just because a turn ended. |
 | **Files beside the work** | Browse the project and preview files without leaving the thread. |
 | **Multiple logins** | Choose named Muse accounts and set a default account per project. |
 | **Desktop and web** | Use the same interface in a Tauri desktop app or a browser connected to a local or remote server. |

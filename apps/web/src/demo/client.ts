@@ -137,6 +137,8 @@ export class DemoAncillaClient implements AncillaClient {
   private yoloSettings: YoloSettings = { enabled: false };
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private created = 0;
+  /** How many builds the `turn` scenario has played, for `?plan=first`. */
+  private builds = 0;
   private listed: (() => void)[] = [];
   private hasListed = false;
   private researchSettings: ResearchSettings = { enabled: true, config: RESEARCH_CONFIG };
@@ -787,6 +789,10 @@ export class DemoAncillaClient implements AncillaClient {
     const started = Date.now();
     this.created += 1;
     const turnId = sampleId(`build:${sessionId}:${this.created}:${started}`);
+    // `?plan=first` keeps a plan for the first prompt only, so the second runs beside the first one's finished plan.
+    const planParam = new URLSearchParams(window.location.search).get("plan");
+    const withPlan = planParam === "0" ? false : planParam === "first" ? this.builds === 0 : true;
+    this.builds += 1;
     thread.summary = { ...thread.summary, turnCount: thread.summary.turnCount + 1 };
     this.setLive(sessionId, { ...idle(null), activeTurnId: turnId, turnStartedAt: iso(started) });
     this.broadcast({ type: "sessions-changed" });
@@ -797,7 +803,7 @@ export class DemoAncillaClient implements AncillaClient {
       });
     }, 120);
     // `?plan=0` plays the same turn without a plan, to see the card as it is when Muse keeps no checklist.
-    if (new URLSearchParams(window.location.search).get("plan") !== "0") {
+    if (withPlan) {
       const plan = (active: number) =>
         BUILD_STEPS.map((step, index) => ({ text: step.text, activeForm: step.active, status: index < active ? "completed" : index === active ? "inProgress" : "pending" }));
       BUILD_STEP_AT.forEach((ms, index) => {
