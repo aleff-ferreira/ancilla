@@ -1,6 +1,8 @@
 import { DEFAULT_PROFILE } from "./profile.js";
 import type { AssistantService } from "./service.js";
 import { ConflictError, NotFoundError, ValidationError, type ListFilter } from "./store.js";
+import { dismissSuggestion, suggest } from "./suggest.js";
+import { parseScheduleSpec, parseTaskSpec } from "./tasks.js";
 import { MEMORY_KINDS, type MemoryKind, type Scope } from "./types.js";
 
 /**
@@ -98,12 +100,112 @@ const NO_STATS = { schemaVersion: 0, ftsEnabled: false, epoch: 0, items: { activ
 function untouched(req: AssistantRequest, sub: string): AssistantReply {
   if (req.method === "GET" && sub === "") return { status: 200, body: { available: true, fresh: true, profile: DEFAULT_PROFILE, goals: [], stats: NO_STATS, epoch: 0 } };
   if (req.method === "GET" && sub === "/goals") return { status: 200, body: { goals: [] } };
+  if (req.method === "GET" && sub === "/tasks") return { status: 200, body: { tasks: [], summary: { open: 0, needsYou: 0, running: 0 } } };
+  if (req.method === "GET" && sub === "/suggestions") return { status: 200, body: { suggestions: [], autonomy: DEFAULT_PROFILE.autonomy } };
+  if (req.method === "GET" && sub === "/schedules") return { status: 200, body: { schedules: [] } };
   if (req.method === "GET" && sub === "/memories") return { status: 200, body: { items: [], total: 0, epoch: 0 } };
   if (req.method === "GET" && sub === "/activity") return { status: 200, body: { activity: [] } };
   if (req.method === "GET" && sub === "/export") return { status: 200, body: { format: "ancilla.assistant.export", version: 1, items: [], goals: [], profile: DEFAULT_PROFILE, notes: ["The assistant has not been used yet."] }, download: "ancilla-assistant-empty.json" };
   if (req.method === "POST" && sub === "/preview") return { status: 200, body: { text: "", tokens: 0, wouldAdd: false, noEvidence: false, omitted: [], memories: [] } };
   if (req.method === "GET" && /^\/threads\/[^/]+\/context$/.test(sub)) return { status: 200, body: { context: null } };
   return { status: 404, body: { error: "Nothing is saved yet.", kind: "not_found" } };
+}
+
+const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retry|confirm|extend|resolve)$/;
+
+/** Tasks, what to do next, and schedules: the executive's side of the surface. Null when the path is not one of theirs. */
+async function handleWork(service: AssistantService, sub: string, req: AssistantRequest): Promise<AssistantReply | null> {
+  const mine = ["/tasks", "/suggestions", "/schedules"].some((p) => sub === p || sub.startsWith(`${p}/`));
+  if (!mine) return null;
+  const exec = service.executive;
+  if (!exec) return { status: 503, body: { error: "Tasks need a Muse host, and this server was not given one.", kind: "tasks_unavailable" } };
+  const store = service.store;
+  const tasks = service.tasks;
+  const profile = store.getProfile();
+  const projectKey = (cwd: string): string => service.projectKey(cwd);
+
+  if (req.method === "GET" && sub === "/tasks") {
+    const filter = req.query.get("filter") ?? "all";
+    if (filter !== "active" && filter !== "done" && filter !== "all") bad("filter must be active, done or all", "filter");
+    return { status: 200, body: { tasks: tasks.list(filter, integer(req.query.get("limit"), 100, 1, 500)), summary: service.taskSummary() } };
+  }
+  if (req.method === "POST" && sub === "/tasks") {
+    const task = exec.create(parseTaskSpec(await req.body(), profile, projectKey));
+    return { status: 201, body: { task } };
+  }
+  const one = sub.match(/^\/tasks\/([A-Za-z0-9_-]{1,64})$/);
+  if (one && req.method === "GET") {
+    const id = one[1] as string;
+    return { status: 200, body: { ...tasks.detail(id), checkpoint: tasks.latestCheckpoint(id) } };
+  }
+  const act = sub.match(TASK_ACTIONS);
+  if (act && req.method === "POST") {
+    const id = act[1] as string;
+    const action = act[2] as string;
+    const body = await req.body();
+    let task;
+    if (action === "pause") task = exec.pause(id);
+    else if (action === "resume") task = exec.resume(id);
+    else if (action === "retry") task = exec.retry(id);
+    else if (action === "confirm") task = exec.confirm(id);
+    else if (action === "cancel") task = await exec.cancel(id);
+    else if (action === "extend") {
+      const turns = typeof body["turns"] === "number" ? body["turns"] : 0;
+      const minutes = typeof body["minutes"] === "number" ? body["minutes"] : 0;
+      task = exec.extend(id, turns, minutes);
+    } else {
+      const resolution = body["resolution"];
+      if (typeof body["stepId"] !== "string") bad("stepId is required", "stepId");
+      if (resolution !== "done" && resolution !== "retry" && resolution !== "skip") bad("resolution must be done, retry or skip", "resolution");
+      task = exec.resolve(id, body["stepId"], resolution);
+    }
+    return { status: 200, body: { task } };
+  }
+
+  if (req.method === "GET" && sub === "/suggestions") {
+    return { status: 200, body: { suggestions: suggest({ memory: store, tasks, profile, now: store.now() }), autonomy: profile.autonomy } };
+  }
+  if (req.method === "POST" && sub === "/suggestions/dismiss") {
+    const body = await req.body();
+    dismissSuggestion(store, text(body["id"], "id", 200), store.now());
+    return { status: 200, body: { ok: true } };
+  }
+  if (req.method === "POST" && sub === "/suggestions/accept") {
+    const body = await req.body();
+    const id = text(body["id"], "id", 200);
+    const found = suggest({ memory: store, tasks, profile, now: store.now() }).find((s) => s.id === id);
+    if (!found) throw new NotFoundError("The suggestion");
+    if (found.action.type === "confirm-memory") {
+      const item = store.confirm(found.action.memoryId);
+      service.announce({ reason: "memory" });
+      return { status: 200, body: { item } };
+    }
+    if (found.action.type === "open-task") return { status: 200, body: { task: tasks.require(found.action.taskId) } };
+    const cwd = found.action.project ?? (typeof body["cwd"] === "string" ? body["cwd"] : "");
+    if (!cwd) bad("This suggestion has no project of its own: say where it should run with cwd", "cwd");
+    const spec = parseTaskSpec({ goal: found.action.goal, cwd, title: found.title.slice(0, 100) }, profile, projectKey);
+    return { status: 201, body: { task: exec.create({ ...spec, origin: "suggestion" }) } };
+  }
+
+  if (req.method === "GET" && sub === "/schedules") return { status: 200, body: { schedules: tasks.schedules() } };
+  if (req.method === "POST" && sub === "/schedules") {
+    const spec = parseScheduleSpec(await req.body(), profile, projectKey, store.now());
+    const schedule = tasks.createSchedule(spec, store.now());
+    service.announce({ reason: "task" });
+    return { status: 201, body: { schedule } };
+  }
+  const sch = sub.match(/^\/schedules\/([A-Za-z0-9_-]{1,64})(?:\/(enable|disable))?$/);
+  if (sch && req.method === "POST" && sch[2]) {
+    const schedule = tasks.setScheduleEnabled(sch[1] as string, sch[2] === "enable", sch[2] === "disable" ? "Paused by you." : "");
+    service.announce({ reason: "task" });
+    return { status: 200, body: { schedule } };
+  }
+  if (sch && req.method === "DELETE" && !sch[2]) {
+    tasks.removeSchedule(sch[1] as string);
+    service.announce({ reason: "task" });
+    return { status: 200, body: { ok: true } };
+  }
+  return { status: 404, body: { error: "No such assistant route.", kind: "not_found" } };
 }
 
 /** Answers an assistant request, or null when the path is not one of its routes. A bad request is an error reply, not a throw. */
@@ -121,13 +223,16 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
   try {
     // ---- status and settings
     if (req.method === "GET" && sub === "") {
-      return { status: 200, body: { available: true, profile: store.getProfile(), goals: store.listGoals(), stats: store.stats(), epoch: store.epoch() } };
+      return { status: 200, body: { available: true, profile: store.getProfile(), goals: store.listGoals(), stats: store.stats(), epoch: store.epoch(), executive: service.executive !== null, tasks: service.taskSummary() } };
     }
     if (req.method === "PATCH" && sub === "/profile") {
       const body = await req.body();
       const { expectedUpdatedAt, ...patch } = body;
       if (expectedUpdatedAt !== undefined && (typeof expectedUpdatedAt !== "number" || !Number.isFinite(expectedUpdatedAt))) bad("expectedUpdatedAt must be a number", "expectedUpdatedAt");
+      const before = store.getProfile();
       const profile = store.saveProfile(patch, expectedUpdatedAt as number | undefined);
+      // Switching the assistant off stops its work from starting anything new; a turn already running finishes.
+      if (before.enabled && !profile.enabled) service.executive?.pauseAll("The assistant was switched off.");
       service.announce({ reason: "profile" });
       return { status: 200, body: { profile, epoch: store.epoch() } };
     }
@@ -254,6 +359,10 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
     }
     const contextMatch = sub.match(new RegExp(`^/threads/${ID}/context$`));
     if (contextMatch && req.method === "GET") return { status: 200, body: { context: service.lastContext(contextMatch[1] as string) } };
+
+    // ---- tasks, what to do next, and schedules
+    const work = await handleWork(service, sub, req);
+    if (work) return work;
     return { status: 404, body: { error: "No such assistant route.", kind: "not_found" } };
   } catch (error) {
     return replyError(error);

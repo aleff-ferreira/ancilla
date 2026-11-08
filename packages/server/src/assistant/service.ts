@@ -1,8 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Executive, type ExecutiveHost, type RecoverySummary } from "./executive.js";
 import { digest, tokens } from "./text.js";
 import { MemoryStore, type Change, type CaptureResult } from "./store.js";
 import { DEFAULT_PROFILE } from "./profile.js";
+import { startAutonomous } from "./suggest.js";
+import { parseTaskSpec, TaskStore } from "./tasks.js";
 import type { AssembledContext, AssistantProfile, Goal, MemoryKind, MemoryStatus } from "./types.js";
 
 /**
@@ -68,6 +71,10 @@ export interface AssistantDeps {
   now?: () => number;
   /** The local clock's distance east of UTC, for "tomorrow" and "5pm". */
   offsetMinutes?: () => number;
+  /** What the task executive needs of the server: threads, turns, files. Without it there is no executive, only memory. */
+  host?: ExecutiveHost;
+  /** How often the executive looks for work, in milliseconds. */
+  tickMs?: number;
 }
 
 const CACHE_LIMIT = 64;
@@ -97,10 +104,88 @@ export class AssistantService {
   private readonly lastUsed = new Map<string, UsedContext>();
   private readonly lastQuery = new Map<string, string>();
 
+  readonly tasks: TaskStore;
+  /** Null when the server gave no host to run tasks on: the memory still works. */
+  readonly executive: Executive | null;
+  private timer: ReturnType<typeof setInterval> | null = null;
+
   constructor(
     readonly store: MemoryStore,
     private readonly deps: AssistantDeps,
-  ) {}
+  ) {
+    this.tasks = new TaskStore(store, () => this.now());
+    this.executive = deps.host
+      ? new Executive(this.tasks, deps.host, {
+          profile: () => this.store.getProfile(),
+          memory: (input) => this.taskContext(input),
+          changed: (taskId) => this.announce({ reason: "task", ...(taskId ? { taskId } : {}) }),
+          initiative: (now) => this.takeInitiative(now),
+        })
+      : null;
+  }
+
+  /**
+   * What the assistant does when the server starts, and then every few seconds: settle what a restart left in the air,
+   * and look for work. Safe to call once; never throws.
+   */
+  async start(): Promise<RecoverySummary | null> {
+    const executive = this.executive;
+    if (!executive) return null;
+    let summary: RecoverySummary | null = null;
+    try {
+      summary = await executive.recover();
+    } catch (error) {
+      this.deps.log(`assistant: recovering tasks after a restart failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!this.timer) {
+      this.timer = setInterval(() => void executive.tick().catch((error) => this.deps.log(`assistant: a tick failed: ${error instanceof Error ? error.message : String(error)}`)), this.deps.tickMs ?? 15_000);
+      this.timer.unref?.();
+    }
+    return summary;
+  }
+
+  /** The key a folder is known by in memory scopes and on tasks. */
+  projectKey(cwd: string): string {
+    return this.deps.host ? this.deps.host.projectKey(cwd) : cwd;
+  }
+
+  /** What the page shows at a glance about the work: how much is open and how much waits on the user. */
+  taskSummary(): { open: number; needsYou: number; running: number } {
+    return {
+      open: this.tasks.count(["queued", "running", "waiting", "paused", "blocked"]),
+      needsYou: this.tasks.count(["blocked", "unverified", "paused"]),
+      running: this.tasks.count(["running"]),
+    };
+  }
+
+  /** The notes for a task step: the same retrieval as a message, and never read for memories. */
+  private taskContext(input: { text: string; sessionId: string | null; project: string; account: string | null }): string | null {
+    const profile = this.store.getProfile();
+    if (!profile.enabled) return null;
+    try {
+      const out = this.store.retrieve({ text: input.text, ...(input.sessionId ? { thread: input.sessionId } : {}), project: input.project, ...(input.account ? { account: input.account } : {}), budgetTokens: profile.contextBudgetTokens, now: this.now() });
+      return out.memories.length > 0 || hasIdentity(profile, this.store.activeGoals()) ? out.text : null;
+    } catch (error) {
+      this.deps.log(`assistant: choosing notes for a task failed: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /** Under "act", the assistant starts the read-only work its notes point at, a couple of tasks a day at most. */
+  private takeInitiative(now: number): void {
+    const executive = this.executive;
+    const host = this.deps.host;
+    if (!executive || !host) return;
+    const profile = this.store.getProfile();
+    startAutonomous({
+      memory: this.store, tasks: this.tasks, profile, now,
+      start: (suggestion) => {
+        if (suggestion.action.type !== "task" || !suggestion.action.project) throw new Error("not a task with a place to run");
+        const spec = parseTaskSpec({ goal: suggestion.action.goal, cwd: suggestion.action.project, title: suggestion.title.slice(0, 100) }, profile, host.projectKey);
+        return executive.create({ ...spec, origin: "suggestion" });
+      },
+    });
+  }
 
   /** Opens the assistant's database in the data folder (in memory when the server has none). A failure is the caller's to log: the feature is optional. */
   static open(dataDir: string, deps: AssistantDeps): AssistantService {
@@ -119,6 +204,11 @@ export class AssistantService {
 
   close(): void {
     this.cache.clear();
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.executive?.close();
     try {
       this.store.close();
     } catch (error) {

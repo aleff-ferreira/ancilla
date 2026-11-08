@@ -41,8 +41,8 @@ import {
  *  - an edit made on a stale view is refused, and two connections to one file serialise on the write lock.
  */
 
-type Row = Record<string, unknown>;
-type Param = string | number | null;
+export type Row = Record<string, unknown>;
+export type Param = string | number | null;
 
 export class ConflictError extends Error {
   readonly code = "conflict";
@@ -325,20 +325,22 @@ export class MemoryStore {
     return statement;
   }
 
-  private run(sql: string, params: Param[] = []): void {
+  // run, get, all and write are the store's SQL surface; the task store, which lives in the same file, shares them so
+  // that one transaction can cover a memory and a task, and one busy timeout and one lock serve both.
+  run(sql: string, params: Param[] = []): void {
     this.prepared(sql).run(...params);
   }
 
-  private get(sql: string, params: Param[] = []): Row | undefined {
+  get(sql: string, params: Param[] = []): Row | undefined {
     return this.prepared(sql).get(...params) as Row | undefined;
   }
 
-  private all(sql: string, params: Param[] = []): Row[] {
+  all(sql: string, params: Param[] = []): Row[] {
     return this.prepared(sql).all(...params) as Row[];
   }
 
   /** Runs `fn` in one write transaction (nested calls join the outer one). COMMIT is the only way a change becomes real. */
-  private write<T>(fn: () => T): T {
+  write<T>(fn: () => T): T {
     if (this.depth > 0) return fn();
     this.db.exec("BEGIN IMMEDIATE");
     this.depth = 1;

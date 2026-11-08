@@ -142,6 +142,127 @@ DROP TABLE IF EXISTS assistant_profile;
 DROP TABLE IF EXISTS assistant_meta;
 `,
   },
+  {
+    version: 2,
+    name: "tasks and schedules",
+    up: `
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  goal_id TEXT,
+  status TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL,
+  schedule_id TEXT,
+  cwd TEXT NOT NULL,
+  project TEXT NOT NULL,
+  account TEXT,
+  session_id TEXT,
+  allow_writes INTEGER NOT NULL DEFAULT 0,
+  max_turns INTEGER NOT NULL,
+  max_minutes INTEGER NOT NULL,
+  turns_used INTEGER NOT NULL DEFAULT 0,
+  fence INTEGER NOT NULL DEFAULT 0,
+  retry_at INTEGER,
+  failures INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER,
+  finished_at INTEGER,
+  result TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX tasks_status ON tasks (status, created_at);
+
+CREATE TABLE task_steps (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+  ord INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT,
+  effect TEXT NOT NULL,
+  verifier TEXT,
+  status TEXT NOT NULL,
+  evidence TEXT NOT NULL DEFAULT '',
+  verified INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER,
+  finished_at INTEGER
+);
+CREATE INDEX task_steps_task ON task_steps (task_id, ord);
+
+CREATE TABLE task_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+  step_id TEXT NOT NULL REFERENCES task_steps (id) ON DELETE CASCADE,
+  number INTEGER NOT NULL,
+  fence INTEGER NOT NULL,
+  command_id TEXT NOT NULL UNIQUE,
+  session_id TEXT,
+  turn_id TEXT,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  outcome TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX task_attempts_task ON task_attempts (task_id, number);
+CREATE INDEX task_attempts_turn ON task_attempts (session_id, turn_id);
+
+CREATE TABLE task_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  attempt_id TEXT,
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX task_events_task ON task_events (task_id, id);
+
+CREATE TABLE task_checkpoints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+  at INTEGER NOT NULL,
+  state TEXT NOT NULL
+);
+CREATE INDEX task_checkpoints_task ON task_checkpoints (task_id, id);
+
+CREATE TABLE schedules (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  goal TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  project TEXT NOT NULL,
+  account TEXT,
+  kind TEXT NOT NULL,
+  every_minutes INTEGER,
+  at_minute INTEGER,
+  tz TEXT NOT NULL,
+  start_at INTEGER,
+  end_at INTEGER,
+  max_runs INTEGER,
+  runs INTEGER NOT NULL DEFAULT 0,
+  catch_up TEXT NOT NULL,
+  allow_writes INTEGER NOT NULL DEFAULT 0,
+  steps TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  next_run_at INTEGER,
+  last_run_at INTEGER,
+  last_task_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX schedules_due ON schedules (enabled, next_run_at);
+`,
+    down: `
+DROP TABLE IF EXISTS schedules;
+DROP TABLE IF EXISTS task_checkpoints;
+DROP TABLE IF EXISTS task_events;
+DROP TABLE IF EXISTS task_attempts;
+DROP TABLE IF EXISTS task_steps;
+DROP TABLE IF EXISTS tasks;
+`,
+  },
 ];
 
 /** The full text index. Kept apart from the migrations because it is built by hand, and rebuilt when it cannot be trusted. */

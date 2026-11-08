@@ -94,6 +94,7 @@ import {
 } from "./research/index.js";
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { handleAssistant, isAssistantPath, type AssistantReply } from "./assistant/routes.js";
+import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
@@ -1007,6 +1008,8 @@ export class AncillaServer {
   private assistant: AssistantService | null = null;
   private assistantUnavailable: string | null = null;
   private assistantFailedAt = 0;
+  /** Set once the turns the last process left running have been marked, which is what a task is reconciled against. */
+  private assistantReady = false;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1177,7 +1180,7 @@ export class AncillaServer {
     if (this.assistant) {
       return this.assistant;
     }
-    if (this.closed || this.storeClosed) {
+    if (this.closed || this.storeClosed || !this.assistantReady) {
       return null;
     }
     const now = Date.now();
@@ -1192,8 +1195,15 @@ export class AncillaServer {
         log: (line) => this.log(line),
         emit: (event) => this.emit("ancilla", event),
         offsetMinutes: () => -new Date().getTimezoneOffset(),
+        host: this.assistantHost(),
       });
       this.assistantUnavailable = null;
+      // Settles what a restart left in the air and starts looking for work; it never fails the request that opened it.
+      void this.assistant.start().then((summary) => {
+        if (summary && (summary.reconciled > 0 || summary.resumed > 0 || summary.blocked > 0)) {
+          this.log(`assistant tasks after a restart: ${summary.reconciled} reconciled, ${summary.resumed} picked up again, ${summary.blocked} waiting on the user`);
+        }
+      });
     } catch (error) {
       this.assistant = null;
       this.assistantUnavailable = error instanceof Error ? error.message : String(error);
@@ -1201,6 +1211,126 @@ export class AncillaServer {
       this.log(`the assistant could not be opened, so turns go without notes: ${this.assistantUnavailable}`);
     }
     return this.assistant;
+  }
+
+  /**
+   * Muse has the prompt. From here nothing may fail the caller: an error now would tell it that a prompt Muse accepted
+   * was not sent, and sending it again would put it in the thread twice. What Ancilla keeps beside the turn is best
+   * effort, and a failure is logged. Shared by a person's send and by a task's.
+   */
+  private afterTurnAccepted(
+    sessionId: string,
+    managed: ManagedHost,
+    ack: Awaited<ReturnType<SessionManager["sendTurn"]>>,
+    live: LiveState,
+    sentAtRevision: number,
+  ): void {
+    try {
+      // A host that took the turn has the session loaded.
+      if (this.hosts.get(managed.key) === managed) {
+        this.sessionHosts.set(sessionId, managed.key);
+      }
+      // Only a turn that has started is registered: a queued or a steered prompt has no turn of its own to run yet.
+      if (ack.disposition === "started" && ack.turnId) {
+        this.recordTurnStart(sessionId, ack.turnId);
+      }
+      if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
+        live.activityRevision += 1;
+        live.activeTurnId = ack.turnId;
+        live.turnStartedAt = nowIso();
+        live.turnHost = managed.key;
+        live.lastTerminal = null;
+        live.lastError = null;
+        this.emitStatus(sessionId);
+      }
+    } catch (error) {
+      this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but its live state could not be updated: ${errorInfo(error).message}`);
+    }
+  }
+
+  /**
+   * What the task executive uses of this server: it opens threads and sends prompts through the same paths a person's
+   * clicks do, so a task is an ordinary visible thread whose approvals reach the user like any other.
+   */
+  private assistantHost(): ExecutiveHost {
+    return {
+      now: () => Date.now(),
+      projectKey: (cwd) => normalizeCwd(cwd),
+      hostAvailable: async (cwd, account) => {
+        try {
+          await this.hostFor(normalizeCwd(cwd), account);
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, reason: errorInfo(error).message };
+        }
+      },
+      startSession: async ({ cwd, account, title }) => {
+        const created = await this.startSession(normalizeCwd(cwd), undefined, undefined, account);
+        const sessionId = String(created["sessionId"]);
+        try {
+          this.store.updateSession(sessionId, { title, titleSource: "user" });
+        } catch (error) {
+          this.log(`a task's thread could not be named: ${errorInfo(error).message}`);
+        }
+        return { sessionId };
+      },
+      startTurn: async ({ sessionId, text, displayText }) => {
+        const managed = await this.hostForSession(sessionId);
+        this.wake(sessionId);
+        const live = this.liveFor(sessionId);
+        const sentAtRevision = ++live.activityRevision;
+        let ack;
+        try {
+          ack = await managed.manager.sendTurn(sessionId, text, { displayText });
+        } catch (error) {
+          // A refusal is a plain failure. Anything that may have reached Muse before it failed is ambiguous.
+          const info = errorInfo(error);
+          if (/timed? ?out|timeout|aborted|socket|ECONNRESET|EPIPE/i.test(info.message) && info.status >= 500) {
+            throw new AmbiguousStartError(info.message);
+          }
+          throw new Error(info.message);
+        }
+        if (!ack.turnId) {
+          throw new AmbiguousStartError("Muse accepted the prompt but named no turn");
+        }
+        this.afterTurnAccepted(sessionId, managed, ack, live, sentAtRevision);
+        return { turnId: ack.turnId };
+      },
+      interruptTurn: async (sessionId, turnId) => {
+        const manager = await this.managerForSession(sessionId);
+        await manager.interruptTurn(sessionId, turnId, false);
+      },
+      turnState: async (sessionId, turnId) => {
+        const status = this.store.turnStatus(turnId, sessionId);
+        if (status === null) return "absent";
+        if (status === "running") return "running";
+        if (status === "completed") return "completed";
+        if (status === "failed") return "failed";
+        if (status === "cancelled" || status === "interrupted") return "interrupted";
+        return "unknown";
+      },
+      readProjectFile: async (cwd, relPath) => {
+        const root = await this.workspaceRootFor(normalizeCwd(cwd));
+        try {
+          const file = await readProjectFile(root, root, relPath);
+          if (file.truncated) {
+            throw new Error(`${relPath} is too large to check`);
+          }
+          return { exists: true, text: file.content ?? null, size: file.size };
+        } catch (error) {
+          if (error instanceof FileError && error.status === 404) {
+            return { exists: false, text: null, size: 0 };
+          }
+          throw error;
+        }
+      },
+      needsUser: (sessionId) => {
+        const live = this.live.get(sessionId);
+        return Boolean(live && (live.pendingApprovals.size > 0 || live.pendingInputs.size > 0));
+      },
+      watch: (sessionId, handler) => this.onSessionNotification(sessionId, (method, params) => handler(method, params)),
+      log: (line) => this.log(line),
+    };
   }
 
   private readonly assistantAccess = {
@@ -1267,6 +1397,12 @@ export class AncillaServer {
       this.log(`the research sweep at boot failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     await this.sweepTurnsAtBoot(signal);
+    // Only now may the assistant open: the sweep above marked the turns the last process left running as unknown, which
+    // is what its tasks are reconciled against. One that was never switched on has no file, and nothing opens.
+    this.assistantReady = true;
+    if (!this.closed) {
+      this.assistantFor(false);
+    }
     // A server that was closed while it swept has nothing to schedule.
     if (!this.closed) {
       // No sweep at startup: which threads are busy in other Muse clients is only known after discovery.
@@ -2652,27 +2788,7 @@ export class AncillaServer {
       // keeps beside the turn is best effort, and a failure is logged.
       prepared.accepted();
       const saved: Record<string, unknown>[] = [];
-      try {
-        // A host that took the turn has the session loaded.
-        if (this.hosts.get(managed.key) === managed) {
-          this.sessionHosts.set(sessionId, managed.key);
-        }
-        // Only a turn that has started is registered: a queued or a steered prompt has no turn of its own to run yet.
-        if (ack.disposition === "started" && ack.turnId) {
-          this.recordTurnStart(sessionId, ack.turnId);
-        }
-        if (live.activityRevision === sentAtRevision && ack.disposition === "started" && ack.turnId) {
-          live.activityRevision += 1;
-          live.activeTurnId = ack.turnId;
-          live.turnStartedAt = nowIso();
-          live.turnHost = managed.key;
-          live.lastTerminal = null;
-          live.lastError = null;
-          this.emitStatus(sessionId);
-        }
-      } catch (error) {
-        this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but its live state could not be updated: ${errorInfo(error).message}`);
-      }
+      this.afterTurnAccepted(sessionId, managed, ack, live, sentAtRevision);
       // The saved attachments go back with the ack: the open thread shows them without waiting for a reload.
       prepared.files.forEach((file, index) => {
         try {
