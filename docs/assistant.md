@@ -11,6 +11,8 @@ It is **off until you switch it on**, and until you do there is no file on disk 
 
 Related: [what it is measured against](assistant-baseline.md), [how well it does](assistant-evaluation.md).
 
+![The assistant's home: its face on a lit stage, what it would do next, the rules it follows and what you have shared](assets/assistant-home.png)
+
 ## Switching it on
 
 Open the Assistant page from the sidebar footer and turn it on. That creates `assistant.db` in Ancilla's data folder
@@ -61,6 +63,10 @@ tabs.
 - **Settings.** Goals, initiative (Ask first, Suggest, Act within limits), whether it may start read-only work on its
   own, whether a task may be given write access, the limits on how much it may spend, and how large the notes block may be.
 
+![Memory: each note with who said it and when, and whether it is disputed or a guess](assets/assistant-memory.png)
+
+![The Persona tab, saved as you go: name, look, voice and habits](assets/assistant-persona.png)
+
 The page reads again on its own when the server announces a change. In any page, a save, a replacement, a refusal (a
 credential, or remembering paused) and a question about which of two notes you meant show as a short message.
 
@@ -83,6 +89,10 @@ words). The Assistant page opens on four steps:
 
 **Nothing is saved, and nothing is switched on, until the last step**, so leaving half way leaves everything as it was.
 An assistant that was switched on before it had a face gets the same meeting.
+
+![The first meeting's Look step: a form, a colour and a glow, with the face changing as you choose](assets/assistant-meeting.png)
+
+The [90-second tour](assets/ancilla-tour.mp4) starts with this meeting.
 
 ### The face
 

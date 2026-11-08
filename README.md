@@ -6,14 +6,15 @@
 
 ![Ancilla — Deep research. Agents in view. An AMAZONIA WORKS product.](docs/assets/readme-hero.svg)
 
-**Deep research and agent monitoring for Muse Code.**
+**Ask a question, get a cited research report, watch parallel agents work.**
 
-Ancilla is an open-source desktop and web app. Turn a question into a cited research report,
-follow parallel agents as they work, and keep coding threads, approvals and background tasks in one workspace.
-It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windows, macOS or Linux.
+Ancilla is an open-source desktop and web workspace for Meta's **Muse Code CLI** (`muse`). Turn a question into a
+cited research report, follow parallel agents as they work, and keep coding threads, approvals and background tasks
+in one place, with an opt-in assistant that remembers what you tell it. It uses your Muse login, so there are no
+extra API keys, on Windows, macOS or Linux.
 
 **[Download Ancilla](https://github.com/aleff-ferreira/ancilla/releases/latest)** ·
-[Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
+[Watch the tour](#see-it-in-90-seconds) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
 > **New in 0.24.0:** an assistant with a face, a voice and a first meeting that you choose, shown in the sidebar, on its
@@ -23,6 +24,14 @@ It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windo
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
 > are trademarks of Meta, used here only to describe what this client connects to.
+
+## See it in 90 seconds
+
+[![Choosing the assistant's face in its first meeting. Click to watch the whole tour.](docs/assets/ancilla-tour.gif)](docs/assets/ancilla-tour.mp4)
+
+The first meeting with the assistant, what it remembers, a run card with the plan folded in, a cited research report,
+the Crew panel and the usage meter, on sample data.
+[Watch the whole tour](docs/assets/ancilla-tour.mp4) (1 min 32 s, no sound, 10 MB).
 
 ## Deep Research
 
@@ -70,6 +79,11 @@ See the work behind ordinary prompts as well as parallel research. Crew follows 
 tools, Muse workflows, native subagents, Deep Research workers and background shell tasks in the thread's monitoring
 surfaces. Research mode is not required.
 
+Each prompt gets a calm card above the composer. It rests shut with one line of what is happening and opens to the plan
+and the latest calls; its progress moves only when Muse reports, with no clock-driven estimate.
+
+![A running prompt's card opened to its plan, the steps ticked off as Muse reports them, and the latest calls](docs/assets/run-card.png)
+
 ![The Crew panel showing workflow phases, agent timeline, attention states and a searchable roster](docs/assets/agents.png)
 
 | Surface | What you can follow |
@@ -95,6 +109,8 @@ what you type, keeps rules, preferences, decisions, deadlines and facts with you
 and puts the notes that bear on a message in front of the prompt. It adds no model of its own and costs no extra: Muse
 still does the thinking, on your plan. It is **off until you switch it on**.
 
+![The assistant's home: its face on a lit stage, what it would do next, the rules it follows and what you have shared](docs/assets/assistant-home.png)
+
 | Capability | What it does |
 | --- | --- |
 | **Memory you can read** | Every note shows who said it and when, with its earlier versions. Correct it, pin it, confirm it, settle a dispute, export everything, pause remembering, or erase a note, and the same old words are not learned again. |
@@ -106,6 +122,17 @@ still does the thinking, on your plan. It is **off until you switch it on**.
 
 See [the assistant](docs/assistant.md) for setup, the API and how to roll back, and
 [how it is measured](docs/assistant-evaluation.md) for what it does well and where it is weak.
+
+<details>
+<summary>The first meeting, what it remembers and its Persona tab</summary>
+
+![The first meeting: choosing a form, a colour and a voice, with the face changing as you choose](docs/assets/assistant-meeting.png)
+
+![Memory: each note with who said it and when, and whether it is disputed or a guess](docs/assets/assistant-memory.png)
+
+![The Persona tab, saved as you go: name, look, voice and habits](docs/assets/assistant-persona.png)
+
+</details>
 
 ## Subscription usage, alongside local activity
 
