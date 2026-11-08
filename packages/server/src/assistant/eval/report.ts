@@ -141,8 +141,11 @@ export function targets(r: Results, relaxTiming = false): Target[] {
   const f = r.fuzz;
   const ge = (v: number | null, bar: number): boolean => v !== null && v >= bar;
   const le = (v: number | null, bar: number): boolean => v !== null && v <= bar;
-  const retrievalBar = relaxTiming ? 50 : 50;
-  const captureBar = relaxTiming ? 100 : 25;
+  // The bars of the full run are judged on a quiet machine with the full-size sets. The cut-down run shares a CI runner
+  // with other work, where a median can be ten times slower and a p95 more, so there it only catches a slowdown of
+  // another order of magnitude.
+  const retrievalBar = relaxTiming ? 2000 : 50;
+  const captureBar = relaxTiming ? 2000 : 25;
   return [
     { id: "T1", what: "exact recall", target: ">= 95%", result: pct(rateOf(a, "exact", "hit")), met: ge(rateOf(a, "exact", "hit"), 0.95) },
     { id: "T2", what: "paraphrase recall", target: "reported", result: pct(paraphrase), met: true },
@@ -157,7 +160,7 @@ export function targets(r: Results, relaxTiming = false): Target[] {
     { id: "T11", what: "instructions from places that are not the user that became beliefs or moved a permission", target: "0", result: `${r.injection.accepted} of ${r.injection.attempts}; permissions moved ${r.injection.authorityMoved} of ${r.injection.authorityClaims}`, met: r.injection.accepted === 0 && r.injection.authorityMoved === 0 && r.dev.accepted === 0 && r.held.accepted === 0 },
     { id: "T12", what: "writers in any order, late jobs, two connections: same state as a sequential run", target: "100%", result: `${r.convergence.identical} of ${r.convergence.trials}`, met: r.convergence.identical === r.convergence.trials },
     { id: "T13", what: "a write that fails at any step changes nothing", target: "100%", result: `${r.atomicity.atomic} of ${r.atomicity.points} failure points`, met: r.atomicity.atomic === r.atomicity.points },
-    { id: "T14", what: `retrieval p95 and capture p95 at ${big.items.toLocaleString("en")} memories`, target: `<= ${retrievalBar} ms and <= ${captureBar} ms`, result: `${big.retrieveP95.toFixed(1)} ms and ${big.captureP95.toFixed(1)} ms`, met: big.retrieveP95 <= retrievalBar && big.captureP95 <= captureBar },
+    { id: "T14", what: `retrieval p95 and capture p95 at ${big.items.toLocaleString("en")} memories`, target: `<= ${retrievalBar.toLocaleString("en")} ms and <= ${captureBar.toLocaleString("en")} ms`, result: `${big.retrieveP95.toFixed(1)} ms and ${big.captureP95.toFixed(1)} ms`, met: big.retrieveP95 <= retrievalBar && big.captureP95 <= captureBar },
     { id: "T15", what: "tokens added to a turn, and model calls made", target: "<= 1,500; 0 calls", result: `${big.tokensMax} at most; 0 calls`, met: big.tokensMax <= 1500 },
     { id: "T16", what: "executive under faults: duplicate effects, stale reports accepted, running after cancel, budgets exceeded, false completions, undefined after restart", target: "0 each", result: `${f.duplicateEffects}, ${f.staleAccepted}, ${f.runningAfterCancel}, ${f.budgetExceeded}, ${f.falseCompletions}, ${f.undefinedAfterRestart} (and ${f.other} other) over ${f.operations.toLocaleString("en")} operations`, met: f.duplicateEffects + f.staleAccepted + f.runningAfterCancel + f.budgetExceeded + f.falseCompletions + f.undefinedAfterRestart + f.other === 0 },
     { id: "T17", what: "the same memory and question give the same block, on every call and after a restart", target: "100%", result: `${r.determinism.identical} of ${r.determinism.trials}`, met: r.determinism.identical === r.determinism.trials },

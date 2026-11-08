@@ -72,6 +72,15 @@ describe("the targets fixed in advance", () => {
     assert.deepEqual(missed, [], `\n${renderTargets(targets(results, true))}`);
   });
 
+  it("judge speed on a cut-down run only as a sanity bound, since a shared runner can be many times slower than a quiet machine", () => {
+    const big = results.scales[results.scales.length - 1] as Results["scales"][number];
+    const at = (ms: number): Results => ({ ...results, scales: [{ ...big, retrieveP95: ms, captureP95: ms }] });
+    const t14 = (r: Results, relaxed: boolean): boolean | undefined => targets(r, relaxed).find((t) => t.id === "T14")?.met;
+    assert.equal(t14(at(300), true), true, "a slow shared runner is not a failure");
+    assert.equal(t14(at(300), false), false, "but the bars of the full run are not loosened");
+    assert.equal(t14(at(5000), true), false, "and a slowdown of another order of magnitude still is one");
+  });
+
   it("show what the baselines cannot do, so that meeting them means something", () => {
     const t = results.held.table;
     const rate = (system: string, key: string, field: "hit" | "answer" | "leaked"): number => {
