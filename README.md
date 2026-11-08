@@ -16,8 +16,8 @@ It connects to Meta's **Muse Code CLI** (`muse`) using your Muse login, on Windo
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.22.0:** one calm card for what Muse is doing, with the plan inside it, and a Timeline that reads as a
-> rhythm. [Read the release notes](docs/CHANGELOG.md#0220).
+> **New in 0.23.0:** an assistant that keeps what you tell it, with your exact words, and works on what you approve,
+> off until you switch it on. [Read the release notes](docs/CHANGELOG.md#0230).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"

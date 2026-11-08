@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.23.0
 
-### Added
+### New
 
 - **An assistant that keeps what you tell it and works on what you approve.** It is off until you switch it on from the new Assistant page (the brain icon in the sidebar footer, or `#/assistant`); switching it on creates `assistant.db` next to `ancilla.db` and nothing else. It makes no model call of its own and adds no runtime: Muse still does the thinking, on your plan. `docs/assistant.md` has the setup, the API and how to roll back, `docs/assistant-baseline.md` separates what was taken from the public documentation of an existing personal assistant from what is only a guess, and `docs/assistant-evaluation.md` gives the measured results and where it is weak.
 - **A memory with the exact words, where they came from, and a way to correct them.** It reads what you type in threads, never tool output, files, web pages or its own words, and keeps rules, preferences, decisions, deadlines and facts with when you said them and whether you said them, a check confirmed them or they are a guess. A change of mind replaces a note and keeps the old one as history; a guess never replaces what you said; two notes of equal standing that disagree are shown as disputed for you to settle. Passwords, keys, tokens, card numbers and ID numbers are refused. A note counts as saved only once it is on disk. Forgetting erases the words from the note, its earlier versions, its sources and the search index, and the same old words are not learned again. The notes that bear on a message go in front of the prompt as a short block marked as reference data, within a budget you set (900 estimated tokens by default), with a warning on a note that may be out of date and a line saying so when nothing saved answers the question. The thread keeps showing your own words, and the page can show the exact block for a question before you send it.
