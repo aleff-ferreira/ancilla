@@ -263,6 +263,47 @@ DROP TABLE IF EXISTS task_steps;
 DROP TABLE IF EXISTS tasks;
 `,
   },
+  {
+    version: 3,
+    name: "conversations",
+    // What was said in a call or typed to the assistant, so that the next call, and the text box, go on from it. Only words
+    // are kept: no audio is ever stored.
+    up: `
+CREATE TABLE conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  project TEXT,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  turns INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX conversations_updated ON conversations (updated_at DESC);
+
+CREATE TABLE utterances (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id TEXT NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+  turn INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  source TEXT NOT NULL,
+  text TEXT NOT NULL,
+  heard TEXT,
+  interrupted INTEGER NOT NULL DEFAULT 0,
+  at INTEGER NOT NULL
+);
+CREATE INDEX utterances_conversation ON utterances (conversation_id, id);
+`,
+    down: `
+DROP TABLE IF EXISTS utterances;
+DROP TABLE IF EXISTS conversations;
+`,
+  },
+  {
+    version: 4,
+    name: "the Muse thread of a conversation",
+    // When Muse is the call's model, the conversation goes on in one Muse thread, so that its history lives where Muse keeps it.
+    up: `ALTER TABLE conversations ADD COLUMN muse_session TEXT;`,
+    down: `ALTER TABLE conversations DROP COLUMN muse_session;`,
+  },
 ];
 
 /** The full text index. Kept apart from the migrations because it is built by hand, and rebuilt when it cannot be trusted. */

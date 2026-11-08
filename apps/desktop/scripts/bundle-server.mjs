@@ -36,6 +36,7 @@ function hasCargo() {
 
 await rm(join(resourcesDir, "frontend"), { recursive: true, force: true });
 await rm(join(resourcesDir, "server.cjs"), { force: true });
+await rm(join(resourcesDir, "asr-worker.cjs"), { force: true });
 await mkdir(legalDir, { recursive: true });
 await cp(join(appDir, "..", "web", "dist"), join(resourcesDir, "frontend"), {
   recursive: true,
@@ -86,5 +87,15 @@ await esbuild.build({
   outfile: join(resourcesDir, "server.cjs"),
   logLevel: "info",
   plugins: [pdfkitStandardFonts],
+});
+// The voice's speech recogniser runs on a thread of its own, which loads its own file: it sits beside server.cjs, and
+// the server finds it there (packages/server/src/voice/engines/asr.ts). It imports nothing but Node's own modules.
+await esbuild.build({
+  entryPoints: [join(rootDir, "packages", "server", "src", "voice", "engines", "asr-worker.ts")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: join(resourcesDir, "asr-worker.cjs"),
+  logLevel: "info",
 });
 console.log("bundled desktop resources into src-tauri/resources");

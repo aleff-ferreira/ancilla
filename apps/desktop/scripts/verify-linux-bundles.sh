@@ -22,6 +22,7 @@ check_tree() {
   test -x "$root/usr/lib/Ancilla/resources/node"
   "$root/usr/lib/Ancilla/resources/node" --version
   test -s "$root/usr/lib/Ancilla/resources/server.cjs"
+  test -s "$root/usr/lib/Ancilla/resources/asr-worker.cjs"
   test -s "$root/usr/lib/Ancilla/resources/frontend/index.html"
   test -s "$root/usr/lib/Ancilla/resources/legal/node-LICENSE"
   local desktop="$root/usr/share/applications/Ancilla.desktop"

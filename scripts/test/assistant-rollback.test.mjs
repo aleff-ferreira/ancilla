@@ -40,9 +40,29 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     const dir = await makeData();
     const out = run(dir, "--status");
     assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /schema version 2/);
+    assert.match(out.stdout, /schema version 4/);
     assert.match(out.stdout, /1: memory and profile/);
     assert.match(out.stdout, /2: tasks and schedules/);
+    assert.match(out.stdout, /3: conversations/);
+    assert.match(out.stdout, /4: the Muse thread of a conversation/);
+  });
+
+  test("steps back over the voice's conversations and keeps the tasks", async () => {
+    const dir = await makeData();
+    const before = tables(dir);
+    assert.ok(before.names.includes("conversations") && before.names.includes("utterances"));
+    assert.equal(run(dir, "3").status, 0);
+    const three = tables(dir);
+    assert.equal(three.version, 3);
+    assert.ok(three.names.includes("conversations"), "version 3 still has conversations");
+    const db = new DatabaseSync(join(dir, "assistant.db"));
+    const columns = db.prepare("PRAGMA table_info(conversations)").all().map((c) => c.name);
+    db.close();
+    assert.ok(!columns.includes("muse_session"), "but not the thread column added after it");
+    assert.equal(run(dir, "2").status, 0);
+    const two = tables(dir);
+    assert.equal(two.version, 2);
+    assert.ok(two.names.includes("tasks") && !two.names.includes("conversations") && !two.names.includes("utterances"));
   });
 
   test("writes a copy of the memories first, then drops only what the newer version added", async () => {
@@ -57,7 +77,7 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     assert.equal(exported.profile.name, "Jarvis");
     const now = tables(dir);
     assert.equal(now.version, 1);
-    assert.ok(now.names.includes("memory_items") && !now.names.includes("tasks") && !now.names.includes("schedules"));
+    assert.ok(now.names.includes("memory_items") && !now.names.includes("tasks") && !now.names.includes("schedules") && !now.names.includes("conversations"));
   });
 
   test("goes all the way back to nothing when asked, and then there is nothing of the assistant left", async () => {
@@ -70,13 +90,13 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
 
   test("refuses a version it is not at or above, a missing file and a missing argument", async () => {
     const dir = await makeData();
-    assert.equal(run(dir, "2").status, 2);
+    assert.equal(run(dir, "4").status, 2);
     assert.equal(run(dir, "7").status, 2);
     assert.equal(run(dir, "x").status, 2);
     assert.equal(run(dir).status, 2);
     const empty = mkdtempSync(join(tmpdir(), "ancilla-rollback-empty-"));
     dirs.push(empty);
     assert.equal(run(empty, "0").status, 1);
-    assert.equal(tables(dir).version, 2, "nothing was changed by the refusals");
+    assert.equal(tables(dir).version, 4, "nothing was changed by the refusals");
   });
 });

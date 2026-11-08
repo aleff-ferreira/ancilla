@@ -6,7 +6,7 @@ import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promi
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
-import type { Readable } from "node:stream";
+import type { Duplex, Readable } from "node:stream";
 import {
   AncillaMspHost,
   AncillaStore,
@@ -94,6 +94,9 @@ import {
 } from "./research/index.js";
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { handleAssistant, isAssistantPath, type AssistantReply } from "./assistant/routes.js";
+import { handleVoice, isVoicePath } from "./voice/routes.js";
+import { VoiceService } from "./voice/service.js";
+import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
@@ -1010,6 +1013,9 @@ export class AncillaServer {
   private assistantFailedAt = 0;
   /** Set once the turns the last process left running have been marked, which is what a task is reconciled against. */
   private assistantReady = false;
+  /** The voice: models, the open call and its settings. Made the first time something asks for it; nothing runs until a call does. */
+  private voiceService: VoiceService | null = null;
+  private voiceSockets: VoiceSocketServer | null = null;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1111,6 +1117,79 @@ export class AncillaServer {
     this.server = createServer((req, res) => {
       void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
     });
+    this.server.on("upgrade", (req, socket, head) => this.upgrade(req, socket, head));
+  }
+
+  /** The voice, made on first use. */
+  private voiceFor(): VoiceService {
+    if (!this.voiceService) {
+      this.voiceService = new VoiceService({
+        dataDir: this.options.dataDir,
+        assistant: (create) => this.assistantFor(create),
+        log: (line) => this.log(line),
+        // The same four things a task uses to run in a Muse thread: a call thinks in one, and shows in the sidebar like any other.
+        museHost: this.assistantHost(),
+        lastProject: () => {
+          try {
+            return this.store.listProjects()[0]?.cwd ?? null;
+          } catch {
+            return null;
+          }
+        },
+      });
+    }
+    return this.voiceService;
+  }
+
+  /**
+   * A request to open the call's socket. A browser applies no cross-origin rule to a WebSocket, so what `route` does for
+   * a request (the host it names, the origin it comes from, the credential it carries) is done here by hand, before the
+   * handshake is completed. A page of another site that has the user's cookie still cannot open a call.
+   */
+  private upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const refuse = (status: number, text: string): void => {
+      const body = `${text}\n`;
+      socket.write(`HTTP/1.1 ${status} ${text.split(".")[0]}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+      socket.destroy();
+    };
+    try {
+      let path: string;
+      try {
+        path = new URL(req.url ?? "/", "http://localhost").pathname;
+      } catch {
+        refuse(400, "That address is not valid.");
+        return;
+      }
+      if (path !== VOICE_SOCKET_PATH) {
+        refuse(404, "Not found.");
+        return;
+      }
+      if (this.closed) {
+        refuse(503, "Ancilla is shutting down.");
+        return;
+      }
+      if (this.enforceHost && !trustedHost(req.headers["host"], this.trustedHosts) && !this.bearerValid(req)) {
+        this.hostRefusals += 1;
+        refuse(403, "This daemon does not answer requests for that host.");
+        return;
+      }
+      const foreign = this.foreignOrigin(req);
+      if (foreign !== null && !this.options.allowOrigins.includes(foreign)) {
+        refuse(403, "This daemon does not answer that origin.");
+        return;
+      }
+      if (!this.authorized(req)) {
+        refuse(401, "Missing or invalid token.");
+        return;
+      }
+      if (!this.voiceSockets) {
+        this.voiceSockets = new VoiceSocketServer(() => this.voiceFor(), (line) => this.log(line));
+      }
+      this.voiceSockets.handleUpgrade(req, socket, head);
+    } catch (error) {
+      this.log(`a voice socket could not be opened: ${errorInfo(error).message}`);
+      refuse(500, "The call could not be opened.");
+    }
   }
 
   /**
@@ -1193,7 +1272,11 @@ export class AncillaServer {
     try {
       this.assistant = AssistantService.open(this.options.dataDir, {
         log: (line) => this.log(line),
-        emit: (event) => this.emit("ancilla", event),
+        emit: (event) => {
+          this.emit("ancilla", event);
+          // A call that is open hears of a task that changed, to say so when there is a lull.
+          if (event.reason === "task" && event.taskId) this.voiceService?.hub.emit({ taskId: event.taskId });
+        },
         offsetMinutes: () => -new Date().getTimezoneOffset(),
         host: this.assistantHost(),
       });
@@ -1548,6 +1631,11 @@ export class AncillaServer {
     }
     // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
     this.storeClosed = true;
+    // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.
+    this.voiceSockets?.close();
+    await this.voiceService?.close().catch(() => undefined);
+    this.voiceService = null;
+    this.voiceSockets = null;
     this.assistant?.close();
     this.assistant = null;
     this.store?.close();
@@ -2511,6 +2599,10 @@ export class AncillaServer {
         this.sendAssistant(res, reply);
         return true;
       }
+    }
+    if (isVoicePath(path)) {
+      this.sendAssistant(res, await handleVoice(this.voiceFor(), { method, path, query: url.searchParams, body: () => this.readBody(req) }));
+      return true;
     }
     if (path === "/api/research" || path.startsWith("/api/research/") || path === "/api/research-settings") {
       if (await this.routeResearch(method, path, url, req, res)) {

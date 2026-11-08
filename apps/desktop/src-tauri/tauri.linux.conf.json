@@ -6,7 +6,7 @@
     "shortDescription": "Deep Research and agent monitoring with Muse Code",
     "homepage": "https://github.com/aleff-ferreira/ancilla",
     "externalBin": [],
-    "resources": ["resources/server.cjs", "resources/frontend", "resources/legal", "resources/node"],
+    "resources": ["resources/server.cjs", "resources/asr-worker.cjs", "resources/frontend", "resources/legal", "resources/node"],
     "linux": {
       "deb": {
         "section": "devel",
