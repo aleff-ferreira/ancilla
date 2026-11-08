@@ -290,7 +290,7 @@ export class AssistantService {
     }
     const store = MemoryStore.open(path, deps.now ? { now: deps.now } : {});
     // Meaning search is on when the user saved a model for it; a server given one directly (a test) keeps that one.
-    const saved = deps.embedding === undefined ? readEmbeddingSettings(dataDir) : null;
+    const saved = deps.embedding === undefined ? readEmbeddingSettings(dataDir, (message) => deps.log(`assistant: ${message}`)) : null;
     const embedding = deps.embedding !== undefined ? deps.embedding : saved ? { settings: saved, embedder: embedderFor(saved) } : null;
     return new AssistantService(store, { ...deps, dataDir, embedding });
   }

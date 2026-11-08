@@ -170,14 +170,18 @@ export function parseEmbeddingSettings(raw: unknown): EmbeddingSettings {
   return { baseUrl, model, queryPrefix: text("queryPrefix", 300, false), apiKeyEnv: apiKeyEnv === "" ? null : apiKeyEnv, minCosine, standoutCosine, standoutLead, most };
 }
 
-/** Reads the settings the user saved, or null when meaning search is not set up (or the file cannot be understood). */
-export function readEmbeddingSettings(dataDir: string): EmbeddingSettings | null {
+/**
+ * Reads the settings the user saved, or null when meaning search is not set up. A file that cannot be understood (a typo
+ * in one edited by hand, say) also gives null, and `onProblem` is told why, so that it is not simply off with no reason.
+ */
+export function readEmbeddingSettings(dataDir: string, onProblem?: (message: string) => void): EmbeddingSettings | null {
   if (dataDir === ":memory:") return null;
   const path = join(dataDir, EMBEDDING_FILE);
   if (!existsSync(path)) return null;
   try {
     return parseEmbeddingSettings(JSON.parse(readFileSync(path, "utf8")) as unknown);
-  } catch {
+  } catch (error) {
+    onProblem?.(`${EMBEDDING_FILE} could not be used, so meaning search is off: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   }
 }

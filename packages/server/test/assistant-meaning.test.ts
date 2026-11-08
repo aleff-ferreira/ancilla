@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -342,6 +342,18 @@ describe("what is kept, and what is sent", () => {
     r.service.close();
   });
 
+  it("drops the vectors of a model that changed size behind the same name, and reads those notes again", () => {
+    const r = rig();
+    const a = r.remember("The user drives a Subaru Outback");
+    const b = r.remember("The user has a beagle puppy");
+    assert.equal(r.store.putVector(a, "m@x", Float32Array.from([1, 0, 0]), "The user drives a Subaru Outback"), true);
+    assert.equal(r.store.vectorStats("m@x").indexed, 1);
+    assert.equal(r.store.putVector(b, "m@x", Float32Array.from([0, 1, 0, 0]), "The user has a beagle puppy"), true);
+    assert.equal(r.store.vectorStats("m@x").indexed, 1, "the vector of the other size is gone: it says nothing about the new one's space");
+    assert.deepEqual(r.store.itemsNeedingVectors("m@x", 10).map((n) => n.id), [a], "and its note waits to be read again");
+    r.service.close();
+  });
+
   it("gives a note no vector when it changed while its vector was being made", async () => {
     const r = rig();
     const before = "The user drives a Subaru Outback";
@@ -479,6 +491,26 @@ describe("the settings", () => {
     assert.equal(field({ baseUrl: "http://x/v1", model: "m", most: 2.5 }), "most");
     assert.equal(field({ baseUrl: "http://x/v1", model: "m", apiKeyEnv: "not a name" }), "apiKeyEnv");
     assert.equal(field("nope"), "embeddings");
+  });
+
+  it("says why meaning search is off when its settings file cannot be used, instead of being silently off", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ancilla-embed-bad-"));
+    try {
+      writeFileSync(join(dir, EMBEDDING_FILE), JSON.stringify({ baseUrl: "ftp://nowhere", model: "m" }));
+      const problems: string[] = [];
+      assert.equal(readEmbeddingSettings(dir, (message) => problems.push(message)), null);
+      assert.match(problems[0] ?? "", /embeddings\.json could not be used.*http/);
+      const logs: string[] = [];
+      const service = AssistantService.open(dir, { log: (line) => logs.push(line), emit: () => undefined });
+      try {
+        assert.equal(service.embeddingStatus().configured, false);
+        assert.ok(logs.some((line) => /could not be used/.test(line)), JSON.stringify(logs));
+      } finally {
+        service.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps them in the data folder and removes the file when meaning search is switched off", () => {

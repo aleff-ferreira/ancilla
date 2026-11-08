@@ -446,6 +446,9 @@ export class MemoryStore {
     const current = this.get("SELECT text FROM memory_items WHERE id = ? AND status IN ('active','contested')", [itemId]);
     if (!current || String(current.text) !== expectedText) return false;
     this.vectorStamp += 1;
+    // A model that was replaced behind the same name and address makes vectors of another size: those of the old one say
+    // nothing about this one's space, so they go, and their notes are read again.
+    this.run("DELETE FROM memory_vectors WHERE model = ? AND dim != ?", [model, vec.length]);
     this.run("INSERT INTO memory_vectors (item_id, model, dim, vec) VALUES (?, ?, ?, ?) ON CONFLICT(item_id) DO UPDATE SET model = excluded.model, dim = excluded.dim, vec = excluded.vec", [itemId, model, vec.length, toBlob(vec)]);
     return true;
   }
