@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp, useController } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { errorMessage } from "../../client.js";
 import type { AssistantStatusView, AssistantSuggestionView } from "../../types.js";
 import { TopBar } from "../chrome.js";
 import { Pick, Section } from "../settings/SettingsPage.js";
-import { ArrowLeftIcon } from "../ui/icons.js";
+import { ArrowLeftIcon, MicrophoneIcon, PhoneDisconnectIcon } from "../ui/icons.js";
 import { Modal } from "../ui/overlays.js";
 import { Button, Toggle } from "../ui/primitives.js";
+import { onWantedTab, takeWantedTab } from "../voice/nav.js";
+import { useTalk } from "../voice/talk.js";
+import { VoicePanel } from "../voice/VoicePanel.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
 import { CompanionHero, History, IdentityBar, Rules } from "./companion/Companion.js";
 import { MemoryPanel } from "./MemoryPanel.js";
@@ -17,7 +20,8 @@ import { PersonaPanel } from "./PersonaPanel.js";
 import { ProfilePanel } from "./ProfilePanel.js";
 import { Suggestion, TasksPanel } from "./TasksPanel.js";
 
-type Tab = "home" | "memory" | "tasks" | "persona" | "settings";
+type Tab = "home" | "memory" | "tasks" | "persona" | "voice" | "settings";
+const TABS: readonly Tab[] = ["home", "memory", "tasks", "persona", "voice", "settings"];
 
 /**
  * The assistant's home. A first visit is an introduction: a face, a voice, a name, and only then is it switched on. After
@@ -31,7 +35,18 @@ export function AssistantPage() {
   const call = useAssistantCall();
   const [bump, setBump] = useState(0);
   const status = useAssistantData<AssistantStatusView>("", bump);
-  const [tab, setTab] = useState<Tab>("home");
+  const [tab, setTab] = useState<Tab>(() => {
+    const wanted = takeWantedTab();
+    return TABS.includes(wanted as Tab) ? (wanted as Tab) : "home";
+  });
+  // Something elsewhere (the call card, the sidebar) can send the person to a tab while this page is open.
+  useEffect(() => onWantedTab((wanted) => {
+    if (TABS.includes(wanted as Tab)) {
+      takeWantedTab();
+      setTab(wanted as Tab);
+    }
+  }), []);
+  const voice = useTalk();
   const [making, setMaking] = useState(false);
   const [confirmOn, setConfirmOn] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +86,13 @@ export function AssistantPage() {
               <p className="text-xs text-muted">Remembers what you tell it, with your exact words, and works on what you approve. Kept on this device, in its own file.</p>
             </div>
             {profile && configured && !meeting ? (
-              <div className="order-2 ml-auto @min-[520px]:order-3 @min-[520px]:ml-0">
+              <div className="order-2 ml-auto flex items-center gap-3 @min-[520px]:order-3 @min-[520px]:ml-0">
+                {profile.enabled && controller.hasVoice ? (
+                  <Button size="sm" variant={voice.live ? "danger" : "accent"} onClick={voice.talk} aria-label={voice.live ? "End the call" : `Talk to ${profile.name}`}>
+                    {voice.live ? <PhoneDisconnectIcon size={14} /> : <MicrophoneIcon size={14} />}
+                    {voice.live ? "End call" : "Talk"}
+                  </Button>
+                ) : null}
                 <Toggle checked={profile.enabled} label="Switch the assistant on" onChange={(on) => (on ? setConfirmOn(true) : void setEnabled(false))} />
               </div>
             ) : null}
@@ -105,6 +126,7 @@ export function AssistantPage() {
                     { value: "memory", label: `Memory (${data.stats.items.active + data.stats.items.contested})` },
                     { value: "tasks", label: `Tasks${data.tasks && data.tasks.needsYou > 0 ? ` (${data.tasks.needsYou} need you)` : data.tasks && data.tasks.open > 0 ? ` (${data.tasks.open})` : ""}` },
                     { value: "persona", label: "Persona" },
+                    ...(controller.hasVoice ? [{ value: "voice" as const, label: "Voice" }] : []),
                     { value: "settings", label: "Settings" },
                   ]}
                   onChange={setTab}
@@ -121,6 +143,7 @@ export function AssistantPage() {
                 </>
               ) : null}
               {tab === "persona" ? <PersonaPanel profile={profile} changed={changed} /> : null}
+              {tab === "voice" ? <><IdentityBar status={data} /><VoicePanel changed={changed} /></> : null}
               {tab === "settings" ? <><IdentityBar status={data} /><ProfilePanel profile={profile} changed={changed} bump={bump} /></> : null}
             </>
           ) : null}

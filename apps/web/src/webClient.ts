@@ -310,6 +310,24 @@ export class WebAncillaClient implements AncillaClient {
     return call<T>(method, `/api/assistant${path}`, body);
   }
 
+  async voice<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    return call<T>(method, `/api/voice${path}`, body);
+  }
+
+  /**
+   * Where a call's WebSocket is. A socket cannot carry a header, so, like the event stream, it relies on the cookie the
+   * token bought at the handshake: nothing secret is in the address.
+   */
+  voiceSocketUrl(): string | null {
+    try {
+      const address = new URL(url("/api/voice/ws"), window.location.href);
+      address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+      return address.toString();
+    } catch {
+      return null;
+    }
+  }
+
   async runShellProxy(sessionId: string, command: string): Promise<ShellRun> {
     // The server lets a command run for two minutes, so this must outlast that rather than abandon it early.
     const result = await call<{ run: ShellRun }>("POST", `/api/sessions/${enc(sessionId)}/shell-proxy`, { command }, SHELL_TIMEOUT_MS);

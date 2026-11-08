@@ -227,6 +227,10 @@ export interface AncillaClient {
    * are the server's, and the same shape as every other call.
    */
   assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
+  /** The voice's HTTP surface (`/api/voice/...`): its status, settings and the conversations it keeps. Absent on a client without voice. */
+  voice?<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
+  /** The address of a call's WebSocket (`ws://` or `wss://`), carrying whatever the client's own calls carry; null where there is no voice. */
+  voiceSocketUrl?(): string | null;
   /** Subscribe to server events; returns an unsubscribe function. */
   subscribe(handler: EventHandler): () => void;
 }

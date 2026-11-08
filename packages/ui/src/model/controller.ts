@@ -2142,6 +2142,22 @@ export class AncillaController {
     return this.client.assistant<T>(method, path, body);
   }
 
+  /** One call of the voice's HTTP surface: its status, settings and conversations. */
+  voice<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    if (!this.client.voice) return Promise.reject(new Error("This version of Ancilla has no voice."));
+    return this.client.voice<T>(method, path, body);
+  }
+
+  /** Where a call's socket is, or null when this client has no voice. */
+  voiceSocketUrl(): string | null {
+    return this.client.voiceSocketUrl ? this.client.voiceSocketUrl() : null;
+  }
+
+  /** Whether this client can make a call at all. */
+  get hasVoice(): boolean {
+    return Boolean(this.client.voice && this.client.voiceSocketUrl);
+  }
+
   private queueEvent(sessionId: string, event: ViewEvent): void {
     const buffer = this.loading.get(sessionId);
     if (buffer) {

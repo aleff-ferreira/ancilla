@@ -1,5 +1,6 @@
 import { useApp, useController } from "../../../app/context.js";
-import { XIcon } from "../../ui/icons.js";
+import { MicrophoneIcon, PhoneDisconnectIcon, XIcon } from "../../ui/icons.js";
+import { useTalk } from "../../voice/talk.js";
 import { Tip } from "../../ui/overlays.js";
 import { cn } from "../../ui/primitives.js";
 import { Avatar } from "./Avatar.js";
@@ -28,6 +29,7 @@ export function CompanionChip() {
   const invite = useApp((s) => s.prefs.assistantInvite);
   const active = useApp((s) => s.route.kind === "assistant");
   const face = useFaceMood(glance, reaction);
+  const voice = useTalk();
   if (!glance || invite === "hidden") return null;
   const state = stateOf(glance);
   const asking = state === "invite";
@@ -53,6 +55,21 @@ export function CompanionChip() {
         {state === "needs" ? <span className="cc-badge" aria-hidden="true">{glance.needsYou}</span> : null}
         {asking ? <span className="cc-go" aria-hidden="true">Set up</span> : null}
       </button>
+      {!asking && glance.enabled && controller.hasVoice ? (
+        <Tip label={voice.live ? "End the call" : `Talk to ${glance.name}`}>
+          <button
+            type="button"
+            aria-label={voice.live ? "End the call" : `Talk to ${glance.name}`}
+            onClick={voice.talk}
+            className={cn(
+              "absolute top-1/2 right-2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-lg transition-colors",
+              voice.live ? "bg-danger-soft text-danger-text" : "text-subtle opacity-0 hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/cc:opacity-100",
+            )}
+          >
+            {voice.live ? <PhoneDisconnectIcon size={14} /> : <MicrophoneIcon size={14} />}
+          </button>
+        </Tip>
+      ) : null}
       {asking && invite === "pulse" ? (
         <Tip label="Not now">
           <button

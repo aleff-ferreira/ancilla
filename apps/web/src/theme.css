@@ -4022,6 +4022,39 @@
   background: linear-gradient(90deg, oklch(0.74 0.15 0), oklch(0.74 0.15 45), oklch(0.74 0.15 90), oklch(0.74 0.15 135), oklch(0.74 0.15 180), oklch(0.74 0.15 225), oklch(0.74 0.15 270), oklch(0.74 0.15 315), oklch(0.74 0.15 360));
 }
 
+/*
+ * The call card's ring: two soft halos round the assistant's face that swell with the sound on the line, the person's
+ * (cool) and the voice's (the accent). Their size comes from `--mic` and `--voice`, set from the audio levels once a
+ * frame; held still under reduced motion, where the card says the same in words.
+ */
+.call-ring {
+  --mic: 0;
+  --voice: 0;
+  border-radius: 9999px;
+}
+.call-ring::before,
+.call-ring::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+}
+.call-ring[data-live]::before {
+  opacity: 1;
+  box-shadow: 0 0 0 calc(1px + var(--mic) * 9px) color-mix(in oklch, oklch(0.72 0.12 215) 42%, transparent);
+}
+.call-ring[data-live]::after {
+  opacity: 1;
+  box-shadow: 0 0 0 calc(1px + var(--voice) * 11px) color-mix(in oklch, var(--accent) 50%, transparent);
+}
+.call-ring[data-live][data-who="none"]::before,
+.call-ring[data-live][data-who="none"]::after {
+  opacity: 0.55;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .spin-ring,
   .attention-pulse,

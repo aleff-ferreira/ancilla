@@ -883,6 +883,50 @@ export interface AssistantStatusView {
   tasks?: { open: number; needsYou: number; running: number };
 }
 
+/** How the voice is set up; a key is never part of it. */
+export type VoiceBrainSetting =
+  | { kind: "muse" }
+  | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
+  | { kind: "none" };
+
+export interface VoiceSettingsView {
+  mode: "hands-free" | "push-to-talk";
+  voice: string | null;
+  speed: number;
+  refine: boolean;
+  ttsSteps: number;
+  brain: VoiceBrainSetting;
+  proactive: boolean;
+  keepDays: number | null;
+  runtimeDir: string | null;
+  modelsDir: string | null;
+  defaultProject: string | null;
+  /** A key is set for the model in `brain`. */
+  hasKey: boolean;
+}
+
+export interface VoiceStatusView {
+  /** Everything a call cannot go without is installed. */
+  available: boolean;
+  pack: { runtime: boolean; vad: boolean; streaming: boolean; refine: boolean; tts: boolean; ready: boolean; missing: string[] };
+  layout: { runtimeDir: string | null; modelsDir: string };
+  engines: { loaded: boolean; asr: string | null; tts: string | null; sampleRate: number | null };
+  call: { active: boolean; id: string | null; conversation: string | null; since: number | null };
+  settings: VoiceSettingsView;
+  brain: { label: string; local: boolean; problem: string | null };
+  voices: { id: string; name: string; lang: string }[];
+  latency: { turns: number; firstAudio: { n: number; p50: number | null; p95: number | null }; endpoint: { n: number; p50: number | null; p95: number | null } };
+}
+
+export interface VoiceConversationView {
+  id: string;
+  title: string;
+  project: string | null;
+  startedAt: number;
+  updatedAt: number;
+  turns: number;
+}
+
 export type AssistantTaskStatus = "queued" | "running" | "waiting" | "paused" | "blocked" | "completed" | "unverified" | "failed" | "cancelled";
 export type AssistantStepStatus = "pending" | "running" | "done" | "failed" | "skipped" | "cancelled" | "unknown";
 export type AssistantVerifier = { type: "file_exists"; path: string } | { type: "file_contains"; path: string; text: string } | { type: "manual" };

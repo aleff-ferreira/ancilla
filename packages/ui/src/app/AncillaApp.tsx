@@ -15,6 +15,7 @@ import { UsagePage } from "../components/usage/UsagePage.js";
 import { TooltipProvider } from "../components/ui/overlays.js";
 import { cn, isMac } from "../components/ui/primitives.js";
 import { Toasts } from "../components/ui/Toasts.js";
+import { CallDock } from "../components/voice/CallDock.js";
 import { AncillaController, type Platform } from "../model/controller.js";
 import type { Notifier } from "../model/notify.js";
 import type { AppUpdater } from "../model/updates.js";
@@ -73,6 +74,7 @@ export function AncillaApp(props: AncillaAppProps) {
           <CommandPalette />
           <AddProjectDialog />
           <WhatsNew />
+          <CallDock />
           <Toasts />
           <WindowControls />
         </TooltipProvider>
