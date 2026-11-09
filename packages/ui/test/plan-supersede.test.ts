@@ -3,7 +3,7 @@
  * of the next one saying Complete, from the moment that prompt is sent.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ControllerProvider } from "../src/app/context.js";
@@ -17,6 +17,10 @@ import type { LiveView, SessionSummary, ViewEvent } from "../src/types.js";
 import { SESSION as BASE } from "./fixtures/lantern.js";
 
 const T0 = Date.parse("2026-11-08T09:00:00.000Z");
+// The card of a run that ended shows its report for a day, by the real clock. The story told here happens in one minute,
+// so the clock stands in it, whatever day the tests are run: left to run, they would fail from the day after T0 on.
+before(() => mock.timers.enable({ apis: ["Date"], now: T0 + 60_000 }));
+after(() => mock.timers.reset());
 const DONE = [{ text: "Read the code", status: "completed" }, { text: "Change it", status: "completed" }, { text: "Check it", status: "completed" }];
 const OPEN = [{ text: "Read the code", status: "completed" }, { text: "Change it", status: "in_progress", active_form: "Changing it" }, { text: "Check it", status: "pending" }];
 const started = (turnId: string, at: number): ViewEvent => ({ method: "turn/started", params: { turnId }, at });
