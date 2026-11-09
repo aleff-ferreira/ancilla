@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
-import { closeWhenStdinEnds, createShutdown, SHUTDOWN_DEADLINE_MS } from "../src/shutdown.js";
+import { closeWhenStdinEnds, createShutdown, settleStdin, SHUTDOWN_DEADLINE_MS, STDIN_SETTLE_MS } from "../src/shutdown.js";
 
 function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
   let resolve!: (value: T) => void;
@@ -152,5 +152,80 @@ describe("closeWhenStdinEnds", () => {
     assert.equal(r.closes(), 1);
     assert.deepEqual(r.exits, []);
     assert.doesNotMatch(r.lines.join("\n"), /second signal/);
+  });
+});
+
+/** A clock that only moves when something sleeps, so that waiting is counted and costs no time. */
+function fakeClock() {
+  let t = 0;
+  return {
+    now: () => t,
+    sleep: async (ms: number) => {
+      t += ms;
+    },
+    elapsed: () => t,
+  };
+}
+
+describe("settleStdin", () => {
+  it("returns at once when a close has already begun", async () => {
+    const clock = fakeClock();
+    await settleStdin({ begun: () => true }, clock);
+    assert.equal(clock.elapsed(), 0);
+  });
+
+  it("waits the whole settle time when nothing happens: a pipe that stays open costs one wait, and no more", async () => {
+    const clock = fakeClock();
+    await settleStdin({ begun: () => false }, clock);
+    assert.ok(clock.elapsed() >= STDIN_SETTLE_MS && clock.elapsed() < STDIN_SETTLE_MS + 10, `waited ${clock.elapsed()} ms`);
+    // Every start of the desktop app pays it, in front of a boot that takes seconds: it stays a fraction of a second.
+    assert.ok(STDIN_SETTLE_MS <= 250, `the settle time is ${STDIN_SETTLE_MS} ms`);
+  });
+
+  it("stops waiting as soon as the end of stdin is reported, however late in the wait", async () => {
+    for (const reportedAt of [5, 40, 95]) {
+      const clock = fakeClock();
+      await settleStdin({ begun: () => clock.elapsed() >= reportedAt }, clock);
+      assert.ok(clock.elapsed() >= reportedAt && clock.elapsed() < reportedAt + 10, `reported at ${reportedAt} ms, stopped at ${clock.elapsed()} ms`);
+    }
+  });
+
+  it("counts by the clock and not by the number of looks, since a timer can take longer than it was asked for", async () => {
+    let t = 0;
+    let looks = 0;
+    // Every sleep takes three times what it asked for, as a timer on Windows can.
+    await settleStdin(
+      { begun: () => false },
+      {
+        now: () => t,
+        sleep: async (ms) => {
+          looks += 1;
+          t += ms * 3;
+        },
+      },
+    );
+    assert.ok(t >= STDIN_SETTLE_MS && t < STDIN_SETTLE_MS + 20, `waited ${t} ms`);
+    assert.ok(looks <= Math.ceil(STDIN_SETTLE_MS / 15) + 1, `looked ${looks} times`);
+  });
+
+  it("closes a server whose stdin ended while it was waiting, and so no ready line is written", async () => {
+    // What the command line does after the server is listening: wait, then write the line only if no close has begun.
+    const closing = deferred();
+    const r = rig(closing.promise);
+    const stdin = fakeStdin();
+    closeWhenStdinEnds(stdin, r.shutdown);
+    const clock = fakeClock();
+    const written: string[] = [];
+    await settleStdin(r.shutdown, {
+      now: clock.now,
+      // The end of the pipe is reported thirty milliseconds into the wait: later than one turn of the event loop.
+      sleep: async (ms) => {
+        await clock.sleep(ms);
+        if (clock.elapsed() >= 30) stdin.emit("end");
+      },
+    });
+    if (!r.shutdown.begun()) written.push("ancilla-server listening on http://127.0.0.1:1\n");
+    assert.deepEqual(written, []);
+    assert.equal(r.closes(), 1);
   });
 });

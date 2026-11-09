@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   }
   const { HOST_START_TIMEOUT_ENV, resolveHostStartTimeoutMs } = await import("./hostBounds.js");
   const { CLI_HOST_WAITS } = await import("./hostBounds.js");
-  const { closeWhenStdinEnds, createShutdown, shutdownSignals } = await import("./shutdown.js");
+  const { closeWhenStdinEnds, createShutdown, settleStdin, shutdownSignals } = await import("./shutdown.js");
   const server = new AncillaServer({
     // Short enough that the worst case of a close ends before the shutdown deadline; see `worstCaseCloseMs`.
     hostWaits: CLI_HOST_WAITS,
@@ -174,10 +174,16 @@ async function main(): Promise<void> {
     }
     throw error;
   }
-  // One turn of the event loop before the ready line: a boot over an empty folder never waits on anything, so an end
-  // of stdin that was there all along (the shell died while this server booted) is only read now, and no ready line
-  // is written for a server that is closing.
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  // A moment before the ready line: a boot over an empty folder never waits on anything, so an end of stdin that was
+  // there all along (the shell died while this server booted) is only reported now, and no ready line is to be written
+  // for a server that is closing. With the flag that moment is `settleStdin`'s: a pipe's end can take longer than one
+  // turn of the event loop to arrive, on Windows most of all. Without the flag stdin is never read, and one turn is all
+  // it has ever been.
+  if (argv.includes(STDIN_EOF_FLAG)) {
+    await settleStdin(shutdown);
+  } else {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
   if (shutdown.begun()) {
     return;
   }

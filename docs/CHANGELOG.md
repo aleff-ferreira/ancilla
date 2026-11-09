@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A server told to close while it starts no longer announces itself first.** The desktop app closes the server's stdin when it quits, and a server that learns of that during its start must close without saying it is ready. It waited one turn of the event loop for the end of stdin to be reported, which is not always enough: over a hundred starts on a CI runner, with stdin closed ten milliseconds after the boot began, the ready line was written 90 times on macOS and once on Windows, and with stdin closed before the start it was written twice on Windows (a test caught it now and then). The server closed either way. It now waits up to a tenth of a second for the end of stdin to be reported, once, and only when the desktop app started it; the same hundred starts wrote the line none of the times on any of the three systems.
+
 ## 0.25.0
 
 ### New

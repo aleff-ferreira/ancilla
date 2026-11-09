@@ -137,6 +137,45 @@ export function createShutdown(options: ShutdownOptions): ShutdownHandler {
   return Object.assign(handler, { begun: () => begun });
 }
 
+/**
+ * How long the command line, once the server is listening, waits for the end of stdin to be reported before it writes
+ * the ready line. The shell can die while the server boots, and then the line must not be written for a server that is
+ * about to close; but the end of a pipe is not reported at once. On Windows libuv reads a pipe handed down by a parent
+ * on a helper thread and posts the result to the event loop, so a boot over an empty folder can get to the ready line
+ * before that thread has run, and one turn of the loop (`setImmediate`) is not enough. Measured on CI runners over a
+ * hundred starts each: with stdin closed before the server started, the line was written twice on Windows; with stdin
+ * closed ten milliseconds after the boot began, it was written 90 times on macOS and once on Windows. With the wait
+ * below no start wrote it, on any of the three systems. A tenth of a second is what a late report needs on a loaded
+ * machine. The shell waits for the ready line for seconds, so the wait costs nothing worth saving, and only a server
+ * started with the flag pays it.
+ */
+export const STDIN_SETTLE_MS = 100;
+
+export interface SettleOptions {
+  /** How long to wait at most; `STDIN_SETTLE_MS` when left out. */
+  ms?: number;
+  /** How often to look again, in milliseconds. */
+  stepMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Waits for the end of stdin to be reported if it is going to be, and no longer than `STDIN_SETTLE_MS`: it returns at
+ * once when a close has already begun, and as soon as one begins while it waits. A pipe that stays open (the shell is
+ * alive and quiet, which is the normal case) costs the whole wait, once.
+ */
+export async function settleStdin(shutdown: Pick<ShutdownHandler, "begun">, options: SettleOptions = {}): Promise<void> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const step = Math.max(1, options.stepMs ?? 5);
+  // By the clock, not by counting steps: a timer on Windows can take three times as long as it was asked for.
+  const until = now() + (options.ms ?? STDIN_SETTLE_MS);
+  while (!shutdown.begun() && now() < until) {
+    await sleep(step);
+  }
+}
+
 /** The part of `process.stdin` the watchdog uses. */
 export interface StdinEvents {
   on(event: "end" | "error", listener: () => void): unknown;

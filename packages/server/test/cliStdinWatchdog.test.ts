@@ -61,6 +61,20 @@ describe("ancilla-server with the stdin watchdog flag", () => {
     assert.match(run.stderr(), /stdin EOF received/);
   });
 
+  it("closes before it is ready when stdin ends a moment after the boot began, and writes no ready line", { timeout: 60_000 }, async () => {
+    const dir = await dataDir();
+    const run = startCli(["--port", "0", "--data-dir", dir, FLAG], {}, { stdin: "pipe" });
+    // The owner record is the first sign that the boot has begun. The end of stdin comes while the server is still
+    // binding, or has just bound: after the point where one turn of the event loop had been all it waited for.
+    await until(() => existsSync(join(dir, OWNER_LOCK_FILE)) || run.child.exitCode !== null, "the boot to begin");
+    run.child.stdin!.end();
+    const ended = await exitedWithin(run);
+    assert.notEqual(ended, null, `the server was still running ${HUNG} ms after its stdin ended; stderr:\n${run.stderr()}`);
+    assert.deepEqual(ended, { code: 0, signal: null }, run.stderr());
+    assert.equal(run.stdout(), "", "a ready line was written for a server that was already closing");
+    assert.match(run.stderr(), /stdin EOF received/);
+  });
+
   it("closes when the process that held its stdin dies without closing it, as when the desktop app is killed", { timeout: 60_000 }, async () => {
     const dir = await dataDir();
     const root = join(dir, "..");
