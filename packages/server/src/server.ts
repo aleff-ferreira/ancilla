@@ -95,6 +95,7 @@ import {
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { handleAssistant, isAssistantPath, type AssistantReply } from "./assistant/routes.js";
 import { handleVoice, isVoicePath } from "./voice/routes.js";
+import type { HarnessMessage, HarnessReader, HarnessThread, HarnessUsage } from "./voice/harness.js";
 import { VoiceService } from "./voice/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
@@ -1129,6 +1130,7 @@ export class AncillaServer {
         log: (line) => this.log(line),
         // The same four things a task uses to run in a Muse thread: a call thinks in one, and shows in the sidebar like any other.
         museHost: this.assistantHost(),
+        harness: this.harnessReader(),
         lastProject: () => {
           try {
             return this.store.listProjects()[0]?.cwd ?? null;
@@ -1329,6 +1331,47 @@ export class AncillaServer {
     } catch (error) {
       this.log(`turn ${ack.turnId ?? "?"} of ${sessionId} was accepted, but its live state could not be updated: ${errorInfo(error).message}`);
     }
+  }
+
+  /** What the call may look at of the harness: read only, folders shown as project names. */
+  private harnessReader(): HarnessReader {
+    const nameOf = (cwd: string): string => cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+    const usageOf = (usage: SubscriptionUsage | null): HarnessUsage | null =>
+      usage ? { tier: usage.tier, windowPercent: usage.window.usedPercent, weeklyPercent: usage.weekly.usedPercent, weeklyResetsAt: usage.weekly.resetsAtMs } : null;
+    return {
+      threads: (): HarnessThread[] =>
+        this.store
+          .listFolders()
+          .flatMap((project) => this.store.listSessionsByProject(project.id).map((record) => ({ record, project: nameOf(project.cwd) })))
+          .filter(({ record }) => record.origin !== "research-worker")
+          .map(({ record, project }): HarnessThread => {
+            const live = this.live.get(record.id);
+            const waiting = Boolean(live && (live.pendingApprovals.size > 0 || live.pendingInputs.size > 0));
+            return { id: record.id, title: record.title, project, state: waiting ? "waiting" : live?.activeTurnId ? "running" : "idle", activityAt: Date.parse(record.activityAt) || 0 };
+          })
+          .sort((a, b) => b.activityAt - a.activityAt)
+          .slice(0, 200),
+      messages: async (threadId, count): Promise<HarnessMessage[]> => {
+        const found = this.store.findSession(threadId);
+        if (!found) return [];
+        const host = await this.hostFor(found.cwd, found.session.accountId ?? null);
+        const out: HarnessMessage[] = [];
+        for (const event of eventsFromHistory(await host.manager.readSession(threadId, false))) {
+          const item = asRecord(event.params["item"]);
+          const kind = item?.["kind"];
+          const text = str(item?.["displayText"]) ?? str(item?.["text"]);
+          if (text && (kind === "userMessage" || kind === "agentMessage")) out.push({ role: kind === "userMessage" ? "user" : "assistant", text });
+        }
+        return out.slice(-count);
+      },
+      cachedUsage: () => usageOf(this.defaultPlanUsage),
+      usage: async () => usageOf((await this.readPlanUsage()).usage),
+      projects: () => this.store.listFolders().map((p) => ({ name: nameOf(p.cwd), threads: this.store.listSessionsByProject(p.id).length })),
+      currentProject: () => {
+        const cwd = this.store.listProjects()[0]?.cwd;
+        return cwd ? nameOf(cwd) : null;
+      },
+    };
   }
 
   /**

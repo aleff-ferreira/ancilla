@@ -99,6 +99,17 @@ nothing else**:
 - What it hears is kept as what you said, with the words as the recogniser wrote them; the memory treats a spoken
   statement like a typed one but records that it was spoken.
 
+### Looking at the rest of Ancilla
+
+The call can also **look** at your threads, read only. Each turn's context carries a short "Right now" block (threads
+running, threads or tasks waiting on you, plan usage only above 80%), so "what is going on?" needs no tool at all. Five
+small tools cover the rest: `harness_overview`, `list_threads`, `read_thread` (the last few messages of one, clipped),
+`usage` and `list_projects`. They are in-process tools offered like the task tools, so they work with any model that
+answers the call (Muse, a hosted model, or a local server, with the text convention when it cannot take tools). They
+show project names, never folders, and cannot start, change or approve anything. The code is
+`packages/server/src/voice/harness.ts` (the tools and the `HarnessReader` they read through) and a small adapter in
+`server.ts`.
+
 ## What is kept, and where
 
 | What | Where | For how long |

@@ -6,6 +6,7 @@ import { makeBrain, type BrainContext, type BrainFactoryDeps } from "./brains.js
 import type { BrainProvider } from "./brain.js";
 import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
+import type { HarnessReader } from "./harness.js";
 import { ConversationStore } from "./conversations.js";
 import type { Voice } from "./engines.js";
 import { createSherpaEngines, inspectPack, type PackReport, type SherpaEngineOptions, type SherpaEngineSet, type VoicePackLayout } from "./engines/index.js";
@@ -62,6 +63,8 @@ export interface VoiceServiceDeps {
   museBrain?: (context: BrainContext) => BrainProvider;
   /** The folder the person last worked in, for a task they start by voice when the call was not opened from a project. */
   lastProject?: () => string | null;
+  /** The read-only view of the harness the call may look at. */
+  harness?: HarnessReader | null;
   scheduler?: Scheduler;
   /** For tests: the engines, instead of the downloaded ones. */
   engineFactory?: (layout: VoicePackLayout, options: SherpaEngineOptions) => SherpaEngineSet;
@@ -327,6 +330,7 @@ export class VoiceService {
       settings: () => this.settings.get(),
       hub: this.hub,
       project: () => project,
+      harness: this.deps.harness ?? null,
       log: (line) => this.deps.log(line),
     });
     const chosen = makeBrain(

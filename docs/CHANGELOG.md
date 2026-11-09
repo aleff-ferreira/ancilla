@@ -4,6 +4,7 @@
 
 ### Added
 
+- **The voice assistant can see what is going on in Ancilla.** Ask "what is going on?" and it knows which threads are running, which wait on you and, when it is high, how much of your plan is used, without a lookup; five small read-only tools (overview, threads, one thread's last messages, usage, projects) answer anything more. They work with any model that answers the call, local ones included, and cannot change anything.
 - **The voice settings find the model servers on your computer.** With *Another model* chosen, the tab looks for Ollama, LM Studio, llama.cpp and vLLM at their usual addresses and lists the models each has, so a local model is one click instead of an address, a model name and a guess that it is installed. *Detect* looks again.
 
 ### Fixed

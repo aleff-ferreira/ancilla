@@ -7,6 +7,7 @@ import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from 
 import { openingPhrase, taskPhrase, type TaskNotice } from "./prompt.js";
 import type { VoiceSettings } from "./settings.js";
 import { guessLanguage, type Lang } from "./text.js";
+import { ambientDigest, HARNESS_TOOL_NAMES, HarnessTools, type HarnessReader } from "./harness.js";
 import { VoiceTools } from "./tools.js";
 
 /**
@@ -69,6 +70,8 @@ export interface AssistantVoiceHostDeps {
   hub: TaskHub;
   /** The folder a spoken task is started in. */
   project: () => string | null;
+  /** The harness the call may look at (read only), when the server gives one. */
+  harness?: HarnessReader | null;
   log: (line: string) => void;
 }
 
@@ -77,9 +80,11 @@ export class AssistantVoiceHost implements VoiceHost {
   /** The last state each task was told in, so a state is said once and never twice. */
   private readonly told = new Map<string, string>();
   private readonly voiceTools: VoiceTools;
+  private readonly harnessTools: HarnessTools | null;
 
   constructor(private readonly deps: AssistantVoiceHostDeps) {
     this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId });
+    this.harnessTools = deps.harness ? new HarnessTools({ reader: deps.harness, taskCounts: () => this.taskCounts() }) : null;
   }
 
   private lang(): Lang {
@@ -107,11 +112,29 @@ export class AssistantVoiceHost implements VoiceHost {
     if (guess !== "unknown") this.userLang = guess;
     try {
       // Meaning search is given a short wait: a call is about the next half second, and the words decide when it is late.
-      return (await this.deps.assistant.prepareTurnAsync({ sessionId: this.deps.conversationId, text, project: null, account: null }, { timeoutMs: VOICE_MEANING_TIMEOUT_MS })).prefix;
+      const prefix = (await this.deps.assistant.prepareTurnAsync({ sessionId: this.deps.conversationId, text, project: null, account: null }, { timeoutMs: VOICE_MEANING_TIMEOUT_MS })).prefix;
+      return this.withRightNow(prefix);
     } catch (error) {
       this.deps.log(`voice: the notes for a turn could not be chosen: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
+  }
+
+  private taskCounts(): { active: number; waiting: number } {
+    const active = this.deps.assistant.tasks.list("active", 50);
+    return { active: active.length, waiting: active.filter((t) => noticeOf(t) === "needs").length };
+  }
+
+  /** The "Right now" block joined to the notes of a turn, so a question about what is going on needs no tool call. */
+  private withRightNow(prefix: string | null): string | null {
+    let block: string | null = null;
+    try {
+      block = this.deps.harness ? ambientDigest(this.deps.harness, this.taskCounts(), Date.now()) : null;
+    } catch (error) {
+      this.deps.log(`voice: the harness digest could not be built: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const parts = [prefix, block].filter((p): p is string => typeof p === "string" && p !== "");
+    return parts.length === 0 ? null : parts.join("\n\n");
   }
 
   record(entry: TranscriptEntry): void {
@@ -123,10 +146,11 @@ export class AssistantVoiceHost implements VoiceHost {
   }
 
   tools(): ToolSpec[] {
-    return this.voiceTools.specs();
+    return this.harnessTools ? [...this.voiceTools.specs(), ...this.harnessTools.specs()] : this.voiceTools.specs();
   }
 
   runTool(call: ToolCall, _context: { turn: number; signal: AbortSignal }): Promise<ToolResult> {
+    if (this.harnessTools && HARNESS_TOOL_NAMES.has(call.name)) return this.harnessTools.run(call);
     return this.voiceTools.run(call);
   }
 
