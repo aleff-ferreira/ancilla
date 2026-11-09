@@ -56,7 +56,7 @@ export function didntCatchPhrase(lang: Lang): string {
   return DIDNT_CATCH[pick(lang)];
 }
 
-export type TaskNotice = "started" | "done" | "unverified" | "failed" | "needs" | "cancelled" | "paused";
+export type TaskNotice = "started" | "proposed" | "done" | "unverified" | "failed" | "needs" | "cancelled" | "paused";
 
 /** A task's title, short enough to be said: cut at a word, never in the middle of one. */
 export function sayable(title: string, max = 60): string {
@@ -70,6 +70,7 @@ export function sayable(title: string, max = 60): string {
 const TASK: Record<"en" | "pt", Record<TaskNotice, (title: string) => string>> = {
   en: {
     started: () => "I've started that in the background.",
+    proposed: () => "I've put that on your screen. It waits for your approval, and only you can give it.",
     done: (t) => `${t} is done.`,
     unverified: (t) => `${t} finished, but nothing checked the result. Please take a look.`,
     failed: (t) => `${t} did not go through.`,
@@ -79,6 +80,7 @@ const TASK: Record<"en" | "pt", Record<TaskNotice, (title: string) => string>> =
   },
   pt: {
     started: () => "Já comecei isso em segundo plano.",
+    proposed: () => "Coloquei isso na sua tela. Aguarda a sua aprovação, e só você pode dar.",
     done: (t) => `${t} está pronto.`,
     unverified: (t) => `${t} terminou, mas nada conferiu o resultado. Dá uma olhada, por favor.`,
     failed: (t) => `${t} não deu certo.`,

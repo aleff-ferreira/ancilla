@@ -4,6 +4,7 @@
 
 ### Added
 
+- **The voice assistant can propose a change, and you approve it on the screen.** Ask it to fix something and the goal appears under Assistant, Tasks, as *Needs your approval*: paused and never started. **Approve** starts it as an ordinary task that may change files; **Decline** drops it, and one nobody answers is dropped after a day. The call cannot approve it itself: no spoken word, tool or resume does, at most three wait at once, and it needs project writes switched on in the assistant's settings (approving checks that again).
 - **The voice assistant can see what is going on in Ancilla.** Ask "what is going on?" and it knows which threads are running, which wait on you and, when it is high, how much of your plan is used, without a lookup; five small read-only tools (overview, threads, one thread's last messages, usage, projects) answer anything more. They work with any model that answers the call, local ones included, and cannot change anything.
 - **The voice settings find the model servers on your computer.** With *Another model* chosen, the tab looks for Ollama, LM Studio, llama.cpp and vLLM at their usual addresses and lists the models each has, so a local model is one click instead of an address, a model name and a guess that it is installed. *Detect* looks again.
 

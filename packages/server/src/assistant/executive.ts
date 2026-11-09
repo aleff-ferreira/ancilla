@@ -1,5 +1,5 @@
 import { ConflictError, NotFoundError, ValidationError } from "./store.js";
-import { stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
+import { awaitsApproval, stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
 import type { AssistantProfile } from "./types.js";
 
 /**
@@ -73,6 +73,9 @@ const MIN = 60_000;
 const DAY = 86_400_000;
 const BACKOFF_MS = [30_000, 60_000, 2 * MIN, 5 * MIN, 10 * MIN];
 const MAX_OPEN_TASKS = 50;
+/** The proposals from the voice that may wait on the user at once, and how long one waits before it is dropped. */
+export const MAX_PROPOSALS = 3;
+export const PROPOSAL_TTL_MS = DAY;
 const EARLY_TTL_MS = 2 * MIN;
 const MISSED_AFTER_MS = 5 * MIN;
 
@@ -115,11 +118,49 @@ export class Executive {
   create(spec: NewTask): Task {
     const profile = this.opts.profile();
     if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
-    if (this.tasks.count(["queued", "running", "waiting", "paused", "blocked"]) >= MAX_OPEN_TASKS) throw new ConflictError(`There are already ${MAX_OPEN_TASKS} open tasks. Finish or cancel some first.`);
+    this.requireRoom();
     const task = this.tasks.create(spec);
     this.opts.changed(task.id);
     this.kick();
     return task;
+  }
+
+  private requireRoom(): void {
+    if (this.tasks.count(["queued", "running", "waiting", "paused", "blocked"]) >= MAX_OPEN_TASKS) throw new ConflictError(`There are already ${MAX_OPEN_TASKS} open tasks. Finish or cancel some first.`);
+  }
+
+  /**
+   * The voice's way to ask for a change: the task is made paused and never started, and it stays so until the user
+   * approves it on the screen. It takes a place among the open tasks like any task, and only a few may wait at once, so a
+   * model that keeps proposing cannot fill the list; the same proposal made twice is the one already waiting.
+   */
+  propose(spec: NewTask): Task {
+    const profile = this.opts.profile();
+    if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
+    if (!spec.allowWrites || !profile.policy.allowProjectWrites) throw new ConflictError("Project writes are off in the assistant's settings, so a change cannot be proposed.");
+    const waiting = this.tasks.byStatus(["paused"]).filter(awaitsApproval);
+    const same = waiting.find((t) => t.goal === spec.goal && t.cwd === spec.cwd);
+    if (same) return same;
+    if (waiting.length >= MAX_PROPOSALS) throw new ConflictError(`${MAX_PROPOSALS} proposals already wait for the user's approval. They need to approve or decline one first.`);
+    this.requireRoom();
+    const folder = spec.cwd.split(/[\\/]/).filter(Boolean).pop() ?? spec.cwd;
+    const task = this.tasks.create({ ...spec, origin: "voice", hold: `Proposed by voice. Waiting for your approval to change files in ${folder}. Nothing runs until you approve it.` });
+    this.opts.changed(task.id);
+    return task;
+  }
+
+  /** The user's approval of a proposal, given on the screen: the only thing that lets it start. */
+  approve(taskId: string): Task {
+    const task = this.tasks.require(taskId);
+    if (!awaitsApproval(task)) throw new ConflictError("There is nothing here to approve.");
+    const profile = this.opts.profile();
+    if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
+    if (!profile.policy.allowProjectWrites) throw new ConflictError("Project writes are off in the assistant's settings. Switch them on to approve this.");
+    this.tasks.event(taskId, "approved", null, "the user approved it on the screen");
+    const out = this.tasks.setStatus(taskId, "queued", "Approved by you.", { retryAt: null });
+    this.opts.changed(taskId);
+    this.kick();
+    return out;
   }
 
   /** Runs a tick without making the caller wait for it. */
@@ -150,6 +191,7 @@ export class Executive {
 
   resume(taskId: string): Task {
     const task = this.tasks.require(taskId);
+    if (awaitsApproval(task)) throw new ConflictError("This proposal waits for the user's approval on the screen, and a resume does not give it.");
     if (task.status !== "paused" && task.status !== "waiting") throw new ConflictError("Only a paused or waiting task can be resumed.");
     const out = this.tasks.setStatus(taskId, this.tasks.runningAttempt(taskId) ? "running" : "queued", "Resumed.", { retryAt: null });
     this.opts.changed(taskId);
@@ -259,6 +301,7 @@ export class Executive {
       await this.stage("schedules", () => this.releaseSchedules(now, profile));
       await this.stage("initiative", () => this.opts.initiative?.(now));
       await this.stage("limits", () => this.enforceLimits());
+      await this.stage("proposals", () => this.expireProposals(now));
       await this.stage("waiting", () => this.wakeWaiting(now));
       await this.stage("start", () => this.startQueued(now, profile));
     } finally {
@@ -271,6 +314,13 @@ export class Executive {
       await run();
     } catch (error) {
       this.log(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** A proposal nobody approved within a day is dropped: what it was about has probably moved on, and it holds a place in the list. */
+  private async expireProposals(now: number): Promise<void> {
+    for (const task of this.tasks.byStatus(["paused"])) {
+      if (awaitsApproval(task) && now - task.createdAt >= PROPOSAL_TTL_MS) await this.cancel(task.id, "Nobody approved this within a day, so it was dropped.");
     }
   }
 

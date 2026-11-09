@@ -1,5 +1,5 @@
 import type { AssistantService } from "../assistant/service.js";
-import type { Task } from "../assistant/tasks.js";
+import { awaitsApproval, type Task } from "../assistant/tasks.js";
 import { VOICES } from "../assistant/context.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
@@ -164,12 +164,14 @@ export class AssistantVoiceHost implements VoiceHost {
       if (this.told.get(task.id)?.startsWith(`${task.status}:`)) return;
       this.told.set(task.id, key);
       const needsUser = notice === "needs";
+      // A proposal made in this call was said by the tool that made it, so its event goes out without saying it again.
+      const said = awaitsApproval(task) && task.updatedAt === task.createdAt;
       handler({
         id: task.id,
         kind: "task",
         title: task.title,
         status: task.status,
-        say: this.deps.settings().proactive ? taskPhrase(this.lang(), notice, task.title) : null,
+        say: this.deps.settings().proactive && !said ? taskPhrase(this.lang(), notice, task.title) : null,
         needsUser,
       });
     });

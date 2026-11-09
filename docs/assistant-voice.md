@@ -94,6 +94,11 @@ A spoken sentence may have been misheard, or may not have been yours. So voice c
 nothing else**:
 
 - A task started by voice can read and research. It **cannot change files**, whatever was said.
+- For a change, the call can only **propose** one (`propose_change`). It appears on the Assistant page, under Tasks, as
+  *Needs your approval*: paused and never started, with the goal in full. **Approve** starts it as an ordinary task that
+  may change files; **Decline** drops it; one nobody answers is dropped after a day. Resuming it by voice is refused,
+  no voice tool approves, and at most three wait at once. It needs project writes switched on in the assistant's
+  settings, and approving checks that again.
 - No approval is ever given by voice. An approval, or a change to a file, is a click on the screen.
 - A Muse turn that asks to use a tool is stopped, and the call says it is waiting on the screen.
 - What it hears is kept as what you said, with the words as the recogniser wrote them; the memory treats a spoken

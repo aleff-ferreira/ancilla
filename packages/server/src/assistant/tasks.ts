@@ -16,7 +16,15 @@ export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped" |
 /** `write` is any step that can change something (a file, anything outside the project): it is never run twice on a guess. */
 export type Effect = "read" | "write";
 export type AttemptOutcome = "running" | "succeeded" | "failed" | "cancelled" | "stale" | "unknown" | "timeout";
-export type TaskOrigin = "user" | "suggestion" | "schedule";
+export type TaskOrigin = "user" | "suggestion" | "schedule" | "voice";
+
+/**
+ * A change the voice proposed that the user has not approved yet: paused, never started, and only the user's approval (a
+ * click on the screen) lets it run. A resume, a retry or a restart does not: each refuses it or leaves it alone.
+ */
+export function awaitsApproval(task: Pick<Task, "origin" | "status" | "startedAt">): boolean {
+  return task.origin === "voice" && task.status === "paused" && task.startedAt === null;
+}
 
 export type Verifier =
   | { type: "file_exists"; path: string }
@@ -118,6 +126,8 @@ export interface NewTask {
   origin: TaskOrigin;
   scheduleId: string | null;
   steps: { title: string; prompt: string | null; effect: Effect; verifier: Verifier | null }[];
+  /** Set for a proposal: the task is made paused with this as its reason, and nothing starts it until the user approves it. */
+  hold?: string;
 }
 
 export interface Schedule {
@@ -351,8 +361,8 @@ export class TaskStore {
       const now = this.now();
       const taskId = id("t");
       this.store.run(
-        "INSERT INTO tasks (id, title, goal, goal_id, status, reason, origin, schedule_id, cwd, project, account, allow_writes, max_turns, max_minutes, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [taskId, spec.title, spec.goal, spec.goalId, "Waiting for its turn", spec.origin, spec.scheduleId, spec.cwd, spec.project, spec.account, spec.allowWrites ? 1 : 0, spec.maxTurns, spec.maxMinutes, now, now],
+        "INSERT INTO tasks (id, title, goal, goal_id, status, reason, origin, schedule_id, cwd, project, account, allow_writes, max_turns, max_minutes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [taskId, spec.title, spec.goal, spec.goalId, spec.hold === undefined ? "queued" : "paused", spec.hold ?? "Waiting for its turn", spec.origin, spec.scheduleId, spec.cwd, spec.project, spec.account, spec.allowWrites ? 1 : 0, spec.maxTurns, spec.maxMinutes, now, now],
       );
       spec.steps.forEach((step, ord) => {
         this.store.run("INSERT INTO task_steps (id, task_id, ord, title, prompt, effect, verifier, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')", [id("st"), taskId, ord, step.title, step.prompt, step.effect, step.verifier ? JSON.stringify(step.verifier) : null]);

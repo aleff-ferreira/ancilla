@@ -221,7 +221,9 @@ function TaskRow(props: { task: AssistantTaskView; now: number; open: boolean; o
   const call = useAssistantCall();
   const controller = useController();
   const [error, setError] = useState<string | null>(null);
-  const status = STATUS[task.status];
+  // A change the voice proposed that nobody approved yet: paused and never started, it runs only when it is approved here.
+  const proposal = task.origin === "voice" && task.status === "paused" && task.startedAt === null;
+  const status = proposal ? { label: "Needs your approval", tone: "warn" as const } : STATUS[task.status];
   const act = async (name: string, body: Record<string, unknown> = {}) => {
     setError(null);
     try {
@@ -240,8 +242,9 @@ function TaskRow(props: { task: AssistantTaskView; now: number; open: boolean; o
           <span className="flex flex-wrap items-center gap-2">
             <Chip tone={status.tone}>{status.label}</Chip>
             <span className="text-sm text-fg [overflow-wrap:anywhere]">{task.title}</span>
-            {task.origin !== "user" ? <Chip>{task.origin === "schedule" ? "Scheduled" : "Suggested"}</Chip> : null}
+            {task.origin !== "user" ? <Chip>{task.origin === "schedule" ? "Scheduled" : task.origin === "voice" ? "Proposed by voice" : "Suggested"}</Chip> : null}
           </span>
+          {proposal && task.goal !== task.title ? <span className="mt-1 block text-xs text-fg [overflow-wrap:anywhere]">{task.goal}</span> : null}
           <span className="mt-1 block text-xs text-muted [overflow-wrap:anywhere]">{task.reason || task.result}</span>
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtle">
             <span>
@@ -263,11 +266,12 @@ function TaskRow(props: { task: AssistantTaskView; now: number; open: boolean; o
             </Button>
           ) : null}
           {open ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
-          {task.status === "paused" || task.status === "waiting" ? <Button size="xs" variant="accent" onClick={() => void act("resume")}>Resume</Button> : null}
+          {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
+          {!proposal && (task.status === "paused" || task.status === "waiting") ? <Button size="xs" variant="accent" onClick={() => void act("resume")}>Resume</Button> : null}
           {budgetStop ? <Button size="xs" variant="accent" onClick={() => void act("extend", { turns: 4, minutes: 10 })}>Give it more room</Button> : null}
           {task.status === "failed" || (task.status === "blocked" && !budgetStop) ? <Button size="xs" variant="secondary" onClick={() => void act("retry")}>Try again</Button> : null}
           {task.status === "unverified" || (task.status === "blocked" && /confirm/i.test(task.reason)) ? <Button size="xs" variant="accent" onClick={() => void act("confirm")}>It is right</Button> : null}
-          {!["completed", "unverified", "failed", "cancelled"].includes(task.status) ? <Button size="xs" variant="danger" onClick={() => void act("cancel")}>Cancel</Button> : null}
+          {!["completed", "unverified", "failed", "cancelled"].includes(task.status) ? <Button size="xs" variant="danger" onClick={() => void act("cancel")}>{proposal ? "Decline" : "Cancel"}</Button> : null}
         </div>
       </div>
       {error ? <div className="px-4 pb-3"><Notice tone="error">{error}</Notice></div> : null}

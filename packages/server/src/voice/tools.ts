@@ -12,7 +12,8 @@ import type { Lang } from "./text.js";
  * Every tool is a small, checked operation on the task executive or on the notes. None of them can approve anything or
  * change a file: a task started by voice reads and researches only, so a spoken sentence (which may have been misheard,
  * or may not have been the user's at all) can never be what lets something be altered. Work that would change something
- * is proposed, and the approval is a click on the screen.
+ * is proposed (`propose_change`): it waits, paused and never started, and the approval is a click on the screen. No tool
+ * here approves, and resuming a proposal is refused, so nothing said aloud can start one.
  */
 
 export interface VoiceToolDeps {
@@ -29,11 +30,24 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
   {
     name: "delegate_task",
     description:
-      "Start a task in the background and carry on talking. Use it for work that takes more than a few seconds: reading a codebase, researching, summarising files, checking something. The task can read and research only; it cannot change files. When the user wants a change made, say so and give the goal as a proposal.",
+      "Start a task in the background and carry on talking. Use it for work that takes more than a few seconds: reading a codebase, researching, summarising files, checking something. The task can read and research only; it cannot change files. For a change, use propose_change.",
     parameters: {
       type: "object",
       properties: {
         goal: { type: "string", description: "What the task is to find out or produce, in a sentence or two, complete enough to be understood on its own." },
+        title: { type: "string", description: "A short name for it, a few words." },
+      },
+      required: ["goal"],
+    },
+  },
+  {
+    name: "propose_change",
+    description:
+      "Ask for work that would change files in the project: fix a bug, edit code or a document. Nothing starts: it appears on the user's screen and only their click approves it. You cannot approve it, and saying yes aloud does not.",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "What is to be changed and how, in a sentence or two, complete enough to be understood on its own." },
         title: { type: "string", description: "A short name for it, a few words." },
       },
       required: ["goal"],
@@ -131,6 +145,20 @@ export class VoiceTools {
             ok: true,
             text: `Started task ${task.id}, "${sayable(task.title, 80)}". It reads and researches in the background and cannot change files. The user is told when it finishes or needs them.`,
             narration: taskPhrase(lang, "started", task.title),
+          };
+        }
+        case "propose_change": {
+          if (!executive) return { ok: false, text: "Background tasks are not available right now." };
+          const goal = str(args["goal"], 2000);
+          if (goal === "") return { ok: false, text: "A proposal needs a goal: say what is to be changed." };
+          const cwd = this.deps.project();
+          if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
+          const spec = parseTaskSpec({ goal, cwd, allowWrites: true, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const task = executive.propose(spec);
+          return {
+            ok: true,
+            text: `Proposed task ${task.id}, "${sayable(task.title, 80)}". Nothing has started: it waits on the user's screen, and only they can approve or decline it there. Say that it waits for their approval; do not say it is under way.`,
+            narration: taskPhrase(lang, "proposed", task.title),
           };
         }
         case "list_tasks": {
