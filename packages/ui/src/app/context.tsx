@@ -1,7 +1,9 @@
 import { IconContext, type IconProps } from "@phosphor-icons/react";
-import { createContext, useContext, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { PackProvider, PackStore } from "../components/assistant/companion/packs.js";
 import type { AncillaController } from "../model/controller.js";
 import type { AppState } from "../model/store.js";
+import type { AvatarPackView } from "../types.js";
 
 const ControllerContext = createContext<AncillaController | null>(null);
 
@@ -14,9 +16,13 @@ const ControllerContext = createContext<AncillaController | null>(null);
 const ICON_DEFAULTS: IconProps = { weight: "bold", size: 24 };
 
 export function ControllerProvider(props: { controller: AncillaController; children: ReactNode }) {
+  // The avatars the user drew or brought are fetched by id as the faces ask for them, and held here for the whole app.
+  const packs = useMemo(() => new PackStore({ get: (id) => props.controller.assistant<{ avatar: AvatarPackView }>("GET", `/avatars/${encodeURIComponent(id)}`).then((out) => out.avatar) }), [props.controller]);
   return (
     <ControllerContext.Provider value={props.controller}>
-      <IconContext.Provider value={ICON_DEFAULTS}>{props.children}</IconContext.Provider>
+      <PackProvider store={packs}>
+        <IconContext.Provider value={ICON_DEFAULTS}>{props.children}</IconContext.Provider>
+      </PackProvider>
     </ControllerContext.Provider>
   );
 }

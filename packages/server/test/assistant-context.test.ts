@@ -243,7 +243,7 @@ describe("the character the model is told", () => {
 describe("the character as stored", () => {
   it("is brought inside its limits and never throws on rubbish", () => {
     const c = normalizeCharacter({ avatar: { form: "dragon", hue: 9999, glow: -4, detail: 77, seed: "x" }, voice: { archetype: "pirate", warmth: 12, humor: -1 }, callsUser: `${"n".repeat(80)}`, quirks: ["a", 5, "", "b".repeat(200), "c", "d", "e", "f"], presence: "loud", showBond: false, setupAt: -3 });
-    assert.deepEqual(c.avatar, { form: "halo", hue: 359, glow: 0, detail: 3, seed: 1 });
+    assert.deepEqual(c.avatar, { form: "halo", hue: 359, glow: 0, detail: 3, seed: 1, look: { kind: "sigil" } });
     assert.equal(c.voice.archetype, "steady");
     assert.equal(c.voice.warmth, 4);
     assert.equal(c.voice.humor, 0);

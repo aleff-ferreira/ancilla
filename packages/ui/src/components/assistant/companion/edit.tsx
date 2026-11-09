@@ -1,114 +1,32 @@
-import { useId, useState, type ReactNode } from "react";
-import type { AssistantCharacterView, AvatarForm, VoiceArchetype } from "../../../types.js";
+import { useId, useState } from "react";
+import type { AssistantCharacterView, VoiceArchetype } from "../../../types.js";
 import { Button, cn } from "../../ui/primitives.js";
 import { Avatar } from "./Avatar.js";
-import { FORMS, HUES, MOODS, formInfo, hueName, looksLike, randomSpec, type AvatarMood } from "./faces.js";
+import { MOODS, type AvatarMood } from "./faces.js";
+import { wornWords } from "./look.js";
+import { LookStudio } from "./looks/LookStudio.js";
+import { usePack } from "./packs.js";
+import { Card, Field } from "./ui.js";
 import { ARCHETYPES, DIALS, archetypeInfo, dialWord, greeting, say } from "./voice.js";
 
 /**
- * The controls that make the assistant someone: a face (a form, its variant, a hue, a glow), a voice (an archetype and
- * five dials), what it calls the user and a few habits. They edit a draft the caller holds, so the first-run flow can keep
- * the whole character until the user wakes it, and the Persona tab can save as the user goes.
+ * The controls that make the assistant someone: a look (a character to choose, build, draw or bring), a voice (an
+ * archetype and five dials), what it calls the user and a few habits. They edit a draft the caller holds, so the first-run
+ * flow can keep the whole character until the user wakes it, and the Persona tab can save as the user goes.
  */
 
 export type Draft = AssistantCharacterView;
 
 type Change = (patch: { avatar?: Partial<Draft["avatar"]>; voice?: Partial<Draft["voice"]>; callsUser?: string; quirks?: string[] }) => void;
 
-export function Field(props: { label: string; hint?: string; children: ReactNode }) {
-  return (
-    <div className="py-3">
-      <p className="text-sm font-medium text-fg">{props.label}</p>
-      {props.hint ? <p className="mt-0.5 text-xs text-muted">{props.hint}</p> : null}
-      <div className="mt-2">{props.children}</div>
-    </div>
-  );
-}
-
-/** A choice made of cards: one is chosen, and the chosen one shows it. */
-function Card(props: { chosen: boolean; onClick: () => void; label: string; children: ReactNode; className?: string }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={props.chosen}
-      aria-label={props.label}
-      onClick={props.onClick}
-      className={cn(
-        "group relative flex min-w-0 flex-col items-center gap-2 rounded-xl p-3 text-center transition-[background-color,box-shadow,transform] duration-150 ease-out active:scale-[0.98]",
-        props.chosen ? "bg-accent-soft shadow-[0_0_0_1.5px_var(--accent)]" : "bg-sunken shadow-[0_0_0_1px_var(--border)] hover:bg-hover",
-        props.className,
-      )}
-    >
-      {props.children}
-    </button>
-  );
-}
-
 // ------------------------------------------------------------------------------------------------ the look
 
-export function LookEditor(props: { draft: Draft; onChange: Change }) {
-  const { draft, onChange } = props;
-  const info = formInfo(draft.avatar.form);
-  const hue = useId();
-  const glow = useId();
-  return (
-    <div>
-      <Field label="Form" hint={info.blurb}>
-        <div className="grid grid-cols-3 gap-2 @min-[560px]:grid-cols-5">
-          {FORMS.map((f) => (
-            <Card key={f.form} chosen={draft.avatar.form === f.form} label={f.name} onClick={() => onChange({ avatar: { form: f.form as AvatarForm } })}>
-              <Avatar spec={{ ...draft.avatar, form: f.form }} size={56} stage />
-              <span className="text-xs font-medium text-fg">{f.name}</span>
-            </Card>
-          ))}
-        </div>
-      </Field>
-      <Field label={info.variantLabel}>
-        <div className="flex flex-wrap gap-1.5">
-          {info.variants.map((name, i) => (
-            <button
-              key={name}
-              type="button"
-              aria-pressed={draft.avatar.detail === i}
-              onClick={() => onChange({ avatar: { detail: i } })}
-              className={cn("h-8 rounded-lg px-3 text-xs font-medium transition-colors", draft.avatar.detail === i ? "bg-accent-soft text-accent-text shadow-[0_0_0_1.5px_var(--accent)]" : "bg-sunken text-muted shadow-[0_0_0_1px_var(--border)] hover:bg-hover hover:text-fg")}
-            >
-              {name}
-            </button>
-          ))}
-        </div>
-      </Field>
-      <Field label="Colour" hint={`${hueName(draft.avatar.hue)}. Pick one, or slide to any hue.`}>
-        <div className="flex flex-wrap items-center gap-2">
-          {HUES.map((h) => (
-            <button
-              key={h.name}
-              type="button"
-              aria-label={h.name}
-              aria-pressed={Math.abs(draft.avatar.hue - h.hue) < 3}
-              onClick={() => onChange({ avatar: { hue: h.hue } })}
-              className={cn("size-7 rounded-full transition-transform duration-150 ease-out hover:scale-110 active:scale-95", Math.abs(draft.avatar.hue - h.hue) < 3 && "shadow-[0_0_0_2px_var(--bg-raised),0_0_0_3.5px_var(--fg)]")}
-              style={{ background: `oklch(0.74 0.15 ${h.hue})` }}
-            />
-          ))}
-        </div>
-        <label htmlFor={hue} className="sr-only">Hue</label>
-        <input id={hue} type="range" min={0} max={359} step={1} value={draft.avatar.hue} onChange={(e) => onChange({ avatar: { hue: Number(e.currentTarget.value) } })} className="companion-range hue mt-3" />
-      </Field>
-      <Field label="Glow" hint="How much light it gives off.">
-        <label htmlFor={glow} className="sr-only">Glow</label>
-        <input id={glow} type="range" min={0} max={100} step={1} value={draft.avatar.glow} onChange={(e) => onChange({ avatar: { glow: Number(e.currentTarget.value) } })} className="companion-range" style={{ ["--v" as string]: `${draft.avatar.glow}%` }} />
-      </Field>
-      <div className="flex flex-wrap gap-2 pt-1">
-        <Button size="sm" variant="secondary" onClick={() => onChange({ avatar: randomSpec() })}>
-          Surprise me
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => onChange({ avatar: { seed: 1 + Math.floor(Math.random() * 2_000_000_000) } })}>
-          Another take
-        </Button>
-      </div>
-    </div>
-  );
+/**
+ * Choosing and making a look. `full` adds drawing, bringing a picture and the library of what was made, which keep their
+ * things on the server; the first-run flow, which may not have one yet, offers the ready-made characters and the builder.
+ */
+export function LookEditor(props: { draft: Draft; onChange: Change; name?: string; full?: boolean }) {
+  return <LookStudio draft={props.draft} onChange={props.onChange} name={props.name ?? "Assistant"} {...(props.full ? { full: true } : {})} />;
 }
 
 // ------------------------------------------------------------------------------------------------ the voice
@@ -235,6 +153,8 @@ const MOOD_LABEL: Record<AvatarMood, string> = { idle: "Resting", working: "Work
 export function Preview(props: { draft: Draft; name: string; size?: number; line?: string | undefined }) {
   const [mood, setMood] = useState<AvatarMood>("idle");
   const [burst, setBurst] = useState(0);
+  const worn = props.draft.avatar.look?.kind === "pack" ? props.draft.avatar.look : null;
+  const wornPack = usePack(worn?.id ?? null, worn?.rev ?? 0);
   const pick = (m: AvatarMood) => {
     setMood(m);
     setBurst(Date.now());
@@ -251,7 +171,7 @@ export function Preview(props: { draft: Draft; name: string; size?: number; line
         <div className="min-w-0 flex-1 p-4 @min-[440px]:self-center @min-[440px]:p-5">
           <p className="font-display text-xl text-fg [overflow-wrap:anywhere]">{props.name}</p>
           <p className="mt-0.5 text-xs text-muted">
-            {archetypeInfo(props.draft.voice.archetype).name} voice, {looksLike(props.draft.avatar)}
+            {archetypeInfo(props.draft.voice.archetype).name} voice, {wornWords(props.draft.avatar, wornPack)}
           </p>
           {props.line ? <p className="mt-2 text-sm leading-5 text-fg [overflow-wrap:anywhere]">&ldquo;{props.line}&rdquo;</p> : null}
           <div className="mt-3 flex flex-wrap gap-1.5" role="group" aria-label="Try a mood">

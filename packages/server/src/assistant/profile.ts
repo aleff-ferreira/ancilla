@@ -1,5 +1,5 @@
 import { looksSecret } from "./secrets.js";
-import type { AssistantCharacter, AssistantProfile, AvatarForm, Autonomy, CharacterPresence, Goal, VoiceArchetype } from "./types.js";
+import type { AssistantCharacter, AssistantProfile, AvatarForm, AvatarLook, Autonomy, CharacterPresence, FigureSpec, Goal, VoiceArchetype } from "./types.js";
 
 /**
  * The assistant's configurable identity: what it is called, how it talks, how much it may do alone and how much it
@@ -17,8 +17,18 @@ const PRESENCES: readonly CharacterPresence[] = ["off", "tone", "full"];
 export const MAX_QUIRKS = 4;
 export const MAX_QUIRK = 80;
 
+/**
+ * The shape of a figure part's id, not its membership: the catalogue lives in the interface, and a pack made by a newer
+ * Ancilla must survive an older server, which draws the plain part for an id it does not know.
+ */
+export const PART_ID = /^[a-z0-9][a-z0-9-]{0,23}$/;
+/** The id of a saved avatar, the same shape every assistant entity's id has. */
+export const PACK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+export const FIGURE_PARTS = ["body", "top", "eyes", "mouth", "mark", "gear", "aura", "finish"] as const;
+const FIGURE_KEYS: readonly string[] = [...FIGURE_PARTS, "accent", "shade"];
+
 export const DEFAULT_CHARACTER: AssistantCharacter = {
-  avatar: { form: "halo", hue: 232, glow: 60, detail: 1, seed: 1 },
+  avatar: { form: "halo", hue: 232, glow: 60, detail: 1, seed: 1, look: { kind: "sigil" } },
   voice: { archetype: "steady", warmth: 2, humor: 1, directness: 3, curiosity: 1, formality: 1 },
   callsUser: "",
   quirks: [],
@@ -55,8 +65,13 @@ const AUTONOMY: readonly Autonomy[] = ["ask", "suggest", "act"];
 
 type Obj = Record<string, unknown>;
 
-function isObj(value: unknown): value is Obj {
+export function isObj(value: unknown): value is Obj {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A text field as the user typed it, less control characters, within `max`, and never a credential. Shared with the avatar names. */
+export function textField(value: unknown, field: string, max: number): string {
+  return text(value, field, max);
 }
 
 function text(value: unknown, field: string, max: number): string {
@@ -92,6 +107,86 @@ const pick = <T extends string>(v: unknown, allowed: readonly T[], fallback: T):
 const str = (v: unknown, max: number, fallback: string): string => (typeof v === "string" ? v.slice(0, max) : fallback);
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
 
+/** A whole number within a range, as the strict parsers want it: no rounding, so 2.5 is refused rather than guessed at. */
+export function integer(value: unknown, field: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) throw new ValidationError(field, `${field} must be a whole number`);
+  if (value < min || value > max) throw new ValidationError(field, `${field} must be between ${min} and ${max}`);
+  return value;
+}
+
+/** A figure as stored, or null when it is not one: every one of its ten fields must be present and well formed. Never throws. */
+export function normalizeFigure(raw: unknown): FigureSpec | null {
+  if (!isObj(raw)) return null;
+  const keys = Object.keys(raw);
+  if (keys.length !== FIGURE_KEYS.length || !FIGURE_KEYS.every((k) => keys.includes(k))) return null;
+  const parts: Partial<Record<(typeof FIGURE_PARTS)[number], string>> = {};
+  for (const part of FIGURE_PARTS) {
+    const v = raw[part];
+    if (typeof v !== "string" || !PART_ID.test(v)) return null;
+    parts[part] = v;
+  }
+  const accent = raw.accent;
+  if (accent !== null && !(typeof accent === "number" && Number.isInteger(accent) && accent >= 0 && accent <= 359)) return null;
+  const shade = raw.shade;
+  if (typeof shade !== "number" || !Number.isInteger(shade) || shade < 0 || shade > 4) return null;
+  return { ...(parts as Record<(typeof FIGURE_PARTS)[number], string>), accent: accent as number | null, shade };
+}
+
+/** A figure from the user, checked field by field: a missing or unknown field is refused with its name. */
+export function parseFigure(raw: unknown, field: string): FigureSpec {
+  if (!isObj(raw)) throw new ValidationError(field, `${field} must be an object`);
+  for (const key of Object.keys(raw)) if (!FIGURE_KEYS.includes(key)) throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
+  for (const key of FIGURE_KEYS) if (!(key in raw)) throw new ValidationError(`${field}.${key}`, `${field}.${key} is required`);
+  const parts: Partial<Record<(typeof FIGURE_PARTS)[number], string>> = {};
+  for (const part of FIGURE_PARTS) {
+    const v = raw[part];
+    if (typeof v !== "string" || !PART_ID.test(v)) throw new ValidationError(`${field}.${part}`, `${field}.${part} must be a part id: lower-case letters, digits and dashes, up to 24 characters`);
+    parts[part] = v;
+  }
+  const accent = raw.accent === null ? null : integer(raw.accent, `${field}.accent`, 0, 359);
+  const shade = integer(raw.shade, `${field}.shade`, 0, 4);
+  return { ...(parts as Record<(typeof FIGURE_PARTS)[number], string>), accent, shade };
+}
+
+/** What the assistant wears, as stored: anything malformed is the sigil, so an old or damaged profile still has a face. Never throws. */
+export function normalizeLook(raw: unknown): AvatarLook {
+  if (!isObj(raw)) return { kind: "sigil" };
+  if (raw.kind === "sigil") return { kind: "sigil" };
+  if (raw.kind === "figure") {
+    const figure = normalizeFigure(raw.figure);
+    return figure ? { kind: "figure", figure } : { kind: "sigil" };
+  }
+  if (raw.kind === "pack") {
+    if (typeof raw.id !== "string" || !PACK_ID.test(raw.id)) return { kind: "sigil" };
+    const rev = typeof raw.rev === "number" && Number.isInteger(raw.rev) && raw.rev >= 0 ? raw.rev : 0;
+    return { kind: "pack", id: raw.id, rev };
+  }
+  return { kind: "sigil" };
+}
+
+/**
+ * A look from the user. A pack's `rev` is not the user's to set (it is the pack's own `updatedAt`, stamped where the
+ * database is reachable), so one sent along is ignored; whether the pack exists is checked there too.
+ */
+function parseLook(raw: unknown, field: string): AvatarLook {
+  if (!isObj(raw)) throw new ValidationError(field, `${field} must be an object`);
+  const kind = raw.kind;
+  if (kind === "sigil") {
+    for (const key of Object.keys(raw)) if (key !== "kind") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
+    return { kind: "sigil" };
+  }
+  if (kind === "figure") {
+    for (const key of Object.keys(raw)) if (key !== "kind" && key !== "figure") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
+    return { kind: "figure", figure: parseFigure(raw.figure, `${field}.figure`) };
+  }
+  if (kind === "pack") {
+    for (const key of Object.keys(raw)) if (key !== "kind" && key !== "id" && key !== "rev") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
+    if (typeof raw.id !== "string" || !PACK_ID.test(raw.id)) throw new ValidationError(`${field}.id`, `${field}.id must be the id of a saved avatar`);
+    return { kind: "pack", id: raw.id, rev: 0 };
+  }
+  throw new ValidationError(`${field}.kind`, `${field}.kind must be one of sigil, figure, pack`);
+}
+
 /** The character as stored, completed with defaults and brought inside the limits. Never throws. */
 export function normalizeCharacter(raw: unknown): AssistantCharacter {
   const d = DEFAULT_CHARACTER;
@@ -108,6 +203,7 @@ export function normalizeCharacter(raw: unknown): AssistantCharacter {
       glow: clamp(av.glow, 0, 100, d.avatar.glow),
       detail: clamp(av.detail, 0, 3, d.avatar.detail),
       seed: clamp(av.seed, 0, 2_147_483_647, d.avatar.seed),
+      look: normalizeLook(av.look),
     },
     voice: {
       archetype: pick(vo.archetype, ARCHETYPES, d.voice.archetype),
@@ -188,13 +284,15 @@ function parseCharacterPatch(raw: unknown): CharacterPatch {
   if ("avatar" in raw) {
     if (!isObj(raw.avatar)) throw new ValidationError("character.avatar", "character.avatar must be an object");
     const a = raw.avatar;
-    for (const key of Object.keys(a)) if (!["form", "hue", "glow", "detail", "seed"].includes(key)) throw new ValidationError(`character.avatar.${key}`, `unknown field character.avatar.${key}`);
+    for (const key of Object.keys(a)) if (!["form", "hue", "glow", "detail", "seed", "look"].includes(key)) throw new ValidationError(`character.avatar.${key}`, `unknown field character.avatar.${key}`);
     const avatar: NonNullable<CharacterPatch["avatar"]> = {};
     if ("form" in a) avatar.form = oneOf(a.form, "character.avatar.form", AVATAR_FORMS);
     if ("hue" in a) avatar.hue = whole(a.hue, "character.avatar.hue", 0, 359);
     if ("glow" in a) avatar.glow = whole(a.glow, "character.avatar.glow", 0, 100);
     if ("detail" in a) avatar.detail = whole(a.detail, "character.avatar.detail", 0, 3);
     if ("seed" in a) avatar.seed = whole(a.seed, "character.avatar.seed", 0, 2_147_483_647);
+    // The look is one value, replaced whole: a figure's parts are not merged with the last figure's.
+    if ("look" in a) avatar.look = parseLook(a.look, "character.avatar.look");
     out.avatar = avatar;
   }
   if ("voice" in raw) {

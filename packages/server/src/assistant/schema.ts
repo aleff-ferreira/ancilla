@@ -320,6 +320,25 @@ CREATE INDEX memory_vectors_model ON memory_vectors (model);
 `,
     down: `DROP TABLE IF EXISTS memory_vectors;`,
   },
+  {
+    version: 6,
+    name: "saved avatars",
+    // Avatars the user made or brought for the assistant: a figure of parts, pixel art, or a picture. The data is one JSON
+    // document per avatar (checked on the way in, never larger than the limit in avatars.ts); the profile points at one by id.
+    up: `
+CREATE TABLE avatar_packs (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  data TEXT NOT NULL,
+  bytes INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX avatar_packs_updated ON avatar_packs (updated_at DESC);
+`,
+    down: `DROP TABLE IF EXISTS avatar_packs;`,
+  },
 ];
 
 /** The full text index. Kept apart from the migrations because it is built by hand, and rebuilt when it cannot be trusted. */

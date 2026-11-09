@@ -40,12 +40,23 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     const dir = await makeData();
     const out = run(dir, "--status");
     assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /schema version 5/);
+    assert.match(out.stdout, /schema version 6/);
     assert.match(out.stdout, /1: memory and profile/);
     assert.match(out.stdout, /2: tasks and schedules/);
     assert.match(out.stdout, /3: conversations/);
     assert.match(out.stdout, /4: the Muse thread of a conversation/);
     assert.match(out.stdout, /5: notes by meaning/);
+    assert.match(out.stdout, /6: saved avatars/);
+  });
+
+  test("steps back over the saved avatars and keeps everything else", async () => {
+    const dir = await makeData();
+    assert.ok(tables(dir).names.includes("avatar_packs"));
+    assert.equal(run(dir, "5").status, 0);
+    const five = tables(dir);
+    assert.equal(five.version, 5);
+    assert.ok(!five.names.includes("avatar_packs"), "the saved avatars are gone, which the export written first holds");
+    assert.ok(five.names.includes("memory_vectors") && five.names.includes("memory_items"), "the notes and their meaning stay");
   });
 
   test("steps back over the meaning of the notes and keeps the notes and the conversations", async () => {
@@ -54,6 +65,7 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
     assert.equal(run(dir, "4").status, 0);
     const four = tables(dir);
     assert.equal(four.version, 4);
+    assert.ok(!four.names.includes("avatar_packs"), "going back to 4 passes 6 on the way");
     assert.ok(!four.names.includes("memory_vectors"), "the vectors are gone: they are derived from the notes, which are not");
     assert.ok(four.names.includes("memory_items") && four.names.includes("conversations"));
     const db = new DatabaseSync(join(dir, "assistant.db"));
@@ -108,13 +120,13 @@ describe("rolling the assistant's database back", { skip: built ? false : "the s
 
   test("refuses a version it is not at or above, a missing file and a missing argument", async () => {
     const dir = await makeData();
-    assert.equal(run(dir, "5").status, 2);
+    assert.equal(run(dir, "6").status, 2);
     assert.equal(run(dir, "7").status, 2);
     assert.equal(run(dir, "x").status, 2);
     assert.equal(run(dir).status, 2);
     const empty = mkdtempSync(join(tmpdir(), "ancilla-rollback-empty-"));
     dirs.push(empty);
     assert.equal(run(empty, "0").status, 1);
-    assert.equal(tables(dir).version, 5, "nothing was changed by the refusals");
+    assert.equal(tables(dir).version, 6, "nothing was changed by the refusals");
   });
 });

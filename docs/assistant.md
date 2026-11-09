@@ -56,7 +56,8 @@ tabs.
   what it would do next (or what is waiting on you, when initiative is Ask first), and watch open tasks with Pause,
   Resume, Cancel, Try again, Give it more room and "It is right". Finished tasks say whether the result was checked.
   Repeating work lives here too, each with its time zone and an end.
-- **Persona.** Who it is, saved as you go: name, a few words of your own about it, its look (form, variant, colour, glow),
+- **Persona.** Who it is, saved as you go: name, a few words of your own about it, its look (a character to choose, build
+  from parts, draw in pixels or bring as a picture, in any colour and glow),
   its voice (a temperament and five dials, with sample lines that answer the dials at once), what it calls you, up to four
   habits, how it replies in threads (tone, length, language, notes) and where it shows up. A preview of its face and
   opening line follows you down the page when the window is tall enough, and each of its moods can be tried on it.
@@ -83,25 +84,43 @@ moving round its border (the small cross on the card says "not now": it stops th
 words). The Assistant page opens on four steps:
 
 1. **Hello**: what it is, what it may keep, and what to call it.
-2. **Look**: a form, its variant, a colour and how much it glows, with the face in front of you changing as you choose.
+2. **Look**: a ready-made character (or one of the five forms of light, or one you build from parts), a colour and how
+   much it glows, with the face in front of you changing as you choose. Drawing, bringing a picture and the library of
+   what you made are on the Persona tab.
 3. **Voice**: a temperament and five dials, with sample lines that change as you move them.
 4. **Wake it**: what is stored and where, and how much it may do on its own.
 
 **Nothing is saved, and nothing is switched on, until the last step**, so leaving half way leaves everything as it was.
 An assistant that was switched on before it had a face gets the same meeting.
 
-![The first meeting's Look step: a form, a colour and a glow, with the face changing as you choose](assets/assistant-meeting.png)
+![The first meeting's Look step: a character, a colour and a glow, with the face changing as you choose](assets/assistant-meeting.png)
 
 The [tour video](https://github.com/aleff-ferreira/ancilla/raw/main/docs/assets/ancilla-tour.mp4) (a download) opens with
 a short version of this meeting.
 
 ### The face
 
-A face is a small description (a form, a variant, a hue, a glow and a seed) that the interface draws as a living thing.
-There are five forms, each with four variants: **Halo** (a core of light held by turning rings), **Optic** (a lens that
-blinks and follows the pointer), **Hologram** (a figure drawn in light), **Critter** (a small creature that speaks with
-its eyes) and **Cipher** (a sigil that wakes when it has something to tell you). Any hue and any glow can be chosen, and
-a few touches, such as when it blinks, come from the seed, so two faces side by side do not move as one.
+A face is a small description that the interface draws as a living thing. What it wears is one of four kinds, chosen
+on the Persona tab under Look (`docs/assistant-avatars.md` has the formats, the limits and the reasons):
+
+- **Forms of light.** Five forms, each with four variants: **Halo** (a core of light held by turning rings), **Optic** (a
+  lens that blinks and follows the pointer), **Hologram** (a figure drawn in light), **Critter** (a small creature that
+  speaks with its eyes) and **Cipher** (a sigil that wakes when it has something to tell you).
+- **Characters.** Twenty-eight ready-made ones (a fox, a robot, a ghost, a slime, a drone, a mage and more), and any of
+  them can be changed. **Build** puts one together from parts: fourteen bodies, sixteen things to grow or wear on top,
+  ten kinds of eyes, nine mouths, nine markings, ten pieces of gear, nine things around it and seven finishes (glossy,
+  matte, plush, glass, metal, neon, ink), in any colour, accent and shade. A figure is ten small values, so it is kept
+  in the profile and drawn the same everywhere.
+- **Pixel art.** **Draw** opens a pixel studio: 16 to 64 cells a side, a pencil, a fill, shapes, a colour picker,
+  mirroring, undo, palettes you can edit, onion skin, and frames for each mood. A mood with no frames of its own wears the
+  resting ones and moves in its own way.
+- **A picture or a sprite sheet.** **Bring your own** takes a PNG, JPEG, WebP or GIF (its first frame). A sprite sheet,
+  a grid of frames with a row for each mood such as the 8 by 9 sheets that desktop pets use, plays the row chosen for each
+  mood. A picture is shrunk to what a face needs and kept on this computer.
+
+Everything you build, draw or bring can be kept under **Mine** (24 avatars, 8 MB), worn, changed, renamed, copied,
+deleted, or exported as a small file that someone else can import. Any hue and any glow can be chosen, and a few touches,
+such as when it blinks, come from the seed, so two faces side by side do not move as one.
 
 It has six moods and they are the plain facts of the moment: resting, working (a turn or a task is running), wanting you
 (an approval, a question or a task waits on you), pleased (a note was kept, a turn finished), concerned (a turn failed, a
@@ -110,7 +129,8 @@ before that it is awake and waiting for you. A pleased or concerned face shows f
 what it was doing.
 
 It is drawn as SVG and CSS, so there are no images to download and nothing leaves the machine. It is named for a screen
-reader ("Ancilla, an ice halo with a bright glow, resting"), and with reduced motion it keeps its colours and its mood
+reader ("Ancilla, an ice halo with a bright glow, resting"; "Ancilla, a teal round figure with cat ears and bright eyes,
+working"; "Ancilla, a pixel art avatar called Pip, resting"), and with reduced motion it keeps its colours and its mood
 and stops moving.
 
 ### The voice
@@ -326,7 +346,8 @@ flowchart LR
   field an older file lacks takes its default. Tables: profile and goals; memory items,
   revisions, sources, evidence links, links between items, tombstones, a capture log, summaries and an audit log of what
   changed and who changed it (ids and rule names, never the words); tasks, steps, attempts, events, checkpoints and
-  schedules; conversations; the meaning vectors of notes (only when meaning search is on); and an FTS5 index that is
+  schedules; conversations; the meaning vectors of notes (only when meaning search is on); the avatars you made or
+  brought (`avatar_packs`; the profile holds only which one it wears); and an FTS5 index that is
   rebuilt from the items whenever it disagrees with them. `embeddings.json` beside it holds the address and model of the
   embedding server, and the name of the variable that holds its key.
 - Code: `packages/server/src/assistant/`. The pure parts (extraction, resolution, ranking, context) have no database,
@@ -349,6 +370,8 @@ All under `/api/assistant`, behind the same host check, origin check and token a
 | `GET /embeddings`, `PUT` or `PATCH`, `DELETE` | meaning search: how it is set and how far it has got (never a key); set it, or change what is named; switch it off and erase every vector |
 | `POST /embeddings/test` | try a server with the settings in the body, without saving them or opening the assistant |
 | `GET /activity` | what changed and who changed it |
+| `GET /avatars`, `POST /avatars` | the avatars you made or brought (without their data, with the limits and how much is used), and keep a new one |
+| `GET /avatars/:id`, `PATCH`, `DELETE` | read one with its data; rename it or change its data (refused if stale); delete it (if it was worn, the face goes back to a form of light) |
 | `GET/POST /goals`, `PATCH/DELETE /goals/:id` | goals |
 | `GET/POST /tasks`, `GET /tasks/:id`, `POST /tasks/:id/{pause,resume,cancel,retry,confirm,extend,resolve}` | tasks |
 | `GET /suggestions`, `POST /suggestions/{accept,dismiss}` | what to do next |
@@ -370,7 +393,7 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
 4. **Downgrade Ancilla**: an older Ancilla does not open `assistant.db`, so it ignores it. A newer file than the program
    understands is refused, never altered, with a message saying which version to restore.
 5. **Step the schema back** without removing the file: `scripts/assistant-rollback.mjs <data folder> <version>` writes an
-   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks; version 3 adds the voice's conversations; version 4 adds the Muse thread of a conversation; version 5 adds the meaning vectors of notes, which stepping back drops and switching meaning search on makes again).
+   export first, then runs the steps' `down` scripts (version 1 is memory and profile; version 2 adds tasks; version 3 adds the voice's conversations; version 4 adds the Muse thread of a conversation; version 5 adds the meaning vectors of notes, which stepping back drops and switching meaning search on makes again; version 6 adds the avatars you made or brought, which stepping back drops, so export first: the export holds them).
 
 ## What it does not do
 
@@ -387,6 +410,7 @@ Nothing outside `assistant.db` depends on the assistant, so every step below is 
   a local process that can reach the port can read it as it can read threads.
 - One assistant per data folder. Notes can be scoped to an account, but there is no separate assistant per account.
 - The character is a look and a tone, not a mind. The lines it says in the interface are written in advance, so it does
-  not learn your phrasing or comment on what you are doing, and it has no voice or sound. Faces are chosen from five
-  forms and drawn from a description; there is no image upload. The honest limit of the history is that it counts what
-  is stored: a note you erased no longer counts.
+  not learn your phrasing or comment on what you are doing, and it has no voice or sound. A face you bring is a picture
+  or pixels: Ancilla makes no pictures for you, it does not read animated GIFs past their first frame, and a sprite sheet's
+  rows are matched to moods by you (the layout desktop pets share is offered as a guess). The honest limit of the history
+  is that it counts what is stored: a note you erased no longer counts.

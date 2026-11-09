@@ -3629,6 +3629,242 @@
 .av[data-mood="concern"] .av-poly.ghost { transform: translate(3.4px, -2.4px); animation: av-glitch 0.9s steps(1) infinite; }
 .av[data-mood="asleep"] .av-node { animation: none; opacity: 0.4; }
 
+/*
+ * Figures: an avatar built from parts (see companion/figure). The main hue is `--h` as for every face; `--fa` is the accent
+ * hue, set inline. `data-shade` (0 pastel to 4 deep) picks the body's lightness, `data-finish` its material, and
+ * `data-mood` what it is doing. Nothing here draws a transform onto an element that also has a transform attribute (a CSS
+ * transform replaces the attribute): motion goes on the groups that have none.
+ */
+.fg {
+  --fg-ink: oklch(0.22 0.045 var(--h));
+  --fg-spec: #fff;
+  --fg-hi: oklch(0.97 0.03 var(--h));
+  --fg-night: oklch(0.17 0.045 var(--h));
+  --fg-eyehot: oklch(0.97 0.05 var(--fa));
+  --fa-1: oklch(0.86 0.13 var(--fa));
+  --fa-2: oklch(0.72 0.16 var(--fa));
+  --fa-3: oklch(0.5 0.13 var(--fa));
+  --fg-1: oklch(0.85 0.12 var(--h));
+  --fg-2: oklch(0.74 0.15 var(--h));
+  --fg-3: oklch(0.54 0.14 var(--h));
+}
+.fg[data-shade="0"] { --fg-1: oklch(0.95 0.045 var(--h)); --fg-2: oklch(0.89 0.08 var(--h)); --fg-3: oklch(0.72 0.1 var(--h)); }
+.fg[data-shade="1"] { --fg-1: oklch(0.91 0.075 var(--h)); --fg-2: oklch(0.83 0.115 var(--h)); --fg-3: oklch(0.65 0.125 var(--h)); }
+.fg[data-shade="3"] { --fg-1: oklch(0.74 0.14 var(--h)); --fg-2: oklch(0.6 0.15 var(--h)); --fg-3: oklch(0.42 0.12 var(--h)); }
+.fg[data-shade="4"] { --fg-1: oklch(0.58 0.13 var(--h)); --fg-2: oklch(0.43 0.12 var(--h)); --fg-3: oklch(0.3 0.09 var(--h)); --fg-ink: oklch(0.97 0.03 var(--h)); --fg-spec: oklch(0.2 0.04 var(--h)); }
+.fg[data-finish="neon"] { --fg-ink: oklch(0.96 0.06 var(--h)); --fg-spec: oklch(0.2 0.04 var(--h)); }
+
+.fg-ground { fill: oklch(0 0 0 / 0.3); }
+.fg-ground.floaty { animation: fg-shadow 6.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.fg-body-wrap {
+  transform-box: view-box;
+  transform-origin: 80px 142px;
+  animation: av-chest var(--breath) ease-in-out infinite;
+}
+.fg-hop { transform-box: view-box; transform-origin: 80px 142px; }
+.fg-float { animation: fg-drift calc(var(--breath) * 1.35) ease-in-out infinite; }
+
+/* The body and its finish */
+.fg-outline { stroke: color-mix(in oklab, var(--fg-3) 62%, transparent); stroke-width: 1.6; stroke-linejoin: round; }
+.fg-outline.wide { stroke-width: 3.2; }
+.fg-fill-night { fill: var(--fg-night); }
+.fg-fill-flat { fill: var(--fg-1); }
+.fg-fill-aflat { fill: var(--fa-1); }
+.fg[data-finish="glass"] .fg-outline { stroke: var(--fg-1); stroke-width: 1.8; }
+.fg[data-finish="glass"] .fg-outline.wide { stroke-width: 3.6; }
+.fg[data-finish="metal"] .fg-outline { stroke: var(--fg-3); stroke-width: 1.5; }
+.fg[data-finish="neon"] .fg-outline { stroke: var(--fg-1); stroke-width: 2.6; filter: drop-shadow(0 0 4px var(--fg-1)); }
+.fg[data-finish="neon"] .fg-outline.wide { stroke-width: 5.2; }
+.fg[data-finish="ink"] .fg-outline { stroke: var(--fg-ink); stroke-width: 3.2; }
+.fg[data-finish="ink"] .fg-outline.wide { stroke-width: 6.4; }
+.fg-shade-b { mix-blend-mode: multiply; }
+.fg-spec-hi { fill: #fff; opacity: 0.72; }
+.fg-spec-hi.dot { opacity: 0.6; }
+.fg-rim-light { fill: none; stroke: #fff; stroke-width: 1.6; opacity: 0.2; stroke-linecap: round; }
+.fg-glass-hi { fill: none; stroke: #fff; stroke-width: 3.4; stroke-linecap: round; opacity: 0.55; }
+.fg-glass-dot { fill: #fff; opacity: 0.6; }
+.fg-glass-rim { fill: none; stroke: var(--fg-1); stroke-width: 1.4; opacity: 0.5; stroke-linecap: round; }
+.fg-streak { fill: #fff; opacity: 0.22; }
+.fg-metal-seam { fill: none; stroke: var(--fg-3); opacity: 0.5; stroke-width: 1.2; }
+.fg-neon-inner { fill: none; stroke: var(--fg-1); stroke-width: 1.2; opacity: 0.4; stroke-dasharray: 2 4; }
+.fg-ink-shade { fill: var(--fg-2); opacity: 0.55; }
+.fg-stitch { fill: none; stroke: var(--fg-3); stroke-width: 1.2; stroke-dasharray: 3 3.4; opacity: 0.5; }
+.fg-facets path { fill: none; stroke: #fff; stroke-width: 1.2; opacity: 0.35; stroke-linejoin: round; }
+.fg-seams { fill: none; stroke: var(--fg-3); stroke-width: 1.2; opacity: 0.5; }
+.fg-seams circle { fill: var(--fg-3); stroke: none; }
+.fg-lights circle { fill: var(--fa-1); filter: drop-shadow(0 0 2px var(--fa-1)); animation: av-twinkle 2s ease-in-out infinite; }
+.fg-lights circle:nth-child(2n) { animation-delay: 0.7s; }
+.fg-inner { fill: var(--fa-1); opacity: 0.8; }
+.fg-glint { animation: none; }
+.fg-jet { animation: fg-jet 0.34s steps(2) infinite; transform-box: fill-box; transform-origin: 50% 0; }
+.fg-tentacle { fill: none; stroke: var(--fg-2); stroke-width: 7.4; stroke-linecap: round; filter: drop-shadow(0 0 0.7px var(--fg-3)); transform-box: fill-box; transform-origin: 50% 0; animation: fg-wave 3.2s ease-in-out infinite; }
+.fg-tentacle.b { animation-delay: -0.5s; }
+.fg-tentacle.c { animation-delay: -1s; }
+.fg-tentacle.d { animation-delay: -1.5s; }
+.fg-tentacle.e { animation-delay: -2s; }
+.fg[data-finish="neon"] .fg-tentacle { stroke: var(--fg-1); filter: drop-shadow(0 0 3px var(--fg-1)); }
+
+/* Parts: ears, horns, hats, gear */
+.fg-part, .fg-part-a { stroke: color-mix(in oklab, var(--fg-3) 62%, transparent); stroke-width: 1.4; stroke-linejoin: round; }
+.fg-part-a { stroke: color-mix(in oklab, var(--fa-3) 72%, transparent); }
+.fg[data-finish="ink"] .fg-part, .fg[data-finish="ink"] .fg-part-a { stroke: var(--fg-ink); stroke-width: 2.6; }
+.fg[data-finish="ink"] .fg-part { fill: var(--fg-1); }
+.fg[data-finish="ink"] .fg-part-a { fill: var(--fa-1); }
+.fg[data-finish="neon"] .fg-part { fill: var(--fg-night); stroke: var(--fg-1); filter: drop-shadow(0 0 3px var(--fg-1)); }
+.fg[data-finish="neon"] .fg-part-a { fill: var(--fg-night); stroke: var(--fa-1); filter: drop-shadow(0 0 3px var(--fa-1)); }
+.fg[data-finish="glass"] .fg-part, .fg[data-finish="glass"] .fg-part-a { fill-opacity: 0.62; }
+.fg-ear-in { fill: color-mix(in oklab, var(--fa-1) 70%, var(--fg-2)); opacity: 0.6; }
+.fg-tip { fill: var(--fg-3); opacity: 0.9; }
+.fg-foot { fill: color-mix(in oklab, var(--fg-3) 80%, var(--fg-2)); stroke: color-mix(in oklab, var(--fg-3) 70%, transparent); stroke-width: 1.2; }
+.fg[data-finish="neon"] .fg-foot { fill: var(--fg-night); stroke: var(--fg-1); }
+.fg[data-finish="ink"] .fg-foot { fill: var(--fg-2); stroke: var(--fg-ink); stroke-width: 2.6; }
+.fg-arm { transform-box: fill-box; transform-origin: 75% 18%; }
+.fg-ear { transform-box: fill-box; transform-origin: 50% 100%; animation: av-twitch 9s ease-in-out infinite; }
+.fg-top > g:nth-of-type(2) .fg-ear { animation-delay: 4s; }
+.fg-stalk { fill: none; stroke: var(--fg-3); stroke-width: 3.2; stroke-linecap: round; }
+.fg-stalk.thin { stroke-width: 2.2; }
+.fg-bulb { fill: var(--fa-1); filter: drop-shadow(0 0 5px var(--fa-1)); animation: av-breathe var(--breath) ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+.fg-hair { fill: none; stroke: var(--fg-3); stroke-width: 3.6; stroke-linecap: round; }
+.fg-hair.thin { stroke-width: 2.4; }
+.fg-band { fill: none; stroke: var(--fa-3); stroke-width: 2; opacity: 0.8; stroke-linecap: round; }
+.fg-halo { fill: none; stroke: var(--fa-1); stroke-width: 3.6; filter: drop-shadow(0 0 5px var(--fa-1)); animation: av-float 4.6s ease-in-out infinite; }
+.fg-cuff { fill: var(--fa-3); stroke: color-mix(in oklab, var(--fa-3) 60%, black); stroke-width: 1; }
+.fg-rib { fill: none; stroke: var(--fa-1); opacity: 0.5; stroke-width: 1.4; stroke-linecap: round; }
+.fg-pom { fill: var(--fa-1); stroke: var(--fa-3); stroke-width: 1; }
+.fg-brim { fill: var(--fa-3); stroke: color-mix(in oklab, var(--fa-3) 60%, black); stroke-width: 1; }
+.fg-jewel { fill: var(--fa-1); stroke: var(--fa-3); stroke-width: 0.8; }
+.fg-fire { fill: var(--fa-1); filter: drop-shadow(0 0 4px var(--fa-1)); transform-box: fill-box; transform-origin: 50% 100%; animation: fg-fire 0.9s ease-in-out infinite alternate; }
+.fg-fire.hot { fill: var(--fg-hi); filter: none; animation-delay: -0.3s; }
+.fg-frame { fill: none; stroke: var(--fg-ink); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.fg-lensfill { fill: #fff; opacity: 0.16; }
+.fg-shade { fill: oklch(0.15 0.03 var(--h)); stroke: oklch(0.3 0.04 var(--h)); stroke-width: 1; }
+.fg-bridge { fill: none; stroke: oklch(0.15 0.03 var(--h)); stroke-width: 2.4; stroke-linecap: round; }
+.fg-glint-line { fill: none; stroke: #fff; stroke-width: 1.6; opacity: 0.55; stroke-linecap: round; }
+.fg-rim { fill: none; stroke: var(--fa-1); stroke-width: 2.4; }
+.fg-chain { fill: none; stroke: var(--fa-1); stroke-width: 1.2; stroke-dasharray: 1.6 1.6; }
+.fg-band-arc { fill: none; stroke: var(--fg-3); stroke-width: 4.4; stroke-linecap: round; }
+.fg-band-arc.thin { stroke-width: 2.6; }
+.fg-cushion { fill: oklch(0.2 0.03 var(--h)); opacity: 0.85; }
+.fg-boom { fill: none; stroke: var(--fg-3); stroke-width: 2.2; stroke-linecap: round; }
+.fg-mic { fill: var(--fa-1); stroke: var(--fa-3); stroke-width: 0.8; }
+.fg-fold { fill: none; stroke: var(--fa-3); stroke-width: 1.2; opacity: 0.6; stroke-linecap: round; }
+.fg-tailtip { stroke: none; opacity: 0.85; }
+.fg-wing { transform-box: view-box; animation: fg-flap 2.8s ease-in-out infinite; }
+.fg-tail { transform-box: view-box; animation: fg-wag 3.4s ease-in-out infinite; }
+.fg-cape { transform-box: fill-box; transform-origin: 50% 0; animation: fg-flutter 4.2s ease-in-out infinite; }
+
+/* The face */
+.fg-eyes { transform-box: fill-box; transform-origin: 50% 55%; animation: av-blink-y var(--blink) var(--blink-at) infinite; }
+.fg-eye { transform-box: fill-box; transform-origin: center; transition: transform 300ms var(--ease-out); }
+.fg-pupil { transform: translate(calc(var(--lx) * 3px), calc(var(--ly) * 2.6px)); }
+.fg-ink-fill { fill: var(--fg-ink); }
+.fg-spec { fill: var(--fg-spec); opacity: 0.95; }
+.fg-spec.soft { opacity: 0.6; }
+.fg-sclera { fill: #fff; stroke: color-mix(in oklab, var(--fg-ink) 35%, transparent); stroke-width: 1; }
+.fg-iris-flat { fill: var(--fa-1); stroke: var(--fg-ink); stroke-width: 0.8; stroke-opacity: 0.5; }
+.fg-lidline { fill: none; stroke: var(--fg-ink); stroke-width: 2.6; stroke-linecap: round; }
+.fg-visor { fill: oklch(0.14 0.03 var(--h)); stroke: var(--fg-3); stroke-width: 1.4; }
+.fg-led { fill: var(--fg-eyehot); filter: drop-shadow(0 0 3px var(--fa-1)); }
+.fg-scan { fill: #fff; opacity: 0; }
+.fg-lens-rim { fill: oklch(0.2 0.03 var(--h)); stroke: var(--fg-3); stroke-width: 2.4; }
+.fg-ring { fill: none; stroke: var(--fg-ink); stroke-width: 3; }
+.fg-core { fill: var(--fa-1); filter: drop-shadow(0 0 3px var(--fa-1)); }
+.fg-goggle { fill: #fff; stroke: var(--fg-3); stroke-width: 3; }
+.fg-happy, .fg-closed { fill: none; stroke: var(--fg-ink); stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; opacity: 0; }
+.fg-happy.hot, .fg-closed.hot { stroke: var(--fg-eyehot); }
+.fg-brows { fill: none; stroke: var(--fg-ink); stroke-width: 2.4; stroke-linecap: round; opacity: 0; transition: opacity 200ms; }
+.fg-mouth { fill: none; stroke: var(--fg-ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.fg-mouth .fg-ink-fill { fill: var(--fg-ink); stroke: none; }
+.fg-mouth .m-work, .fg-mouth .m-o, .fg-mouth .m-glad, .fg-mouth .m-sad, .fg-mouth .m-sleep { opacity: 0; }
+.fg-mouth .m-o { fill: var(--fg-ink); stroke: none; }
+.fg-mouth .m-glad { fill: var(--fg-ink); }
+.fg-tongue { fill: var(--fa-1); stroke: var(--fg-ink); stroke-width: 0.8; }
+.fg-fang { fill: #fff; stroke: var(--fg-ink); stroke-width: 0.8; }
+.fg-beak { fill: var(--fa-2); stroke: var(--fa-3); stroke-width: 1; }
+.fg-beak-shine { fill: none; stroke: #fff; stroke-width: 1.6; opacity: 0.55; }
+.fg-grille { fill: none; stroke: var(--fg-eyehot); stroke-width: 1.4; opacity: 0.85; }
+
+/* Markings */
+.fg-blush ellipse { fill: var(--fa-1); opacity: 0.42; }
+.fg-freckles circle { fill: var(--fg-3); opacity: 0.6; }
+.fg-stripes path { fill: none; stroke: var(--fg-3); stroke-width: 3.2; stroke-linecap: round; opacity: 0.8; }
+.fg-spots circle { fill: var(--fg-3); opacity: 0.38; }
+.fg-spots.light circle { fill: var(--fg-hi); opacity: 0.85; }
+.fg-belly { fill: var(--fg-hi); opacity: 0.5; }
+.fg-mask { fill: var(--fg-3); opacity: 0.9; }
+.fg-gem path { fill: var(--fa-1); stroke: var(--fa-3); stroke-width: 1.2; stroke-linejoin: round; filter: drop-shadow(0 0 3px var(--fa-1)); }
+.fg-gem path.cut { fill: none; stroke: #fff; stroke-width: 0.8; opacity: 0.6; filter: none; }
+.fg-bolt { fill: var(--fa-1); stroke: var(--fa-3); stroke-width: 1; stroke-linejoin: round; }
+.fg-circuit path { fill: none; stroke: var(--fa-2); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.fg-circuit circle { fill: var(--fa-1); }
+
+/* Auras */
+.fg-glowring { fill: none; stroke: var(--av-2); stroke-width: 1.6; opacity: 0.5; animation: av-bloom calc(var(--breath) * 1.4) ease-in-out infinite; transform-box: view-box; transform-origin: 80px 90px; }
+.fg-spark { fill: var(--fa-1); animation: av-twinkle 3s ease-in-out infinite; }
+.fg-orbit { transform-box: view-box; transform-origin: 80px 90px; animation: av-spin 18s linear infinite; }
+.fg-orbit-ring { fill: none; stroke: var(--fa-2); opacity: 0.25; stroke-dasharray: 2 5; }
+.fg-orbit-dot { fill: var(--fa-1); filter: drop-shadow(0 0 3px var(--fa-1)); }
+.fg-ember { fill: var(--fa-1); opacity: 0; animation: av-rise 5s var(--ease-out) infinite; }
+.fg-bubble { fill: color-mix(in oklab, var(--fa-1) 14%, transparent); stroke: var(--fa-1); stroke-width: 1; opacity: 0; animation: fg-bubble 8s linear infinite; }
+.fg-petal { fill: var(--fa-1); opacity: 0; animation: fg-petal 9s linear infinite; }
+.fg-bit { fill: var(--fa-1); opacity: 0; animation: fg-fall 3.4s linear infinite; }
+.fg-note { opacity: 0; animation: fg-note 6s ease-out infinite; }
+.fg-note ellipse { fill: var(--fa-1); }
+.fg-note path { fill: none; stroke: var(--fa-1); stroke-width: 1.8; stroke-linecap: round; }
+.fg-heart { fill: var(--fa-1); opacity: 0; animation: fg-heart 5s ease-out infinite; }
+
+/* What it is doing */
+.fg[data-mood="working"] .fg-eye { transform: scaleY(0.74); }
+.fg[data-mood="working"] .fg-pupil { transform: translate(calc(var(--lx) * 2px + 2px), calc(var(--ly) * 2px + 2.4px)); }
+.fg[data-mood="working"] .fg-scan { opacity: 0.16; animation: fg-scan 1.6s ease-in-out infinite alternate; }
+.fg[data-mood="working"] .fg-float { animation-duration: 3.4s; }
+.fg[data-mood="working"] .fg-grille { animation: av-twinkle 0.8s ease-in-out infinite; }
+.fg[data-mood="working"] .m-idle { opacity: 0; }
+.fg[data-mood="working"] .m-work { opacity: 1; }
+.fg[data-mood="attention"] .fg-eye { transform: scale(1.14); }
+.fg[data-mood="attention"] .fg-hop { animation: av-hop 1.15s ease-in-out infinite; }
+.fg[data-mood="attention"] .m-idle { opacity: 0; }
+.fg[data-mood="attention"] .m-o { opacity: 1; }
+.fg[data-mood="delight"] .fg-eyes, .fg[data-mood="asleep"] .fg-eyes { opacity: 0; animation: none; }
+.fg[data-mood="delight"] .fg-happy { opacity: 1; }
+.fg[data-mood="delight"] .fg-hop { animation: av-bounce 0.62s var(--ease-out) 3; }
+.fg[data-mood="delight"] .fg-arm { animation: av-wave-l 0.4s ease-in-out 4; }
+.fg[data-mood="delight"] .m-idle { opacity: 0; }
+.fg[data-mood="delight"] .m-glad { opacity: 1; }
+.fg[data-mood="delight"] .fg-blush ellipse { opacity: 0.7; }
+.fg[data-mood="concern"] .fg-eye { transform: translateY(1px) scaleY(0.92); }
+.fg[data-mood="concern"] .fg-brows { opacity: 1; }
+.fg[data-mood="concern"] .fg-body-wrap { animation: av-shiver 0.12s linear 8; filter: saturate(0.8); }
+.fg[data-mood="concern"] .m-idle { opacity: 0; }
+.fg[data-mood="concern"] .m-sad { opacity: 1; }
+.fg[data-mood="asleep"] .fg-closed { opacity: 1; }
+.fg[data-mood="asleep"] .fg-body-wrap { animation: av-chest 7s ease-in-out infinite; }
+.fg[data-mood="asleep"] .fg-float { animation: fg-drift 9s ease-in-out infinite; }
+.fg[data-mood="asleep"] .m-idle { opacity: 0; }
+.fg[data-mood="asleep"] .m-sleep { opacity: 1; }
+.fg[data-mood="asleep"] .av-z.a { animation: av-zzz 4.6s ease-in-out infinite; }
+.fg[data-mood="asleep"] .av-z.b { animation: av-zzz 4.6s ease-in-out 1.6s infinite; }
+.av-sweat { fill: oklch(0.84 0.09 235); stroke: oklch(0.6 0.1 235); stroke-width: 0.8; opacity: 0; }
+.av[data-mood="concern"] .av-sweat { opacity: 0.95; animation: av-sweat 1.4s ease-in infinite; }
+
+/* A picture or pixel art: it breathes at rest, and in its own way for each mood unless it has frames of its own for that mood */
+.av-motion {
+  transform-box: view-box;
+  transform-origin: 80px 144px;
+  animation: av-chest var(--breath) ease-in-out infinite;
+  filter: drop-shadow(0 0 calc(9px * var(--g)) var(--av-1));
+}
+.av[data-mood="working"] .av-motion[data-own="false"] { animation: av-bob 0.9s ease-in-out infinite; }
+.av[data-mood="attention"] .av-motion[data-own="false"] { animation: av-hop 1.15s ease-in-out infinite; }
+.av[data-mood="delight"] .av-motion[data-own="false"] { animation: av-bounce 0.62s var(--ease-out) 3; }
+.av[data-mood="concern"] .av-motion[data-own="false"] { animation: av-shiver 0.12s linear 8; filter: saturate(0.7) drop-shadow(0 0 calc(9px * var(--g)) var(--av-1)); }
+.av[data-mood="asleep"] .av-motion { animation: av-chest 7s ease-in-out infinite; }
+.pk .fg-ground { fill: oklch(0 0 0 / 0.3); }
+
+/* A face on a card is still until the card is pointed at, so a page of thirty does not all move at once. */
+.av-calm, .av-calm * { animation-play-state: paused !important; }
+.group:hover .av-calm, .group:hover .av-calm *, .group:focus-visible .av-calm, .group:focus-visible .av-calm * { animation-play-state: running !important; }
+
 /* ---------------------------------------------------------------- motion */
 @keyframes av-spin { to { transform: rotate(360deg); } }
 @keyframes av-breathe {
@@ -3719,6 +3955,77 @@
 @keyframes av-twinkle {
   0%, 100% { opacity: 0.55; }
   50% { opacity: 1; }
+}
+@keyframes av-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+@keyframes av-sweat {
+  0% { transform: translateY(0); opacity: 0.95; }
+  100% { transform: translateY(12px); opacity: 0; }
+}
+@keyframes fg-drift {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+@keyframes fg-shadow {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.84); opacity: 0.7; }
+}
+@keyframes fg-jet {
+  0% { transform: scaleY(1); opacity: 0.9; }
+  100% { transform: scaleY(0.78); opacity: 0.6; }
+}
+@keyframes fg-wave {
+  0%, 100% { transform: rotate(-4deg) skewX(-3deg); }
+  50% { transform: rotate(4deg) skewX(3deg); }
+}
+@keyframes fg-flap {
+  0%, 100% { transform: rotate(0); }
+  50% { transform: rotate(-9deg); }
+}
+@keyframes fg-wag {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(6deg); }
+}
+@keyframes fg-flutter {
+  0%, 100% { transform: skewX(-2deg); }
+  50% { transform: skewX(3deg); }
+}
+@keyframes fg-fire {
+  0% { transform: scale(1, 1) skewX(-3deg); }
+  100% { transform: scale(0.94, 1.1) skewX(3deg); }
+}
+@keyframes fg-scan {
+  from { transform: translateX(0); }
+  to { transform: translateX(48px); }
+}
+@keyframes fg-bubble {
+  0% { transform: translate(0, 0); opacity: 0; }
+  12% { opacity: 0.85; }
+  50% { transform: translate(6px, -56px); }
+  100% { transform: translate(-4px, -118px); opacity: 0; }
+}
+@keyframes fg-petal {
+  0% { transform: translate(0, 0) rotate(0); opacity: 0; }
+  10% { opacity: 0.9; }
+  50% { transform: translate(14px, 70px) rotate(160deg); }
+  100% { transform: translate(-6px, 144px) rotate(340deg); opacity: 0; }
+}
+@keyframes fg-fall {
+  0% { transform: translateY(0); opacity: 0; }
+  12% { opacity: 0.85; }
+  100% { transform: translateY(146px); opacity: 0; }
+}
+@keyframes fg-note {
+  0% { transform: translate(0, 0); opacity: 0; }
+  15% { opacity: 0.95; }
+  100% { transform: translate(8px, -70px); opacity: 0; }
+}
+@keyframes fg-heart {
+  0% { transform: translate(0, 0); opacity: 0; }
+  15% { opacity: 0.95; }
+  100% { transform: translate(5px, -34px); opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .av *,

@@ -1,3 +1,4 @@
+import { MAX_AVATAR_BYTES, MAX_AVATARS, MAX_TOTAL_AVATAR_BYTES } from "./avatars.js";
 import { parseEmbeddingSettings, testEmbedding } from "./embed.js";
 import { DEFAULT_PROFILE } from "./profile.js";
 import { NO_EMBEDDING, type AssistantService } from "./service.js";
@@ -97,6 +98,17 @@ export interface AssistantAccess {
 
 const NO_STATS = { schemaVersion: 0, ftsEnabled: false, epoch: 0, items: { active: 0, superseded: 0, contested: 0, pending: 0, deleted: 0 }, kinds: {}, revisions: 0, sources: 0, tombstones: 0, bytes: 0 };
 
+/** What the avatar library may hold, and how much of it is in use. */
+function avatarLimits(usage: { used: number; total: number }): { count: number; perAvatarBytes: number; totalBytes: number; used: number; total: number } {
+  return { count: MAX_AVATARS, perAvatarBytes: MAX_AVATAR_BYTES, totalBytes: MAX_TOTAL_AVATAR_BYTES, used: usage.used, total: usage.total };
+}
+
+/** A number the caller may send to say which version they were looking at. */
+function expected(value: unknown): number | undefined {
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) bad("expectedUpdatedAt must be a number", "expectedUpdatedAt");
+  return value as number | undefined;
+}
+
 /** What looking at an assistant that has not been used yet shows: its defaults, and nothing stored. */
 function untouched(req: AssistantRequest, sub: string): AssistantReply {
   if (req.method === "GET" && sub === "") return { status: 200, body: { available: true, fresh: true, profile: DEFAULT_PROFILE, goals: [], stats: NO_STATS, bond: EMPTY_BOND, epoch: 0, executive: false, tasks: { open: 0, needsYou: 0, running: 0 } } };
@@ -107,7 +119,8 @@ function untouched(req: AssistantRequest, sub: string): AssistantReply {
   if (req.method === "GET" && sub === "/memories") return { status: 200, body: { items: [], total: 0, epoch: 0 } };
   if (req.method === "GET" && sub === "/embeddings") return { status: 200, body: { ...NO_EMBEDDING } };
   if (req.method === "GET" && sub === "/activity") return { status: 200, body: { activity: [] } };
-  if (req.method === "GET" && sub === "/export") return { status: 200, body: { format: "ancilla.assistant.export", version: 1, items: [], goals: [], profile: DEFAULT_PROFILE, notes: ["The assistant has not been used yet."] }, download: "ancilla-assistant-empty.json" };
+  if (req.method === "GET" && sub === "/avatars") return { status: 200, body: { avatars: [], limits: avatarLimits({ used: 0, total: 0 }) } };
+  if (req.method === "GET" && sub === "/export") return { status: 200, body: { format: "ancilla.assistant.export", version: 1, items: [], goals: [], avatars: [], profile: DEFAULT_PROFILE, notes: ["The assistant has not been used yet."] }, download: "ancilla-assistant-empty.json" };
   if (req.method === "POST" && sub === "/preview") return { status: 200, body: { text: "", tokens: 0, wouldAdd: false, noEvidence: false, omitted: [], memories: [] } };
   if (req.method === "GET" && /^\/threads\/[^/]+\/context$/.test(sub)) return { status: 200, body: { context: null } };
   return { status: 404, body: { error: "Nothing is saved yet.", kind: "not_found" } };
@@ -238,9 +251,8 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
     if (req.method === "PATCH" && sub === "/profile") {
       const body = await req.body();
       const { expectedUpdatedAt, ...patch } = body;
-      if (expectedUpdatedAt !== undefined && (typeof expectedUpdatedAt !== "number" || !Number.isFinite(expectedUpdatedAt))) bad("expectedUpdatedAt must be a number", "expectedUpdatedAt");
       const before = store.getProfile();
-      const profile = store.saveProfile(patch, expectedUpdatedAt as number | undefined);
+      const profile = store.saveProfile(patch, expected(expectedUpdatedAt));
       // Switching the assistant off stops its work from starting anything new; a turn already running finishes.
       if (before.enabled && !profile.enabled) service.executive?.pauseAll("The assistant was switched off.");
       service.announce({ reason: "profile" });
@@ -263,6 +275,32 @@ export async function handleAssistant(access: AssistantAccess, req: AssistantReq
     if (goalMatch && req.method === "DELETE") {
       store.removeGoal(goalMatch[1] as string);
       service.announce({ reason: "goal" });
+      return { status: 200, body: { ok: true } };
+    }
+
+    // ---- saved avatars: the library the assistant's look can be chosen from
+    if (req.method === "GET" && sub === "/avatars") return { status: 200, body: { avatars: store.listAvatars(), limits: avatarLimits(store.avatarUsage()) } };
+    if (req.method === "POST" && sub === "/avatars") {
+      const avatar = store.createAvatar(await req.body());
+      // The library is part of the Persona page, which reloads with the profile: no event of its own is needed.
+      service.announce({ reason: "profile" });
+      return { status: 201, body: { avatar } };
+    }
+    const avatarMatch = sub.match(new RegExp(`^/avatars/${ID}$`));
+    if (avatarMatch && req.method === "GET") return { status: 200, body: { avatar: store.requireAvatar(avatarMatch[1] as string) } };
+    if (avatarMatch && req.method === "PATCH") {
+      const avatarId = avatarMatch[1] as string;
+      const { expectedUpdatedAt, ...patch } = await req.body();
+      const wearing = store.getProfile().character.avatar.look;
+      const active = wearing.kind === "pack" && wearing.id === avatarId;
+      const avatar = store.updateAvatar(avatarId, patch, undefined, expected(expectedUpdatedAt));
+      service.announce({ reason: "profile" });
+      // When the assistant wears this one, its look moved with it: the profile comes back so the page need not ask again.
+      return { status: 200, body: { avatar, ...(active ? { profile: store.getProfile() } : {}) } };
+    }
+    if (avatarMatch && req.method === "DELETE") {
+      store.deleteAvatar(avatarMatch[1] as string);
+      service.announce({ reason: "profile" });
       return { status: 200, body: { ok: true } };
     }
 

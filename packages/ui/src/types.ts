@@ -824,9 +824,87 @@ export type AvatarForm = "halo" | "optic" | "hologram" | "critter" | "cipher";
 export type VoiceArchetype = "steady" | "warm" | "dry" | "sharp" | "playful" | "formal" | "curious" | "custom";
 export type CharacterPresence = "off" | "tone" | "full";
 
+/** What a face is doing. The first is the resting one; delight and concern are brief and go back to it. */
+export type AvatarMoodId = "idle" | "working" | "attention" | "delight" | "concern" | "asleep";
+
+/**
+ * A figure built from parts. Each part is named by a short id from the catalogue in `companion/figure/parts.ts`, and an id the
+ * catalogue does not know draws the plain part, so a pack made by a newer Ancilla still shows in an older one. The colours
+ * come from the avatar's own hue and glow, so one slider recolours any figure.
+ */
+export interface FigureSpec {
+  body: string;
+  top: string;
+  eyes: string;
+  mouth: string;
+  mark: string;
+  gear: string;
+  aura: string;
+  finish: string;
+  /** The accent colour's hue, 0 to 359, or null for the one that suits the main hue. */
+  accent: number | null;
+  /** From light (0) to deep (4). */
+  shade: number;
+}
+
+/**
+ * What the assistant wears. A sigil is one of the five forms of light above (the form, hue, glow and detail say which);
+ * a figure is built from parts and carried right here, because it is small; a pack is something the user drew or brought
+ * (pixel art, a picture, a sprite sheet), kept on the server and fetched by its id, at the revision named.
+ */
+export type AvatarLookView = { kind: "sigil" } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
+
+/** Pixel art: a square or a rectangle of coloured cells with frames for the moods. */
+export interface PixelData {
+  /** Cells across and down, 8 to 64. */
+  w: number;
+  h: number;
+  /** "#rrggbb" colours, at most 32. A cell holds 0 (clear) or n, which is `palette[n - 1]`. */
+  palette: string[];
+  /** Each mood's frames: every frame is `w * h` cells, one byte each, in base64; `ms` is how long a frame shows. Idle is required; a mood without frames wears idle's and moves in its own way. */
+  moods: Partial<Record<AvatarMoodId, { ms: number; frames: string[] }>>;
+}
+
+/** A picture, or a sprite sheet: a grid of frames in one picture, with the row that plays for each mood. */
+export interface ImagePackData {
+  /** The picture as a `data:image/png|webp|jpeg;base64,` URL. */
+  src: string;
+  /** Pixels across and down of the whole picture. */
+  w: number;
+  h: number;
+  /** Present for a sprite sheet: its grid, and which row and how many frames of it play for each mood. */
+  sheet?: { cols: number; rows: number; moods: Partial<Record<AvatarMoodId, { row: number; frames: number; ms: number }>> };
+  /** Scale it without smoothing, for pixel art. */
+  crisp: boolean;
+}
+
+/** A figure kept on its own, with the colour it was made in. */
+export interface FigurePackData {
+  figure: FigureSpec;
+  hue: number;
+  glow: number;
+}
+
+export type AvatarPackKind = "figure" | "pixel" | "image";
+
+/** An avatar the user made or brought, as kept: the library on the Persona page lists these. */
+export type AvatarPackView = {
+  id: string;
+  /** What the user calls it, up to 40 characters. */
+  name: string;
+  /** Size of its data, in bytes. */
+  bytes: number;
+  createdAt: number;
+  updatedAt: number;
+} & ({ kind: "figure"; data: FigurePackData } | { kind: "pixel"; data: PixelData } | { kind: "image"; data: ImagePackData });
+
+/** An avatar without its data: what the library lists, so that opening the page does not carry every picture. */
+export type AvatarPackMeta = Omit<AvatarPackView, "data">;
+
 /** The assistant as a character: a face, a voice and a few habits. It changes how it looks and sounds, never what it may do. */
 export interface AssistantCharacterView {
-  avatar: { form: AvatarForm; hue: number; glow: number; detail: number; seed: number };
+  /** `look` is absent on a server that predates it, and means a sigil. */
+  avatar: { form: AvatarForm; hue: number; glow: number; detail: number; seed: number; look?: AvatarLookView };
   voice: { archetype: VoiceArchetype; warmth: number; humor: number; directness: number; curiosity: number; formality: number };
   callsUser: string;
   quirks: string[];

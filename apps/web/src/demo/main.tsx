@@ -115,7 +115,7 @@ if (params.get("gallery") === "avatars") {
   document.documentElement.dataset["theme"] = theme === "light" ? "light" : "dark";
   createRoot(root).render(
     <StrictMode>
-      <AvatarGallery hue={Number(params.get("hue")) || undefined} glow={Number(params.get("glow")) || undefined} />
+      <AvatarGallery hue={Number(params.get("hue")) || undefined} glow={Number(params.get("glow")) || undefined} section={params.get("section")} />
     </StrictMode>,
   );
 } else {

@@ -1,10 +1,16 @@
 import { useEffect, useId, useRef, type CSSProperties, type ReactNode, type RefObject } from "react";
-import { avatarVars, describeAvatar, particles, polygon, pointsOf, type AvatarMood, type AvatarSpec } from "./faces.js";
+import { avatarVars, particles, polygon, pointsOf, type AvatarMood, type AvatarSpec } from "./faces.js";
+import { accentHue } from "./figure/parts.js";
+import { Figure, Overlays } from "./figure/Figure.js";
+import { describeLook, packRef, resolveLook, type RenderLook } from "./look.js";
+import { usePack } from "./packs.js";
+import { ImageSprite, PixelLook } from "./sprite.js";
 
 /**
- * The assistant's face, drawn as SVG and moved by CSS (see `.av` in the stylesheet). One component, five forms, six
- * moods. It breathes and blinks on its own, looks where the pointer is when asked to, and a transient mood (delight,
- * concern) plays its burst again each time `burst` changes. Reduced motion holds it still, lit.
+ * The assistant's face, drawn as SVG and moved by CSS (see `.av` in the stylesheet). One component, whatever it wears: a
+ * sigil (five forms of light), a figure built from parts, or something the user drew or brought. It breathes and blinks
+ * on its own, looks where the pointer is when asked to, reacts to what the assistant is doing in any of six moods, and a
+ * transient mood (delight, concern) plays its burst again each time `burst` changes. Reduced motion holds it still, lit.
  */
 
 export interface AvatarProps {
@@ -21,6 +27,8 @@ export interface AvatarProps {
   /** A dark disc behind it, so it reads on any background; chips and small marks want one. */
   stage?: boolean;
   className?: string;
+  /** Draw this instead of what the spec names: a drawing not yet saved, or a card in the library. */
+  render?: RenderLook;
 }
 
 /** The pointer's direction from the face, eased, as two numbers from -1 to 1 on the element: the eyes read them. */
@@ -59,23 +67,56 @@ function useLook(ref: RefObject<SVGSVGElement | null>, enabled: boolean): void {
   }, [ref, enabled]);
 }
 
-export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, size = 96, look = false, stage = false, className }: AvatarProps) {
+export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, size = 96, look = false, stage = false, className, render }: AvatarProps) {
   const id = useId().replace(/:/g, "");
   const ref = useRef<SVGSVGElement>(null);
   useLook(ref, look);
-  const style = { ...avatarVars(spec), width: size, height: size } as CSSProperties;
+  const wanted = render ? null : packRef(spec);
+  const pack = usePack(wanted?.id ?? null, wanted?.rev ?? 0);
+  const wears: RenderLook = render ?? resolveLook(spec, pack);
+  const vars: Record<string, string | number> = { ...avatarVars(spec) };
+  if (wears.kind === "figure") vars["--fa"] = accentHue(wears.figure, spec.hue);
+  const style = { ...vars, width: size, height: size } as CSSProperties;
   const transient = mood === "delight" || mood === "concern";
+  const root = wears.kind === "figure" ? " fg" : wears.kind === "pixel" || wears.kind === "image" ? " pk" : "";
   return (
     <svg
       ref={ref}
       viewBox="0 0 160 160"
       role="img"
-      aria-label={describeAvatar(spec, name, mood)}
-      className={`av${className ? ` ${className}` : ""}`}
-      data-form={spec.form}
+      aria-label={describeLook(spec, name, mood, wears)}
+      className={`av${root}${className ? ` ${className}` : ""}`}
+      data-form={wears.kind === "sigil" ? spec.form : wears.kind}
+      data-look={wears.kind}
       data-mood={mood}
+      data-shade={wears.kind === "figure" ? wears.figure.shade : undefined}
+      data-finish={wears.kind === "figure" ? wears.figure.finish : undefined}
       style={style}
     >
+      {stage ? <circle cx="80" cy="80" r="78" className="av-stage" /> : null}
+      {wears.kind === "sigil" ? <Sigil id={id} spec={spec} /> : null}
+      {wears.kind === "figure" ? <Figure id={id} figure={wears.figure} seed={spec.seed} /> : null}
+      {wears.kind === "image" ? (
+        <>
+          <ImageSprite data={wears.data} mood={mood} />
+          <Overlays />
+        </>
+      ) : null}
+      {wears.kind === "pixel" ? (
+        <>
+          <PixelLook data={wears.data} mood={mood} />
+          <Overlays />
+        </>
+      ) : null}
+      {transient ? <Burst key={burst} mood={mood} /> : null}
+    </svg>
+  );
+}
+
+/** One of the five forms of light, with the gradients and clips they share. */
+function Sigil({ id, spec }: { id: string; spec: AvatarSpec }) {
+  return (
+    <>
       <defs>
         <radialGradient id={`${id}b`} cx="50%" cy="50%" r="50%">
           <stop offset="0%" style={{ stopColor: "var(--av-bloom)" }} />
@@ -115,14 +156,12 @@ export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, siz
           <rect width="4" height="1" style={{ fill: "var(--av-1)", fillOpacity: 0.34 }} />
         </pattern>
       </defs>
-      {stage ? <circle cx="80" cy="80" r="78" className="av-stage" /> : null}
       {spec.form === "halo" ? <Halo id={id} spec={spec} /> : null}
       {spec.form === "optic" ? <Optic id={id} spec={spec} /> : null}
       {spec.form === "hologram" ? <Hologram id={id} spec={spec} /> : null}
       {spec.form === "critter" ? <Critter id={id} spec={spec} /> : null}
       {spec.form === "cipher" ? <Cipher id={id} spec={spec} /> : null}
-      {transient ? <Burst key={burst} mood={mood} /> : null}
-    </svg>
+    </>
   );
 }
 

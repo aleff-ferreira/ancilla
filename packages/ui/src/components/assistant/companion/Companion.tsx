@@ -5,12 +5,11 @@ import { Section } from "../../settings/SettingsPage.js";
 import { ago, day, useAssistantData } from "../api.js";
 import { Chip } from "../parts.js";
 import { Avatar } from "./Avatar.js";
-import { looksLike, withArticle } from "./faces.js";
+import { wornSentence } from "./look.js";
 import { stateOf, useFaceMood } from "./mood.js";
+import { usePack } from "./packs.js";
 import { ARCHETYPES, DIALS, dialWord, greeting, milestoneText, say } from "./voice.js";
 import type { AssistantGlance } from "../../../model/store.js";
-
-const sentence = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
 
 /** What the sidebar's card and the dock read, built from the page's own, fuller answer. */
 export function glanceOf(status: AssistantStatusView): AssistantGlance {
@@ -61,6 +60,8 @@ export function CompanionHero(props: { status: AssistantStatusView; onMake: () =
   const state = stateOf(glance);
   const ch = glance.character;
   const bond = status.bond;
+  const worn = ch.avatar.look?.kind === "pack" ? ch.avatar.look : null;
+  const wornPack = usePack(worn?.id ?? null, worn?.rev ?? 0);
   const vars = { ["--h" as string]: ch.avatar.hue, ["--g" as string]: (ch.avatar.glow / 100).toFixed(2) };
   const facts: string[] = [];
   if (ch.showBond && bond.since !== null) {
@@ -80,7 +81,7 @@ export function CompanionHero(props: { status: AssistantStatusView; onMake: () =
           <h2 className="mt-0.5 font-display text-[28px] leading-8 tracking-[-0.01em] text-fg [overflow-wrap:anywhere]">{glance.name}</h2>
           <p className="mt-1 text-sm text-muted">
             {ARCHETYPES.find((a) => a.archetype === ch.voice.archetype)?.name ?? "Steady"} voice
-            {leanings(status) ? `, ${leanings(status)}` : ""}. {sentence(withArticle(looksLike(ch.avatar)))}.
+            {leanings(status) ? `, ${leanings(status)}` : ""}. {wornSentence(ch.avatar, wornPack)}
           </p>
         </div>
         <p className="border-l-2 pl-3 text-[15px] leading-6 text-fg [overflow-wrap:anywhere]" style={{ borderColor: `oklch(0.72 0.15 ${ch.avatar.hue} / 0.7)` }}>

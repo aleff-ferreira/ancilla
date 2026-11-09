@@ -104,8 +104,8 @@ export function PersonaPanel(props: { profile: AssistantProfileView; changed: ()
   const name = draft.name.trim() || "Ancilla";
   return (
     <div>
-      {/* It follows you down the page, so a change made far from it still shows on it, when the window is tall enough to spare the room. */}
-      <div className="z-10 mt-6 [@media(min-height:760px)]:sticky [@media(min-height:760px)]:top-2">
+      {/* It follows you down the page, so a change made far from it still shows on it, when the window is tall and wide enough to spare the room (a narrow one has no room to give). */}
+      <div className="z-10 mt-6 [@media(min-height:760px)_and_(min-width:640px)]:sticky [@media(min-height:760px)_and_(min-width:640px)]:top-2">
         <Preview draft={c} name={name} line={greeting(c, { name }, Date.now())} />
       </div>
       <p className="mt-2 h-4 text-right text-2xs text-subtle" role="status">{saving ? "Saving..." : error ? "" : "Saved as you go"}</p>
@@ -122,7 +122,7 @@ export function PersonaPanel(props: { profile: AssistantProfileView; changed: ()
 
       <Section title="Look">
         <div className="px-4 pb-4">
-          <LookEditor draft={c} onChange={(change) => update({ character: change })} />
+          <LookEditor draft={c} name={name} full onChange={(change) => update({ character: change })} />
         </div>
       </Section>
 

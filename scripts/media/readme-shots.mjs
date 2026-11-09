@@ -48,13 +48,25 @@ await scene("research-report", async (b, shot) => {
   await shot();
 });
 await scene("assistant-home", async (b, shot) => { await b.goto(`${base}?${q}#/assistant`, 3200); await shot(); });
-await scene("assistant-persona", async (b, shot) => { await b.goto(`${base}?${q}#/assistant`, 2600); await clickTab(b, "Persona"); await sleep(1100); await shot(); });
+// The Persona tab at its Look section: a character chosen, with the preview that follows the reader above the tabs.
+await scene("assistant-persona", async (b, shot) => {
+  await b.goto(`${base}?${q}#/assistant`, 2600);
+  await clickTab(b, "Persona");
+  await sleep(1100);
+  await clickButton(b, "Fox");
+  await sleep(700);
+  await b.eval(`(() => { const el = ${SCROLLER}; const t = Array.from(document.querySelectorAll('[role="tablist"]')).find((x) => x.getAttribute('aria-label') === 'How to choose a look'); if (el && t) el.scrollTop += t.getBoundingClientRect().top - el.getBoundingClientRect().top - 300; })()`);
+  await sleep(700);
+  await shot();
+});
+// The ready-made characters side by side (the browser demo's gallery of faces).
+await scene("assistant-avatars", async (b, shot) => { await b.goto(`${base}?gallery=avatars&section=presets&${q}`, 2200); await shot(); });
 await scene("assistant-memory", async (b, shot) => { await b.goto(`${base}?${q}#/assistant`, 2600); await clickTab(b, "Memory"); await sleep(1100); await shot(); });
 await scene("assistant-meeting", async (b, shot) => {
   await b.goto(`${base}?assistant=new&${q}#/assistant`, 2600);
   await clickButton(b, "Let's begin");
   await sleep(900);
-  await b.eval(`Array.from(document.querySelectorAll('button')).find((e) => e.textContent.includes('Hologram'))?.click()`);
+  await clickButton(b, "Ghost");
   await sleep(500);
   await clickButton(b, "Violet");
   await sleep(900);

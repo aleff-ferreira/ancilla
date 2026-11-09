@@ -1,15 +1,17 @@
-import type { AssistantCharacterView, AvatarForm } from "../../../types.js";
+import type { AssistantCharacterView, AvatarForm, AvatarMoodId } from "../../../types.js";
 
 /**
  * The assistant's face. An avatar is a small spec (a form, a hue, how much it glows, which variant, a seed) that the
  * renderer draws as a living thing: it breathes, blinks, looks where the pointer is, and reacts to what the assistant
  * is doing. Everything here is pure, so the same spec is the same face everywhere, in a chip, on the page and in a test.
+ * The five forms here are the "sigils", made of light; `look` on the spec says when it wears something else (a figure
+ * built from parts, or a pack the user drew or brought), and `look.ts` turns that into what is drawn.
  */
 
 export type AvatarSpec = AssistantCharacterView["avatar"];
 
 /** What the face is doing. The first is the resting one; a transient (delight, concern) is brief and returns to the resting mood. */
-export type AvatarMood = "idle" | "working" | "attention" | "delight" | "concern" | "asleep";
+export type AvatarMood = AvatarMoodId;
 export const MOODS: readonly AvatarMood[] = ["idle", "working", "attention", "delight", "concern", "asleep"];
 
 export interface FormInfo {
@@ -75,10 +77,13 @@ export const withArticle = (phrase: string): string => `${/^[aeiou]/i.test(phras
 /** The colour and the form, in lower case: "ice hologram". */
 export const looksLike = (spec: AvatarSpec): string => `${hueName(spec.hue).toLowerCase()} ${formInfo(spec.form).name.toLowerCase()}`;
 
+/** What the face is doing, in words a screen reader can use. */
+export const moodPhrase = (mood: AvatarMood): string =>
+  mood === "asleep" ? "asleep" : mood === "working" ? "working" : mood === "attention" ? "wants your attention" : mood === "delight" ? "pleased" : mood === "concern" ? "concerned" : "resting";
+
 /** What a screen reader says for the face: its form, colour and mood. */
 export function describeAvatar(spec: AvatarSpec, name: string, mood: AvatarMood = "idle"): string {
-  const state = mood === "asleep" ? "asleep" : mood === "working" ? "working" : mood === "attention" ? "wants your attention" : mood === "delight" ? "pleased" : mood === "concern" ? "concerned" : "resting";
-  return `${name}, ${withArticle(looksLike(spec))} with a ${glowName(spec.glow)}, ${state}`;
+  return `${name}, ${withArticle(looksLike(spec))} with a ${glowName(spec.glow)}, ${moodPhrase(mood)}`;
 }
 
 /** A small, fast, seedable generator, so the little touches of a face (blink timing, particles, proportions) are the same each time. */

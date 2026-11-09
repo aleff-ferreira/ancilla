@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { avatarBytes, MAX_AVATARS, MAX_TOTAL_AVATAR_BYTES, parseAvatarInput, parseAvatarPatch, type AvatarData, type AvatarKind } from "./avatars.js";
 import { assembleContext } from "./context.js";
 import { fromBlob, toBlob } from "./embed.js";
 import { extractCandidates, type ExtractContext } from "./extract.js";
@@ -13,6 +14,9 @@ import {
   GLOBAL,
   type AssembledContext,
   type AssistantProfile,
+  type AvatarLook,
+  type AvatarPack,
+  type AvatarPackMeta,
   type Basis,
   type Candidate,
   type Goal,
@@ -545,6 +549,14 @@ export class MemoryStore {
       const current = this.getProfile();
       if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== current.updatedAt) throw new ConflictError("The settings changed since you opened them.", { current: current.updatedAt });
       const now = this.now();
+      // A look that names a saved avatar must name one that exists, and carries that avatar's revision so a client can
+      // tell when what it drew is out of date. The parser could not know either; here the table is at hand.
+      const look = patch.character?.avatar?.look;
+      if (look?.kind === "pack") {
+        const pack = this.get("SELECT updated_at FROM avatar_packs WHERE id = ?", [look.id]);
+        if (!pack) throw new ValidationError("character.avatar.look.id", "no such avatar");
+        look.rev = Number(pack.updated_at);
+      }
       const next = applyProfilePatch(current, patch, Math.max(now, current.updatedAt + 1));
       this.run("UPDATE assistant_profile SET json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(next), next.updatedAt, ASSISTANT_ID]);
       // Words said while capture was off, or before the assistant was switched on, are not read when it comes back.
@@ -597,6 +609,106 @@ export class MemoryStore {
       if (!row) throw new NotFoundError("The goal");
       this.run("DELETE FROM assistant_goals WHERE id = ?", [goalId]);
       this.audit("goal.remove", goalId, "user");
+      this.bump();
+    });
+  }
+
+  // ------------------------------------------------------------------------------------------------ saved avatars
+
+  private toAvatarMeta(r: Row): AvatarPackMeta {
+    return { id: String(r.id), name: String(r.name), kind: r.kind as AvatarKind, bytes: Number(r.bytes), createdAt: Number(r.created_at), updatedAt: Number(r.updated_at) };
+  }
+
+  private toAvatar(r: Row): AvatarPack {
+    return { ...this.toAvatarMeta(r), data: JSON.parse(String(r.data)) as AvatarData } as AvatarPack;
+  }
+
+  /** The library, newest change first, without the data: the page lists these and asks for one when it needs to draw it. */
+  listAvatars(): AvatarPackMeta[] {
+    return this.all("SELECT id, name, kind, bytes, created_at, updated_at FROM avatar_packs ORDER BY updated_at DESC, id").map((r) => this.toAvatarMeta(r));
+  }
+
+  /** Every avatar with its data, oldest first: what the export carries. */
+  allAvatars(): AvatarPack[] {
+    return this.all("SELECT * FROM avatar_packs ORDER BY created_at, id").map((r) => this.toAvatar(r));
+  }
+
+  getAvatar(avatarId: string): AvatarPack | null {
+    const row = this.get("SELECT * FROM avatar_packs WHERE id = ?", [avatarId]);
+    return row ? this.toAvatar(row) : null;
+  }
+
+  requireAvatar(avatarId: string): AvatarPack {
+    const found = this.getAvatar(avatarId);
+    if (!found) throw new NotFoundError("The avatar");
+    return found;
+  }
+
+  /** How much of the library is in use: how many avatars, and how many bytes of data together. */
+  avatarUsage(): { used: number; total: number } {
+    const row = this.get("SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS b FROM avatar_packs");
+    return { used: Number(row?.b ?? 0), total: Number(row?.n ?? 0) };
+  }
+
+  /** The avatar the profile wears now, when it wears a saved one. */
+  private activeAvatarId(): string | null {
+    const look = this.getProfile().character.avatar.look;
+    return look.kind === "pack" ? look.id : null;
+  }
+
+  /** Changes only what the assistant wears, inside the caller's transaction, and moves the profile's `updatedAt` so a stale page knows. */
+  private setLook(look: AvatarLook, now: number): void {
+    const current = this.getProfile();
+    const next = normalizeProfile({ ...current, character: { ...current.character, avatar: { ...current.character.avatar, look } }, updatedAt: Math.max(now, current.updatedAt + 1) });
+    this.run("UPDATE assistant_profile SET json = ?, updated_at = ? WHERE id = ?", [JSON.stringify(next), next.updatedAt, ASSISTANT_ID]);
+  }
+
+  createAvatar(raw: unknown, now = this.now()): AvatarPack {
+    const input = parseAvatarInput(raw);
+    const bytes = avatarBytes(input.data);
+    return this.write(() => {
+      const usage = this.avatarUsage();
+      if (usage.total >= MAX_AVATARS) throw new ValidationError("avatars", `The library holds at most ${MAX_AVATARS} avatars. Remove one to make room.`);
+      if (usage.used + bytes > MAX_TOTAL_AVATAR_BYTES) throw new ValidationError("data", `This avatar would take the library past ${MAX_TOTAL_AVATAR_BYTES} bytes in all. Remove one to make room.`);
+      const avatar = { id: id("av"), name: input.name, kind: input.kind, data: input.data, bytes, createdAt: now, updatedAt: now } as AvatarPack;
+      this.run("INSERT INTO avatar_packs (id, name, kind, data, bytes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)", [avatar.id, avatar.name, avatar.kind, JSON.stringify(avatar.data), bytes, now, now]);
+      this.audit("avatar.add", avatar.id, "user", avatar.kind);
+      this.bump();
+      return avatar;
+    });
+  }
+
+  /**
+   * Renames an avatar or replaces its data (never its kind). `expectedUpdatedAt` is the `updatedAt` the caller was
+   * looking at: a change made on a stale view is refused. When the profile wears this avatar, its look moves to the new
+   * revision in the same transaction, so a client that compares revisions redraws it.
+   */
+  updateAvatar(avatarId: string, raw: unknown, now = this.now(), expectedUpdatedAt?: number): AvatarPack {
+    return this.write(() => {
+      const current = this.requireAvatar(avatarId);
+      if (expectedUpdatedAt !== undefined && expectedUpdatedAt !== current.updatedAt) throw new ConflictError("The avatar changed since you opened it.", { current: current.updatedAt });
+      const patch = parseAvatarPatch(raw, current.kind);
+      const data = patch.data ?? current.data;
+      const bytes = patch.data ? avatarBytes(patch.data) : current.bytes;
+      const usage = this.avatarUsage();
+      if (usage.used - current.bytes + bytes > MAX_TOTAL_AVATAR_BYTES) throw new ValidationError("data", `This change would take the library past ${MAX_TOTAL_AVATAR_BYTES} bytes in all. Remove an avatar to make room.`);
+      const updatedAt = Math.max(now, current.updatedAt + 1);
+      const next = { ...current, name: patch.name ?? current.name, data, bytes, updatedAt } as AvatarPack;
+      this.run("UPDATE avatar_packs SET name = ?, data = ?, bytes = ?, updated_at = ? WHERE id = ?", [next.name, JSON.stringify(next.data), bytes, updatedAt, avatarId]);
+      if (this.activeAvatarId() === avatarId) this.setLook({ kind: "pack", id: avatarId, rev: updatedAt }, now);
+      this.audit("avatar.update", avatarId, "user", Object.keys(patch).join(","));
+      this.bump();
+      return next;
+    });
+  }
+
+  /** Removes an avatar. When the profile wore it, the assistant goes back to its sigil in the same transaction. */
+  deleteAvatar(avatarId: string, now = this.now()): void {
+    this.write(() => {
+      this.requireAvatar(avatarId);
+      this.run("DELETE FROM avatar_packs WHERE id = ?", [avatarId]);
+      if (this.activeAvatarId() === avatarId) this.setLook({ kind: "sigil" }, now);
+      this.audit("avatar.remove", avatarId, "user");
       this.bump();
     });
   }
@@ -1530,6 +1642,7 @@ export class MemoryStore {
       schemaVersion: schemaVersion(this.db),
       profile: this.getProfile(),
       goals: this.listGoals(),
+      avatars: this.allAvatars(),
       items,
       notes: ["Memories that were forgotten are not included, and the fingerprints kept to stop them coming back are not exported."],
     };

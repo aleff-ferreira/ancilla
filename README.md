@@ -117,7 +117,7 @@ until you switch it on**.
 | **Talk to it** | An optional voice call. It listens while you talk and works out when you have finished, answers a sentence at a time, can be cut off in the middle of a word and goes on from what you heard, remembers the conversation, and starts read-only work in the background while you keep talking. The speech recognition and the voice run on your computer (a download of about 0.6 GB that you start yourself); the model that answers is your choice: your Muse plan, or any server that speaks the common chat protocol, including one on your own machine. English and Brazilian Portuguese. A spoken sentence can read and research but never change a file or approve anything. [How it works and what was measured](docs/assistant-voice.md). |
 | **Finds notes by meaning** | Optional. Name an embedding model (one running on your computer works) and a question that shares no word with a note, such as "which car do I own?" against "drives a Subaru", can still find it. Measured on the evaluation's questions: at least twice as many paraphrases found, for about one point of precision. Nothing is sent anywhere until you name a model, and then only to it. |
 | **Initiative, within limits** | Ask first, suggest, or act on its own for work that only reads, a couple of times a day at most. Memory never grants permission: settings and Muse's approvals do. |
-| **A character of your own** | A short first meeting, or the Persona tab later, gives it a name, a face (five forms you can recolour and tune), a voice (eight temperaments and five dials) and up to four habits. Its face is in the sidebar, on the Home tab and beside the composer, where it works while a turn runs, wants you when something waits and is pleased when it finishes. It changes how it sounds, never what it may do or what is true, and it says it is an AI if you ask. |
+| **A character of your own** | A short first meeting, or the Persona tab later, gives it a name, a face, a voice (eight temperaments and five dials) and up to four habits. The face is one of twenty-eight characters or five forms of light, a figure you build from parts, pixel art you draw, or a picture or sprite sheet you bring, in any colour. Its face is in the sidebar, on the Home tab and beside the composer, where it works while a turn runs, wants you when something waits and is pleased when it finishes. It changes how it sounds, never what it may do or what is true, and it says it is an AI if you ask. |
 | **What you have shared** | Days together, what it remembers, what you finished together and a few round numbers, read from what is stored. No streaks and nothing that counts the days you were away, and you can hide it. |
 
 See [the assistant](docs/assistant.md) for setup, the API and how to roll back, and
@@ -126,7 +126,7 @@ See [the assistant](docs/assistant.md) for setup, the API and how to roll back, 
 <details>
 <summary>The first meeting, what it remembers and its Persona tab</summary>
 
-![The first meeting: choosing a form, a colour and a voice, with the face changing as you choose](docs/assets/assistant-meeting.png)
+![The first meeting: choosing a character, a colour and a voice, with the face changing as you choose](docs/assets/assistant-meeting.png)
 
 ![Memory: each note with who said it and when, and whether it is disputed or a guess](docs/assets/assistant-memory.png)
 

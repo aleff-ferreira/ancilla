@@ -14,6 +14,8 @@ import type {
   AssistantTaskDetailView,
   AssistantTaskView,
   AssistantStepView,
+  AvatarPackMeta,
+  AvatarPackView,
   MemoryDetailView,
   MemoryItemView,
   MemoryKind,
@@ -85,6 +87,8 @@ export class DemoAssistant {
   private schedules: AssistantScheduleView[] = [];
   private activityLog: AssistantActivityView[] = [];
   private dismissed = new Set<string>();
+  /** The avatars made in this visit: kept in memory, like everything else here. */
+  private avatars = new Map<string, AvatarPackView>();
 
   constructor() {
     if (this.mode === "new") return;
@@ -195,10 +199,17 @@ export class DemoAssistant {
       void _e;
       const change = (patchedCharacter ?? {}) as Record<string, unknown>;
       const { configured, avatar, voice, ...flat } = change;
+      const nextAvatar = { ...this.profile.character.avatar, ...((avatar as object) ?? {}) } as AssistantCharacterView["avatar"];
+      if (nextAvatar.look?.kind === "pack") {
+        // As the server does: the pack must exist, and the look carries the revision it has now.
+        const worn = this.avatars.get(nextAvatar.look.id);
+        if (!worn) throw Object.assign(new Error("There is no such avatar."), { kind: "invalid", field: "character.avatar.look.id" });
+        nextAvatar.look = { kind: "pack", id: worn.id, rev: worn.updatedAt };
+      }
       const character: AssistantCharacterView = {
         ...this.profile.character,
         ...(flat as Partial<AssistantCharacterView>),
-        avatar: { ...this.profile.character.avatar, ...((avatar as object) ?? {}) },
+        avatar: nextAvatar,
         voice: { ...this.profile.character.voice, ...((voice as object) ?? {}) },
         setupAt: configured === undefined ? this.profile.character.setupAt : configured ? (this.profile.character.setupAt ?? Date.now()) : null,
       };
@@ -211,6 +222,49 @@ export class DemoAssistant {
       };
       bump();
       return { profile: this.profile, epoch: this.epoch };
+    }
+    // Saved avatars: the same surface as the server's, held in memory.
+    if (path === "/avatars" && method === "GET") {
+      const metas: AvatarPackMeta[] = [...this.avatars.values()].sort((a, b) => b.updatedAt - a.updatedAt).map(({ data: _data, ...meta }) => meta);
+      const used = metas.reduce((n, m) => n + m.bytes, 0);
+      return { avatars: metas, limits: { count: 24, perAvatarBytes: 700_000, totalBytes: 8_000_000, used, total: metas.length } };
+    }
+    if (path === "/avatars" && method === "POST") {
+      if (this.avatars.size >= 24) throw Object.assign(new Error("There is room for 24 avatars. Delete one first."), { kind: "invalid", field: "avatars" });
+      const kind = body["kind"];
+      if (kind !== "figure" && kind !== "pixel" && kind !== "image") throw Object.assign(new Error("kind must be figure, pixel or image"), { kind: "invalid", field: "kind" });
+      const name = String(body["name"] ?? "").trim().slice(0, 40);
+      if (!name) throw Object.assign(new Error("name cannot be empty"), { kind: "invalid", field: "name" });
+      const at = Date.now();
+      const data = body["data"] as AvatarPackView["data"];
+      const avatar = { id: `av_${(this.seq++).toString(16).padStart(16, "0")}`, name, kind, data, bytes: JSON.stringify(data).length, createdAt: at, updatedAt: at } as AvatarPackView;
+      this.avatars.set(avatar.id, avatar);
+      bump();
+      return { avatar };
+    }
+    const avatarId = path.match(/^\/avatars\/([^/]+)$/)?.[1];
+    if (avatarId) {
+      const found = this.avatars.get(avatarId);
+      if (!found) throw Object.assign(new Error("The avatar was not found"), { kind: "not_found" });
+      if (method === "GET") return { avatar: found };
+      if (method === "DELETE") {
+        this.avatars.delete(avatarId);
+        if (this.profile.character.avatar.look?.kind === "pack" && this.profile.character.avatar.look.id === avatarId) {
+          this.profile = { ...this.profile, character: { ...this.profile.character, avatar: { ...this.profile.character.avatar, look: { kind: "sigil" } } }, updatedAt: Date.now() };
+        }
+        bump();
+        return { ok: true };
+      }
+      if (method === "PATCH") {
+        const at = Math.max(Date.now(), found.updatedAt + 1);
+        const next = { ...found, ...(typeof body["name"] === "string" ? { name: body["name"].trim().slice(0, 40) || found.name } : {}), ...(body["data"] ? { data: body["data"] } : {}), updatedAt: at } as AvatarPackView;
+        next.bytes = JSON.stringify(next.data).length;
+        this.avatars.set(avatarId, next);
+        const worn = this.profile.character.avatar.look?.kind === "pack" && this.profile.character.avatar.look.id === avatarId;
+        if (worn) this.profile = { ...this.profile, character: { ...this.profile.character, avatar: { ...this.profile.character.avatar, look: { kind: "pack", id: avatarId, rev: at } } }, updatedAt: at };
+        bump();
+        return worn ? { avatar: next, profile: this.profile } : { avatar: next };
+      }
     }
     if (method === "GET" && path === "/goals") return { goals: this.goals };
     if (method === "POST" && path === "/goals") {

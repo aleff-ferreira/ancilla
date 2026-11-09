@@ -148,6 +148,66 @@ export interface MemoryDetail {
 export type Autonomy = "ask" | "suggest" | "act";
 
 export type AvatarForm = "halo" | "optic" | "hologram" | "critter" | "cipher";
+export type AvatarMoodId = "idle" | "working" | "attention" | "delight" | "concern" | "asleep";
+
+/**
+ * A figure built from parts. The ids come from the catalogue the interface keeps (`companion/figure/parts.ts`); the server
+ * checks their shape, not their membership, so a pack made by a newer Ancilla is kept and an older one draws the plain part.
+ */
+export interface FigureSpec {
+  body: string;
+  top: string;
+  eyes: string;
+  mouth: string;
+  mark: string;
+  gear: string;
+  aura: string;
+  finish: string;
+  /** The accent colour's hue, 0 to 359, or null for the one that suits the main hue. */
+  accent: number | null;
+  /** From light (0) to deep (4). */
+  shade: number;
+}
+
+/** What the assistant wears: one of the five forms of light, a figure built from parts (small, so carried here), or a saved avatar by its id. */
+export type AvatarLook = { kind: "sigil" } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
+
+/** Pixel art: `w` by `h` cells (8 to 64 each) with frames per mood. A cell is 0 (clear) or n, which is `palette[n - 1]`. */
+export interface PixelData {
+  w: number;
+  h: number;
+  /** "#rrggbb" colours, at most 32. */
+  palette: string[];
+  /** Every frame is `w * h` bytes in base64. Idle is required. */
+  moods: Partial<Record<AvatarMoodId, { ms: number; frames: string[] }>>;
+}
+
+/** A picture or a sprite sheet, as a `data:image/png|webp|jpeg;base64,` URL. */
+export interface ImagePackData {
+  src: string;
+  w: number;
+  h: number;
+  sheet?: { cols: number; rows: number; moods: Partial<Record<AvatarMoodId, { row: number; frames: number; ms: number }>> };
+  crisp: boolean;
+}
+
+export interface FigurePackData {
+  figure: FigureSpec;
+  hue: number;
+  glow: number;
+}
+
+/** An avatar the user made or brought, as stored: the library on the Persona page lists these. */
+export type AvatarPack = {
+  id: string;
+  name: string;
+  bytes: number;
+  createdAt: number;
+  updatedAt: number;
+} & ({ kind: "figure"; data: FigurePackData } | { kind: "pixel"; data: PixelData } | { kind: "image"; data: ImagePackData });
+
+export type AvatarPackMeta = Omit<AvatarPack, "data">;
+
 export type VoiceArchetype = "steady" | "warm" | "dry" | "sharp" | "playful" | "formal" | "curious" | "custom";
 /** How much of the character reaches a prompt: nothing (it only speaks in Ancilla's own words), a line of tone, or the whole character. */
 export type CharacterPresence = "off" | "tone" | "full";
@@ -167,6 +227,8 @@ export interface AssistantCharacter {
     detail: number;
     /** What the small random touches of the form (blink timing, particle positions, proportions) are drawn from. */
     seed: number;
+    /** What it wears: a sigil (the form above), a figure built from parts, or a saved avatar. Always present once read through `normalizeCharacter`. */
+    look: AvatarLook;
   };
   /** The voice: a starting archetype, and dials from 0 to 4 that bend it. */
   voice: { archetype: VoiceArchetype; warmth: number; humor: number; directness: number; curiosity: number; formality: number };
