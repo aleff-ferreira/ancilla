@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp, useController } from "../../app/context.js";
-import { phaseLabel, type CallLine, type CallView } from "../../model/voice/callState.js";
+import { emptyLine, phaseLabel, type CallLine, type CallView } from "../../model/voice/callState.js";
 import type { CallSession } from "../../model/voice/session.js";
 import { Avatar } from "../assistant/companion/Avatar.js";
 import type { AvatarMood } from "../assistant/companion/faces.js";
@@ -138,7 +138,7 @@ function Transcript(props: { view: CallView; tall: boolean }) {
   const lines = props.tall ? view.lines : view.lines.slice(-4);
   return (
     <div ref={box} className={cn("mx-4 mb-2 min-h-[56px] flex-1 space-y-1.5 overflow-y-auto text-sm", props.tall ? "" : "max-h-[200px]")}>
-      {lines.length === 0 && view.partial === "" ? <p className="text-xs text-subtle">{view.status === "ready" ? (view.resumed ? "Back where you left off. Say something." : "Say something, or type below.") : "…"}</p> : null}
+      {lines.length === 0 && view.partial === "" ? <p className="text-xs text-subtle">{emptyLine(view)}</p> : null}
       {lines.map((line, i) => (
         <Line key={`${line.turn}-${line.role}-${i}`} line={line} />
       ))}
@@ -169,7 +169,12 @@ function Line(props: { line: CallLine }) {
 function Controls(props: { session: CallSession; view: CallView }) {
   const { session, view } = props;
   const [text, setText] = useState("");
-  const [typing, setTyping] = useState(false);
+  // With a microphone that cannot be heard, typing is how the call goes on, so its box is open without being asked for.
+  const [typing, setTyping] = useState(view.micProblem !== null);
+  const problem = view.micProblem !== null;
+  useEffect(() => {
+    if (problem) setTyping(true);
+  }, [problem]);
   const send = () => {
     session.sendText(text);
     setText("");

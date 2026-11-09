@@ -6,11 +6,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { runInNewContext } from "node:vm";
-import { initialCall, phaseLabel, reduceServer, withTyped, type CallView } from "../src/model/voice/callState.js";
+import { emptyLine, initialCall, phaseLabel, reduceServer, withTyped, type CallView } from "../src/model/voice/callState.js";
 import { CAPTURE_FRAME_SAMPLES, CAPTURE_PROCESSOR, CAPTURE_WORKLET_SOURCE } from "../src/model/voice/capture.js";
 import { PlaybackLedger, type Player } from "../src/model/voice/player.js";
 import { AUDIO_IN, AUDIO_OUT, decodeAudioOut, encodeMicFrame, parseServerMessage, type ServerMessage } from "../src/model/voice/protocol.js";
-import { CallSession, type CallIO, type MicHandle, type SocketLike } from "../src/model/voice/session.js";
+import { micName } from "../src/model/voice/browser.js";
+import { CallSession, type CallIO, type MicHandle, type MicState, type SocketLike } from "../src/model/voice/session.js";
 
 // ---------------------------------------------------------------------------------------------------------------------
 
@@ -286,11 +287,28 @@ class FakePlayer implements Player {
   }
 }
 
-function rig(options: { micFails?: Error; url?: string | null } = {}) {
+/** A microphone the browser reports on: a name, whether the system holds it muted, and word of when that changes. */
+function reporting(options: { muted?: boolean; label?: string } = {}) {
+  let listener: ((state: MicState) => void) | null = null;
+  let muted = options.muted === true;
+  return {
+    label: options.label ?? "Desk microphone",
+    muted: () => muted,
+    watch(next: (state: MicState) => void) {
+      listener = next;
+    },
+    become(state: MicState) {
+      muted = state === "muted";
+      listener?.(state);
+    },
+  };
+}
+
+function rig(options: { micFails?: Error; url?: string | null; mic?: Partial<MicHandle> } = {}) {
   const socket = new FakeSocket();
   const player = new FakePlayer();
   let feed: ((pcm: Int16Array, rms: number) => void) | null = null;
-  const mic: MicHandle & { stopped: boolean } = { echoCancelled: true, stopped: false, stop() { this.stopped = true; } };
+  const mic: MicHandle & { stopped: boolean } = { echoCancelled: true, stopped: false, stop() { this.stopped = true; }, ...options.mic };
   let disposed = 0;
   const io: CallIO = {
     socketUrl: () => (options.url === undefined ? "ws://127.0.0.1:1/api/voice/ws" : options.url),
@@ -375,6 +393,84 @@ describe("a call, from the page", () => {
     r.session.sendText("hello there");
     assert.deepEqual(r.socket.texts().pop(), { type: "text", text: "hello there" });
     r.session.end();
+  });
+
+  it("says so when the system holds the microphone muted, and lets go of the words when it is unmuted", async () => {
+    const watched = reporting({ muted: true });
+    const r = rig({ mic: watched });
+    await r.session.start();
+    assert.match(r.session.view.micProblem ?? "", /muted/, "a microphone that was muted before the call began is said at once");
+    r.socket.open();
+    r.socket.say(READY);
+    assert.equal(phaseLabel(r.session.view), "Can't hear the microphone", "the face does not say it is listening");
+    watched.become("live");
+    assert.equal(r.session.view.micProblem, null, "unmuting needs nothing more");
+    assert.equal(phaseLabel(r.session.view), "Listening");
+    watched.become("muted");
+    assert.match(r.session.view.micProblem ?? "", /muted/, "and muting it again is noticed");
+    watched.become("ended");
+    assert.match(r.session.view.micProblem ?? "", /stopped/, "a microphone that is lost says so, and to start the call again");
+    r.session.end();
+  });
+
+  it("notices a microphone that gives nothing but silence, names it, and clears the words when sound comes", async () => {
+    const r = rig({ mic: reporting({ label: "Microphone Array on SoundWire Device" }) });
+    await r.session.start();
+    r.socket.open();
+    r.socket.say(READY);
+    const silence = new Int16Array(512);
+    for (let i = 0; i < 189; i++) r.feed(silence, 0);
+    assert.equal(r.session.view.micProblem, null, "a few seconds of quiet is only quiet");
+    r.feed(silence, 0);
+    assert.match(r.session.view.micProblem ?? "", /no sound at all from the microphone \(Microphone Array on SoundWire Device\)/);
+    assert.equal(r.socket.frames() > 0, true, "the audio still goes to the server: the silence is the person's to fix, not ours to hold back");
+    const speech = new Int16Array(512);
+    speech[100] = 900;
+    r.feed(speech, 0.05);
+    assert.equal(r.session.view.micProblem, null, "the first real sound takes the words away");
+    for (let i = 0; i < 100; i++) r.feed(silence, 0);
+    assert.equal(r.session.view.micProblem, null, "and the count starts again from nothing");
+    r.session.end();
+  });
+
+  it("does not call it a problem when the person muted the microphone themselves", async () => {
+    const r = rig();
+    await r.session.start();
+    r.socket.open();
+    r.socket.say(READY);
+    r.session.setMuted(true);
+    for (let i = 0; i < 400; i++) r.feed(new Int16Array(512), 0);
+    assert.equal(r.session.view.micProblem, null);
+    assert.equal(phaseLabel(r.session.view), "Muted");
+    r.session.end();
+  });
+
+  it("keeps saying why the microphone could not be opened, whatever else it learns", async () => {
+    const r = rig({ micFails: Object.assign(new Error("denied"), { name: "NotAllowedError" }) });
+    await r.session.start();
+    r.socket.open();
+    r.socket.say(READY);
+    assert.match(r.session.view.micProblem ?? "", /blocked/);
+    assert.equal(phaseLabel(r.session.view), "Can't hear the microphone");
+    r.socket.say({ type: "state", state: "thinking" });
+    assert.equal(phaseLabel(r.session.view), "Thinking", "what the assistant is doing still shows while it works");
+    r.session.end();
+  });
+
+  it("invites the person to speak, or to type when the microphone cannot be heard", () => {
+    const ready = { ...initialCall(), status: "ready" as const };
+    assert.equal(emptyLine(initialCall()), "…");
+    assert.equal(emptyLine(ready), "Say something, or type below.");
+    assert.equal(emptyLine({ ...ready, resumed: true }), "Back where you left off. Say something.");
+    assert.match(emptyLine({ ...ready, micProblem: "The microphone is muted." }), /^Type below, or fix the microphone/);
+    assert.match(emptyLine({ ...ready, resumed: true, micProblem: "The microphone is muted." }), /^Back where you left off\. Type below/);
+  });
+
+  it("names a microphone the way a person would", () => {
+    assert.equal(micName("Default - Microphone Array on SoundWire Device (5- SoundWire Audio)"), "Microphone Array on SoundWire Device (5- SoundWire Audio)");
+    assert.equal(micName("Communications - Headset (HUAWEI FreeBuds 6i Hands-Free)"), "Headset (HUAWEI FreeBuds 6i Hands-Free)");
+    assert.equal(micName("USB Audio Device"), "USB Audio Device");
+    assert.equal(micName(""), "");
   });
 
   it("holds push to talk to the button, and refuses to talk when it is off", async () => {

@@ -21,10 +21,19 @@ export interface SocketLike {
   onerror: ((event: unknown) => void) | null;
 }
 
+/** What the microphone is doing, as the browser reports it: heard, held muted by the system or the device, or gone. */
+export type MicState = "live" | "muted" | "ended";
+
 export interface MicHandle {
   stop(): void;
   /** The browser is cancelling the speakers' sound out of the microphone. */
   echoCancelled: boolean;
+  /** What the browser calls the microphone in use, for the words said to the person. */
+  label?: string;
+  /** The system, or the device itself, holds the microphone muted: it hears nothing, whatever the person says. */
+  muted?(): boolean;
+  /** Told when that changes, and when the microphone is lost altogether (unplugged, or taken by another program). */
+  watch?(listener: (state: MicState) => void): void;
 }
 
 export interface CallIO {
@@ -48,12 +57,27 @@ const OPEN = 1;
 const MAX_BUFFERED = 1_000_000;
 const REPORT_EVERY_MS = 100;
 const MAX_RECONNECTS = 2;
+/**
+ * A frame whose loudest sample is this small (of 32 768) is digital silence: a room, even a quiet one, is louder than
+ * that through any microphone, so a line this flat is a microphone that is muted, blocked or not the one being spoken into.
+ */
+const SILENT_PEAK = 2;
+/** How many frames of 32 ms of it, in a row, are worth saying so: a little over six seconds. */
+const SILENT_FRAMES = 190;
 
 function micMessage(error: unknown): string {
   const name = error instanceof Error ? error.name : "";
   if (name === "NotAllowedError" || name === "SecurityError") return "The microphone is blocked. Allow it for Ancilla in the browser or system settings, then start the call again. You can still type.";
   if (name === "NotFoundError" || name === "OverconstrainedError") return "No microphone was found. You can still type.";
   return "The microphone could not be opened. You can still type.";
+}
+
+const MIC_MUTED = "The microphone is muted (in the system's sound settings, or by a key or switch on the device), so Ancilla hears nothing. Unmute it and the call picks up by itself. You can still type.";
+const MIC_ENDED = "The microphone stopped, which happens when it is unplugged or another program takes it. End the call and start it again. You can still type.";
+
+function micSilent(label: string): string {
+  const which = label === "" ? "" : ` (${label.length > 70 ? `${label.slice(0, 69)}…` : label})`;
+  return `Ancilla is getting no sound at all from the microphone${which}. Check that it is not muted and is the one you speak into. You can still type.`;
 }
 
 export class CallSession {
@@ -67,6 +91,13 @@ export class CallSession {
   private reconnects = 0;
   private micLevel = 0;
   private echoCancelled = true;
+  /** Why the microphone could not be opened at all, in words for the person; null when it was. */
+  private openProblem: string | null = null;
+  private micState: MicState = "live";
+  private micLabel = "";
+  /** Frames in a row that were digital silence, and whether that has gone on long enough to say so. */
+  private quiet = 0;
+  private silent = false;
 
   constructor(
     private readonly io: CallIO,
@@ -111,16 +142,72 @@ export class CallSession {
         (mic) => {
           this.mic = mic;
           this.echoCancelled = mic.echoCancelled;
+          this.micLabel = mic.label ?? "";
+          mic.watch?.((state) => {
+            this.micState = state;
+            this.showMicProblem();
+          });
+          if (mic.muted?.()) this.micState = "muted";
+          this.showMicProblem();
           return true;
         },
         (error: unknown) => {
-          this.set({ ...this.state, micProblem: micMessage(error) });
+          this.openProblem = micMessage(error);
+          this.showMicProblem();
           return false;
         },
       );
     await micReady;
     if (this.closing) return;
     this.open(url);
+  }
+
+  /** The words for why the microphone is not being heard, or null when it is: what the call shows under its face. */
+  private micWords(): string | null {
+    if (this.openProblem !== null) return this.openProblem;
+    if (this.micState === "ended") return MIC_ENDED;
+    if (this.micState === "muted") return MIC_MUTED;
+    return this.silent ? micSilent(this.micLabel) : null;
+  }
+
+  private showMicProblem(): void {
+    const words = this.micWords();
+    if (words !== this.state.micProblem) this.set({ ...this.state, micProblem: words });
+  }
+
+  /**
+   * Counts the frames that are nothing but silence. A microphone the system holds muted is told by the browser, but a
+   * driver, a privacy switch or a device that is not the one being spoken into may only deliver zeros, so what arrives is
+   * watched as well. Counted only while the person has not muted it themselves, which is no problem.
+   */
+  private listenForSilence(pcm: Int16Array): void {
+    if (this.state.muted) {
+      this.quiet = 0;
+      if (this.silent) {
+        this.silent = false;
+        this.showMicProblem();
+      }
+      return;
+    }
+    let peak = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const v = pcm[i] as number;
+      const size = v < 0 ? -v : v;
+      if (size > peak) peak = size;
+    }
+    if (peak <= SILENT_PEAK) {
+      this.quiet += 1;
+      if (this.quiet >= SILENT_FRAMES && !this.silent) {
+        this.silent = true;
+        this.showMicProblem();
+      }
+    } else {
+      this.quiet = 0;
+      if (this.silent) {
+        this.silent = false;
+        this.showMicProblem();
+      }
+    }
   }
 
   private open(url: string): void {
@@ -186,6 +273,7 @@ export class CallSession {
 
   private onMicFrame(pcm: Int16Array, rms: number): void {
     this.micLevel = Math.min(1, rms * 6);
+    this.listenForSilence(pcm);
     const socket = this.socket;
     if (!socket || socket.readyState !== OPEN || this.state.muted || this.state.status !== "ready") return;
     if (socket.bufferedAmount > MAX_BUFFERED) return;

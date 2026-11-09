@@ -52,7 +52,7 @@ export interface CallView {
   /** Why the call is not working, in words for the person. */
   error: string | null;
   endedReason: string | null;
-  /** The microphone could not be opened: the call goes on by text. */
+  /** Why the microphone is not being heard (it could not be opened, is muted, is silent or was lost), in words for the person; the call goes on by text. */
   micProblem: string | null;
 }
 
@@ -155,12 +155,21 @@ export function withTyped(view: CallView, text: string): CallView {
   return { ...view, lines: [...view.lines, line].slice(-MAX_LINES) };
 }
 
+/** What the transcript says before anything was said: an invitation to speak, unless the microphone cannot be heard, when it is to type. */
+export function emptyLine(view: CallView): string {
+  if (view.status !== "ready") return "…";
+  if (view.micProblem !== null) return view.resumed ? "Back where you left off. Type below, or fix the microphone and speak." : "Type below, or fix the microphone and speak.";
+  return view.resumed ? "Back where you left off. Say something." : "Say something, or type below.";
+}
+
 /** The word on the call's face: what it is doing, for the person. */
 export function phaseLabel(view: CallView): string {
   if (view.status === "connecting") return "Connecting";
   if (view.status === "failed") return "Could not start";
   if (view.status === "ended") return "Call ended";
   if (view.muted) return "Muted";
+  // A call that listens to nothing must not say "Listening": what the assistant is doing still shows while it works or speaks.
+  if (view.micProblem !== null && view.phase !== "speaking" && view.phase !== "thinking") return "Can't hear the microphone";
   switch (view.phase) {
     case "speaking":
       return view.ducked ? "Listening…" : "Speaking";
