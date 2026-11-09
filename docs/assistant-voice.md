@@ -19,7 +19,13 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
    it is used. About 0.6 GB; an optional *accuracy booster* adds half a gigabyte and is described below.
 3. **The model that answers.** Choose one:
    - *Muse*: your Muse plan, one thread per conversation (it shows in the sidebar like any thread). No key. Each answer
-     takes as long as a Muse turn, so a short phrase covers the wait.
+     takes as long as a Muse turn, so a short phrase covers the wait. A *Muse model* row lists the models your plan
+     offers, the same list as the message box's model menu, with *Muse default* first: pick one and a new thread starts
+     on it, and the thread a conversation already had is put on it before the next answer. A smaller model answers
+     sooner. A model id Muse does not list can be typed in (*Other model id*); Muse decides at the first answer whether
+     your plan may use it, and a call that cannot be put on the model says so instead of answering on another one.
+     *Muse default* names no model: a new thread starts on Muse's own choice, and a thread that already has a model keeps
+     it. A change applies from the next call.
    - *Another model*: any server that speaks the OpenAI chat protocol. The tab has starting points for OpenAI,
      OpenRouter, Groq, Ollama, LM Studio and llama.cpp. A key, if there is one, is kept in a file only you can read and is
      never shown again. A model that runs on your computer sends nothing over the network.
@@ -44,6 +50,28 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
   you speak first, so it never lands on a topic you chose. It goes on in the language of the conversation, and the same
   setting as the rest turns it off (Assistant, Voice, Speaks up by itself).
 - **Languages.** English and Brazilian Portuguese, switching when you do.
+
+## When it does not hear you
+
+A call that says *Listening* while your voice gets no answer has a microphone that is open but delivers nothing. The
+card says so rather than waiting: its status reads *Can't hear the microphone*, with the reason under it, and the box to
+type in opens by itself so that the call goes on.
+
+- **The microphone is muted.** The browser reports a microphone that the system, a key on the keyboard or a switch on the
+  device holds muted, and the call says so the moment it starts and again whenever it is muted later; unmuting it clears
+  the message, with no need to start again. On Windows the place is Settings, System, Sound, Input; a laptop's microphone
+  key does the same. This is the most common reason, and on a laptop with a microphone array it is easy to press by
+  accident.
+- **It gets only silence.** A microphone that is not muted for the browser can still deliver nothing, from a privacy
+  switch, a driver or a device that is not the one you speak into. After a little over six seconds of an unbroken flat
+  line the card names the microphone it is listening to ("Ancilla is getting no sound at all from the microphone
+  (Microphone Array ...)"), and takes the message away at the first sound. The line is flatter than any room: a frame
+  whose loudest sample is within two steps of zero, 190 frames in a row.
+- **The microphone was lost.** Unplugged, or taken by another program: the card says to end the call and start it again.
+- **It could not be opened.** Blocked in the browser or the system, or none found: said at once, and the call goes on by
+  typing.
+
+Muting it yourself, with the card's own microphone button, is not a problem and is never reported.
 
 ## What it will and will not do by voice
 

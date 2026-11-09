@@ -2,8 +2,15 @@
 
 ## Unreleased
 
+### New
+
+- **Choose which Muse model answers the call.** Assistant, Voice, The model that answers, now has a *Muse model* row beside *Muse*: the models your plan offers (the message box's own list, Muse's built-in one with Meta's published models added when that is all Muse sends, and a model id typed by hand), with *Muse default* first. A new call thread starts on the model you pick, and the thread a conversation already had is put on it before the next answer, once; a call that Muse will not put on the model says so and sends nothing to another one. A smaller model answers sooner than the plan's default. It applies from the next call.
+
 ### Fixed
 
+- **A call whose microphone is muted says so, instead of saying "Listening".** On a laptop whose microphone was muted in Windows (the key on the keyboard, or Settings, System, Sound, Input) the call opened normally, showed *Listening*, and never heard a word, while typed messages were answered as usual: the muted microphone delivers nothing but silence and nothing in the call told you. The browser reports a muted microphone, and the call now says it (the status reads *Can't hear the microphone*, with the reason under it, and the box to type in opens by itself), clears it when you unmute with no need to start again, and does the same for a microphone that is lost (unplugged) and for one that gives only silence for six seconds (a privacy switch, a driver, the wrong device), naming the microphone it is listening to. Muting it yourself with the card's button is never reported.
+- **A voice settings file that starts with a byte-order mark is read.** Windows PowerShell and some editors write UTF-8 with a mark in front, which JSON refuses, so `voice.json` (and the keys file) was ignored and the defaults were used with a line in the log. The mark is skipped now.
+- **A test that began to fail a day after it was written.** The plan-card test fixed its story on 8 November 2026 but let the card's own clock run: a finished run keeps its report for a day, so from the next day the test failed and so would CI. It now holds the clock in the story.
 - **A server told to close while it starts no longer announces itself first.** The desktop app closes the server's stdin when it quits, and a server that learns of that during its start must close without saying it is ready. It waited one turn of the event loop for the end of stdin to be reported, which is not always enough: over a hundred starts on a CI runner, with stdin closed ten milliseconds after the boot began, the ready line was written 90 times on macOS and once on Windows, and with stdin closed before the start it was written twice on Windows (a test caught it now and then). The server closed either way. It now waits up to a tenth of a second for the end of stdin to be reported, once, and only when the desktop app started it; the same hundred starts wrote the line none of the times on any of the three systems.
 
 ## 0.25.0
