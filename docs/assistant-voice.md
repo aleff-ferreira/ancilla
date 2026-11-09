@@ -35,6 +35,15 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
    - *Another model*: any server that speaks the OpenAI chat protocol. The tab has starting points for OpenAI,
      OpenRouter, Groq, Ollama, LM Studio and llama.cpp. A key, if there is one, is kept in a file only you can read and is
      never shown again. A model that runs on your computer sends nothing over the network.
+     - *Models on this computer*: the tab looks for Ollama, LM Studio, llama.cpp and vLLM at their usual addresses
+       (`127.0.0.1`, ports 11434, 1234, 8080 and 8000) and offers the models each has, so nothing has to be typed and no
+       model that is not installed is named. Press *Detect* to look again. A server in another place is typed in as before:
+       Ancilla on Windows reaches a model server running in WSL at `127.0.0.1`, but Ancilla running inside WSL cannot reach a
+       Windows model server unless WSL uses mirrored networking.
+     - *Tools*: a local server often cannot take tool calls (Ollama says "does not support tools", llama.cpp wants
+       `--jinja`). A server that turns tools down is given them through text instead, as a model with no tool calling always
+       was, and that is remembered for ten minutes. *Test* asks the model to use a test tool and says how it takes tools:
+       built in, through text, or not at all (a small model may not use them, and then the assistant cannot start tasks).
 4. Press the microphone beside the assistant's name (in the sidebar, or the *Talk* button on its page).
 
 ## Talking

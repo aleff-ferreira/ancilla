@@ -1,5 +1,7 @@
 import { ConflictError, NotFoundError, ValidationError } from "../assistant/store.js";
 import type { AssistantReply, AssistantRequest } from "../assistant/routes.js";
+import { probeToolMode, type ToolModeProvider } from "./brain.js";
+import { detectLocalServers } from "./local-models.js";
 import { VoiceUnavailableError, type VoiceService } from "./service.js";
 
 /**
@@ -105,8 +107,24 @@ async function route(service: VoiceService, req: AssistantRequest): Promise<Assi
       clearTimeout(timer);
     }
     if (abort.signal.aborted && error === null && text === "") error = "The model did not answer in time.";
-    return { status: 200, body: { ok: error === null && text.trim() !== "", ms: Date.now() - started, firstTokenMs: firstMs, text: text.trim().slice(0, 80), ...(error ? { error } : {}) } };
+    const ok = error === null && text.trim() !== "";
+    // A model that answers is also asked to use a tool, because a server that takes a plain request may refuse one with tools:
+    // the way that works (built in, or through text) is found and kept for the calls that follow.
+    let tools: "native" | "text" | "none" | null = null;
+    if (ok && "setToolMode" in chosen.brain) {
+      const probeAbort = new AbortController();
+      const probeTimer = setTimeout(() => probeAbort.abort(), 25_000);
+      try {
+        tools = await probeToolMode(chosen.brain as ToolModeProvider, probeAbort.signal);
+      } finally {
+        clearTimeout(probeTimer);
+      }
+    }
+    return { status: 200, body: { ok, ms: Date.now() - started, firstTokenMs: firstMs, text: text.trim().slice(0, 80), tools, ...(error ? { error } : {}) } };
   }
+
+  // What model servers run on this computer, so the settings can offer them rather than ask for an address.
+  if (method === "GET" && sub === "/local-models") return { status: 200, body: { servers: await detectLocalServers() } };
 
   if (sub === "/conversations") {
     const store = service.conversations(false);

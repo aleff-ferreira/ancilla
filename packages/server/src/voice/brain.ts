@@ -35,7 +35,8 @@ export type BrainEvent =
   | { type: "done"; reason: "stop" | "tool" | "length" }
   /** Something the person should be told that does not stop the answer: shown on the call, the answer goes on. */
   | { type: "notice"; text: string }
-  | { type: "error"; message: string; retryable: boolean };
+  /** `code` says why, when the caller can do something about it: "tools-unsupported" is a server that turned the request down because it cannot take tools. */
+  | { type: "error"; message: string; retryable: boolean; code?: "tools-unsupported" };
 
 export interface BrainRequest {
   messages: ChatMessage[];
@@ -76,6 +77,14 @@ export interface OpenAiOptions {
   fetchImpl?: typeof fetch;
   temperature?: number;
 }
+
+/**
+ * How model servers say they cannot take tools: Ollama ("does not support tools"), llama.cpp ("tools param requires
+ * --jinja"), vLLM ("auto tool choice requires --enable-auto-tool-choice"), OpenRouter ("support tool use"). Only a refusal
+ * that says so is taken as one: a bad key or a busy server is an error as it always was.
+ */
+const TOOLS_NOT_TAKEN = /does not support tools?|support tool|tools? (param|parameter)|unsupported[^.]{0,30}tools?|--jinja|tool[_ -]?choice|tool[_ -]?use|tool[_ -]?call|function[_ -]?call/i;
+const TOOL_REFUSAL_STATUS = new Set([400, 404, 422, 500, 501]);
 
 interface WireToolCall {
   index?: number;
@@ -141,7 +150,8 @@ export class OpenAiCompatibleProvider implements BrainProvider {
       } catch {
         /* the body is only for the message */
       }
-      yield { type: "error", message: `The model answered ${response.status}${detail ? `: ${detail}` : ""}`, retryable: response.status === 408 || response.status === 429 || response.status >= 500 };
+      const toolsRefused = request.tools.length > 0 && TOOL_REFUSAL_STATUS.has(response.status) && TOOLS_NOT_TAKEN.test(detail);
+      yield { type: "error", message: `The model answered ${response.status}${detail ? `: ${detail}` : ""}`, retryable: response.status === 408 || response.status === 429 || response.status >= 500, ...(toolsRefused ? { code: "tools-unsupported" as const } : {}) };
       return;
     }
     const calls = new Map<number, { id: string; name: string; args: string }>();
@@ -297,4 +307,83 @@ export function withTextTools(inner: BrainProvider): BrainProvider {
       yield { type: "done", reason: rest.calls.length > 0 ? "tool" : reason };
     },
   };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Servers differ in whether they take tools: a model on this computer may not. A server that turns tools down is given
+// them through text instead, once, and remembered for a while, so the call works rather than failing on its first tool.
+
+export type ToolMode = "native" | "text";
+
+export interface ToolModeProvider extends BrainProvider {
+  /** How tools reach this model now: built in, or asked for in its text. */
+  toolMode(): ToolMode;
+  setToolMode(mode: ToolMode): void;
+}
+
+const TOOL_MODE_TTL_MS = 10 * 60_000;
+const learnedToolModes = new Map<string, { mode: ToolMode; at: number }>();
+
+/** For tests. */
+export function forgetToolModes(): void {
+  learnedToolModes.clear();
+}
+
+/** `key` names the server and model, so what was learned about one is not applied to another. */
+export function withToolFallback(inner: BrainProvider, options: { key: string; now?: () => number }): ToolModeProvider {
+  const now = options.now ?? Date.now;
+  const viaText = withTextTools({ id: inner.id, label: inner.label, capabilities: { ...inner.capabilities, tools: false }, stream: (request) => inner.stream(request) });
+  const mode = (): ToolMode => {
+    const learned = learnedToolModes.get(options.key);
+    return learned && now() - learned.at < TOOL_MODE_TTL_MS ? learned.mode : "native";
+  };
+  const set = (next: ToolMode): void => {
+    if (next === "text") learnedToolModes.set(options.key, { mode: next, at: now() });
+    else learnedToolModes.delete(options.key);
+  };
+  return {
+    id: inner.id,
+    label: inner.label,
+    capabilities: inner.capabilities,
+    toolMode: mode,
+    setToolMode: set,
+    async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
+      if (request.tools.length === 0) return yield* inner.stream(request);
+      if (mode() === "text") return yield* viaText.stream(request);
+      let first = true;
+      for await (const event of inner.stream(request)) {
+        if (first && event.type === "error" && event.code === "tools-unsupported") {
+          set("text");
+          return yield* viaText.stream(request);
+        }
+        first = false;
+        yield event;
+      }
+    },
+  };
+}
+
+export const PING_TOOL: ToolSpec = { name: "ping", description: "Call this tool to answer. It takes no arguments.", parameters: { type: "object", properties: {} } };
+
+/**
+ * Finds out how a model takes tools: built in, through text, or not at all. It asks the way that is known first and then
+ * the other, and leaves the working way in place for the calls that follow (and the known way when neither works).
+ */
+export async function probeToolMode(brain: ToolModeProvider, signal: AbortSignal): Promise<ToolMode | "none"> {
+  const called = async (): Promise<boolean> => {
+    // A system message is there for the text convention to be written into.
+    const messages: ChatMessage[] = [{ role: "system", content: "You are being tested." }, { role: "user", content: "Call the ping tool now." }];
+    for await (const event of brain.stream({ messages, tools: [PING_TOOL], signal, maxTokens: 64, temperature: 0 })) {
+      if (event.type === "tool" && event.call.name === PING_TOOL.name) return true;
+      if (event.type === "error") return false;
+    }
+    return false;
+  };
+  const known = brain.toolMode();
+  if (await called()) return brain.toolMode();
+  const other: ToolMode = brain.toolMode() === "native" ? "text" : "native";
+  brain.setToolMode(other);
+  if (await called()) return other;
+  brain.setToolMode(known);
+  return "none";
 }

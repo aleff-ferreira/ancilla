@@ -260,6 +260,20 @@ function Install(props: { status: VoiceStatusView; reload: () => void }) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 
+/** A model server found on this computer (see the server's local-models.ts). */
+interface LocalServerView {
+  id: string;
+  label: string;
+  baseUrl: string;
+  models: { id: string; sizeBytes: number | null }[];
+}
+
+const TOOL_WORDS = {
+  native: " Tools: built in.",
+  text: " Tools: through text, because this server does not take them natively.",
+  none: " It did not use a test tool, so the assistant may not be able to start tasks with it; a larger model usually can.",
+} as const;
+
 function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; save: (patch: Record<string, unknown>) => Promise<void> }) {
   const controller = useController();
   const { settings } = props;
@@ -273,6 +287,21 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   });
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  // Model servers on this computer, looked for when another model is on show, and again on request. Null while looking.
+  const [found, setFound] = useState<LocalServerView[] | null>(null);
+  const [rescan, setRescan] = useState(0);
+  useEffect(() => {
+    if (brain.kind !== "openai") return;
+    let live = true;
+    setFound(null);
+    controller.voice<{ servers: LocalServerView[] }>("GET", "/local-models").then(
+      (out) => live && setFound(out.servers),
+      () => live && setFound([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, [controller, brain.kind, rescan]);
 
   // The Muse model's choices are the list Muse sends, read when the setting is on show; a list already read is left be.
   const throughMuse = brain.kind === "muse";
@@ -300,8 +329,8 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     setTesting(true);
     setTest(null);
     try {
-      const out = await controller.voice<{ ok: boolean; ms?: number; firstTokenMs?: number | null; text?: string; error?: string; skipped?: boolean }>("POST", "/brain/test");
-      setTest(out.ok ? { ok: true, text: out.skipped ? (out.text ?? "") : `Answered "${out.text}" in ${((out.firstTokenMs ?? out.ms ?? 0) / 1000).toFixed(1)} s to the first word.` } : { ok: false, text: out.error ?? "No answer." });
+      const out = await controller.voice<{ ok: boolean; ms?: number; firstTokenMs?: number | null; text?: string; error?: string; skipped?: boolean; tools?: keyof typeof TOOL_WORDS | null }>("POST", "/brain/test");
+      setTest(out.ok ? { ok: true, text: out.skipped ? (out.text ?? "") : `Answered "${out.text}" in ${((out.firstTokenMs ?? out.ms ?? 0) / 1000).toFixed(1)} s to the first word.${out.tools ? TOOL_WORDS[out.tools] : ""}` } : { ok: false, text: out.error ?? "No answer." });
     } catch (e) {
       setTest({ ok: false, text: errorMessage(e) });
     } finally {
@@ -348,6 +377,25 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
                   {p.label}
                 </Button>
               ))}
+            </div>
+          </Row>
+          <Row
+            label="On this computer"
+            description={found === null ? "Looking for Ollama, LM Studio, llama.cpp and vLLM…" : found.length === 0 ? "No model server answered at its usual address. Start one and press Detect, or type its address below." : "Model servers running here. Pick one of their models."}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              {(found ?? []).flatMap((s) =>
+                s.models.length === 0
+                  ? [<Chip key={s.id}>{s.label}: no model loaded</Chip>]
+                  : s.models.slice(0, 8).map((m) => (
+                      <Button key={`${s.id}:${m.id}`} size="xs" variant={draft.baseUrl === s.baseUrl && draft.model === m.id ? "primary" : "secondary"} onClick={() => void apply({ baseUrl: s.baseUrl, model: m.id, local: true })}>
+                        {s.label} · {m.id}
+                      </Button>
+                    )),
+              )}
+              <Button size="xs" variant="ghost" loading={found === null} onClick={() => setRescan((n) => n + 1)}>
+                Detect
+              </Button>
             </div>
           </Row>
           <Row label="Address">

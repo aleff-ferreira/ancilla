@@ -1,4 +1,4 @@
-import { OpenAiCompatibleProvider, withTextTools, type BrainEvent, type BrainProvider, type BrainRequest } from "./brain.js";
+import { OpenAiCompatibleProvider, withTextTools, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "./brain.js";
 import { MuseThreadBrain, type MuseBrainHost } from "./muse-brain.js";
 import type { BrainSetting, VoiceSettings } from "./settings.js";
 
@@ -53,8 +53,10 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
   const choice = settings.brain;
   if (choice.kind === "openai") {
     const apiKey = deps.keyFor(choice);
+    // A server that cannot take tools (a model on this computer often cannot) is given them through text instead.
+    const provider = new OpenAiCompatibleProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });
     return {
-      brain: new OpenAiCompatibleProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local }),
+      brain: withToolFallback(provider, { key: `${choice.baseUrl}|${choice.model}` }),
       problem: apiKey === null && !choice.local ? "No key is set for this model. Add one in Settings, Voice." : null,
     };
   }

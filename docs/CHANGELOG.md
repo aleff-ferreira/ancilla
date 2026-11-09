@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The voice settings find the model servers on your computer.** With *Another model* chosen, the tab looks for Ollama, LM Studio, llama.cpp and vLLM at their usual addresses and lists the models each has, so a local model is one click instead of an address, a model name and a guess that it is installed. *Detect* looks again.
+
+### Fixed
+
+- **A local model server that cannot take tools no longer fails every call.** Ollama refuses a request with tools for a model that does not support them, and llama.cpp does unless it was started with `--jinja`; the *Test* button sent no tools, so it said "Works" and the first real call said "Sorry, I lost my train of thought". A server that turns tools down is now given them through text instead, and *Test* asks the model to use a test tool and says how it takes them (built in, through text, or not at all).
+
 ## 0.26.1
 
 ### Fixed
