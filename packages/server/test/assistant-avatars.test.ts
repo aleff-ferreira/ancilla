@@ -301,7 +301,9 @@ describe("the avatar library", () => {
     const small = heavy.store.createAvatar(figureInput("Small"));
     assert.ok(small.id, "a small one still fits");
     assert.throws(() => heavy.store.updateAvatar(small.id, { data: parseAvatarInput(big).data }), /unknown field data\.src/, "and cannot be turned into a picture");
-    const first = heavy.store.listAvatars().at(-1) as { id: string };
+    // One of the big ones, by name: the clock is held still here, so every avatar has the same time and the order of the list
+    // among them is the order of their random ids, which may put the small one last.
+    const first = heavy.store.listAvatars().find((a) => a.name === "Big") as { id: string };
     heavy.store.deleteAvatar(first.id);
     assert.ok(heavy.store.createAvatar(big).id, "removing one makes room again");
   });
