@@ -33,6 +33,8 @@ export type BrainEvent =
   | { type: "tool"; call: ToolCall }
   | { type: "usage"; inputTokens: number; outputTokens: number }
   | { type: "done"; reason: "stop" | "tool" | "length" }
+  /** Something the person should be told that does not stop the answer: shown on the call, the answer goes on. */
+  | { type: "notice"; text: string }
   | { type: "error"; message: string; retryable: boolean };
 
 export interface BrainRequest {

@@ -13,10 +13,23 @@ import { DEFAULT_VOICE_SETTINGS } from "../src/voice/settings.js";
 type Handler = (method: string, params: Record<string, unknown>) => void;
 type Script = (turn: number, emit: (method: string, params: Record<string, unknown>) => void, turnId: string) => void | Promise<void>;
 
+/** What Muse says of a thread its host has not loaded: every command to it is refused, as the real host does. */
+const notLoaded = (sessionId: string) => Object.assign(new Error(`session ${sessionId} is not loaded on this host`), { kind: "sessionNotLoaded" });
+
 class FakeMuse implements MuseBrainHost {
   sessions: Array<{ cwd: string; title: string; modelId?: string }> = [];
+  /** The threads the host has loaded. A thread made here is; one from an earlier run of the host is not until it is opened. */
+  loaded = new Set<string>();
+  /** Every thread opened, in order. */
+  opens: string[] = [];
+  /** Whether an old thread can be opened: false is a thread that is gone, or held by another Muse client. */
+  openable = true;
+  /** Why opening a thread fails (the host cannot be reached), or null. */
+  openFails: Error | null = null;
   /** Every thread put on a model after it was made. */
   switches: Array<{ sessionId: string; modelId: string }> = [];
+  /** How many times a switch was asked for, refused or not. */
+  switchTries = 0;
   /** Muse's reason for refusing a switch, or null when it takes it. */
   refuseSwitch: string | null = null;
   turns: Array<{ sessionId: string; text: string; displayText: string }> = [];
@@ -30,13 +43,25 @@ class FakeMuse implements MuseBrainHost {
 
   async startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }> {
     this.sessions.push({ cwd: input.cwd, title: input.title, ...(input.modelId ? { modelId: input.modelId } : {}) });
-    return { sessionId: `s${this.sessions.length}` };
+    const sessionId = `s${this.sessions.length}`;
+    this.loaded.add(sessionId);
+    return { sessionId };
+  }
+  async openSession(sessionId: string): Promise<boolean> {
+    this.opens.push(sessionId);
+    if (this.openFails) throw this.openFails;
+    if (!this.openable) return false;
+    this.loaded.add(sessionId);
+    return true;
   }
   async setModel(sessionId: string, modelId: string): Promise<void> {
+    if (!this.loaded.has(sessionId)) throw notLoaded(sessionId);
+    this.switchTries++;
     if (this.refuseSwitch !== null) throw new Error(this.refuseSwitch);
     this.switches.push({ sessionId, modelId });
   }
   async startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }> {
+    if (!this.loaded.has(input.sessionId)) throw notLoaded(input.sessionId);
     this.turns.push({ sessionId: input.sessionId, text: input.text, displayText: input.displayText });
     const n = ++this.count;
     const turnId = `t${n}`;
@@ -301,6 +326,7 @@ describe("Muse as the call's mind, on the model chosen for the voice", () => {
     const inner = answers();
     const cannot: MuseBrainHost = {
       startSession: (input) => inner.startSession(input),
+      openSession: (sessionId) => inner.openSession(sessionId),
       startTurn: (input) => inner.startTurn(input),
       interruptTurn: (sessionId, turnId) => inner.interruptTurn(sessionId, turnId),
       needsUser: () => inner.needsUser(),
@@ -311,17 +337,46 @@ describe("Muse as the call's mind, on the model chosen for the voice", () => {
     assert.equal(text(events), "Sure.", "a host that cannot switch answers on the model the thread has");
   });
 
-  it("says so, and sends nothing, when Muse will not put the thread on the model, then tries again on the next turn", async () => {
+  it("answers on the model the thread has, and says once why, when Muse will not put it on the model chosen", async () => {
     const muse = answers();
     muse.refuseSwitch = "That model is not offered.";
     const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v", sessionId: "s-old", model: "muse-wonder-1.0" });
+    const first = await ask(brain, "hello");
+    assert.deepEqual(first[0], { type: "notice", text: "Muse would not put this thread on muse-wonder-1.0: That model is not offered. It answers on the model the thread already has." });
+    assert.equal(text(first), "Sure.", "an assistant that cannot change model still answers");
+    assert.equal(muse.turns.length, 1);
+    const second = await ask(brain, "and again");
+    assert.equal(second.some((e) => e.type === "notice"), false, "said once, not at every turn");
+    assert.equal(text(second), "Sure.");
+    assert.equal(muse.switchTries, 1, "and not asked again for the rest of the call");
+  });
+
+  it("is told it cannot be reached when the thread cannot be opened, and tries the same thread again next turn", async () => {
+    const muse = answers();
+    muse.openFails = new Error("the Muse host is not running");
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v", sessionId: "s-old" });
     const refused = await ask(brain, "hello");
-    assert.deepEqual(refused, [{ type: "error", message: "Muse would not put this thread on muse-wonder-1.0: That model is not offered.", retryable: true }]);
-    assert.equal(muse.turns.length, 0, "the question was not sent to a model the person did not choose");
-    muse.refuseSwitch = null;
-    const events = await ask(brain, "hello");
-    assert.equal(text(events), "Sure.");
-    assert.deepEqual(muse.switches, [{ sessionId: "s-old", modelId: "muse-wonder-1.0" }]);
+    assert.deepEqual(refused, [{ type: "error", message: "Muse could not be reached: the Muse host is not running", retryable: true }]);
+    assert.equal(muse.turns.length, 0);
+    muse.openFails = null;
+    assert.equal(text(await ask(brain, "hello")), "Sure.");
+    assert.deepEqual(muse.opens, ["s-old", "s-old"], "the thread was not given up on");
+    assert.equal(muse.sessions.length, 0);
+  });
+
+  it("still tells the thread the rules of a call when its first attempt could not reach Muse", async () => {
+    const muse = answers();
+    const make = muse.startSession.bind(muse);
+    let failures = 1;
+    muse.startSession = async (input) => {
+      if (failures-- > 0) throw new Error("no Muse host for that folder");
+      return make(input);
+    };
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    const first = await ask(brain, "hello");
+    assert.match((first[0] as { message: string }).message, /could not be reached/);
+    await ask(brain, "hello");
+    assert.match(muse.turns[0]?.text ?? "", /live voice call/, "a refused attempt does not use up the rules");
   });
 
   it("is made from the settings: the model chosen for Muse goes to the thread", async () => {
@@ -335,5 +390,81 @@ describe("Muse as the call's mind, on the model chosen for the voice", () => {
     const unset = makeBrain(DEFAULT_VOICE_SETTINGS, { project: "/work/atlas", name: "Vesper", museSession: null, rememberMuseSession: () => undefined }, { museHost: none, keyFor: () => null });
     await collect(unset.brain.stream({ messages: [system, user("hello")], tools: [], signal: new AbortController().signal }));
     assert.equal("modelId" in (none.sessions[0] ?? {}), false, "Muse default names no model");
+  });
+});
+
+describe("Muse as the call's mind, on a thread the conversation already had", () => {
+  const answers = () =>
+    new FakeMuse((_n, emit, turnId) => {
+      emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: "Sure." } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+  const ask = (brain: MuseThreadBrain, ...said: string[]) => collect(brain.stream({ messages: [system, ...said.map(user)], tools: [], signal: new AbortController().signal }));
+
+  it("loads the thread before it uses it, once for the whole call: a host that started again holds none", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v", sessionId: "s-old" });
+    assert.equal(muse.loaded.has("s-old"), false, "the host knows nothing of it yet");
+    assert.equal(text(await ask(brain, "hello")), "Sure.", "a thread the host does not hold is refused every command, so this answered only because it was loaded");
+    await ask(brain, "and again");
+    assert.deepEqual(muse.opens, ["s-old"]);
+    assert.deepEqual(muse.turns.map((t) => t.sessionId), ["s-old", "s-old"]);
+    assert.equal(muse.sessions.length, 0, "no new thread");
+  });
+
+  it("starts a new thread, told what was said before, when the old one cannot be used", async () => {
+    const muse = answers();
+    muse.openable = false;
+    const remembered: string[] = [];
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v", sessionId: "s-gone", onSession: (id) => remembered.push(id) });
+    const history: ChatMessage[] = [system, user("my sister is called Ana"), { role: "assistant", content: "Noted." }, user("what is her name?")];
+    const events = await collect(brain.stream({ messages: history, tools: [], signal: new AbortController().signal }));
+    assert.equal(text(events), "Sure.");
+    assert.equal(muse.sessions.length, 1, "a new thread");
+    assert.deepEqual(remembered, ["s1"], "the conversation is told which thread it has now");
+    const sent = muse.turns[0]?.text ?? "";
+    assert.equal(muse.turns[0]?.sessionId, "s1");
+    assert.match(sent, /Earlier in this conversation/);
+    assert.match(sent, /User: my sister is called Ana/);
+    assert.match(sent, /live voice call/, "and the rules of a call");
+    await ask(brain, "and now?");
+    assert.deepEqual(muse.opens, ["s-gone"], "the old thread is not tried again");
+    assert.equal(muse.turns[1]?.sessionId, "s1");
+  });
+
+  it("loads the thread again and tries once more when Muse says, in the middle of the call, that it is not loaded", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    await ask(brain, "hello");
+    muse.loaded.delete("s1"); // the host started again: it holds nothing now
+    assert.equal(text(await ask(brain, "are you there?")), "Sure.");
+    assert.deepEqual(muse.opens, ["s1"]);
+    assert.equal(muse.turns.length, 2);
+  });
+
+  it("knows a thread its host does not hold by the host's words too, whatever kind it gives the refusal", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    await ask(brain, "hello");
+    muse.loaded.delete("s1");
+    const take = muse.startTurn.bind(muse);
+    muse.startTurn = async (input) => {
+      if (!muse.loaded.has(input.sessionId)) throw new Error(`session ${input.sessionId} is not loaded on this host`); // no kind
+      return take(input);
+    };
+    assert.equal(text(await ask(brain, "are you there?")), "Sure.");
+    assert.deepEqual(muse.opens, ["s1"]);
+  });
+
+  it("does not try more than once, and says what Muse said", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    await ask(brain, "hello");
+    muse.startTurn = async (input) => {
+      throw notLoaded(input.sessionId);
+    };
+    const events = await ask(brain, "again");
+    assert.deepEqual(events, [{ type: "error", message: "Muse did not take that: session s1 is not loaded on this host", retryable: true }]);
+    assert.deepEqual(muse.opens, ["s1"], "one attempt to load it, one to send, no loop");
   });
 });

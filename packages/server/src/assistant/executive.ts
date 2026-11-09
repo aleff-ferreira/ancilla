@@ -30,6 +30,13 @@ export interface ExecutiveHost {
   /** Puts a thread on a model, doing nothing when it is on it already. Only a call's thread is ever asked to; a task keeps its model. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
   /**
+   * Loads a thread on its Muse host as opening it does, for what runs with no page open (a call going on from an earlier
+   * conversation): a host that started again holds no thread and refuses every command to one. False when the thread cannot
+   * be used (this server does not know it, Muse no longer has it, or another Muse client holds it); an error when its host
+   * cannot be reached. Only a call's thread is ever asked to.
+   */
+  openSession?(sessionId: string): Promise<boolean>;
+  /**
    * Sends a prompt in a thread. A plain error means Muse did not take it. An `AmbiguousStartError` means it may have.
    */
   startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }>;

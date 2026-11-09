@@ -189,6 +189,8 @@ export interface Reply {
   pieceMs?: number;
   tool?: { name: string; args: Record<string, unknown> };
   error?: string;
+  /** Said to the person before the reply, which goes on. */
+  notice?: string;
 }
 
 /** A model that says what it is told, at the pace it is told. */
@@ -219,6 +221,7 @@ export class ScriptedBrain implements BrainProvider {
       this.aborted++;
       return;
     }
+    if (reply.notice) yield { type: "notice", text: reply.notice };
     if (reply.error) {
       yield { type: "error", message: reply.error, retryable: true };
       return;

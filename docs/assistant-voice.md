@@ -23,9 +23,15 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
      offers, the same list as the message box's model menu, with *Muse default* first: pick one and a new thread starts
      on it, and the thread a conversation already had is put on it before the next answer. A smaller model answers
      sooner. A model id Muse does not list can be typed in (*Other model id*); Muse decides at the first answer whether
-     your plan may use it, and a call that cannot be put on the model says so instead of answering on another one.
+     your plan may use it. When Muse will not put the thread on the model, the call still answers, on the model the thread
+     has, and says once on its card that it would not change it, with Muse's reason.
      *Muse default* names no model: a new thread starts on Muse's own choice, and a thread that already has a model keeps
      it. A change applies from the next call.
+     A conversation keeps its thread from one call to the next. A Muse host that was started again since (the desktop
+     app starts one each time it opens) holds no thread and refuses every command to one, so the call loads the thread
+     first, as opening it on the screen does, and loads it again if the host lets it go in the middle of a call. A thread
+     that cannot be loaded (it is gone, or another Muse client has it open) is replaced by a new one, which is told what
+     was said before, so the conversation goes on.
    - *Another model*: any server that speaks the OpenAI chat protocol. The tab has starting points for OpenAI,
      OpenRouter, Groq, Ollama, LM Studio and llama.cpp. A key, if there is one, is kept in a file only you can read and is
      never shown again. A model that runs on your computer sends nothing over the network.

@@ -270,6 +270,18 @@ describe("a model that is slow, fails, or uses tools", () => {
     assert.equal(rig.tts.said.at(-1)?.text, "Okay, got it.");
   });
 
+  it("shows what the model says about itself on the card, and goes on answering", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, script: () => ({ ttftMs: 100, notice: "Muse would not put this thread on muse-wonder-1.0: not offered. It answers on the model the thread already has.", text: "Okay, got it." }) });
+    await rig.client.speak(1, 900);
+    await rig.client.quiet(100);
+    await finished(rig);
+    assert.deepEqual(rig.tts.said.map((s) => s.text), ["Okay, got it."], "the answer is said, with no apology");
+    const notices = rig.client.of("notice");
+    assert.equal(notices.length, 1);
+    assert.match((notices[0]?.msg as { text: string }).text, /It answers on the model the thread already has\.$/);
+    assert.equal((notices[0]?.msg as { level: string }).level, "warn");
+  });
+
   it("runs a tool, says what it is doing, and goes on with the result", async () => {
     let n = 0;
     const rig = await makeRig({

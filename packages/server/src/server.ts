@@ -1357,6 +1357,30 @@ export class AncillaServer {
         }
         return { sessionId };
       },
+      openSession: async (sessionId) => {
+        const found = this.store.findSession(sessionId);
+        if (!found) return false;
+        const managed = await this.hostForSession(sessionId);
+        // A host of this server that has held the thread since it was made or opened has it loaded.
+        if (this.sessionHosts.get(sessionId) === managed.key && this.hosts.get(managed.key) === managed) return true;
+        if (!this.mayLoadUnloaded(sessionId, managed)) return false;
+        try {
+          // What opening the thread on the screen does to load it, without reading its transcript.
+          const reply = asRecord(await managed.manager.resumeSession(sessionId, true));
+          if (this.hosts.get(managed.key) === managed) this.sessionHosts.set(sessionId, managed.key);
+          this.liveFor(sessionId).readOnlyReason = null;
+          await this.restoreChosenModel(managed.manager, sessionId, found.session.chosenModelId ?? null, asRecord(reply?.["session"]));
+          return true;
+        } catch (error) {
+          // Only a thread that is gone, or that another Muse client holds, cannot be used; a host that cannot be reached is an error.
+          const info = errorInfo(error);
+          if (info.kind === "sessionInUse" || info.kind === "sessionNotFound") {
+            this.log(`the thread ${sessionId} of a call could not be loaded on ${managed.key}: ${info.message}`);
+            return false;
+          }
+          throw error;
+        }
+      },
       setModel: async (sessionId, modelId) => {
         // A thread that is on the model already is left as it is: a switch is a request to Muse and a note in the thread.
         if (this.store.findSession(sessionId)?.session.modelId === modelId) return;
@@ -1376,7 +1400,8 @@ export class AncillaServer {
           if (/timed? ?out|timeout|aborted|socket|ECONNRESET|EPIPE/i.test(info.message) && info.status >= 500) {
             throw new AmbiguousStartError(info.message);
           }
-          throw new Error(info.message);
+          // The kind goes with it, so that a call can tell a thread its host does not hold from any other refusal.
+          throw Object.assign(new Error(info.message), { kind: info.kind });
         }
         if (!ack.turnId) {
           throw new AmbiguousStartError("Muse accepted the prompt but named no turn");

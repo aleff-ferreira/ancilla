@@ -13,6 +13,12 @@ import type { BrainCapabilities, BrainEvent, BrainProvider, BrainRequest, ChatMe
 export interface MuseBrainHost {
   /** `modelId` is the model the thread starts on; absent leaves it to Muse. */
   startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }>;
+  /**
+   * Makes sure a thread this conversation already had is loaded on its Muse host, as opening it on the screen does: a host
+   * that started again since the thread was last used holds none, and refuses every command to a thread it does not hold.
+   * False when the thread cannot be used (it is gone, or another Muse client holds it); an error when the host cannot be reached.
+   */
+  openSession?(sessionId: string): Promise<boolean>;
   /** Puts a thread on a model, doing nothing when it is on it already; absent where a thread's model cannot be changed. A refusal is an error. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
   startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }>;
@@ -37,8 +43,16 @@ export interface MuseBrainOptions {
   model?: string | null;
 }
 
-/** Muse would not put the thread on the model chosen for the call: said as it is, not as a thread that cannot be reached. */
-class ModelSwitchError extends Error {}
+/**
+ * Muse refused a command because its host does not hold the thread: the thread has to be loaded, and the command is then
+ * sent again. By the kind the protocol gives that refusal, or by the host's words for it ("session ... is not loaded on
+ * this host"), in case a host words it under another kind.
+ */
+function isNotLoaded(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { kind, message } = error as { kind?: unknown; message?: unknown };
+  return kind === "sessionNotLoaded" || (typeof message === "string" && /\bnot loaded on this host\b/i.test(message));
+}
 
 const DEFAULT_IDLE_MS = 90_000;
 
@@ -76,6 +90,10 @@ export class MuseThreadBrain implements BrainProvider {
   private fresh: boolean;
   /** The thread is on the model chosen for the call (or none was chosen), so it need not be asked again. */
   private modelSet: boolean;
+  /** The thread is loaded on its host: it was made for this call, or it has been opened. */
+  private opened = false;
+  /** Something the person should be told that does not stop the answer, said with the next one. */
+  private notice: string | null = null;
 
   constructor(private readonly options: MuseBrainOptions) {
     this.sessionId = options.sessionId ?? null;
@@ -84,30 +102,52 @@ export class MuseThreadBrain implements BrainProvider {
     this.label = options.model ? `Muse (${options.model})` : "Muse";
   }
 
+  /** The thread to talk in: the conversation's own, loaded and on the model chosen, or a new one when it cannot be used. */
   private async session(): Promise<string> {
     const { host, model } = this.options;
-    if (!this.sessionId) {
+    if (this.sessionId !== null && !this.opened) {
+      // A thread the conversation already had is not loaded on a Muse host that started again since it was last used (the
+      // desktop app starts one with each launch), and the host refuses every command to it. It is loaded, as opening it on
+      // the screen does, once for the call; one that cannot be used is replaced by a new thread, told what was said before.
+      const usable = host.openSession ? await host.openSession(this.sessionId) : true;
+      if (usable) this.opened = true;
+      else {
+        host.log(`voice: the conversation's Muse thread ${this.sessionId} cannot be used, so a new one was started`);
+        this.sessionId = null;
+        this.fresh = true;
+        this.told = false;
+      }
+    }
+    if (this.sessionId === null) {
       const { sessionId } = await host.startSession({ cwd: this.options.cwd, account: null, title: this.options.title, ...(model ? { modelId: model } : {}) });
       this.sessionId = sessionId;
+      this.opened = true;
       // A thread that began on the model is on it.
       this.modelSet = true;
       this.options.onSession?.(sessionId);
     }
     if (!this.modelSet && model) {
       // A thread the conversation already had is put on the model chosen now, once; a thread that is on it is left alone.
+      // When Muse will not, the call still answers, on the model the thread has, and says so: a call that cannot change
+      // model is a lesser thing than one that does not answer.
+      this.modelSet = true;
       if (host.setModel) {
         try {
           await host.setModel(this.sessionId, model);
         } catch (error) {
-          throw new ModelSwitchError(`Muse would not put this thread on ${model}: ${error instanceof Error ? error.message : String(error)}`);
+          const why = (error instanceof Error ? error.message : String(error)).trim().replace(/[.\s]+$/, "");
+          this.notice = `Muse would not put this thread on ${model}: ${why}. It answers on the model the thread already has.`;
+          host.log(`voice: ${this.notice}`);
         }
       }
-      this.modelSet = true;
     }
     return this.sessionId;
   }
 
-  /** The text to send for this request, and the person's own words from it for the thread to show. */
+  /**
+   * The text to send for this request, and the person's own words from it for the thread to show. Nothing is marked as told
+   * here: that is done once Muse has taken the prompt, so a prompt that did not get there does not use up the rules.
+   */
   private promptFor(messages: readonly ChatMessage[]): { text: string; shown: string } | null {
     const fresh = freshMessages(messages);
     if (fresh.length === 0) return null;
@@ -128,7 +168,6 @@ export class MuseThreadBrain implements BrainProvider {
       const earlier = this.fresh ? messages.slice(0, messages.length - fresh.length).filter((m) => m.role === "user" || m.role === "assistant") : [];
       const recap = earlier.length === 0 ? "" : `Earlier in this conversation:\n${earlier.slice(-12).map((m) => `${m.role === "user" ? "User" : "You"}: ${clip((m as { content: string }).content, 300)}`).join("\n")}\n\n`;
       text = `${RULES}\n${system && system.role === "system" ? system.content : ""}\n\n${recap}${text}`;
-      this.told = true;
     } else {
       text = `${REMINDER}\n${text}`;
     }
@@ -137,8 +176,7 @@ export class MuseThreadBrain implements BrainProvider {
 
   async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
     const { host } = this.options;
-    const prompt = this.promptFor(request.messages);
-    if (!prompt) {
+    if (freshMessages(request.messages).length === 0) {
       yield { type: "error", message: "There was nothing to say to Muse.", retryable: false };
       return;
     }
@@ -146,10 +184,16 @@ export class MuseThreadBrain implements BrainProvider {
     try {
       sessionId = await this.session();
     } catch (error) {
-      yield { type: "error", message: error instanceof ModelSwitchError ? error.message : `Muse could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
+      yield { type: "error", message: `Muse could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
       return;
     }
+    if (this.notice !== null) {
+      yield { type: "notice", text: this.notice };
+      this.notice = null;
+    }
     if (request.signal.aborted) return;
+    // Made only now: a thread that was replaced is a new one, which has to be told what was said before.
+    const prompt = this.promptFor(request.messages) as { text: string; shown: string };
 
     // Everything Muse says about this thread is queued as it comes, and read in order below.
     const queue: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -172,8 +216,18 @@ export class MuseThreadBrain implements BrainProvider {
     request.signal.addEventListener("abort", onAbort, { once: true });
     try {
       try {
-        const ack = await host.startTurn({ sessionId, text: prompt.text, displayText: `Voice: ${clip(prompt.shown, 400)}`, commandId: `voice-${randomUUID()}` });
+        const send = () => host.startTurn({ sessionId, text: prompt.text, displayText: `Voice: ${clip(prompt.shown, 400)}`, commandId: `voice-${randomUUID()}` });
+        let ack: { turnId: string };
+        try {
+          ack = await send();
+        } catch (error) {
+          // The host started again in the middle of the call, or let the thread go: it refused the prompt, so loading the
+          // thread and sending it once more cannot say it twice. Only once; what is refused after that is the answer.
+          if (!(isNotLoaded(error) && host.openSession && (await host.openSession(sessionId)))) throw error;
+          ack = await send();
+        }
         turnId = ack.turnId;
+        this.told = true;
       } catch (error) {
         yield { type: "error", message: `Muse did not take that: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
         return;

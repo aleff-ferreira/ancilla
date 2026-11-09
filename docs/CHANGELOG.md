@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A call that goes on from an earlier conversation answers again.** The call keeps one Muse thread for each conversation, and opening Ancilla again starts a new Muse host, which holds no thread and refuses every command to one until it is loaded. The call never loaded it, so the first call after the app was reopened, going on from a conversation of the day before, said "Sorry, I lost my train of thought" to everything, with Muse's "session ... is not loaded on this host" as the reason on its card. The call now loads the thread as opening it on the screen does, once, before it uses it; loads it again and tries once more if the host lets it go in the middle of a call; and starts a new thread, told what was said before, when the old one is gone or another Muse client has it open. A call that the app was left open for never met this, which is why it was not seen sooner.
+- **A call that cannot put its thread on the model you chose still answers.** Muse's refusal used to stop every answer. The call now answers on the model the thread has, and says once on its card that it would not change it, with Muse's reason.
+- **A call that could not reach Muse no longer forgets the rules of a call.** The first prompt carries them, and they were marked as told before Muse had taken it, so after one failed attempt the next went without them.
+
 ## 0.26.0
 
 ### New

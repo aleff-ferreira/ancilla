@@ -761,6 +761,11 @@ export class VoiceSession {
         this.deps.log(`the model failed: ${event.message}`);
         this.send({ type: "notice", level: "warn", text: event.message });
         break;
+      case "notice":
+        // Said on the card, and the answer goes on.
+        this.deps.log(`the model said: ${event.text}`);
+        this.send({ type: "notice", level: "warn", text: event.text });
+        break;
       case "usage":
       case "done":
         break;
