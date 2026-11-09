@@ -41,6 +41,10 @@ jobs:
       - if: runner.os == 'Linux'
         run: node scripts/check-attribution.mjs
       - run: npm ci
+      # The browser test starts the runner's own Chrome with its sandbox ON (Ancilla never passes --no-sandbox);
+      # Ubuntu 24.04 blocks the unprivileged user namespaces that sandbox needs unless this is lifted.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       # THIRD_PARTY_NOTICES.md follows the lockfiles; a dependency change has to regenerate it
       # (npm run notices). Linux only: Windows runners check the file out with CRLF endings.
       - if: runner.os == 'Linux'

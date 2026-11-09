@@ -97,6 +97,8 @@ import { handleAssistant, isAssistantPath, type AssistantReply } from "./assista
 import { handleVoice, isVoicePath } from "./voice/routes.js";
 import type { HarnessMessage, HarnessReader, HarnessThread, HarnessUsage } from "./voice/harness.js";
 import { VoiceService } from "./voice/service.js";
+import { handleBrowser, isBrowserPath } from "./browser/routes.js";
+import { BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
@@ -1017,6 +1019,8 @@ export class AncillaServer {
   /** The voice: models, the open call and its settings. Made the first time something asks for it; nothing runs until a call does. */
   private voiceService: VoiceService | null = null;
   private voiceSockets: VoiceSocketServer | null = null;
+  /** The browser the server owns (see docs/browser.md). Made on first use; no browser process exists until a page is opened. */
+  private browserService: BrowserService | null = null;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1119,6 +1123,11 @@ export class AncillaServer {
       void this.route(req, res).catch((error) => this.fail(res, 500, String(error)));
     });
     this.server.on("upgrade", (req, socket, head) => this.upgrade(req, socket, head));
+  }
+
+  private browserFor(): BrowserService {
+    this.browserService ??= new BrowserService({ dataDir: this.options.dataDir, log: (line) => this.log(line) });
+    return this.browserService;
   }
 
   /** The voice, made on first use. */
@@ -1704,6 +1713,8 @@ export class AncillaServer {
     }
     // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
     this.storeClosed = true;
+    await this.browserService?.dispose().catch(() => undefined);
+    this.browserService = null;
     // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.
     this.voiceSockets?.close();
     await this.voiceService?.close().catch(() => undefined);
@@ -2636,6 +2647,10 @@ export class AncillaServer {
         this.sendAssistant(res, reply);
         return true;
       }
+    }
+    if (isBrowserPath(path)) {
+      this.sendAssistant(res, await handleBrowser(this.browserFor(), { method, path, query: url.searchParams, body: () => this.readBody(req) }));
+      return true;
     }
     if (isVoicePath(path)) {
       this.sendAssistant(res, await handleVoice(this.voiceFor(), { method, path, query: url.searchParams, body: () => this.readBody(req) }));
