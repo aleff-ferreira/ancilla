@@ -15,9 +15,9 @@ on Windows, macOS and Linux.
 [See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.24.0:** an assistant with a face, a voice and a first meeting that you choose, shown in the sidebar, on its
-> own page and beside the composer, and a progress card that no longer leaves the last plan on screen as complete beside
-> a new prompt. [Read the release notes](docs/CHANGELOG.md#0240).
+> **New in 0.25.0:** you can call your assistant. It listens while you talk, answers aloud, can be cut off mid-word, works on
+> tasks in the background and opens with what changed while you were away. The speech runs on your computer, any model
+> can answer, and notes can be found by what they mean. [Read the release notes](docs/CHANGELOG.md#0250).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
