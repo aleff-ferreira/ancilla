@@ -50,20 +50,27 @@ export function Pick<T extends string | number | null>(props: {
  * A model control: the rows of the composer's picker, with Muse default first, and the same words when the list is
  * loading, failed or empty. `full` is the new-thread default, which also says what the list is, takes a model id Muse
  * did not list, and reads the list again on request; the title and research models keep to the rows and a retry.
+ * A control for some other setting that is a full one (the model a voice call thinks with) says what a model id typed
+ * by hand does (`onTyped`) and whether the saved model is one tried that way (`tried`), since the new-thread default's
+ * answers to both are not its own.
  */
-function ModelPick(props: { value: string | null; onChange: (modelId: string | null) => void; full?: boolean }) {
+export function ModelPick(props: {
+  value: string | null;
+  onChange: (modelId: string | null) => void;
+  full?: boolean;
+  tried?: boolean;
+  onTyped?: (modelId: string) => Promise<boolean>;
+}) {
   const controller = useController();
   const models = useApp((s) => s.models);
   const accountModels = useApp((s) => s.accountModels);
   const modelsStatus = useApp((s) => s.modelsStatus);
   const accounts = useApp((s) => s.accounts);
-  const tried = useApp((s) => s.prefs.defaultModelTried);
+  const defaultTried = useApp((s) => s.prefs.defaultModelTried);
+  const tried = props.tried ?? (props.full === true && defaultTried);
   // A saved model is global and this control shows one list, the default login's: an id another loaded list offers is
   // not called unavailable (it says whose it is), and the default tried by its id is kept and said to be tried.
-  const menu = modelMenu(
-    { models, accountModels, modelsStatus, accounts },
-    { scope: {}, accountId: null, current: null, pref: props.value, plan: null, tried: props.full === true && tried, elsewhere: true },
-  );
+  const menu = modelMenu({ models, accountModels, modelsStatus, accounts }, { scope: {}, accountId: null, current: null, pref: props.value, plan: null, tried, elsewhere: true });
   // Said in words under the rows: what Muse default follows (it can be a Contributor model), or why a saved model is not among them.
   const line = modelPickLine(menu, { museDefault: props.full === true });
   const selected = menu.rows.find((row) => row.selected);
@@ -117,7 +124,7 @@ function ModelPick(props: { value: string | null; onChange: (modelId: string | n
         <>
           {footer ? <p className="text-xs text-subtle [overflow-wrap:anywhere]">{footer}</p> : null}
           <div className="w-full @min-[520px]:w-72">
-            <ModelIdForm label="Other model id" onUse={(modelId) => tryTypedModel(controller, modelId)} />
+            <ModelIdForm label="Other model id" onUse={(modelId) => (props.onTyped ? props.onTyped(modelId) : tryTypedModel(controller, modelId))} />
           </div>
         </>
       ) : null}

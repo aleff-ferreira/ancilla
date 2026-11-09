@@ -11,7 +11,10 @@ import type { BrainCapabilities, BrainEvent, BrainProvider, BrainRequest, ChatMe
 
 /** What this needs of the server: the same four things the task executive uses, and a way to ask whether the thread is waiting on the person. */
 export interface MuseBrainHost {
-  startSession(input: { cwd: string; account: string | null; title: string }): Promise<{ sessionId: string }>;
+  /** `modelId` is the model the thread starts on; absent leaves it to Muse. */
+  startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }>;
+  /** Puts a thread on a model, doing nothing when it is on it already; absent where a thread's model cannot be changed. A refusal is an error. */
+  setModel?(sessionId: string, modelId: string): Promise<void>;
   startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }>;
   interruptTurn(sessionId: string, turnId: string): Promise<void>;
   needsUser(sessionId: string): boolean;
@@ -30,7 +33,12 @@ export interface MuseBrainOptions {
   onSession?: (sessionId: string) => void;
   /** How long a turn may go without a word from Muse before it is given up on. */
   idleMs?: number;
+  /** The Muse model the thread answers with; null or absent leaves the thread on whatever Muse chose. */
+  model?: string | null;
 }
+
+/** Muse would not put the thread on the model chosen for the call: said as it is, not as a thread that cannot be reached. */
+class ModelSwitchError extends Error {}
 
 const DEFAULT_IDLE_MS = 90_000;
 
@@ -59,25 +67,44 @@ function freshMessages(messages: readonly ChatMessage[]): ChatMessage[] {
 
 export class MuseThreadBrain implements BrainProvider {
   readonly id = "muse-thread";
-  readonly label = "Muse";
+  readonly label: string;
   readonly capabilities: BrainCapabilities = { tools: false, speculative: false, local: false };
   private sessionId: string | null;
   /** The rules of the call have been told to the thread. */
   private told = false;
   /** The thread was made for this call, so earlier turns of the conversation have to be told to it. */
   private fresh: boolean;
+  /** The thread is on the model chosen for the call (or none was chosen), so it need not be asked again. */
+  private modelSet: boolean;
 
   constructor(private readonly options: MuseBrainOptions) {
     this.sessionId = options.sessionId ?? null;
     this.fresh = this.sessionId === null;
+    this.modelSet = !options.model;
+    this.label = options.model ? `Muse (${options.model})` : "Muse";
   }
 
   private async session(): Promise<string> {
-    if (this.sessionId) return this.sessionId;
-    const { sessionId } = await this.options.host.startSession({ cwd: this.options.cwd, account: null, title: this.options.title });
-    this.sessionId = sessionId;
-    this.options.onSession?.(sessionId);
-    return sessionId;
+    const { host, model } = this.options;
+    if (!this.sessionId) {
+      const { sessionId } = await host.startSession({ cwd: this.options.cwd, account: null, title: this.options.title, ...(model ? { modelId: model } : {}) });
+      this.sessionId = sessionId;
+      // A thread that began on the model is on it.
+      this.modelSet = true;
+      this.options.onSession?.(sessionId);
+    }
+    if (!this.modelSet && model) {
+      // A thread the conversation already had is put on the model chosen now, once; a thread that is on it is left alone.
+      if (host.setModel) {
+        try {
+          await host.setModel(this.sessionId, model);
+        } catch (error) {
+          throw new ModelSwitchError(`Muse would not put this thread on ${model}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.modelSet = true;
+    }
+    return this.sessionId;
   }
 
   /** The text to send for this request, and the person's own words from it for the thread to show. */
@@ -119,7 +146,7 @@ export class MuseThreadBrain implements BrainProvider {
     try {
       sessionId = await this.session();
     } catch (error) {
-      yield { type: "error", message: `Muse could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
+      yield { type: "error", message: error instanceof ModelSwitchError ? error.message : `Muse could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
       return;
     }
     if (request.signal.aborted) return;

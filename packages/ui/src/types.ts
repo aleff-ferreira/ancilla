@@ -885,7 +885,8 @@ export interface AssistantStatusView {
 
 /** How the voice is set up; a key is never part of it. */
 export type VoiceBrainSetting =
-  | { kind: "muse" }
+  /** Through Muse; `model` is the Muse model that answers, or null for Muse's own choice. */
+  | { kind: "muse"; model: string | null }
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "none" };
 

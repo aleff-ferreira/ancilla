@@ -65,7 +65,7 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       return { brain: new StaticBrain("Muse needs a project to think in, and none is open. Open a project in Ancilla, or choose another model in the voice settings."), problem: "Muse needs a project: open one in Ancilla." };
     }
     // Muse has no tool calling of its own to offer a call, so its tools are asked for in its text.
-    const thread = new MuseThreadBrain({ host: deps.museHost, cwd: context.project, title: `Voice with ${context.name}`, sessionId: context.museSession, onSession: context.rememberMuseSession });
+    const thread = new MuseThreadBrain({ host: deps.museHost, cwd: context.project, title: `Voice with ${context.name}`, sessionId: context.museSession, onSession: context.rememberMuseSession, model: choice.model });
     return { brain: withTextTools(thread), problem: null };
   }
   return { brain: new StaticBrain("No model is set up for the voice yet. Open the voice settings and choose one."), problem: "No model is chosen." };

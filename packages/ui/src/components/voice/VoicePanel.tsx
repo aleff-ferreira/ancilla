@@ -3,7 +3,7 @@ import { useController } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
 import type { VoiceBrainSetting, VoiceConversationView, VoiceSettingsView, VoiceStatusView } from "../../types.js";
 import { Chip, Notice } from "../assistant/parts.js";
-import { Pick, Row, Section } from "../settings/SettingsPage.js";
+import { ModelPick, Pick, Row, Section } from "../settings/SettingsPage.js";
 import { Button, Toggle } from "../ui/primitives.js";
 import { ago } from "../assistant/api.js";
 import { forgetVoiceStatus } from "./talk.js";
@@ -274,6 +274,12 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
 
+  // The Muse model's choices are the list Muse sends, read when the setting is on show; a list already read is left be.
+  const throughMuse = brain.kind === "muse";
+  useEffect(() => {
+    if (throughMuse) void controller.refreshModels({ navigation: true });
+  }, [controller, throughMuse]);
+
   const choose = (kind: VoiceBrainSetting["kind"]) => {
     setTest(null);
     if (kind === "openai") {
@@ -317,7 +323,21 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
         />
       </Row>
       {brain.kind === "muse" ? (
-        <Row label="Through Muse" description="Uses your Muse plan, one thread per conversation, so each answer takes as long as a Muse turn. Choose another model for a snappier call." />
+        <>
+          <Row label="Through Muse" description="Uses your Muse plan, one thread per conversation, so each answer takes as long as a Muse turn. A smaller model answers sooner, and another provider's model sooner still." />
+          <Row label="Muse model" description="Which of the models your Muse plan offers answers the call. It applies from the next call. “Muse default” leaves a conversation's thread on whatever it is on.">
+            <ModelPick
+              full
+              tried
+              value={brain.model}
+              onChange={(model) => void props.save({ brain: { kind: "muse", model } })}
+              onTyped={async (model) => {
+                await props.save({ brain: { kind: "muse", model } });
+                return true;
+              }}
+            />
+          </Row>
+        </>
       ) : null}
       {brain.kind === "openai" ? (
         <>

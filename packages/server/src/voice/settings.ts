@@ -11,8 +11,11 @@ import { ValidationError } from "../assistant/profile.js";
 export type CallModeSetting = "hands-free" | "push-to-talk";
 
 export type BrainSetting =
-  /** Muse, through a thread: works with a Muse subscription and no key, at the speed of a Muse turn. */
-  | { kind: "muse" }
+  /**
+   * Muse, through a thread: works with a Muse subscription and no key, at the speed of a Muse turn. `model` is the Muse model
+   * a new thread starts on and a thread of the conversation is put on; null leaves it to Muse's own choice.
+   */
+  | { kind: "muse"; model: string | null }
   /** Any server that speaks the OpenAI chat protocol: a hosted model with a key, or one running on this machine. */
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   /** No model: the call can be opened to be set up, and says so. */
@@ -45,7 +48,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   speed: 1,
   refine: true,
   ttsSteps: 4,
-  brain: { kind: "muse" },
+  brain: { kind: "muse", model: null },
   proactive: true,
   keepDays: null,
   runtimeDir: null,
@@ -55,6 +58,11 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
 
 export const VOICE_SETTINGS_FILE = "voice.json";
 export const VOICE_SECRETS_FILE = "voice-secrets.json";
+
+/** A file as text, without the byte-order mark that some Windows editors and tools put in front of it, which JSON does not allow. */
+function readText(path: string): string {
+  return readFileSync(path, "utf8").replace(/^﻿/, "");
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -76,9 +84,20 @@ function optionalText(value: unknown, field: string, max: number): string | null
   return text(value, field, max);
 }
 
-function parseBrain(value: unknown): BrainSetting {
+/** What a Muse model id looks like: the same shape the page accepts when a model is typed by hand. */
+const MUSE_MODEL_ID = /^[A-Za-z0-9][\w.:-]*$/;
+
+function museModel(value: unknown): string | null {
+  const id = optionalText(value, "brain.model", 100)?.trim() ?? "";
+  if (id === "") return null;
+  if (!MUSE_MODEL_ID.test(id)) throw new ValidationError("brain.model", "brain.model must be a model id: letters, digits and . _ : - only");
+  return id;
+}
+
+/** `current` is the brain that is set now, for a change that says nothing about a model and must not undo the one chosen. */
+function parseBrain(value: unknown, current: BrainSetting | null = null): BrainSetting {
   if (!isObject(value)) throw new ValidationError("brain", "brain must be an object");
-  if (value["kind"] === "muse") return { kind: "muse" };
+  if (value["kind"] === "muse") return { kind: "muse", model: "model" in value ? museModel(value["model"]) : current?.kind === "muse" ? current.model : null };
   if (value["kind"] === "none") return { kind: "none" };
   if (value["kind"] === "openai") {
     const baseUrl = text(value["baseUrl"], "brain.baseUrl", 300).trim();
@@ -111,7 +130,7 @@ export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceS
   if ("refine" in raw) next.refine = raw["refine"] === true;
   // Two steps is fast and unintelligible (half the words are lost when the speech is read back), so three is the least.
   if ("ttsSteps" in raw) next.ttsSteps = Math.round(number(raw["ttsSteps"], "ttsSteps", 3, 8, current.ttsSteps));
-  if ("brain" in raw) next.brain = parseBrain(raw["brain"]);
+  if ("brain" in raw) next.brain = parseBrain(raw["brain"], current.brain);
   if ("proactive" in raw) next.proactive = raw["proactive"] === true;
   if ("keepDays" in raw) next.keepDays = raw["keepDays"] === null ? null : Math.round(number(raw["keepDays"], "keepDays", 1, 3650, 30));
   if ("runtimeDir" in raw) next.runtimeDir = optionalText(raw["runtimeDir"], "runtimeDir", 500);
@@ -145,7 +164,7 @@ export class VoiceSettingsStore {
     const settingsPath = this.pathOf(VOICE_SETTINGS_FILE);
     if (settingsPath && existsSync(settingsPath)) {
       try {
-        const raw = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
+        const raw = JSON.parse(readText(settingsPath)) as unknown;
         if (isObject(raw)) this.settings = applySettingsPatch({ ...DEFAULT_VOICE_SETTINGS }, { ...raw, apiKey: undefined });
       } catch (error) {
         this.log(`voice: the settings file could not be read, so the defaults are used: ${error instanceof Error ? error.message : String(error)}`);
@@ -154,7 +173,7 @@ export class VoiceSettingsStore {
     const secretsPath = this.pathOf(VOICE_SECRETS_FILE);
     if (secretsPath && existsSync(secretsPath)) {
       try {
-        const raw = JSON.parse(readFileSync(secretsPath, "utf8")) as unknown;
+        const raw = JSON.parse(readText(secretsPath)) as unknown;
         if (isObject(raw)) for (const [key, value] of Object.entries(raw)) if (typeof value === "string") this.secrets[key] = value;
       } catch {
         this.log("voice: the keys file could not be read, so no key is set");

@@ -25,7 +25,10 @@ export interface ExecutiveHost {
   projectKey(cwd: string): string;
   /** Whether a Muse host can be reached for this folder and account now. */
   hostAvailable(cwd: string, account: string | null): Promise<{ ok: boolean; reason?: string }>;
-  startSession(input: { cwd: string; account: string | null; title: string }): Promise<{ sessionId: string }>;
+  /** `modelId` is the model the thread starts on; absent leaves it to Muse. */
+  startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }>;
+  /** Puts a thread on a model, doing nothing when it is on it already. Only a call's thread is ever asked to; a task keeps its model. */
+  setModel?(sessionId: string, modelId: string): Promise<void>;
   /**
    * Sends a prompt in a thread. A plain error means Muse did not take it. An `AmbiguousStartError` means it may have.
    */

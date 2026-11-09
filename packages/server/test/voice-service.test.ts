@@ -100,6 +100,35 @@ describe("the voice settings", () => {
     }
   });
 
+  it("keeps the Muse model chosen for the voice, and lets a change that says nothing of it leave it be", () => {
+    assert.deepEqual(DEFAULT_VOICE_SETTINGS.brain, { kind: "muse", model: null }, "Muse's own choice until one is made");
+    const chosen = applySettingsPatch(DEFAULT_VOICE_SETTINGS, { brain: { kind: "muse", model: "  muse-spark-1.3 " } });
+    assert.deepEqual(chosen.brain, { kind: "muse", model: "muse-spark-1.3" });
+    assert.deepEqual(applySettingsPatch(chosen, { brain: { kind: "muse" } }).brain, { kind: "muse", model: "muse-spark-1.3" }, "picking Muse again is not picking another model");
+    assert.deepEqual(applySettingsPatch(chosen, { brain: { kind: "muse", model: null } }).brain, { kind: "muse", model: null }, "null is Muse's own choice");
+    assert.deepEqual(applySettingsPatch(chosen, { brain: { kind: "muse", model: "" } }).brain, { kind: "muse", model: null });
+    const away = applySettingsPatch(chosen, { brain: { kind: "openai", baseUrl: "http://127.0.0.1:8080/v1", model: "qwen", local: true } });
+    assert.deepEqual(applySettingsPatch(away, { brain: { kind: "muse" } }).brain, { kind: "muse", model: null }, "coming back from another model starts from Muse's own choice");
+    for (const bad of ["muse wonder", "../etc", "-x", "a".repeat(101), 7, { id: "x" }]) {
+      assert.throws(() => applySettingsPatch(DEFAULT_VOICE_SETTINGS, { brain: { kind: "muse", model: bad } }), /brain\.model/, JSON.stringify(bad));
+    }
+    assert.equal(applySettingsPatch(DEFAULT_VOICE_SETTINGS, { brain: { kind: "muse", model: "muse-wonder-full-1.0" } }).brain.kind === "muse", true, "an id Muse does not list is allowed: Muse decides at the turn");
+  });
+
+  it("reads a file written before the model was chosen, and one that starts with a byte-order mark", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ancilla-voice-bom-"));
+    after(() => rm(dir, { recursive: true, force: true }));
+    await writeFile(join(dir, "voice.json"), JSON.stringify({ speed: 1.1, brain: { kind: "muse" } }));
+    assert.deepEqual(new VoiceSettingsStore(dir).get().brain, { kind: "muse", model: null }, "an older file has no model");
+    // Windows PowerShell and some editors write UTF-8 with a mark in front, which JSON.parse refuses.
+    await writeFile(join(dir, "voice.json"), `﻿${JSON.stringify({ speed: 1.2, brain: { kind: "muse", model: "muse-wonder-1.0" } })}`);
+    const lines: string[] = [];
+    const store = new VoiceSettingsStore(dir, (l) => lines.push(l));
+    assert.deepEqual(store.get().brain, { kind: "muse", model: "muse-wonder-1.0" });
+    assert.equal(store.get().speed, 1.2);
+    assert.deepEqual(lines, [], "nothing to complain about");
+  });
+
   it("saves a key apart, owner-only, and never hands it back", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ancilla-voice-settings-"));
     after(() => rm(dir, { recursive: true, force: true }));

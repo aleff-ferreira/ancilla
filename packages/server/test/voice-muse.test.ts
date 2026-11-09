@@ -6,13 +6,19 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { BrainEvent, ChatMessage } from "../src/voice/brain.js";
+import { makeBrain } from "../src/voice/brains.js";
 import { MuseThreadBrain, type MuseBrainHost } from "../src/voice/muse-brain.js";
+import { DEFAULT_VOICE_SETTINGS } from "../src/voice/settings.js";
 
 type Handler = (method: string, params: Record<string, unknown>) => void;
 type Script = (turn: number, emit: (method: string, params: Record<string, unknown>) => void, turnId: string) => void | Promise<void>;
 
 class FakeMuse implements MuseBrainHost {
-  sessions: Array<{ cwd: string; title: string }> = [];
+  sessions: Array<{ cwd: string; title: string; modelId?: string }> = [];
+  /** Every thread put on a model after it was made. */
+  switches: Array<{ sessionId: string; modelId: string }> = [];
+  /** Muse's reason for refusing a switch, or null when it takes it. */
+  refuseSwitch: string | null = null;
   turns: Array<{ sessionId: string; text: string; displayText: string }> = [];
   interrupts: Array<{ sessionId: string; turnId: string }> = [];
   watching = 0;
@@ -22,9 +28,13 @@ class FakeMuse implements MuseBrainHost {
 
   constructor(private readonly script: Script) {}
 
-  async startSession(input: { cwd: string; account: string | null; title: string }): Promise<{ sessionId: string }> {
-    this.sessions.push({ cwd: input.cwd, title: input.title });
+  async startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }> {
+    this.sessions.push({ cwd: input.cwd, title: input.title, ...(input.modelId ? { modelId: input.modelId } : {}) });
     return { sessionId: `s${this.sessions.length}` };
+  }
+  async setModel(sessionId: string, modelId: string): Promise<void> {
+    if (this.refuseSwitch !== null) throw new Error(this.refuseSwitch);
+    this.switches.push({ sessionId, modelId });
   }
   async startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }> {
     this.turns.push({ sessionId: input.sessionId, text: input.text, displayText: input.displayText });
@@ -250,5 +260,80 @@ describe("Muse as the call's mind", () => {
     assert.match(sent, /\[Result of delegate_task\] Started task t_1\./);
     assert.doesNotMatch(sent, /start a task/, "only what is new");
     assert.equal(muse.sessions.length, 1, "in the same thread");
+  });
+});
+
+describe("Muse as the call's mind, on the model chosen for the voice", () => {
+  const answers = () =>
+    new FakeMuse((_n, emit, turnId) => {
+      emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: "Sure." } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+  const ask = (brain: MuseThreadBrain, ...said: string[]) => collect(brain.stream({ messages: [system, ...said.map(user)], tools: [], signal: new AbortController().signal }));
+
+  it("starts the thread on that model, and does not ask again for one that began on it", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/work/atlas", title: "Voice", model: "muse-spark-1.3" });
+    assert.equal(brain.label, "Muse (muse-spark-1.3)", "the call says which model answers");
+    await ask(brain, "hello");
+    await ask(brain, "and again");
+    assert.deepEqual(muse.sessions, [{ cwd: "/work/atlas", title: "Voice", modelId: "muse-spark-1.3" }]);
+    assert.deepEqual(muse.switches, [], "a thread made on the model needs no switch");
+  });
+
+  it("puts a thread the conversation already had on it, once, before the first turn", async () => {
+    const muse = answers();
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/work/atlas", title: "Voice", sessionId: "s-old", model: "muse-wonder-1.0" });
+    await ask(brain, "hello");
+    await ask(brain, "and again");
+    assert.equal(muse.sessions.length, 0, "no new thread");
+    assert.deepEqual(muse.switches, [{ sessionId: "s-old", modelId: "muse-wonder-1.0" }], "one switch for the call");
+    assert.equal(muse.turns.length, 2);
+  });
+
+  it("leaves a thread on its own model when none was chosen, and goes on where a host cannot switch", async () => {
+    const plain = answers();
+    const brain = new MuseThreadBrain({ host: plain, cwd: "/w", title: "v", sessionId: "s-old", model: null });
+    assert.equal(brain.label, "Muse");
+    await ask(brain, "hello");
+    assert.deepEqual(plain.switches, []);
+    // A host with no way to change a thread's model: the same double, without that one method.
+    const inner = answers();
+    const cannot: MuseBrainHost = {
+      startSession: (input) => inner.startSession(input),
+      startTurn: (input) => inner.startTurn(input),
+      interruptTurn: (sessionId, turnId) => inner.interruptTurn(sessionId, turnId),
+      needsUser: () => inner.needsUser(),
+      watch: (sessionId, handler) => inner.watch(sessionId, handler),
+      log: () => undefined,
+    };
+    const events = await ask(new MuseThreadBrain({ host: cannot, cwd: "/w", title: "v", sessionId: "s-old", model: "muse-wonder-1.0" }), "hello");
+    assert.equal(text(events), "Sure.", "a host that cannot switch answers on the model the thread has");
+  });
+
+  it("says so, and sends nothing, when Muse will not put the thread on the model, then tries again on the next turn", async () => {
+    const muse = answers();
+    muse.refuseSwitch = "That model is not offered.";
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v", sessionId: "s-old", model: "muse-wonder-1.0" });
+    const refused = await ask(brain, "hello");
+    assert.deepEqual(refused, [{ type: "error", message: "Muse would not put this thread on muse-wonder-1.0: That model is not offered.", retryable: true }]);
+    assert.equal(muse.turns.length, 0, "the question was not sent to a model the person did not choose");
+    muse.refuseSwitch = null;
+    const events = await ask(brain, "hello");
+    assert.equal(text(events), "Sure.");
+    assert.deepEqual(muse.switches, [{ sessionId: "s-old", modelId: "muse-wonder-1.0" }]);
+  });
+
+  it("is made from the settings: the model chosen for Muse goes to the thread", async () => {
+    const muse = answers();
+    const chosen = makeBrain({ ...DEFAULT_VOICE_SETTINGS, brain: { kind: "muse", model: "muse-spark-1.3" } }, { project: "/work/atlas", name: "Vesper", museSession: null, rememberMuseSession: () => undefined }, { museHost: muse, keyFor: () => null });
+    assert.equal(chosen.problem, null);
+    assert.equal(chosen.brain.label, "Muse (muse-spark-1.3)");
+    await collect(chosen.brain.stream({ messages: [system, user("hello")], tools: [], signal: new AbortController().signal }));
+    assert.equal(muse.sessions[0]?.modelId, "muse-spark-1.3");
+    const none = answers();
+    const unset = makeBrain(DEFAULT_VOICE_SETTINGS, { project: "/work/atlas", name: "Vesper", museSession: null, rememberMuseSession: () => undefined }, { museHost: none, keyFor: () => null });
+    await collect(unset.brain.stream({ messages: [system, user("hello")], tools: [], signal: new AbortController().signal }));
+    assert.equal("modelId" in (none.sessions[0] ?? {}), false, "Muse default names no model");
   });
 });

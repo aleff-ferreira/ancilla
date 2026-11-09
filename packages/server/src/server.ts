@@ -1347,8 +1347,8 @@ export class AncillaServer {
           return { ok: false, reason: errorInfo(error).message };
         }
       },
-      startSession: async ({ cwd, account, title }) => {
-        const created = await this.startSession(normalizeCwd(cwd), undefined, undefined, account);
+      startSession: async ({ cwd, account, title, modelId }) => {
+        const created = await this.startSession(normalizeCwd(cwd), undefined, modelId ?? undefined, account);
         const sessionId = String(created["sessionId"]);
         try {
           this.store.updateSession(sessionId, { title, titleSource: "user" });
@@ -1356,6 +1356,11 @@ export class AncillaServer {
           this.log(`a task's thread could not be named: ${errorInfo(error).message}`);
         }
         return { sessionId };
+      },
+      setModel: async (sessionId, modelId) => {
+        // A thread that is on the model already is left as it is: a switch is a request to Muse and a note in the thread.
+        if (this.store.findSession(sessionId)?.session.modelId === modelId) return;
+        await this.setThreadModel(sessionId, { modelId });
       },
       startTurn: async ({ sessionId, text, displayText }) => {
         const managed = await this.hostForSession(sessionId);
@@ -2441,43 +2446,7 @@ export class AncillaServer {
           if (!("model" in body)) {
             throw new HttpError(400, "model is required.");
           }
-          const { selection, listed, source } = await this.resolveModelSelection(manager, sessionId, body["model"]);
-          const modelId = str(asRecord(body["model"])?.["modelId"]);
-          // An id the catalog does not list is tried on this thread only: Muse keeps it for the session, and a typo
-          // is not found out until the next turn. The mark is set first, because the `modelChanged` that answers the
-          // switch can arrive before this request does. A list that is only Muse's built-in one (`source` is not
-          // `providerCatalog`) proves nothing about the plan, but it cannot tell a typo from a model either, so an id
-          // missing from it is a trial just the same.
-          const trial = modelId !== null && listed === false;
-          const marked = this.modelTrials.get(sessionId);
-          if (modelId && trial) {
-            this.modelTrials.set(sessionId, modelId);
-          } else {
-            this.modelTrials.delete(sessionId);
-          }
-          try {
-            await manager.setSessionModel(sessionId, selection);
-          } catch (error) {
-            // A rejected switch stores nothing and leaves the mark as it was.
-            if (marked === undefined) {
-              this.modelTrials.delete(sessionId);
-            } else {
-              this.modelTrials.set(sessionId, marked);
-            }
-            throw error;
-          }
-          if (modelId) {
-            // The user's pick, kept apart from what Muse reports: a resume that comes back on another model restores it.
-            // A trial is no pick, and it must not leave an older one standing either (a pin the thread started with,
-            // say): that would be put back over it on the next resume. Cleared, the host's own model wins.
-            this.store.updateSession(sessionId, trial ? { modelId, chosenModelId: null } : { modelId, chosenModelId: modelId });
-            if (trial) {
-              // The id comes off the wire: quoted, so a line break in it cannot split the record.
-              this.log(
-                `${sessionId} tries ${JSON.stringify(modelId)}, which ${source ? `Muse's ${source} list` : "Muse's list"} does not name; kept for this session only`,
-              );
-            }
-          }
+          await this.setThreadModel(sessionId, body["model"], manager);
           this.json(res, 200, { ok: true });
           return true;
         }
@@ -3778,6 +3747,48 @@ export class AncillaServer {
       return { selection, listed: entry !== null, source };
     } catch {
       return { selection: model, listed: null, source: null };
+    }
+  }
+
+  /**
+   * Puts a thread on a model, the way the picker does and the way a call's thread is put on the one chosen for the voice.
+   * An id the catalog does not list is tried on this thread only: Muse keeps it for the session, and a typo is not found
+   * out until the next turn. A rejected switch is an error and changes nothing.
+   */
+  private async setThreadModel(sessionId: string, model: unknown, given?: SessionManager): Promise<void> {
+    const manager = given ?? (await this.managerForSession(sessionId));
+    const { selection, listed, source } = await this.resolveModelSelection(manager, sessionId, model);
+    const modelId = str(asRecord(model)?.["modelId"]);
+    // The mark is set first, because the `modelChanged` that answers the switch can arrive before this request does. A
+    // list that is only Muse's built-in one (`source` is not `providerCatalog`) proves nothing about the plan, but it
+    // cannot tell a typo from a model either, so an id missing from it is a trial just the same.
+    const trial = modelId !== null && listed === false;
+    const marked = this.modelTrials.get(sessionId);
+    if (modelId && trial) {
+      this.modelTrials.set(sessionId, modelId);
+    } else {
+      this.modelTrials.delete(sessionId);
+    }
+    try {
+      await manager.setSessionModel(sessionId, selection);
+    } catch (error) {
+      // A rejected switch stores nothing and leaves the mark as it was.
+      if (marked === undefined) {
+        this.modelTrials.delete(sessionId);
+      } else {
+        this.modelTrials.set(sessionId, marked);
+      }
+      throw error;
+    }
+    if (modelId) {
+      // The user's pick, kept apart from what Muse reports: a resume that comes back on another model restores it.
+      // A trial is no pick, and it must not leave an older one standing either (a pin the thread started with,
+      // say): that would be put back over it on the next resume. Cleared, the host's own model wins.
+      this.store.updateSession(sessionId, trial ? { modelId, chosenModelId: null } : { modelId, chosenModelId: modelId });
+      if (trial) {
+        // The id comes off the wire: quoted, so a line break in it cannot split the record.
+        this.log(`${sessionId} tries ${JSON.stringify(modelId)}, which ${source ? `Muse's ${source} list` : "Muse's list"} does not name; kept for this session only`);
+      }
     }
   }
 
