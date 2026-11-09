@@ -146,15 +146,24 @@ describe("archiving and settling a thread with research in flight", () => {
     const { base, startRun, runOf, internals } = await rig({ autoSettleDays: 0 });
     const runId = await startRun();
     await waitFor(() => runOf(runId)?.status === "running", "the run to be running");
-    await new Promise((resolve) => setTimeout(resolve, 15));
+    // With no days of grace the cut-off is the present moment, compared by the millisecond: the thread is old enough to
+    // be settled only once the clock has moved past its last activity. Without that, the check below would pass because
+    // the thread was too young to settle, and say nothing about its run. (A clock that has just stepped back leaves it
+    // too young for a while: this waits for the clock to catch up.)
+    await waitFor(() => Date.parse(internals.store.getSession("s1")?.activityAt ?? "") < Date.now(), "the clock to move past the thread's last activity");
+    assert.ok(internals.store.listSettleCandidates(new Date().toISOString()).some((session) => session.id === "s1"), "the thread is old enough to be settled, so only its run keeps it");
     internals.autoSettle();
     assert.equal(internals.store.getSession("s1")?.settledOverride, null, "a thread whose run is live is not shelved");
 
     await send(base, `/api/research/${runId}/stop`, {});
     await waitFor(() => runOf(runId)?.status === "cancelled", "the run to be cancelled");
-    await new Promise((resolve) => setTimeout(resolve, 15));
-    internals.autoSettle();
-    assert.equal(internals.store.getSession("s1")?.settledOverride, "settled");
+    // The server sweeps on a timer. The sweep finds a thread old enough by comparing its last activity with the clock, and
+    // a clock that steps back (a WSL2 machine's does, by seconds, every half minute) leaves the thread too young until it
+    // has caught up: so the sweep is run by hand until it settles the thread, not once after a fixed wait.
+    await waitFor(() => {
+      internals.autoSettle();
+      return internals.store.getSession("s1")?.settledOverride === "settled";
+    }, "the thread to be settled once its run is over");
   });
 });
 
