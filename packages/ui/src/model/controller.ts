@@ -2142,6 +2142,15 @@ export class AncillaController {
     return this.client.assistant<T>(method, path, body);
   }
 
+  /**
+   * Open pages of the assistant read their data again, as they do when the server announces a change. For a change that
+   * this client's own call made to the profile as a side effect (an avatar it wears was deleted or rewritten): the page
+   * then holds the server's answer at once, whether or not the event stream has said so yet.
+   */
+  assistantMoved(): void {
+    this.update((s) => ({ ...s, assistantRev: s.assistantRev + 1 }));
+  }
+
   /** One call of the voice's HTTP surface: its status, settings and conversations. */
   voice<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
     if (!this.client.voice) return Promise.reject(new Error("This version of Ancilla has no voice."));

@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { useAssistantCall, useAssistantData } from "../../api.js";
+import { useAssistantCall, useAssistantData, useAssistantMoved } from "../../api.js";
 import type { AvatarPackKind, AvatarPackMeta, AvatarPackView, FigurePackData, FigureSpec, ImagePackData, PixelData } from "../../../../types.js";
 import { normalizeFigure } from "../figure/parts.js";
 import { usePackStore } from "../packs.js";
@@ -43,6 +43,7 @@ export interface Library {
 export function useAvatarLibrary(): Library {
   const call = useAssistantCall();
   const packs = usePackStore();
+  const moved = useAssistantMoved();
   const [bump, setBump] = useState(0);
   const { data, error, loading } = useAssistantData<{ avatars: AvatarPackMeta[]; limits: AvatarLimits }>("/avatars", bump);
   const reload = useCallback(() => setBump((n) => n + 1), []);
@@ -61,17 +62,21 @@ export function useAvatarLibrary(): Library {
       const out = await call<{ avatar: AvatarPackView }>("PATCH", `/avatars/${id}`, { ...patch, ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt }) });
       packs.put(out.avatar);
       reload();
+      // The server moves the profile on to the new revision when this is the avatar being worn: the page reads it again at once.
+      moved();
       return out.avatar;
     },
-    [call, packs, reload],
+    [call, packs, reload, moved],
   );
   const remove = useCallback(
     async (id: string): Promise<void> => {
       await call("DELETE", `/avatars/${id}`);
       packs.drop(id);
       reload();
+      // The server puts the face back to a form of light when this was the avatar being worn: the page reads it again at once.
+      moved();
     },
-    [call, packs, reload],
+    [call, packs, reload, moved],
   );
   return { avatars: data?.avatars ?? [], limits: data?.limits ?? null, loading, error, create, update, remove, reload };
 }

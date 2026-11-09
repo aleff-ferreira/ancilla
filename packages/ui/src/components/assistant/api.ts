@@ -9,6 +9,12 @@ export function useAssistantCall(): <T>(method: "GET" | "POST" | "PATCH" | "DELE
   return useCallback(<T,>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown) => controller.assistant<T>(method, path, body), [controller]);
 }
 
+/** Says that this page's own call changed the profile as a side effect: open pages read it again (see `Controller.assistantMoved`). */
+export function useAssistantMoved(): () => void {
+  const controller = useController();
+  return useCallback(() => controller.assistantMoved(), [controller]);
+}
+
 export interface Loaded<T> {
   data: T | null;
   error: string | null;

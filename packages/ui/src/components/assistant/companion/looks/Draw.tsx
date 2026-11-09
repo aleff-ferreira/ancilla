@@ -39,7 +39,10 @@ export function DrawTab(props: DrawProps) {
     setError(null);
     try {
       const pack = target && target.kind === "pixel" ? await lib.update(target.id, { name: title, data }, target.updatedAt) : await lib.create({ name: title, kind: "pixel", data });
-      props.onWear({ look: { kind: "pack", id: pack.id, rev: pack.updatedAt } });
+      // A drawing that is already being worn was moved on to its new revision by the server as part of the save, and the library has told
+      // the page to read the profile again: saving the same change a second time would be refused as out of date. Any other drawing is
+      // worn now, as the user's own choice.
+      if (!(worn && worn.id === pack.id)) props.onWear({ look: { kind: "pack", id: pack.id, rev: pack.updatedAt } });
       setOpen(false);
       setTarget(null);
       props.onDone();

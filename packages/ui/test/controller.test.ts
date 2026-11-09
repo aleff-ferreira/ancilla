@@ -6490,4 +6490,16 @@ describe("the assistant page", () => {
     assert.equal(controller.store.get().assistantRev, before + 6);
     stop();
   });
+
+  it("makes an open page read again after a change its own call made to the profile, without a word or a reaction of the face", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await started(client);
+    const before = controller.store.get();
+    controller.assistantMoved();
+    const after = controller.store.get();
+    assert.equal(after.assistantRev, before.assistantRev + 1);
+    assert.equal(after.toasts.length, before.toasts.length);
+    assert.deepEqual(after.assistantReaction, before.assistantReaction);
+    stop();
+  });
 });

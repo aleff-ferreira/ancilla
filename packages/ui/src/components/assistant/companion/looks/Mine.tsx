@@ -92,9 +92,9 @@ function MineCard(props: CardProps) {
               loading={busy}
               onClick={() =>
                 void run(async () => {
+                  // When this was the avatar being worn, the server has put the face back to a form of light as part of the delete, and the
+                  // library has told the page to read the profile again: saving the same change a second time would be refused as out of date.
                   await lib.remove(meta.id);
-                  // The server has put the face back to a form of light; the page's own draft is told the same, so that it does not go on describing what is gone.
-                  if (look?.kind === "pack" && look.id === meta.id) props.onWear({ look: { kind: "sigil" } });
                 })
               }
             >
