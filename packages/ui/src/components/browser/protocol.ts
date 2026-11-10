@@ -101,6 +101,56 @@ export function decodeFrame(buffer: ArrayBuffer): Frame | null {
   return { seq: view.getUint32(1, true), width: view.getUint16(5, true), height: view.getUint16(7, true), tabId, jpeg: new Uint8Array(buffer, 10 + idLength) };
 }
 
+/** What a window that only watches is told about the assistant's web task (see the server's `watch.ts`). */
+export interface WatchJob {
+  taskId: string;
+  goal: string;
+  steps: string[];
+  startedAt: number;
+  question: { origin: string; kind: "public" | "local" } | null;
+}
+
+export interface WatchState {
+  /** The assistant's tab whose pictures follow, or null when it has none. */
+  tab: string | null;
+  job: WatchJob | null;
+}
+
+/** A state message from the watcher socket, or null for anything else. */
+export function parseWatchState(raw: string): WatchState | null {
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown> | null;
+    if (typeof value !== "object" || value === null || value["type"] !== "state") return null;
+    const tab = typeof value["tab"] === "string" ? value["tab"] : null;
+    const job = value["job"];
+    if (job === null || job === undefined) return { tab, job: null };
+    if (typeof job !== "object") return null;
+    const o = job as Record<string, unknown>;
+    if (typeof o["taskId"] !== "string" || typeof o["goal"] !== "string" || !Array.isArray(o["steps"])) return null;
+    const q = o["question"] as Record<string, unknown> | null | undefined;
+    const question = q && typeof q["origin"] === "string" ? { origin: q["origin"], kind: q["kind"] === "local" ? ("local" as const) : ("public" as const) } : null;
+    return {
+      tab,
+      job: { taskId: o["taskId"], goal: o["goal"], steps: o["steps"].filter((s): s is string => typeof s === "string").slice(-8), startedAt: typeof o["startedAt"] === "number" ? o["startedAt"] : 0, question },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** The watcher's address, given the pane's: the same server, the other path. */
+export function watchUrl(paneUrl: string | null): string | null {
+  if (!paneUrl) return null;
+  try {
+    const url = new URL(paneUrl);
+    if (!/\/api\/browser\/ws$/.test(url.pathname)) return null;
+    url.pathname = url.pathname.replace(/\/ws$/, "/watch");
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function parseServerMessage(raw: string): ServerMessage | null {
   try {
     const value = JSON.parse(raw) as unknown;

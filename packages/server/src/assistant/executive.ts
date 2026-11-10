@@ -24,6 +24,11 @@ export interface BrowseRunnerPort {
   owns(taskId: string): boolean;
   /** The person's answer to the site the task is waiting on ("task", "always", "not-now" or "block"); throws when none is waiting. */
   answer(taskId: string, answer: string): void;
+  /** Whether a browser and a model are there for a web task, and if not, why. */
+  available(): Promise<{ ok: boolean; reason?: string }>;
+  /** The saved rules about which sites the assistant may open, and may not. */
+  sites(): Array<{ origin: string; decision: "allow" | "block"; at: number }>;
+  removeSite(origin: string): boolean;
 }
 
 /**
@@ -217,6 +222,20 @@ export class Executive {
     this.opts.changed(task.id);
     runner.run(task, this.browseReport(task.id));
     return task;
+  }
+
+  /** Whether a web task can be made now, and if not, why: said before the task exists, not after it fails. */
+  async browseAvailable(): Promise<{ ok: boolean; reason?: string }> {
+    return this.opts.browse ? this.opts.browse.available() : { ok: false, reason: "Browsing is not available here." };
+  }
+
+  /** The saved rules about which sites the assistant may open, and may not. */
+  browseSites(): Array<{ origin: string; decision: "allow" | "block"; at: number }> {
+    return this.opts.browse?.sites() ?? [];
+  }
+
+  removeBrowseSite(origin: string): boolean {
+    return this.opts.browse?.removeSite(origin) ?? false;
   }
 
   /** The person's answer, on the screen, to the site a web task is waiting on. */

@@ -5,6 +5,7 @@ import { Tip } from "../ui/overlays.js";
 import { IconButton, MOD, cn } from "../ui/primitives.js";
 import { DOCK_MIN_THREAD, useWindowWidth } from "../crew/CrewPanel.js";
 import { PanelResize } from "../crew/PanelResize.js";
+import { AssistantBar } from "./AssistantBar.js";
 import { type Frame, type PaneDialog, type PaneTab, type SelectProbe } from "./protocol.js";
 import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, TextGate, planKeyDown, planKeyUp, resolveAddress, toPagePoint, toScreenRect } from "./input.js";
 import { BrowserSession, EMPTY_VIEW, type SessionView, type SocketLike } from "./session.js";
@@ -315,6 +316,7 @@ export function BrowserPanel() {
           <Toast text={(view.notice ?? view.message) as string} onDismiss={() => (view.notice ? session.clearNotice() : session.clearMessage())} />
         ) : null}
       </div>
+      <AssistantBar />
     </aside>
   );
   return aside;

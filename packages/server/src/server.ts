@@ -101,6 +101,7 @@ import { handleBrowser, isBrowserPath } from "./browser/routes.js";
 import { BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
+import { BrowserWatchServer, BROWSER_WATCH_PATH } from "./browser/watch.js";
 import { BrowseRunner } from "./browser/runner.js";
 import { BrowseSites } from "./browser/sites.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
@@ -1023,6 +1024,7 @@ export class AncillaServer {
   private voiceService: VoiceService | null = null;
   private voiceSockets: VoiceSocketServer | null = null;
   private browserSockets: BrowserSocketServer | null = null;
+  private browserWatchers: BrowserWatchServer | null = null;
   /** The browser the server owns (see docs/browser.md). Made on first use; no browser process exists until a page is opened. */
   private browserService: BrowserService | null = null;
   /** The sites the assistant's browser may open, and the browser at work on a web task (both made on first use). */
@@ -1207,7 +1209,7 @@ export class AncillaServer {
         refuse(400, "That address is not valid.");
         return;
       }
-      if (path !== VOICE_SOCKET_PATH && path !== BROWSER_SOCKET_PATH) {
+      if (path !== VOICE_SOCKET_PATH && path !== BROWSER_SOCKET_PATH && path !== BROWSER_WATCH_PATH) {
         refuse(404, "Not found.");
         return;
       }
@@ -1232,6 +1234,12 @@ export class AncillaServer {
       if (path === BROWSER_SOCKET_PATH) {
         this.browserSockets ??= new BrowserSocketServer(() => this.browserFor(), (line) => this.log(line));
         this.browserSockets.handleUpgrade(req, socket, head);
+        return;
+      }
+      if (path === BROWSER_WATCH_PATH) {
+        // The same checks, above, as for the pane: host, origin and token. A watcher only looks.
+        this.browserWatchers ??= new BrowserWatchServer(() => this.browserFor(), () => this.browseRunnerFor(), (line) => this.log(line));
+        this.browserWatchers.handleUpgrade(req, socket, head);
         return;
       }
       if (!this.voiceSockets) {
@@ -1757,6 +1765,8 @@ export class AncillaServer {
     this.storeClosed = true;
     this.browserSockets?.close();
     this.browserSockets = null;
+    this.browserWatchers?.close();
+    this.browserWatchers = null;
     this.browseRunner?.stop();
     this.browseRunner = null;
     this.browseSites = null;

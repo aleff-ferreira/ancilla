@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { MAX_AVATAR_BYTES, MAX_AVATARS, MAX_TOTAL_AVATAR_BYTES } from "./avatars.js";
 import { parseEmbeddingSettings, testEmbedding } from "./embed.js";
 import { DEFAULT_PROFILE } from "./profile.js";
@@ -130,7 +131,7 @@ const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retr
 
 /** Tasks, what to do next, and schedules: the executive's side of the surface. Null when the path is not one of theirs. */
 async function handleWork(service: AssistantService, sub: string, req: AssistantRequest): Promise<AssistantReply | null> {
-  const mine = ["/tasks", "/suggestions", "/schedules"].some((p) => sub === p || sub.startsWith(`${p}/`));
+  const mine = ["/tasks", "/suggestions", "/schedules", "/browse"].some((p) => sub === p || sub.startsWith(`${p}/`));
   if (!mine) return null;
   const exec = service.executive;
   if (!exec) return { status: 503, body: { error: "Tasks need a Muse host, and this server was not given one.", kind: "tasks_unavailable" } };
@@ -147,6 +148,27 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
   if (req.method === "POST" && sub === "/tasks") {
     const task = exec.create(parseTaskSpec(await req.body(), profile, projectKey));
     return { status: 201, body: { task } };
+  }
+  // A web task started from a screen (the Browser panel's box), as the voice's `browse` starts one.
+  if (req.method === "POST" && sub === "/browse") {
+    const body = await req.body();
+    const goal = typeof body["goal"] === "string" ? body["goal"].trim() : "";
+    if (goal.length < 3) bad("goal must say what to find out", "goal");
+    const url = typeof body["url"] === "string" ? body["url"].trim() : "";
+    const ready = await exec.browseAvailable();
+    if (!ready.ok) return { status: 409, body: { error: ready.reason ?? "The browser cannot be used right now.", kind: "browse_unavailable" } };
+    const cwd = typeof body["cwd"] === "string" && body["cwd"] !== "" ? body["cwd"] : homedir();
+    const task = exec.createBrowse(parseTaskSpec({ goal: url ? `${goal}\nStart at: ${url}` : goal, cwd }, profile, projectKey));
+    return { status: 201, body: { task } };
+  }
+  // The sites the person said yes or no to for good: listed, and taken back one at a time.
+  if (sub === "/browse/sites" && req.method === "GET") return { status: 200, body: { rules: exec.browseSites() } };
+  if (sub === "/browse/sites" && req.method === "DELETE") {
+    const body = await req.body();
+    const origin = typeof body["origin"] === "string" ? body["origin"] : "";
+    if (origin === "") bad("origin is required", "origin");
+    if (!exec.removeBrowseSite(origin)) return { status: 404, body: { error: "That site has no saved rule.", kind: "not_found" } };
+    return { status: 200, body: { rules: exec.browseSites() } };
   }
   const one = sub.match(/^\/tasks\/([A-Za-z0-9_-]{1,64})$/);
   if (one && req.method === "GET") {

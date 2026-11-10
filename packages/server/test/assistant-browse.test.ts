@@ -267,6 +267,53 @@ describe("a web task", () => {
     assert.equal((await post({ answer: "task" }))?.status, 409, "nothing is waiting any more");
   });
 
+  it("tells a screen when the task begins, takes a step, asks, and ends", async () => {
+    const r = rig({ steps: [{ calls: [{ name: "open", args: { url: "https://a.example/" } }] }, { calls: [{ name: "done", args: { answer: "ok" } }] }] });
+    const seen: Array<ReturnType<BrowseRunner["current"]>> = [];
+    const off = r.runner.on(() => seen.push(r.runner.current()));
+    const { id } = await r.start("Find the thing");
+    await until(() => r.task(id).status === "paused", "the question");
+    const asking = seen.at(-1);
+    assert.deepEqual([asking?.taskId, asking?.goal, asking?.question?.origin], [id, "Find the thing", "https://a.example"]);
+    assert.equal(typeof asking?.startedAt, "number");
+    r.exec.answerSite(id, "task");
+    await until(() => r.task(id).status === "completed", "the end");
+    await until(() => seen.at(-1) === null, "the end to be told");
+    assert.ok(seen.some((s) => s?.steps.includes("Opened a.example")), "a step was told");
+    off();
+  });
+
+  it("starts from the panel's box over HTTP, lists the saved sites and takes one back", async () => {
+    const r = rig({ steps: [{ calls: [{ name: "done", args: { answer: "ok" } }] }] });
+    const call = async (method: string, path: string, body: Record<string, unknown> = {}) => {
+      const url = new URL(path, "http://localhost");
+      return handleAssistant({ get: () => r.service, unavailable: () => null }, { method, path: url.pathname, query: url.searchParams, body: async () => body });
+    };
+    assert.equal((await call("POST", "/api/assistant/browse", {}))?.status, 400, "a goal is needed");
+    assert.equal((await call("POST", "/api/assistant/browse", { goal: "ab" }))?.status, 400, "and it has to say something");
+    const made = await call("POST", "/api/assistant/browse", { goal: "Find the opening hours", url: "https://shop.example/contact" });
+    assert.equal(made?.status, 201);
+    const id = (made?.body as { task: { id: string } }).task.id;
+    assert.equal(r.task(id).origin, "browse");
+    assert.equal(r.task(id).goal, "Find the opening hours\nStart at: https://shop.example/contact");
+    await until(() => r.task(id).status === "completed", "the end");
+    r.state.available = false;
+    const refused = await call("POST", "/api/assistant/browse", { goal: "Another thing to find" });
+    assert.equal(refused?.status, 409, "said before a task is made");
+    assert.match(JSON.stringify(refused?.body), /No browser was found/);
+
+    r.sites.rules.set("https://a.example", "allow");
+    r.sites.rules.set("https://b.example", "block");
+    const listed = await call("GET", "/api/assistant/browse/sites");
+    assert.deepEqual((listed?.body as { rules: Array<{ origin: string; decision: string }> }).rules.map((x) => [x.origin, x.decision]), [["https://a.example", "allow"], ["https://b.example", "block"]]);
+    assert.equal((await call("DELETE", "/api/assistant/browse/sites", {}))?.status, 400, "which site?");
+    assert.equal((await call("DELETE", "/api/assistant/browse/sites", { origin: "https://nope.example" }))?.status, 404);
+    const removed = await call("DELETE", "/api/assistant/browse/sites", { origin: "https://a.example" });
+    assert.equal(removed?.status, 200);
+    assert.deepEqual((removed?.body as { rules: Array<{ origin: string }> }).rules.map((x) => x.origin), ["https://b.example"]);
+    assert.equal(r.sites.rules.get("https://a.example"), null, "and it asks again next time");
+  });
+
   it("fails with its reason, in words, when there is no model or no browser", async () => {
     const noModel = rig({ problem: "No key is set for the model that browses. Add one in Settings, Voice." });
     const refused = await noModel.tools.run(call("browse", { goal: "x" }));

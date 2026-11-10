@@ -32,6 +32,7 @@ interface Job {
   taskId: string;
   abort: AbortController;
   report: BrowseReport;
+  goal: string;
   steps: string[];
   asking: boolean;
   startedAt: number;
@@ -60,6 +61,7 @@ export function describeOutcome(outcome: BrowseOutcome): { ok: boolean; result: 
 
 export class BrowseRunner implements BrowseRunnerPort {
   private job: Job | null = null;
+  private readonly listeners = new Set<() => void>();
 
   constructor(private readonly deps: BrowseRunnerDeps) {}
 
@@ -72,11 +74,36 @@ export class BrowseRunner implements BrowseRunnerPort {
   }
 
   /** The task being worked on and what it did lately, for a screen that shows it. */
-  current(): { taskId: string; steps: string[]; question: SiteQuestion | null } | null {
+  current(): { taskId: string; goal: string; steps: string[]; startedAt: number; question: SiteQuestion | null } | null {
     const job = this.job;
     if (!job) return null;
     const question = this.deps.gate.pending();
-    return { taskId: job.taskId, steps: job.steps.slice(-8), question: question && question.taskId === job.taskId ? question : null };
+    return { taskId: job.taskId, goal: job.goal, steps: job.steps.slice(-8), startedAt: job.startedAt, question: question && question.taskId === job.taskId ? question : null };
+  }
+
+  /** Tells a screen that what `current()` says changed: a task began, took a step, asked, or ended. */
+  on(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private changed(): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener();
+      } catch {
+        // a screen that fails must not stop the task
+      }
+    }
+  }
+
+  /** The saved rules about which sites the assistant may open. */
+  sites(): Array<{ origin: string; decision: "allow" | "block"; at: number }> {
+    return this.deps.gate.rules.list();
+  }
+
+  removeSite(origin: string): boolean {
+    return this.deps.gate.rules.remove(origin);
   }
 
   /** Whether a browser and a model are there to work with, and if not, why: said before a task is made, not after it fails. */
@@ -92,8 +119,9 @@ export class BrowseRunner implements BrowseRunnerPort {
       report.settle({ ok: false, result: "", reason: "The assistant is already browsing." });
       return;
     }
-    const job: Job = { taskId: task.id, abort: new AbortController(), report, steps: [], asking: false, startedAt: this.now(), pausedAt: null, pausedTotal: 0, surface: null };
+    const job: Job = { taskId: task.id, abort: new AbortController(), report, goal: task.goal, steps: [], asking: false, startedAt: this.now(), pausedAt: null, pausedTotal: 0, surface: null };
     this.job = job;
+    this.changed();
     void this.execute(job, task).catch((error: unknown) => this.deps.log(`browse: ${error instanceof Error ? error.message : String(error)}`));
   }
 
@@ -136,6 +164,7 @@ export class BrowseRunner implements BrowseRunnerPort {
       job.pausedAt = null;
       job.report.resumed(job.steps[job.steps.length - 1] ?? "Browsing.");
     }
+    this.changed();
   }
 
   private elapsed(job: Job): number {
@@ -166,6 +195,7 @@ export class BrowseRunner implements BrowseRunnerPort {
         onStep: (line) => {
           job.steps.push(line);
           if (!job.asking) job.report.progress(line);
+          this.changed();
         },
         log: this.deps.log,
       });
@@ -175,6 +205,7 @@ export class BrowseRunner implements BrowseRunnerPort {
       this.deps.gate.end(task.id);
       await job.surface?.close().catch(() => undefined);
       if (this.job === job) this.job = null;
+      this.changed();
     }
     const tokens = outcome.tokens > 0 ? `, ${outcome.tokens} tokens` : "";
     this.deps.log(`browse: task ${task.id} ${outcome.ok ? "answered" : `stopped (${outcome.reason})`} after ${outcome.steps} steps${tokens}`);
