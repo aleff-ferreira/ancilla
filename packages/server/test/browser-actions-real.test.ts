@@ -36,6 +36,10 @@ const HOME = `<!doctype html><title>Shop</title><h1>Shop</h1>
 <form id="order" method="post" action="/order"><input name="item" aria-label="Item" value="Blue Widget"><input type="password" name="zz" aria-label="Password" value="secret"><input name="note" aria-label="Note"><button type="submit">Place order</button></form>
 <button onclick="fetch('/ajax',{method:'POST',body:'sneaky=1'})">Go</button> <a href="/next">Next</a>`;
 
+/** A form with no password input until the page makes one: "Add a field" puts a password input in under a name nothing says is secret. */
+const LATE = `<!doctype html><title>Late</title><h1>Late</h1>
+<form id="late" method="post" action="/order"><input name="item" aria-label="Item" value="Gadget"><button type="button" onclick="var i=document.createElement('input');i.type='password';i.name='qq';i.value='hunter-two';document.getElementById('late').insertBefore(i,document.getElementById('send'))">Add a field</button><button id="send" type="submit">Place order</button></form>`;
+
 before(async () => {
   if (SKIP) return;
   dataDir = mkdtempSync(join(tmpdir(), "ancilla-actions-real-"));
@@ -47,7 +51,7 @@ before(async () => {
       if (path === "/order" && req.method === "POST") posts.push(body);
       if (path === "/search") searches.push(req.url ?? "");
       if (path === "/ajax" && req.method === "POST") ajax.push(body);
-      const page = path === "/order" ? "<!doctype html><title>Ordered</title><h1>Ordered</h1>" : path === "/search" ? "<!doctype html><title>Found</title><h1>Found</h1>" : path === "/ajax" ? "ok" : HOME;
+      const page = path === "/order" ? "<!doctype html><title>Ordered</title><h1>Ordered</h1>" : path === "/search" ? "<!doctype html><title>Found</title><h1>Found</h1>" : path === "/ajax" ? "ok" : path === "/late" ? LATE : HOME;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(page);
     });
@@ -219,6 +223,27 @@ real("a click on 'Place order' asks first with the form, its answer covers that 
   } finally {
     await surface.close();
   }
+});
+
+real("a password input the page makes after the last look is still masked: the next click looks again before the form is held", async () => {
+  posts.length = 0;
+  const tab = (await svc.openTab("assistant")).id;
+  await svc.navigate(tab, `${origin}/late`);
+  const page = (await svc.snapshot(tab)).text;
+  assert.doesNotMatch(page, /qq/, "there is no password input yet");
+  await svc.click(tab, { ref: refOf(page, "button", "Add a field") });
+  // The refs are the ones of the page as it was: no new look was taken, so only the click's own look can know about `qq`.
+  const sending = svc.click(tab, { ref: refOf(page, "button", "Place order") });
+  const question = await asked();
+  assert.deepEqual(question.fields, [
+    { name: "item", value: "Gadget" },
+    { name: "qq", value: "••••••••" },
+  ]);
+  assert.equal(question.note, undefined, "the page was read, so nothing is said to be hidden");
+  sites.gate.answer(question.id, "dont");
+  await sending;
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(posts.length, 0, "a no: the shop saw nothing");
 });
 
 real("the assistant cannot type into a password field or type a card number; a page that sends with JavaScript is not caught", async () => {

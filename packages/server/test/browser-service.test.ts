@@ -4,7 +4,7 @@ import { CdpConnection } from "../src/browser/cdp.js";
 import { findBrowser } from "../src/browser/find.js";
 import { launchArgs, launchBrowser, type ChildLike } from "../src/browser/launch.js";
 import { handleBrowser } from "../src/browser/routes.js";
-import { buildSnapshot, visibleBackendIds, type AxNode } from "../src/browser/snapshot.js";
+import { buildSnapshot, passwordInputNames, visibleBackendIds, type AxNode } from "../src/browser/snapshot.js";
 import { BrowserError, BrowserService, checkUrl, type BrowserEvent } from "../src/browser/service.js";
 import { PassThrough } from "node:stream";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
@@ -304,6 +304,33 @@ test("visibleBackendIds: display:none, zero size, opacity 0 (also inherited), fo
     ],
   };
   assert.deepEqual([...visibleBackendIds(snapshot)].sort(), [100, 101]);
+});
+
+test("passwordInputNames: the password inputs of every document of a DOM snapshot, by name and id; null when the snapshot did not read the page", () => {
+  const strings = ["HTML", "INPUT", "DIV", "type", "PASSWORD", "password", "name", "id", "zz", "pw-id", "text", "other", "q", "passwords"];
+  const main = {
+    nodes: {
+      nodeName: [0, 1, 1, 2, 1, 1, 1],
+      attributes: [[], [3, 4, 6, 8], [3, 5, 7, 9], [3, 5, 6, 11], [3, 10, 6, 12], [3, 13, 6, 12], [3, 5]],
+    },
+  };
+  const frame = { nodes: { nodeName: [1], attributes: [[3, 5, 6, 12]] } };
+  assert.deepEqual(passwordInputNames({ strings, documents: [main, frame] }), ["zz", "pw-id", "q"], "any case of the type, a name or an id, frames too; not a div, a text input, another type, or an input nothing can name");
+  assert.deepEqual(passwordInputNames({ strings, documents: [{ nodes: { nodeName: [0, 1], attributes: [[], [3, 10, 6, 12]] } }] }), [], "read, and none: not the same as unread");
+
+  // Not read: nothing is said, which is not the same as saying there are none.
+  assert.equal(passwordInputNames({}), null);
+  assert.equal(passwordInputNames({ strings: [], documents: [] }), null);
+  assert.equal(passwordInputNames({ strings, documents: [{ nodes: {} }] }), null);
+  assert.equal(passwordInputNames({ strings, documents: [{ nodes: { nodeName: [0, 1] } }] }), null, "no attributes");
+  assert.equal(passwordInputNames({ documents: [main] }), null, "no strings");
+  assert.deepEqual(passwordInputNames({ strings, documents: [{ nodes: {} }, frame] }), ["q"], "one document that was read is enough");
+
+  // So many that the list cannot be trusted to be the whole of it.
+  const many = Array.from({ length: 201 }, (_, i) => `n${i}`);
+  const crowd = { strings: ["INPUT", "type", "password", "name", ...many], documents: [{ nodes: { nodeName: many.map(() => 0), attributes: many.map((_, i) => [1, 2, 3, 4 + i]) } }] };
+  assert.equal(passwordInputNames(crowd), null);
+  assert.equal(passwordInputNames({ ...crowd, documents: [{ nodes: { nodeName: many.slice(0, 200).map(() => 0), attributes: many.slice(0, 200).map((_, i) => [1, 2, 3, 4 + i]) } }] })?.length, 200);
 });
 
 test("snapshot through the service: refs are kept for the tab and click uses the box centre; a stale ref is a plain error", async () => {

@@ -40,6 +40,23 @@ describe("the Save to dialog of the person's own tab", () => {
   });
 });
 
+describe("a form whose values are hidden", () => {
+  const hidden = { type: "action" as const, origin: "https://shop.example", kind: "public" as const, page: "Cart", what: "Send a form to https://shop.example/buy", fields: [{ name: "item", value: "••••••••" }], note: "Values hidden: the page did not say which fields are passwords." };
+
+  it("keeps the words the server sent and says them on the card", () => {
+    const parsed = parseQuestion(hidden);
+    assert.equal(parsed && "note" in parsed ? parsed.note : null, hidden.note);
+    assert.match(html(createElement(ActionQuestionCard, { question: parsed as never, onAnswer: () => undefined })), /Values hidden: the page did not say which fields are passwords\./);
+  });
+
+  it("shows no words when there are none, and drops a note that is not text", () => {
+    const { note: _note, ...plain } = hidden;
+    assert.equal("note" in (parseQuestion(plain) as object), false);
+    assert.equal("note" in (parseQuestion({ ...hidden, note: 5 }) as object), false);
+    assert.doesNotMatch(html(createElement(ActionQuestionCard, { question: parseQuestion(plain) as never, onAnswer: () => undefined })), /Values hidden/);
+  });
+});
+
 describe("the assistant's download as a question", () => {
   const question = { type: "action" as const, origin: "https://shop.example", kind: "public" as const, page: "Shop", what: "Save the file “a.pdf”", fields: [], download: { id: "dl_1", name: "a.pdf", size: 2048, folder: "/home/me/Downloads", warning: null } };
 
