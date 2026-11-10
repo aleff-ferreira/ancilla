@@ -768,12 +768,14 @@ export class BrowserService {
     if (rt.activeId) this.emit({ type: "active", id: rt.activeId });
   }
 
-  async setViewport(id: string, width: number, height: number, known?: Runtime): Promise<void> {
+  /** Sizes the tab's page; says the size it was given (the one asked for, kept within what the browser takes). */
+  async setViewport(id: string, width: number, height: number, known?: Runtime): Promise<{ width: number; height: number }> {
     const rt = known ?? (await this.ensure());
     const tab = this.requireTab(rt, id);
     const w = Math.round(Math.min(4096, Math.max(100, Number(width) || DEFAULT_SIZE.width)));
     const h = Math.round(Math.min(4096, Math.max(100, Number(height) || DEFAULT_SIZE.height)));
     await rt.conn.send("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false }, tab.sessionId);
+    return { width: w, height: h };
   }
 
   // ---------------------------------------------------------------- navigation
@@ -924,10 +926,10 @@ export class BrowserService {
     if (tab.notes.length < 6) tab.notes.push(text);
   }
 
-  async screenshot(id: string, format: "png" | "jpeg" = "png"): Promise<Buffer> {
+  async screenshot(id: string, format: "png" | "jpeg" = "png", timeoutMs?: number): Promise<Buffer> {
     const rt = await this.ensure();
     const tab = this.requireTab(rt, id);
-    const shot = await rt.conn.send<{ data: string }>("Page.captureScreenshot", { format, ...(format === "jpeg" ? { quality: 80 } : {}) }, tab.sessionId);
+    const shot = await rt.conn.send<{ data: string }>("Page.captureScreenshot", { format, ...(format === "jpeg" ? { quality: 80 } : {}) }, tab.sessionId, timeoutMs);
     return Buffer.from(shot.data, "base64");
   }
 

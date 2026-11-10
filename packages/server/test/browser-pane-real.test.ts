@@ -9,7 +9,7 @@ import { WebSocket } from "ws";
 import { findBrowser } from "../src/browser/find.js";
 import { BROWSER_PROTOCOL_VERSION, decodeFrame } from "../src/browser/protocol.js";
 import { BrowserService } from "../src/browser/service.js";
-import { BROWSER_SOCKET_PATH, BrowserSocketServer } from "../src/browser/ws.js";
+import { BROWSER_SOCKET_PATH, BrowserSocketServer, jpegSize } from "../src/browser/ws.js";
 
 /**
  * The pane's socket against a real browser (whichever Edge, Chrome, Chromium or Brave this machine has; skipped with
@@ -23,13 +23,13 @@ const PAGE = `<!doctype html><meta charset="utf-8"><title>Fixture</title>
 <style>body{margin:0;font:16px sans-serif} .abs{position:absolute;left:20px;width:300px;height:40px}</style>
 <button id="b" class="abs" style="top:20px;background:#c00;color:#fff" onclick="this.style.background=this.style.background==='rgb(0, 0, 204)'?'#c00':'#00c';fetch('/log?kind=click')">Colour</button>
 <a id="l" class="abs" style="top:80px" href="/next">Go next</a>
-<input id="i" class="abs" style="top:140px;box-sizing:border-box" oninput="fetch('/log?kind=input&v='+encodeURIComponent(this.value))">
+<input id="i" class="abs" style="top:140px;box-sizing:border-box" onfocus="fetch('/log?kind=focus')" oninput="fetch('/log?kind=input&v='+encodeURIComponent(this.value))">
 <select id="s" class="abs" style="top:200px" onchange="fetch('/log?kind=select&v='+encodeURIComponent(this.value))"><option value="um">Um</option><option value="dois">Dois</option><option value="tres">Três</option></select>
 <button id="d" class="abs" style="top:260px" onclick="alert('oi');fetch('/log?kind=alerted')">Dialog</button>
 <a id="p" class="abs" style="top:320px" href="/popup" target="_blank">Popup</a>
 <div id="anim" style="position:absolute;left:400px;top:20px;width:50px;height:50px;background:#080"></div>
 <script>let n=0;function t(){n++;document.getElementById('anim').style.transform='translate('+(n%200)+'px,'+((n*3)%300)+'px)';if(location.search==='?anim')requestAnimationFrame(t)}t();
-if(location.search==='?anim')requestAnimationFrame(t)</script>`;
+if(location.search==='?anim')requestAnimationFrame(t);fetch('/log?kind=loaded')</script>`;
 
 let http: Server;
 let base = "";
@@ -85,10 +85,14 @@ after(async () => {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))] as number;
 
+/** What the test can see right now; a timeout carries it, so a failure on a machine nobody can reach says what the pane was doing. */
+let describeState: () => string = () => "";
+
 async function until(cond: () => boolean, what: string, ms = 10_000): Promise<void> {
-  const end = Date.now() + ms;
+  // The monotonic clock: a machine whose wall clock is stepped (a WSL distro's is, by seconds) must not time a wait out early.
+  const end = performance.now() + ms;
   while (!cond()) {
-    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    if (performance.now() > end) throw new Error(`timed out waiting for ${what} (${describeState()})`);
     await sleep(10);
   }
 }
@@ -114,6 +118,35 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   const click = (id: string, x: number, y: number) => {
     send({ type: "mouse", id, input: { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 } });
     send({ type: "mouse", id, input: { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 } });
+  };
+  const count = (kind: string) => logs.filter((l) => l.kind === kind).length;
+  const startedAt = performance.now();
+  describeState = () => {
+    const tabs = (last("tabs") ?? last("ready")) as { tabs: Array<{ id: string; url: string; loading: boolean }>; active: string | null } | undefined;
+    const shown = tabs?.tabs.map((t) => `${t.id.slice(0, 4)}${t.id === tabs.active ? "*" : ""} ${t.loading ? "loading" : "loaded"} ${t.url.replace(base, "")}`).join(" | ");
+    // Each picture: when it came, its tab, the size it says (the browser's word) and the size its pixels have.
+    const newest = frames.slice(-6).map((f) => `${Math.round(f.at - startedAt)}ms ${f.tabId.slice(0, 4)} says ${f.width}x${f.height} is ${jpegSize(f.jpeg)?.width ?? "?"}x${jpegSize(f.jpeg)?.height ?? "?"}`).join(", ");
+    return `${Math.round(performance.now() - startedAt)} ms in; ${frames.length} pictures, the newest: ${newest || "none"}; tabs: ${shown ?? "none"}; the page reported: ${logs.slice(-6).map((l) => l.kind).join(", ") || "nothing"}`;
+  };
+  /** Loads a page in the tab and waits until its script has run (the page says so itself): a click that follows meets this page, never the one being left. */
+  const goTo = async (id: string, url: string) => {
+    const seen = count("loaded");
+    send({ type: "navigate", id, url });
+    await until(() => count("loaded") > seen, `${url.replace(base, "") || "/"} to load`);
+  };
+  /**
+   * A click on something harmless to repeat (a link, a field) is made again when nothing came of it: a page or tab only just
+   * shown may not take input yet. Says whether `done` came; with `required`, a click that never brings it is a failure.
+   */
+  const clickUntil = async (id: string, x: number, y: number, done: () => boolean, what: string, { required = true, attempts = 5, eachMs = 2000 } = {}): Promise<boolean> => {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      click(id, x, y);
+      const end = performance.now() + eachMs;
+      while (!done() && performance.now() < end) await sleep(10);
+      if (done()) return true;
+    }
+    if (required) await until(done, what, 1000);
+    return false;
   };
 
   send({ type: "hello", v: BROWSER_PROTOCOL_VERSION, takeover: false });
@@ -142,7 +175,7 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   metrics["clickToPixelMs"] = { p50: Math.round(percentile(latencies, 0.5)), p95: Math.round(percentile(latencies, 0.95)), max: Math.round(latencies.at(-1) as number), n: latencies.length };
 
   // Frames per second on an animated page, the pane acknowledging at once.
-  send({ type: "navigate", id: first, url: `${base}/?anim` });
+  await goTo(first, `${base}/?anim`);
   await sleep(600);
   const mark = frames.length;
   const t1 = performance.now();
@@ -152,17 +185,20 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   metrics["fps800x600"] = Number((got.length / seconds).toFixed(1));
   metrics["kbPerFrame"] = Math.round(got.reduce((n, f) => n + f.jpeg.length, 0) / Math.max(1, got.length) / 1024);
 
-  // Text with accents reaches the field whole, and the selection can be read back.
-  send({ type: "navigate", id: first, url: `${base}/` });
-  await sleep(400);
-  click(first, 100, 160);
-  send({ type: "text", id: first, text: "ção ã é ~ ´" });
-  await until(() => logs.some((l) => l.kind === "input" && l.v === "ção ã é ~ ´"), "the accented text in the field");
+  // Text with accents reaches the field whole, and the selection can be read back. The page is waited for (it says when its
+  // script has run), and so is the field's focus (the page says that too): text sent before either has nowhere to go, and the
+  // pane cannot know. A field that never reports focus (a page without window focus may not) is typed into anyway.
+  await goTo(first, `${base}/`);
+  const typed = "ção ã é ~ ´";
+  const focusSeen = count("focus");
+  metrics["fieldReportedFocus"] = await clickUntil(first, 100, 160, () => count("focus") > focusSeen, "the field to take focus", { required: false, attempts: 3, eachMs: 1000 });
+  send({ type: "text", id: first, text: typed });
+  await until(() => logs.some((l) => l.kind === "input" && l.v === typed), "the accented text in the field");
+  // The pane carries out what it is sent in order, so the selection is read after the select-all has been done.
   send({ type: "key", id: first, input: { type: "rawKeyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2, commands: ["selectAll"] } });
-  await sleep(100);
   send({ type: "selection", id: first });
   await until(() => last("selection") !== undefined, "the selection");
-  assert.equal(last("selection")?.text, "ção ã é ~ ´");
+  assert.equal(last("selection")?.text, typed);
 
   // A select: the pane is told its options, the press and release never reach the page, and the choice fires change.
   click(first, 100, 220);
@@ -195,9 +231,7 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   await until(() => (last("tabs") as { active: string }).active === first, "switching back");
   // The page it switched back to is a still one, yet the pane gets a picture of it.
   await until(() => frames.some((f) => f.tabId === first && f.at > switchedAt), "a picture of the tab switched to");
-  await sleep(300);
-  click(first, 100, 100);
-  await until(() => (last("tabs") as { tabs: Array<{ id: string; title: string }> }).tabs.some((t) => t.id === first && t.title === "Arrived"), "the page after the link");
+  await clickUntil(first, 100, 100, () => (last("tabs") as { tabs: Array<{ id: string; title: string }> }).tabs.some((t) => t.id === first && t.title === "Arrived"), "the page after the link");
 
   // The person's browser and the assistant's stay apart.
   const theirs = await service.openTab("assistant");
