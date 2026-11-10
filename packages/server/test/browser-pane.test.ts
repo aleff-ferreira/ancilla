@@ -8,7 +8,7 @@ import { after, describe, it } from "node:test";
 import { WebSocket } from "ws";
 import { BROWSER_PROTOCOL_VERSION, decodeFrame, encodeFrame, parseClientMessage } from "../src/browser/protocol.js";
 import { BrowserService } from "../src/browser/service.js";
-import { BROWSER_SOCKET_PATH, BrowserSocketServer } from "../src/browser/ws.js";
+import { BROWSER_SOCKET_PATH, BrowserSocketServer, jpegSize } from "../src/browser/ws.js";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
 import { FakeConnection, start, waitFor } from "./harness.js";
 
@@ -22,6 +22,17 @@ describe("the pane's wire format", () => {
     assert.equal(decodeFrame(Buffer.from([3, 0, 0])), null);
     assert.equal(decodeFrame(Buffer.from([9, 0, 0, 0, 0, 0, 0, 0, 0, 0])), null);
     assert.equal(decodeFrame(Buffer.from([3, 0, 0, 0, 0, 0, 0, 0, 0, 9, 65])), null, "an id longer than the frame");
+  });
+
+  it("reads the size a JPEG says it has, past other segments, and nothing from bytes that are not one", () => {
+    const sof = (width: number, height: number) => [0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01];
+    assert.deepEqual(jpegSize(Buffer.from([0xff, 0xd8, ...sof(800, 600), 0xff, 0xd9])), { width: 800, height: 600 });
+    // A start of image, a quantization table (4 bytes of length and data), a Huffman table (0xC4, which is not a frame) and then the frame.
+    const tables = [0xff, 0xdb, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc4, 0x00, 0x03, 0x00];
+    assert.deepEqual(jpegSize(Buffer.from([0xff, 0xd8, ...tables, ...sof(1280, 720)])), { width: 1280, height: 720 });
+    assert.equal(jpegSize(Buffer.from("jpeg-shot")), null, "not a JPEG");
+    assert.equal(jpegSize(Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00])), null, "cut short");
+    assert.equal(jpegSize(Buffer.alloc(0)), null);
   });
 
   it("parses what is allowed and drops the rest without throwing", () => {
@@ -127,6 +138,41 @@ async function rig(extra: (method: string, params: Record<string, any>, sessionI
 const hello = (takeover = false) => ({ type: "hello", v: BROWSER_PROTOCOL_VERSION, takeover });
 const sent = (fake: FakeBrowser, method: string) => fake.calls.filter((c) => c.method === method);
 
+/** The smallest bytes that say a size the way a JPEG does: a start of image and a start of frame. */
+const jpegOf = (width: number, height: number) =>
+  Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 255, width >> 8, width & 255, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xff, 0xd9]);
+
+/**
+ * A browser whose pictures follow the size it was told to emulate (the browser keeps it within 100 to 4096). Its screencast is
+ * silent when first started; started again, it sends a picture of the emulated size if `restartSends`. Its first
+ * `screenshotFails` screenshots are refused, and the next `staleShots` show the size from before the emulation.
+ */
+function followsEmulation(options: { restartSends: boolean; screenshotFails?: number; staleShots?: number }) {
+  let emulated = { width: 1280, height: 800 };
+  let starts = 0;
+  let shots = 0;
+  let browser: FakeBrowser | null = null;
+  const handler = (method: string, params: Record<string, any>): unknown => {
+    if (method === "Emulation.setDeviceMetricsOverride") emulated = { width: Math.min(4096, Math.max(100, params["width"])), height: Math.min(4096, Math.max(100, params["height"])) };
+    if (method === "Page.startScreencast") {
+      starts += 1;
+      if (options.restartSends && starts > 1) {
+        const size = { ...emulated };
+        setImmediate(() => browser?.emit("Page.screencastFrame", { data: jpegOf(size.width, size.height).toString("base64"), sessionId: starts, metadata: { deviceWidth: size.width, deviceHeight: size.height } }, "S-T0"));
+      }
+    }
+    if (method === "Page.captureScreenshot") {
+      shots += 1;
+      const refused = options.screenshotFails ?? 0;
+      if (shots <= refused) throw new Error("Unable to capture screenshot");
+      if (shots <= refused + (options.staleShots ?? 0)) return { data: jpegOf(1280, 800).toString("base64") };
+      return { data: jpegOf(emulated.width, emulated.height).toString("base64") };
+    }
+    return undefined;
+  };
+  return { handler, bind: (fake: FakeBrowser) => void (browser = fake) };
+}
+
 describe("the pane's socket", () => {
   it("says hello with the person's tabs, streams frames one at a time until each is acknowledged, and forwards input in order", async () => {
     const { fake, url } = await rig();
@@ -178,8 +224,140 @@ describe("the pane's socket", () => {
     await waitFor(() => other.frames.length === 1, "the real picture");
     await new Promise((r) => setTimeout(r, 450));
     assert.equal(sent(busy.fake, "Page.captureScreenshot").length, 0, "a page that paints needs no screenshot");
+    assert.equal(busy.fake.calls.filter((c) => c.method === "Page.stopScreencast").length, 0, "and no restart of the stream");
     assert.equal(other.frames.length, 1);
     other.ws.close();
+  });
+
+  it("brings a tab forward before asking for its pictures, never with a repaint, and not again for a tab already on show", async () => {
+    // On Linux a tab brought forward while its screencast runs can lose the screencast for good, and nothing says so.
+    const { fake, url } = await rig();
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    const where = (pred: (c: FakeBrowser["calls"][number]) => boolean) => fake.calls.flatMap((c, i) => (pred(c) ? [i] : []));
+    const activations = () => where((c) => c.method === "Target.activateTarget" && c.params["targetId"] === "T0");
+    const starts = (session: string) => where((c) => c.method === "Page.startScreencast" && c.sessionId === session);
+    assert.ok(activations()[0]! < starts("S-T0")[0]!, "at the start, the tab is brought forward before it is cast");
+    pane.send({ type: "open", url: null });
+    await pane.waitFor((m) => m.type === "tabs" && m.active === "T1", "the new tab on show");
+    await waitFor(() => starts("S-T1").length === 1, "the new tab cast");
+    pane.send({ type: "activate", id: "T0" });
+    await waitFor(() => starts("S-T0").length === 2, "the first tab cast again");
+    assert.ok(activations().at(-1)! < starts("S-T0").at(-1)!, "a tab switched to is brought forward before it is cast");
+    assert.equal(sent(fake, "Page.bringToFront").length, 0, "no repaint is asked for");
+    const before = activations().length;
+    pane.send({ type: "activate", id: "T0" });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(activations().length, before, "a tab already on show is not brought forward again");
+    pane.ws.close();
+  });
+
+  /** A pane whose tab has shown its first picture, so that what follows is about the picture a resize owes. */
+  async function shown(options: Parameters<typeof followsEmulation>[0]) {
+    const quiet = followsEmulation(options);
+    const { fake, url } = await rig(quiet.handler);
+    quiet.bind(fake);
+    const pane = await connect(url);
+    pane.send(hello());
+    const ready = await pane.waitFor((m) => m.type === "ready", "ready");
+    fake.emit("Page.screencastFrame", { data: jpegOf(1280, 800).toString("base64"), sessionId: 1, metadata: { deviceWidth: 1280, deviceHeight: 800 } }, "S-T0");
+    await waitFor(() => pane.frames.length === 1, "the first picture");
+    return { fake, pane, id: ready["tabs"][0].id as string };
+  }
+
+  it("starts a silent picture stream again after a resize, and the picture it sends is at the size asked for", async () => {
+    const { fake, pane, id } = await shown({ restartSends: true, screenshotFails: 99 });
+    pane.send({ type: "viewport", id, width: 800, height: 600 });
+    await waitFor(() => pane.frames.some((f) => f?.width === 800 && f.height === 600), "a picture at the size asked for");
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 0, "starting the stream again was enough");
+    assert.ok(sent(fake, "Page.stopScreencast").length >= 1);
+    pane.ws.close();
+  });
+
+  it("takes a screenshot when starting the stream again brings nothing, and tells the size the picture really has", async () => {
+    const { fake, pane, id } = await shown({ restartSends: false });
+    // 50 x 50 is less than the browser takes: it is kept to 100 x 100, and the picture says so.
+    pane.send({ type: "viewport", id, width: 50, height: 50 });
+    await waitFor(() => pane.frames.some((f) => f?.width === 100 && f.height === 100), "a screenshot at the size the browser has");
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 1);
+    pane.ws.close();
+  });
+
+  it("does not start the stream again when its first picture came before the browser said it was started", async () => {
+    let browser: FakeBrowser | null = null;
+    const { fake, url } = await rig((method) => {
+      if (method === "Page.startScreencast") browser?.emit("Page.screencastFrame", { data: jpegOf(1280, 800).toString("base64"), sessionId: 1, metadata: { deviceWidth: 1280, deviceHeight: 800 } }, "S-T0");
+      return undefined;
+    });
+    browser = fake;
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    await waitFor(() => pane.frames.length === 1, "the first picture");
+    await new Promise((r) => setTimeout(r, 450));
+    assert.equal(sent(fake, "Page.stopScreencast").length, 0, "no restart");
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 0, "and no screenshot");
+    pane.ws.close();
+  });
+
+  it("owes no picture for a resize to the size the tab already shows", async () => {
+    const { fake, pane, id } = await shown({ restartSends: true });
+    pane.send({ type: "viewport", id, width: 1280, height: 800 });
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(sent(fake, "Page.stopScreencast").length, 0, "no restart");
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 0, "and no screenshot");
+    pane.ws.close();
+  });
+
+  it("sizes a tab again once its page has loaded, because the browser can drop the emulated size when a page commits", async () => {
+    const { fake, url } = await rig();
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    pane.send({ type: "viewport", id: "T0", width: 800, height: 600 });
+    const sizings = () => sent(fake, "Emulation.setDeviceMetricsOverride").filter((c) => c.params["width"] === 800 && c.params["height"] === 600).length;
+    await waitFor(() => sizings() === 1, "the size applied");
+    fake.emit("Page.frameStartedLoading", {}, "S-T0");
+    fake.emit("Page.frameStoppedLoading", {}, "S-T0");
+    await waitFor(() => sizings() === 2, "the size applied again after the load");
+    pane.ws.close();
+  });
+
+  it("brings a blank tab it had to open forward before casting it", async () => {
+    const { fake, url } = await rig((method) => (method === "Target.getTargets" ? { targetInfos: [] } : undefined));
+    const pane = await connect(url);
+    pane.send(hello());
+    const ready = await pane.waitFor((m) => m.type === "ready", "ready");
+    assert.deepEqual(ready["tabs"].map((t: { id: string }) => t.id), ["T1"]);
+    const first = (pred: (c: FakeBrowser["calls"][number]) => boolean) => fake.calls.findIndex(pred);
+    const activated = first((c) => c.method === "Target.activateTarget" && c.params["targetId"] === "T1");
+    const cast = first((c) => c.method === "Page.startScreencast" && c.sessionId === "S-T1");
+    assert.ok(activated >= 0 && cast >= 0 && activated < cast, "brought forward, then cast");
+    assert.equal(sent(fake, "Page.startScreencast").length, 1, "and cast once");
+    pane.ws.close();
+  });
+
+  it("keeps trying until a picture is at the size asked for: a picture of another size does not count", async () => {
+    // Right after a page loads, a picture can carry the browser window's size, and a screenshot can still show the size from before.
+    const { fake, pane, id } = await shown({ restartSends: false, staleShots: 1 });
+    pane.send({ type: "viewport", id, width: 800, height: 600 });
+    fake.emit("Page.screencastFrame", { data: jpegOf(780, 437).toString("base64"), sessionId: 2, metadata: { deviceWidth: 780, deviceHeight: 437 } }, "S-T0");
+    await waitFor(() => pane.frames.some((f) => f?.width === 800 && f.height === 600), "a picture at the size asked for", 8000);
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 2, "the first screenshot was of the old size, the second was right");
+    pane.ws.close();
+  });
+
+  it("asks for a screenshot again when the first one is refused", async () => {
+    const quiet = followsEmulation({ restartSends: false, screenshotFails: 1 });
+    const { fake, url } = await rig(quiet.handler);
+    quiet.bind(fake);
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    await waitFor(() => pane.frames.length >= 1, "a picture after a refused screenshot", 8000);
+    assert.equal(sent(fake, "Page.captureScreenshot").length, 2, "the first was refused, the second came");
+    pane.ws.close();
   });
 
   it("holds the next picture until the last one is acknowledged", async () => {
