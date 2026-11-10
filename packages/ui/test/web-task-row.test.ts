@@ -47,7 +47,7 @@ describe("a web task in the Tasks list", () => {
     const html = render(task());
     assert.match(html, /Web task/);
     assert.match(html, /Opened a\.example/);
-    assert.match(html, /reads web pages only, in its own browser/);
+    assert.match(html, /browses in its own browser and asks before it changes anything/);
     assert.doesNotMatch(html, /turns/);
     assert.doesNotMatch(html, />Pause</);
     assert.doesNotMatch(html, />Resume</);
@@ -62,6 +62,16 @@ describe("a web task in the Tasks list", () => {
     for (const label of ["Allow for this task", "Always allow", "Not now", "Block"]) assert.match(html, new RegExp(`>${label}<`), label);
     assert.doesNotMatch(html, />Resume</, "a web task cannot be resumed: it is waiting for an answer");
     assert.doesNotMatch(html, />Approve</);
+    assert.match(html, />Cancel</);
+  });
+
+  it("asks for a yes or a no, and nothing else, when it waits to change something", () => {
+    const html = render(task({ status: "paused", reason: "Waiting for your approval: Click “Place order” (on https://shop.example)." }));
+    assert.match(html, /Needs your OK/);
+    assert.match(html, /Click “Place order”/);
+    assert.match(html, />Do it</);
+    assert.match(html, />Don(&#x27;|')t</);
+    for (const label of ["Allow for this task", "Always allow", "Not now", "Block"]) assert.doesNotMatch(html, new RegExp(`>${label}<`), label);
     assert.match(html, />Cancel</);
   });
 

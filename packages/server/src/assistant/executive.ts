@@ -1,3 +1,4 @@
+import type { QuestionView } from "../browser/sites.js";
 import { ConflictError, NotFoundError, ValidationError } from "./store.js";
 import { awaitsApproval, stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
 import type { AssistantProfile } from "./types.js";
@@ -24,6 +25,10 @@ export interface BrowseRunnerPort {
   owns(taskId: string): boolean;
   /** The person's answer to the site the task is waiting on ("task", "always", "not-now" or "block"); throws when none is waiting. */
   answer(taskId: string, answer: string): void;
+  /** The person's answer to the action the task is waiting on ("do" or "dont"); throws when none is waiting. */
+  answerAction(taskId: string, answer: string): void;
+  /** What the task is asking the person now (a site or an action, without ids), or null. */
+  question(taskId: string): QuestionView | null;
   /** Whether a browser and a model are there for a web task, and if not, why. */
   available(): Promise<{ ok: boolean; reason?: string }>;
   /** The saved rules about which sites the assistant may open, and may not. */
@@ -245,6 +250,22 @@ export class Executive {
     if (!this.opts.browse) throw new ConflictError("Browsing is not available here.");
     this.opts.browse.answer(taskId, answer);
     return this.tasks.require(taskId);
+  }
+
+  /** The person's answer, on the screen, to the action a web task is waiting on: "do" or "dont". */
+  answerAction(taskId: string, answer: string): Task {
+    const task = this.tasks.require(taskId);
+    if (task.origin !== "browse" || TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is not waiting on an action.");
+    if (!this.opts.browse) throw new ConflictError("Browsing is not available here.");
+    this.opts.browse.answerAction(taskId, answer);
+    return this.tasks.require(taskId);
+  }
+
+  /** What a web task is asking the person now: a site or an action, as a screen shows it. */
+  browseQuestion(taskId: string): QuestionView | null {
+    const task = this.tasks.get(taskId);
+    if (!task || task.origin !== "browse" || TERMINAL_TASK.has(task.status)) return null;
+    return this.opts.browse?.question(taskId) ?? null;
   }
 
   private browseReport(taskId: string): BrowseReport {

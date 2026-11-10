@@ -102,12 +102,50 @@ export function decodeFrame(buffer: ArrayBuffer): Frame | null {
 }
 
 /** What a window that only watches is told about the assistant's web task (see the server's `watch.ts`). */
+export interface SiteQuestionView {
+  origin: string;
+  kind: "public" | "local";
+}
+
+/** An action that changes something: what it is, the page it is on, and what will be sent (secrets masked by the server). */
+export interface ActionQuestionView {
+  type: "action";
+  origin: string;
+  kind: "public" | "local";
+  page: string;
+  what: string;
+  fields: Array<{ name: string; value: string }>;
+}
+
+export type WatchQuestion = SiteQuestionView | ActionQuestionView;
+
+export function isActionQuestion(question: WatchQuestion): question is ActionQuestionView {
+  return "what" in question;
+}
+
+/** A question as the server sends it: a site (no more is said of it than before), or an action; anything else is nothing. */
+export function parseQuestion(raw: unknown): WatchQuestion | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const q = raw as Record<string, unknown>;
+  if (typeof q["origin"] !== "string") return null;
+  const kind = q["kind"] === "local" ? ("local" as const) : ("public" as const);
+  if (q["type"] === "action" && typeof q["what"] === "string") {
+    const fields = (Array.isArray(q["fields"]) ? q["fields"] : [])
+      .map((f) => f as Record<string, unknown> | null)
+      .filter((f): f is Record<string, unknown> => f !== null && typeof f["name"] === "string" && typeof f["value"] === "string")
+      .slice(0, 20)
+      .map((f) => ({ name: f["name"] as string, value: f["value"] as string }));
+    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields };
+  }
+  return { origin: q["origin"], kind };
+}
+
 export interface WatchJob {
   taskId: string;
   goal: string;
   steps: string[];
   startedAt: number;
-  question: { origin: string; kind: "public" | "local" } | null;
+  question: WatchQuestion | null;
 }
 
 export interface WatchState {
@@ -127,8 +165,7 @@ export function parseWatchState(raw: string): WatchState | null {
     if (typeof job !== "object") return null;
     const o = job as Record<string, unknown>;
     if (typeof o["taskId"] !== "string" || typeof o["goal"] !== "string" || !Array.isArray(o["steps"])) return null;
-    const q = o["question"] as Record<string, unknown> | null | undefined;
-    const question = q && typeof q["origin"] === "string" ? { origin: q["origin"], kind: q["kind"] === "local" ? ("local" as const) : ("public" as const) } : null;
+    const question = parseQuestion(o["question"]);
     return {
       tab,
       job: { taskId: o["taskId"], goal: o["goal"], steps: o["steps"].filter((s): s is string => typeof s === "string").slice(-8), startedAt: typeof o["startedAt"] === "number" ? o["startedAt"] : 0, question },

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
 import type { AssistantProfileView, AssistantScheduleView, AssistantStepView, AssistantSuggestionView, AssistantTaskDetailView, AssistantTaskStatus, AssistantTaskView, AssistantVerifier } from "../../types.js";
@@ -7,6 +7,8 @@ import { Row, Section } from "../settings/SettingsPage.js";
 import { Toggle } from "../ui/primitives.js";
 import { ago, useAssistantCall, useAssistantData } from "./api.js";
 import { Chip, Notice } from "./parts.js";
+import { ACTION_REASON, ActionQuestionCard } from "../browser/ActionQuestion.js";
+import { isActionQuestion, parseQuestion, type WatchQuestion } from "../browser/protocol.js";
 
 const STATUS: Record<AssistantTaskStatus, { label: string; tone: "plain" | "ok" | "warn" | "danger" | "accent" }> = {
   queued: { label: "Queued", tone: "plain" },
@@ -216,6 +218,27 @@ function NewTask(props: { profile: AssistantProfileView; onDone: () => void }) {
   );
 }
 
+/** What a web task is asking now (read again whenever its row changes), or null while that is not known. */
+function useWebQuestion(task: AssistantTaskView, asking: boolean, bump: number): WatchQuestion | null {
+  const call = useAssistantCall();
+  const [question, setQuestion] = useState<WatchQuestion | null>(null);
+  useEffect(() => {
+    if (!asking) {
+      setQuestion(null);
+      return;
+    }
+    let live = true;
+    call<{ question: unknown }>("GET", `/browse/question/${encodeURIComponent(task.id)}`).then(
+      (answer) => live && setQuestion(parseQuestion(answer.question)),
+      () => live && setQuestion(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [call, task.id, asking, task.reason, task.updatedAt, bump]);
+  return question;
+}
+
 export function TaskRow(props: { task: AssistantTaskView; now: number; open: boolean; onToggle: () => void; changed: () => void; bump: number }) {
   const { task } = props;
   const call = useAssistantCall();
@@ -226,6 +249,9 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
   // A web task is worked on by the assistant's own browser; while it waits it is the person's answer about a site it wants to open.
   const web = task.origin === "browse";
   const asking = web && task.status === "paused";
+  // What it asks: a site (four answers) or an action (two). The reason says which before the details have loaded.
+  const question = useWebQuestion(task, asking, props.bump);
+  const action = asking && (question ? isActionQuestion(question) : ACTION_REASON.test(task.reason));
   const status = proposal ? { label: "Needs your approval", tone: "warn" as const } : asking ? { label: "Needs your OK", tone: "warn" as const } : STATUS[task.status];
   const act = async (name: string, body: Record<string, unknown> = {}) => {
     setError(null);
@@ -252,7 +278,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           {web && task.result ? <span className="mt-1 block whitespace-pre-wrap text-xs text-fg [overflow-wrap:anywhere]">{task.result}</span> : null}
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtle">
             {web ? (
-              <span>reads web pages only, in its own browser</span>
+              <span>browses in its own browser and asks before it changes anything</span>
             ) : (
               <>
                 <span>
@@ -278,7 +304,14 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           ) : null}
           {open && !web ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
           {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
-          {asking ? (
+          {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer) => void act("action", { answer })} /> : null}
+          {asking && action && !(question && isActionQuestion(question)) ? (
+            <>
+              <Button size="xs" variant="accent" onClick={() => void act("action", { answer: "do" })}>Do it</Button>
+              <Button size="xs" variant="secondary" onClick={() => void act("action", { answer: "dont" })}>Don&apos;t</Button>
+            </>
+          ) : null}
+          {asking && !action ? (
             <>
               <Button size="xs" variant="accent" onClick={() => void act("site", { answer: "task" })}>Allow for this task</Button>
               <Button size="xs" variant="secondary" onClick={() => void act("site", { answer: "always" })}>Always allow</Button>

@@ -1,5 +1,7 @@
 import { CdpError } from "./cdp.js";
-import { BrowserError, type BrowserService } from "./service.js";
+import { describeClick, looksLikeCommit, typingRefusal, type ActionAsk } from "./commit.js";
+import { BrowserError, type BrowserService, type ElementFacts } from "./service.js";
+import { originOf } from "./sites.js";
 
 /**
  * The browser as the browsing agent sees it: one tab in the assistant's own context, and a handful of verbs that each answer with
@@ -47,7 +49,15 @@ export interface SurfaceGate {
   request(url: string): Promise<boolean>;
   /** Resolves when no question about this task is waiting. */
   settled(): Promise<void>;
+  /** Resolves true when the person allows this action: asked every time, nothing is remembered. */
+  confirm(ask: ActionAsk): Promise<boolean>;
+  /** The click that was approved has been sent: it covers nothing more. */
+  endApproval(): void;
 }
+
+const NOT_ALLOWED = "The person did not allow that, so it was not done. Nothing was changed. Do not try again by another route: call done and say what you could not do.";
+/** Keys that activate the focused button or send the form it is in. */
+const ACTIVATING = new Set(["Enter", "NumpadEnter", " ", "Space"]);
 
 export class ServiceSurface implements BrowseSurface {
   private tabId: string | null = null;
@@ -77,6 +87,7 @@ export class ServiceSurface implements BrowseSurface {
 
   private async act(run: (id: string) => Promise<unknown>): Promise<PageView> {
     try {
+      this.gate.endApproval();
       const id = await this.tab();
       await run(id);
       return await this.view(id);
@@ -101,16 +112,48 @@ export class ServiceSurface implements BrowseSurface {
     return this.act(() => Promise.resolve());
   }
 
+  /** Asks the person about an element that commits something, before it is clicked or pressed. Throws when they say no. */
+  private async confirm(id: string, verb: string, label: string, facts: ElementFacts | null): Promise<void> {
+    const info = (await this.service.listTabs()).find((t) => t.id === id);
+    const origin = originOf(info?.url ?? "") ?? info?.url ?? "";
+    const ask = describeClick({ origin, page: info?.title ?? "", verb, label, form: facts?.form ?? null });
+    if (!(await this.gate.confirm(ask))) throw new SurfaceError(NOT_ALLOWED);
+  }
+
   click(ref: string): Promise<PageView> {
-    return this.act((id) => this.service.click(id, { ref }));
+    return this.act(async (id) => {
+      const info = this.service.refInfo(id, ref);
+      if (info && looksLikeCommit(info.role, info.name)) await this.confirm(id, "Click", info.name, await this.service.elementFacts(id, ref));
+      await this.service.click(id, { ref });
+    });
+  }
+
+  /** Enter or Space on a button, or Enter in a field whose form has a button that commits, is that button being pressed. */
+  private async pressGuarded(id: string, key: string): Promise<void> {
+    if (ACTIVATING.has(key)) {
+      const facts = await this.service.elementFacts(id, null);
+      if (facts) {
+        const pressable = facts.tag === "button" || facts.tag === "a" || facts.role === "button" || (facts.tag === "input" && ["submit", "button", "image"].includes(facts.type));
+        const enters = key === "Enter" || key === "NumpadEnter";
+        const label = pressable ? facts.label : enters && facts.tag !== "textarea" && facts.form ? facts.form.defaultButton : "";
+        if (label !== "" && looksLikeCommit("button", label)) await this.confirm(id, `Press ${key === " " ? "Space" : key} on`, label, facts);
+      }
+    }
+    await this.service.press(id, key);
   }
 
   type(ref: string | null, text: string, submit: boolean): Promise<PageView> {
-    return this.act((id) => this.service.type(id, ref ? { ref } : null, text, { clear: ref !== null, submit }));
+    return this.act(async (id) => {
+      const facts = await this.service.elementFacts(id, ref);
+      const refusal = typingRefusal(text, facts ? { type: facts.type, autocomplete: facts.autocomplete, name: facts.name } : null);
+      if (refusal) throw new SurfaceError(refusal);
+      await this.service.type(id, ref ? { ref } : null, text, { clear: ref !== null, submit: false });
+      if (submit) await this.pressGuarded(id, "Enter");
+    });
   }
 
   press(key: string): Promise<PageView> {
-    return this.act((id) => this.service.press(id, key));
+    return this.act((id) => this.pressGuarded(id, key));
   }
 
   scroll(direction: "up" | "down"): Promise<PageView> {

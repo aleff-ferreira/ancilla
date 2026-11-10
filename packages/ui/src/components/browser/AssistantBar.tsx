@@ -4,7 +4,8 @@ import { errorMessage } from "../../client.js";
 import { useAssistantCall } from "../assistant/api.js";
 import { Chip, Notice } from "../assistant/parts.js";
 import { Button } from "../ui/primitives.js";
-import { watchUrl, type Frame } from "./protocol.js";
+import { ActionQuestionCard, type ActionAnswer } from "./ActionQuestion.js";
+import { isActionQuestion, watchUrl, type Frame } from "./protocol.js";
 import type { SocketLike } from "./session.js";
 import { AssistantWatch, EMPTY_WATCH, type WatchView } from "./watch.js";
 
@@ -35,6 +36,7 @@ export interface AssistantBarViewProps {
   onAsk(): void;
   onStop(): void;
   onAnswer(answer: SiteAnswer): void;
+  onAction(answer: ActionAnswer): void;
   onToggleSites(): void;
   onRemove(origin: string): void;
 }
@@ -67,7 +69,8 @@ export function AssistantBarView(props: AssistantBarViewProps) {
               ))}
             </ol>
           ) : null}
-          {job.question ? (
+          {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onAnswer={props.onAction} /> : null}
+          {job.question && !isActionQuestion(job.question) ? (
             <div role="group" aria-label="A site the assistant wants to open" className="space-y-1.5 rounded border border-line bg-bg p-2">
               <p className="text-xs text-fg [overflow-wrap:anywhere]">
                 It wants to open <span className="font-medium">{job.question.origin}</span>
@@ -249,6 +252,7 @@ export function AssistantBar() {
       }
       onStop={() => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/cancel`, {}))))}
       onAnswer={(answer) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/site`, { answer }))))}
+      onAction={(answer) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/action`, { answer }))))}
       onToggleSites={() => {
         const next = !sitesOpen;
         setSitesOpen(next);

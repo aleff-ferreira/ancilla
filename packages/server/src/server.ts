@@ -1140,6 +1140,8 @@ export class AncillaServer {
       log: (line) => this.log(line),
       // The assistant's pages are asked about before they load; the person's own tabs never are.
       siteGate: (request) => this.browseGate().decide(request),
+      // A form is sent only when the person says so on the screen, every time.
+      commitGate: (request) => this.browseGate().decideCommit(request),
     });
     return this.browserService;
   }

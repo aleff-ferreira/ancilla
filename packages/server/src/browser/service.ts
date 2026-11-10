@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { CdpConnection, CdpError } from "./cdp.js";
 import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
+import { bodyText } from "./commit.js";
 import { originOf } from "./sites.js";
 import { buildSnapshot, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
@@ -121,7 +122,64 @@ export interface BrowserServiceOptions {
    * The person's own tabs are never asked about. Absent: the assistant's context is not gated.
    */
   siteGate?: (request: { url: string; origin: string; tabId: string; mainFrame: boolean }) => Promise<boolean>;
+  /**
+   * Asked before the assistant's browser sends a form: a page request that is not a plain GET (a POST from a form, in the main
+   * page or in a frame), held in the browser until this answers. `false` aborts it and the page stays as it was. Absent while
+   * `siteGate` is set: nothing but a GET leaves the assistant's browser.
+   */
+  commitGate?: (request: CommitRequest) => Promise<boolean>;
 }
+
+/** A form the assistant's page is about to send. */
+export interface CommitRequest {
+  url: string;
+  method: string;
+  /** The title of the page the form is on. */
+  title: string;
+  contentType: string;
+  /** What is sent, when the browser lets it be read. */
+  body: string | undefined;
+  /** Names of the password inputs of the page the form is on: a request carries no input types, so the page says which fields are secret. */
+  secrets: string[];
+}
+
+/** What the page says about an element, read for deciding whether acting on it commits something. Everything in it is page-controlled. */
+export interface ElementFacts {
+  tag: string;
+  type: string;
+  name: string;
+  autocomplete: string;
+  role: string;
+  /** Its own text (aria-label, value or text). */
+  label: string;
+  form: { action: string; method: string; defaultButton: string; fields: Array<{ name: string; type: string; value: string }> } | null;
+}
+
+/** Runs in the page, on an element (null: nothing is focused). Reads only; try/catch because a page can shadow what it reads. */
+const FACTS_FN = `function(el){
+  try {
+    if (!el || el.nodeType !== 1) return null;
+    var text = function(n){ return String((n && (n.getAttribute('aria-label') || n.value || n.innerText || n.textContent)) || '').replace(/\\s+/g, ' ').trim().slice(0, 200); };
+    var form = el.form || (el.closest ? el.closest('form') : null);
+    var facts = { tag: el.tagName.toLowerCase(), type: String(el.getAttribute('type') || '').toLowerCase(), name: String(el.getAttribute('name') || ''), autocomplete: String(el.getAttribute('autocomplete') || '').toLowerCase(), role: String(el.getAttribute('role') || ''), label: text(el), form: null };
+    if (form) {
+      var def = form.querySelector('button[type=submit],input[type=submit],button:not([type])');
+      var fields = [];
+      var els = form.elements;
+      for (var i = 0; i < els.length && fields.length < 40; i++) {
+        var f = els[i];
+        var t = String(f.type || '').toLowerCase();
+        var n = String(f.name || f.id || '');
+        if (!n || t === 'submit' || t === 'button' || t === 'reset' || t === 'image' || f.disabled) continue;
+        if ((t === 'checkbox' || t === 'radio') && !f.checked) continue;
+        if (t === 'file') { fields.push({ name: n, type: t, value: (f.files && f.files[0]) ? f.files[0].name : '' }); continue; }
+        fields.push({ name: n, type: t, value: String(f.value == null ? '' : f.value).slice(0, 400) });
+      }
+      facts.form = { action: String(form.action || ''), method: String(form.method || 'get').toLowerCase(), defaultButton: def ? text(def) : '', fields: fields };
+    }
+    return facts;
+  } catch (e) { return null; }
+}`;
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
 const DEFAULT_SIZE = { width: 1280, height: 800 };
@@ -176,6 +234,9 @@ interface Tab {
   loading: boolean;
   openerId?: string;
   refs: Map<string, number>;
+  refInfo: Map<string, { role: string; name: string }>;
+  /** Names of the password inputs seen at the last snapshot (the page cannot be asked while a form is held: it does not answer). */
+  secretNames: string[];
   dialog: DialogInfo | null;
   loadWaiters: Array<() => void>;
   screencast: ScreencastState | null;
@@ -463,6 +524,8 @@ export class BrowserService {
       loading: false,
       ...(openerId ? { openerId } : {}),
       refs: new Map(),
+      refInfo: new Map(),
+      secretNames: [],
       dialog: null,
       loadWaiters: [],
       screencast: null,
@@ -662,15 +725,46 @@ export class BrowserService {
       await rt.conn.send("Accessibility.enable", {}, tab.sessionId);
       tab.axEnabled = true;
     }
-    const [tree, dom] = await Promise.all([
+    const [tree, dom, secrets] = await Promise.all([
       rt.conn.send<{ nodes: AxNode[] }>("Accessibility.getFullAXTree", {}, tab.sessionId),
       rt.conn
         .send<DomSnapshotLike>("DOMSnapshot.captureSnapshot", { computedStyles: ["opacity", "visibility", "font-size"] }, tab.sessionId)
         .catch(() => null),
+      tab.context === "assistant" ? this.passwordNames(rt, tab) : Promise.resolve([] as string[]),
     ]);
+    tab.secretNames = secrets;
     const result = buildSnapshot(tree.nodes ?? [], { url: tab.url, title: tab.title, visible: dom ? visibleBackendIds(dom) : null, ...(options.maxChars ? { maxChars: options.maxChars } : {}) });
     tab.refs = result.refs;
+    tab.refInfo = result.info;
     return { text: result.text, refs: result.refs.size, truncated: result.truncated };
+  }
+
+  /** What the latest snapshot says an element is, or null for a ref it does not know. */
+  refInfo(id: string, ref: string): { role: string; name: string } | null {
+    return this.runtime?.tabs.get(id)?.refInfo.get(ref) ?? null;
+  }
+
+  /** What the page says about an element (the ref's, or the focused one when `ref` is null), or null when it cannot be read. */
+  async elementFacts(id: string, ref: string | null): Promise<ElementFacts | null> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    try {
+      if (ref === null) {
+        const result = await rt.conn.send<{ result?: { value?: ElementFacts | null } }>("Runtime.evaluate", { expression: `(${FACTS_FN})(document.activeElement)`, returnByValue: true }, tab.sessionId);
+        return result.result?.value ?? null;
+      }
+      const backendNodeId = tab.refs.get(ref);
+      if (backendNodeId === undefined) return null;
+      const node = await rt.conn.send<{ object: { objectId: string } }>("DOM.resolveNode", { backendNodeId }, tab.sessionId);
+      const result = await rt.conn.send<{ result?: { value?: ElementFacts | null } }>(
+        "Runtime.callFunctionOn",
+        { objectId: node.object.objectId, functionDeclaration: `function(){ return (${FACTS_FN})(this); }`, returnByValue: true },
+        tab.sessionId,
+      );
+      return result.result?.value ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** What the page did that the assistant should hear about since it last asked: a site refused, a popup closed, a dialog dismissed. */
@@ -1067,9 +1161,26 @@ export class BrowserService {
         allowed = false;
       }
     }
+    // A form is held until the person says it may be sent (any frame); with nobody to ask, it is not sent.
+    const method = String(params["request"]?.method ?? "GET").toUpperCase();
+    let formRefused = false;
+    if (allowed && method !== "GET" && method !== "HEAD") {
+      const headers = (params["request"]?.headers ?? {}) as Record<string, unknown>;
+      const typeKey = Object.keys(headers).find((key) => key.toLowerCase() === "content-type");
+      try {
+        allowed = this.options.commitGate
+          ? await this.options.commitGate({ url, method, title: tab.title, contentType: typeKey ? String(headers[typeKey]) : "", body: bodyText(params["request"] ?? {}), secrets: mainFrame ? tab.secretNames : [] })
+          : false;
+      } catch {
+        allowed = false;
+      }
+      formRefused = !allowed;
+    }
     // The browser, or this tab, went away while the person was deciding.
     if (rt.conn.isClosed || rt.tabs.get(tab.id) !== tab) return;
-    if (!allowed && mainFrame) {
+    if (formRefused) {
+      this.note(tab, `A form to ${origin ?? url.slice(0, 80)} was not sent: the person did not allow it. Nothing was changed.`);
+    } else if (!allowed && mainFrame) {
       tab.blocked = true;
       this.note(tab, `${origin ?? url.slice(0, 80)} was not opened: the person did not allow it.`);
     }
@@ -1078,6 +1189,22 @@ export class BrowserService {
     await rt.conn
       .send(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", allowed ? { requestId } : { requestId, errorReason: "Aborted" }, tab.sessionId)
       .catch(() => undefined);
+  }
+
+  /** The names of the password inputs on the tab's page (a form being sent may hold one under any name). Best effort: none when the page does not answer. */
+  private async passwordNames(rt: Runtime, tab: Tab): Promise<string[]> {
+    try {
+      const result = await rt.conn.send<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        { expression: "Array.from(document.querySelectorAll('input[type=password]')).map(function(e){return e.name||e.id||''}).filter(Boolean).slice(0,20)", returnByValue: true },
+        tab.sessionId,
+        1500,
+      );
+      const value = result.result?.value;
+      return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
   }
 
   private async refreshInfo(rt: Runtime, tab: Tab): Promise<void> {

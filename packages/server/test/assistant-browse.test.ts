@@ -66,7 +66,14 @@ class AskingSurface implements BrowseSurface {
   async read() {
     return this.view("https://a.example/");
   }
-  async click() {
+  /** A click on "buy" is a commit: it asks the person, as the real surface does, before anything is done. */
+  clicked: string[] = [];
+  async click(ref?: string) {
+    if (ref === "buy") {
+      const ask = { origin: "https://a.example", page: "Page", what: "Click “Place order”", fields: [{ name: "item", value: "Blue Widget" }] };
+      if (!(await this.gate.confirm(ask))) throw new SurfaceError("The person did not allow that, so it was not done. Nothing was changed.");
+      this.clicked.push(ref);
+    }
     return this.view("https://a.example/");
   }
   async type() {
@@ -368,7 +375,7 @@ describe("what is kept and said", () => {
   it("labels what the web answered, and words the question for a site on this computer", () => {
     assert.deepEqual(describeOutcome({ ok: true, answer: "42", reason: "", steps: 1, pages: [], tokens: 0 }), { ok: true, result: "From the web (not checked):\n42", reason: "Done after 1 step." });
     assert.deepEqual(describeOutcome({ ok: false, answer: "", reason: "It was stopped.", steps: 2, pages: ["https://a.example/"], tokens: 0 }), { ok: false, result: "", reason: "It was stopped." });
-    assert.equal(questionReason({ id: "q", taskId: "t", origin: "http://localhost:5173", kind: "local", at: 0 }), "Waiting for your approval to open http://localhost:5173 (a page on this computer or your network).");
+    assert.equal(questionReason({ type: "site", id: "q", taskId: "t", origin: "http://localhost:5173", kind: "local", at: 0 }), "Waiting for your approval to open http://localhost:5173 (a page on this computer or your network).");
     assert.match(questionReason(null), /Waiting for your approval/);
   });
 
@@ -384,5 +391,75 @@ describe("what is kept and said", () => {
     assert.equal(muse.brain.label, "Muse (muse-spark-1.3)");
     assert.equal(muse.brain.capabilities.tools, true, "its tools are asked for in its text");
     assert.match(makeBrowseBrain({ ...DEFAULT_VOICE_SETTINGS, brain: { kind: "none" } }, deps).problem ?? "", /No model is chosen/);
+  });
+});
+
+describe("a web task that wants to change something", () => {
+  const buying: Step[] = [
+    { calls: [{ name: "open", args: { url: "https://a.example/" } }] },
+    { calls: [{ name: "click", args: { ref: "buy" } }] },
+    { calls: [{ name: "done", args: { answer: "Finished." } }] },
+  ];
+  const http = (r: ReturnType<typeof rig>) => async (method: string, path: string, body: Record<string, unknown> = {}) => {
+    const url = new URL(path, "http://localhost");
+    return handleAssistant({ get: () => r.service, unavailable: () => null }, { method, path: url.pathname, query: url.searchParams, body: async () => body });
+  };
+  const toAction = async (r: ReturnType<typeof rig>) => {
+    const { id } = await r.start();
+    await until(() => r.task(id).status === "paused", "the site question");
+    r.exec.answerSite(id, "task");
+    await until(() => r.sites.gate.pending()?.type === "action", "the action question");
+    await until(() => /Click/.test(r.task(id).reason), "the row to say what it waits for");
+    return id;
+  };
+
+  it("waits for the person's yes, says what the action is everywhere, and does it only then", async () => {
+    const r = rig({ steps: buying });
+    const id = await toAction(r);
+    const asking = r.task(id);
+    assert.equal(asking.status, "paused");
+    assert.equal(asking.reason, "Waiting for your approval: Click “Place order” (on https://a.example).");
+    assert.equal(noticeOf(asking), "needs", "the call counts it as waiting on the person");
+    assert.equal(r.surfaces[0]?.clicked.length, 0, "nothing was clicked while it waits");
+    const shown = r.runner.current()?.question;
+    assert.equal(shown?.type, "action");
+
+    const api = http(r);
+    const told = await api("GET", `/api/assistant/browse/question/${id}`);
+    assert.deepEqual((told?.body as { question: unknown }).question, { type: "action", origin: "https://a.example", kind: "public", page: "Page", what: "Click “Place order”", fields: [{ name: "item", value: "Blue Widget" }] });
+    assert.deepEqual(((await api("GET", "/api/assistant/browse/question/t_nope"))?.body as { question: unknown }).question, null);
+
+    const answered = await api("POST", `/api/assistant/tasks/${id}/action`, { answer: "do" });
+    assert.equal(answered?.status, 200);
+    await until(() => r.task(id).status === "completed", "the end");
+    assert.deepEqual(r.surfaces[0]?.clicked, ["buy"], "a yes does it");
+    assert.equal(r.sites.gate.pending(), null);
+  });
+
+  it("does nothing on a no, tells the model so, and asks again the next time: no rule is made", async () => {
+    const r = rig({ steps: [...buying.slice(0, 2), { calls: [{ name: "click", args: { ref: "buy" } }] }, { calls: [{ name: "done", args: { answer: "Not ordered." } }] }] });
+    const id = await toAction(r);
+    r.exec.answerAction(id, "dont");
+    await until(() => r.sites.gate.pending()?.type === "action" && r.surfaces[0]?.clicked.length === 0 && r.task(id).status === "paused", "it asks again for the second try");
+    r.exec.answerAction(id, "dont");
+    await until(() => r.task(id).status === "completed", "the end");
+    assert.deepEqual(r.surfaces[0]?.clicked, []);
+    assert.deepEqual(r.sites.rules.list().map((x) => x.origin), [], "nothing was saved");
+  });
+
+  it("keeps the two kinds of answer apart, and a stopped task is not asked again", async () => {
+    const r = rig({ steps: buying });
+    const id = await toAction(r);
+    assert.throws(() => r.exec.answerSite(id, "task"), /An action is waiting for your answer, not a site/);
+    assert.throws(() => r.exec.answerAction(id, "sure"), /answer must be do or dont/);
+    assert.throws(() => r.exec.answerAction("t_nope", "do"), /task/i);
+    const spec = parseTaskSpec({ goal: "a thread task", cwd: "/work/atlas" }, r.store.getProfile(), (c) => c);
+    const plain = r.service.tasks.create({ ...spec, origin: "user" });
+    assert.throws(() => r.exec.answerAction(plain.id, "do"), /not waiting on an action/);
+    await r.exec.cancel(id);
+    await until(() => r.sites.gate.pending() === null, "the question to go");
+    assert.equal(r.task(id).status, "cancelled");
+    assert.deepEqual(r.surfaces[0]?.clicked, [], "stopped while it asked: nothing was done");
+    assert.throws(() => r.exec.answerAction(id, "do"), /not waiting on an action/);
   });
 });

@@ -123,6 +123,11 @@ export class DemoAssistant {
     web.task.origin = "browse";
     web.task.sessionId = null;
     this.tasks.unshift(web);
+    // A web task that wants to change something: it waits for a yes or a no, with what will be sent.
+    const order = this.task("t6", "Order the blue widget", "paused", "Waiting for your approval: Click “Place order”, which sends a form to https://shop.example/order (on https://shop.example).", { cwd: "/work/atlas", turns: 0, steps: [["Order the blue widget", "running", "", false]] });
+    order.task.origin = "browse";
+    order.task.sessionId = null;
+    this.tasks.unshift(order);
     this.schedules = [{ id: "sc1", title: "Check the build every morning", goal: "Read last night's CI run and report what failed", cwd: "/work/atlas", kind: "daily", everyMinutes: null, atMinute: 540, tz: "Europe/Lisbon", endAt: this.t0 + 60 * DAY, maxRuns: null, runs: 12, enabled: true, note: "", nextRunAt: this.t0 + 14 * HOUR, lastRunAt: this.t0 - 10 * HOUR }];
     this.log("create", "m6", "capture");
   }
@@ -385,6 +390,9 @@ export class DemoAssistant {
     }
     // The sites the person said yes or no to for good, and a web task started from the Browser panel's box.
     if (method === "GET" && path === "/browse/sites") return { rules: this.siteRules };
+    if (method === "GET" && path === "/browse/question/t6") {
+      return { question: { type: "action", origin: "https://shop.example", kind: "public", page: "Your cart", what: "Click “Place order”, which sends a form to https://shop.example/order", fields: [{ name: "item", value: "Blue Widget" }, { name: "quantity", value: "1" }, { name: "address", value: "Rua das Flores 12, Lisboa" }, { name: "note", value: "" }, { name: "password", value: "••••••••" }] } };
+    }
     if (method === "DELETE" && path === "/browse/sites") {
       this.siteRules = this.siteRules.filter((r) => r.origin !== body["origin"]);
       return { rules: this.siteRules };
@@ -406,13 +414,13 @@ export class DemoAssistant {
       if (!t) throw Object.assign(new Error("The task was not found"), { kind: "not_found" });
       return { ...t, checkpoint: null };
     }
-    const taskAction = path.match(/^\/tasks\/([^/]+)\/(pause|resume|cancel|retry|confirm|extend|resolve|site)$/);
+    const taskAction = path.match(/^\/tasks\/([^/]+)\/(pause|resume|cancel|retry|confirm|extend|resolve|site|action)$/);
     if (taskAction && method === "POST") {
       const t = this.tasks.find((x) => x.task.id === taskAction[1]);
       if (!t) throw Object.assign(new Error("The task was not found"), { kind: "not_found" });
-      const next: Record<string, AssistantTaskView["status"]> = { pause: "paused", resume: "running", cancel: "cancelled", retry: "queued", confirm: "completed", extend: "queued", resolve: "queued", site: "running" };
+      const next: Record<string, AssistantTaskView["status"]> = { pause: "paused", resume: "running", cancel: "cancelled", retry: "queued", confirm: "completed", extend: "queued", resolve: "queued", site: "running", action: "running" };
       t.task.status = next[taskAction[2] as string] ?? t.task.status;
-      t.task.reason = taskAction[2] === "confirm" ? "Confirmed by you." : taskAction[2] === "cancel" ? "Cancelled by you." : taskAction[2] === "pause" ? "Paused by you." : taskAction[2] === "site" ? "Opened en.wikipedia.org" : "Trying again.";
+      t.task.reason = taskAction[2] === "confirm" ? "Confirmed by you." : taskAction[2] === "cancel" ? "Cancelled by you." : taskAction[2] === "pause" ? "Paused by you." : taskAction[2] === "action" ? "Went on." : taskAction[2] === "site" ? "Opened en.wikipedia.org" : "Trying again.";
       t.task.updatedAt = Date.now();
       bump();
       return { task: t.task };

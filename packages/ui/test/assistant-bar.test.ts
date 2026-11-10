@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { ActionQuestionCard } from "../src/components/browser/ActionQuestion.js";
 import { AssistantBarView, type AssistantBarViewProps } from "../src/components/browser/AssistantBar.js";
 import { parseWatchState, watchUrl } from "../src/components/browser/protocol.js";
 import type { SocketLike } from "../src/components/browser/session.js";
@@ -14,6 +15,39 @@ import { AssistantWatch, EMPTY_WATCH, type WatchView } from "../src/components/b
 
 const job = (over: Record<string, unknown> = {}) => ({ taskId: "t_1", goal: "Find the opening hours", steps: ["Opened shop.example", "Read the page"], startedAt: 5, question: null, ...over });
 const state = (over: Record<string, unknown> = {}) => JSON.stringify({ type: "state", tab: "T7", job: job(), ...over });
+
+const action = { type: "action", origin: "https://shop.example", kind: "public", page: "Your cart", what: "Click “Place order”, which sends a form to https://shop.example/order", fields: [{ name: "item", value: "Blue Widget" }, { name: "password", value: "••••••••" }, { name: "note", value: "" }] };
+
+describe("an action the assistant wants to take", () => {
+  it("is read from the watcher's state, with its fields, and a site question stays what it was", () => {
+    const told = parseWatchState(state({ job: job({ question: action }) }))?.job?.question;
+    assert.deepEqual(told, action);
+    assert.deepEqual(parseWatchState(state({ job: job({ question: { type: "site", origin: "https://a.example", kind: "public" } }) }))?.job?.question, { origin: "https://a.example", kind: "public" });
+    assert.deepEqual(parseWatchState(state({ job: job({ question: { ...action, fields: [{ name: "a", value: "b" }, { name: 3 }, null, "x"], page: 7 } }) }))?.job?.question, { ...action, page: "", fields: [{ name: "a", value: "b" }] });
+    assert.equal(parseWatchState(state({ job: job({ question: { type: "action", origin: "https://a.example" } }) }))?.job?.question?.hasOwnProperty("what"), false, "an action with no words is not shown as one");
+  });
+
+  it("is shown with what it is, where, and what will be sent, and two answers", () => {
+    const html = renderToStaticMarkup(createElement(ActionQuestionCard, { question: action as never, onAnswer: () => undefined }));
+    assert.match(html, /The assistant wants to/);
+    assert.ok(html.includes("Click “Place order”, which sends a form to https://shop.example/order"));
+    assert.ok(html.includes("“Your cart” at https://shop.example"));
+    for (const text of ["item", "Blue Widget", "password", "••••••••", "(empty)"]) assert.ok(html.includes(text), text);
+    assert.match(html, />Do it</);
+    assert.match(html, />Don(&#x27;|')t</);
+    assert.match(html, /asks again next time/);
+    assert.match(renderToStaticMarkup(createElement(ActionQuestionCard, { question: { ...action, kind: "local" } as never, onAnswer: () => undefined })), /a page on this computer or your network/);
+  });
+
+  it("takes the place of the site question in the bar, with Stop still there", () => {
+    const html = renderToStaticMarkup(createElement(AssistantBarView, props({ watch: watching({ question: action }) })));
+    assert.match(html, /An action the assistant wants to take/);
+    assert.match(html, />Do it</);
+    assert.doesNotMatch(html, /Allow for this task/);
+    assert.doesNotMatch(html, /A site the assistant wants to open/);
+    assert.match(html, />Stop</);
+  });
+});
 
 describe("what a watcher is told", () => {
   it("reads a state message, and refuses anything that is not one", () => {
@@ -163,6 +197,7 @@ const props = (over: Partial<AssistantBarViewProps> = {}): AssistantBarViewProps
   onAsk: () => undefined,
   onStop: () => undefined,
   onAnswer: () => undefined,
+  onAction: () => undefined,
   onToggleSites: () => undefined,
   onRemove: () => undefined,
   ...over,

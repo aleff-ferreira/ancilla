@@ -4,7 +4,8 @@ import type { Task } from "../assistant/tasks.js";
 import type { BrainProvider } from "../voice/brain.js";
 import { BrowseAgent, type BrowseOutcome } from "./agent.js";
 import type { BrowserService } from "./service.js";
-import { SITE_ANSWERS, type SiteAnswer, type SiteGate, type SiteQuestion } from "./sites.js";
+import { actionReason } from "./commit.js";
+import { ACTION_ANSWERS, SITE_ANSWERS, questionView, type ActionAnswer, type GateQuestion, type QuestionView, type SiteAnswer, type SiteGate } from "./sites.js";
 import { ServiceSurface, type BrowseSurface, type SurfaceGate } from "./surface.js";
 
 /**
@@ -42,9 +43,10 @@ interface Job {
   surface: BrowseSurface | null;
 }
 
-/** What the person sees waiting for them: the site, and that it leads into this computer or their network when it does. */
-export function questionReason(question: SiteQuestion | null): string {
+/** What the person sees waiting for them: the site, and that it leads into this computer or their network when it does; or the action. */
+export function questionReason(question: GateQuestion | null): string {
   if (!question) return "Waiting for your approval to open a site.";
+  if (question.type === "action") return actionReason(question);
   return `Waiting for your approval to open ${question.origin}${question.kind === "local" ? " (a page on this computer or your network)" : ""}.`;
 }
 
@@ -74,7 +76,7 @@ export class BrowseRunner implements BrowseRunnerPort {
   }
 
   /** The task being worked on and what it did lately, for a screen that shows it. */
-  current(): { taskId: string; goal: string; steps: string[]; startedAt: number; question: SiteQuestion | null } | null {
+  current(): { taskId: string; goal: string; steps: string[]; startedAt: number; question: GateQuestion | null } | null {
     const job = this.job;
     if (!job) return null;
     const question = this.deps.gate.pending();
@@ -129,12 +131,28 @@ export class BrowseRunner implements BrowseRunnerPort {
     if (this.job?.taskId === taskId) this.job.abort.abort();
   }
 
-  /** The person's answer to the question shown for this task. */
+  /** What the person is being asked about this task now, as a screen shows it (no ids), or null. */
+  question(taskId: string): QuestionView | null {
+    const question = this.deps.gate.pending();
+    return question && question.taskId === taskId ? questionView(question) : null;
+  }
+
+  /** The person's answer to the site question shown for this task. */
   answer(taskId: string, answer: string): void {
     if (!(SITE_ANSWERS as readonly string[]).includes(answer)) throw new ValidationError("answer", "answer must be task, always, not-now or block");
     const question = this.deps.gate.pending();
     if (!question || question.taskId !== taskId) throw new ConflictError("No site is waiting for an answer on this task.");
+    if (question.type !== "site") throw new ConflictError("An action is waiting for your answer, not a site.");
     this.deps.gate.answer(question.id, answer as SiteAnswer);
+  }
+
+  /** The person's answer to the action shown for this task: "do" or "dont". */
+  answerAction(taskId: string, answer: string): void {
+    if (!(ACTION_ANSWERS as readonly string[]).includes(answer)) throw new ValidationError("answer", "answer must be do or dont");
+    const question = this.deps.gate.pending();
+    if (!question || question.taskId !== taskId) throw new ConflictError("No action is waiting for an answer on this task.");
+    if (question.type !== "action") throw new ConflictError("A site is waiting for your answer, not an action.");
+    this.deps.gate.answer(question.id, answer as ActionAnswer);
   }
 
   /** The id of the task being worked on, or null. */
@@ -181,6 +199,13 @@ export class BrowseRunner implements BrowseRunnerPort {
       if (!status.available) throw new Error(status.reason ?? "No browser was found on this computer.");
       const gate: SurfaceGate = {
         request: (url) => this.deps.gate.request(task.id, url, AbortSignal.any([job.abort.signal, AbortSignal.timeout(QUESTION_MS)])),
+        confirm: async (ask) => {
+          const allowed = await this.deps.gate.ask(task.id, ask, AbortSignal.any([job.abort.signal, AbortSignal.timeout(QUESTION_MS)]));
+          // The click they allowed may send the form it is in: that form needs no second question.
+          if (allowed) this.deps.gate.approved(task.id);
+          return allowed;
+        },
+        endApproval: () => this.deps.gate.endApproval(),
         settled: async () => {
           await this.deps.gate.settled(task.id, AbortSignal.any([job.abort.signal, AbortSignal.timeout(QUESTION_MS)]));
           // Still waiting after all this time: nobody is going to answer, so it counts as "not now".

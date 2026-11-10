@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { isIP } from "node:net";
+import { describeRequest, type ActionAsk, type ShownField } from "./commit.js";
 
 /**
  * Which sites the assistant's browser may open. A site is an origin (scheme, host and port). The first time a task wants
@@ -23,11 +24,36 @@ export interface SiteRule {
 }
 
 export interface SiteQuestion {
+  type: "site";
   id: string;
   taskId: string;
   origin: string;
   kind: SiteKind;
   at: number;
+}
+
+/** An action the person is asked to allow: what is about to happen, on which page, and what will be sent. */
+export interface ActionQuestion extends ActionAsk {
+  type: "action";
+  id: string;
+  taskId: string;
+  kind: SiteKind;
+  at: number;
+}
+
+export type GateQuestion = SiteQuestion | ActionQuestion;
+
+/** The two answers to an action: do it, or not. Nothing is remembered. */
+export type ActionAnswer = "do" | "dont";
+export const ACTION_ANSWERS: readonly ActionAnswer[] = ["do", "dont"];
+
+/** A question as a screen is shown it: no ids, only what the person needs to decide. */
+export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[] };
+
+export function questionView(question: GateQuestion): QuestionView {
+  return question.type === "action"
+    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields }
+    : { type: "site", origin: question.origin, kind: question.kind };
 }
 
 /** `https://example.com` or `http://localhost:5173`; null for anything that is not an http(s) address. */
@@ -134,9 +160,12 @@ export class SiteRules {
 export type SiteCheck = "allow" | "block" | "ask";
 
 interface Waiting {
-  question: SiteQuestion;
+  question: GateQuestion;
   waiters: Array<(allowed: boolean) => void>;
 }
+
+/** An approved click stays good for the form it sends, and for no longer than this. */
+const APPROVAL_MS = 20_000;
 
 /**
  * The questions and the grants of the task that is browsing. One question is shown at a time; the others wait behind it and
@@ -147,6 +176,8 @@ export class SiteGate {
   private readonly grants = new Map<string, Set<string>>();
   private readonly refusals = new Map<string, Set<string>>();
   private queue: Waiting[] = [];
+  /** The task whose last approved click may send its own form without a second question, and until when. */
+  private approval: { taskId: string; until: number } | null = null;
   private idle: Array<{ taskId: string; wake: () => void }> = [];
 
   constructor(
@@ -165,7 +196,7 @@ export class SiteGate {
   }
 
   /** The question the person is looking at, or null. */
-  pending(): SiteQuestion | null {
+  pending(): GateQuestion | null {
     return this.queue[0]?.question ?? null;
   }
 
@@ -197,6 +228,39 @@ export class SiteGate {
     if (!origin) return Promise.resolve(false);
     const verdict = this.check(taskId, origin);
     if (verdict !== "ask") return Promise.resolve(verdict === "allow");
+    return this.enqueue(taskId, signal, (at) => ({ type: "site", id: this.newId(), taskId, origin, kind: kindOfOrigin(origin), at }), (w) => w.question.type === "site" && w.question.origin === origin);
+  }
+
+  /**
+   * Asks the person to allow one action. Every action asks, each time: nothing is remembered and no rule can settle it. Resolves
+   * true only when they answer "do"; no answer in time, a stop, or the task ending is no.
+   */
+  ask(taskId: string, ask: ActionAsk, signal?: AbortSignal): Promise<boolean> {
+    return this.enqueue(taskId, signal, (at) => ({ ...ask, type: "action", id: this.newId(), taskId, kind: kindOfOrigin(ask.origin), at }), null);
+  }
+
+  /** Records that the click just approved may send the form it is in, once. */
+  approved(taskId: string): void {
+    this.approval = { taskId, until: (this.options.now ?? Date.now)() + APPROVAL_MS };
+  }
+
+  /** Whether the last approved click of `taskId` covers the form being sent now. Used once. */
+  takeApproval(taskId: string): boolean {
+    const approval = this.approval;
+    this.approval = null;
+    return approval !== null && approval.taskId === taskId && approval.until > (this.options.now ?? Date.now)();
+  }
+
+  /** The approved click has done what it was approved for: it no longer covers anything. */
+  endApproval(): void {
+    this.approval = null;
+  }
+
+  private newId(): string {
+    return `sq_${randomBytes(6).toString("hex")}`;
+  }
+
+  private enqueue(taskId: string, signal: AbortSignal | undefined, make: (at: number) => GateQuestion, same: ((w: Waiting) => boolean) | null): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       let settled = false;
       const done = (allowed: boolean): void => {
@@ -217,24 +281,28 @@ export class SiteGate {
       };
       if (signal?.aborted) return done(false);
       signal?.addEventListener("abort", onAbort, { once: true });
-      const same = this.queue.find((w) => w.question.taskId === taskId && w.question.origin === origin);
-      if (same) {
-        same.waiters.push(done);
+      const existing = same ? this.queue.find((w) => w.question.taskId === taskId && same(w)) : undefined;
+      if (existing) {
+        existing.waiters.push(done);
         return;
       }
-      const question: SiteQuestion = { id: `sq_${randomBytes(6).toString("hex")}`, taskId, origin, kind: kindOfOrigin(origin), at: (this.options.now ?? Date.now)() };
-      this.queue.push({ question, waiters: [done] });
+      this.queue.push({ question: make((this.options.now ?? Date.now)()), waiters: [done] });
       this.changed();
     });
   }
 
-  /** The person's answer to the question on the screen. Throws when there is none, or it is not the one shown. */
-  answer(questionId: string, answer: SiteAnswer): void {
+  /** The person's answer to the question on the screen. Throws when there is none, or it is not the one shown, or the answer is for the other kind. */
+  answer(questionId: string, answer: SiteAnswer | ActionAnswer): void {
     const head = this.queue[0];
     if (!head || head.question.id !== questionId) throw new Error("That question is not waiting any more.");
     const { taskId, origin } = head.question;
     let allowed = false;
-    if (answer === "task") {
+    if (head.question.type === "action") {
+      if (answer !== "do" && answer !== "dont") throw new Error("That question is about an action: answer do or dont.");
+      allowed = answer === "do";
+    } else if (answer === "do" || answer === "dont") {
+      throw new Error("That question is about a site, not an action.");
+    } else if (answer === "task") {
       this.set(this.grants, taskId, origin);
       allowed = true;
     } else if (answer === "always") {
@@ -257,7 +325,7 @@ export class SiteGate {
     if (gone.length === 0) return;
     this.queue = this.queue.filter((w) => w.question.taskId !== taskId);
     for (const entry of gone) {
-      this.set(this.refusals, taskId, entry.question.origin);
+      if (entry.question.type === "site") this.set(this.refusals, taskId, entry.question.origin);
       for (const wake of entry.waiters) wake(false);
     }
     this.settleQueued();
@@ -271,6 +339,7 @@ export class SiteGate {
     for (const entry of gone) for (const wake of entry.waiters) wake(false);
     this.grants.delete(taskId);
     this.refusals.delete(taskId);
+    if (this.approval?.taskId === taskId) this.approval = null;
     if (gone.length > 0) this.changed();
   }
 
@@ -284,6 +353,10 @@ export class SiteGate {
   private settleQueued(): void {
     for (let i = 0; i < this.queue.length; ) {
       const entry = this.queue[i] as Waiting;
+      if (entry.question.type === "action") {
+        i += 1;
+        continue;
+      }
       const verdict = this.check(entry.question.taskId, entry.question.origin);
       if (verdict === "ask") {
         i += 1;
@@ -339,5 +412,17 @@ export class BrowseSites {
     }
     if (taskId === null) return false;
     return this.gate.request(taskId, request.url);
+  }
+
+  /**
+   * A page is about to send a form (a request that is not a plain GET). It leaves only when the person says so, every time: no
+   * rule settles it. The one exception is the form of a click they have just approved, which they were shown. With no task
+   * browsing, nothing is sent.
+   */
+  async decideCommit(request: { url: string; method: string; title: string; contentType: string; body: string | undefined; secrets?: readonly string[] }): Promise<boolean> {
+    const taskId = this.source().taskId();
+    if (taskId === null) return false;
+    if (this.gate.takeApproval(taskId)) return true;
+    return this.gate.ask(taskId, describeRequest(request));
   }
 }

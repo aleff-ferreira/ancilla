@@ -5,7 +5,7 @@ import { after, describe, it } from "node:test";
 import { WebSocket } from "ws";
 import { decodeFrame } from "../src/browser/protocol.js";
 import { BrowserService } from "../src/browser/service.js";
-import type { SiteQuestion } from "../src/browser/sites.js";
+import type { ActionQuestion, SiteQuestion } from "../src/browser/sites.js";
 import { BROWSER_WATCH_PATH, BrowserWatchServer, type WatchSource } from "../src/browser/watch.js";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
 import { waitFor } from "./harness.js";
@@ -85,7 +85,7 @@ async function rig(extra: (method: string, params: Record<string, any>, sessionI
 
 const jpeg = (text: string) => Buffer.from(text).toString("base64");
 const frame = (fake: FakeBrowser, session: string, text: string, n = 1) => fake.emit("Page.screencastFrame", { data: jpeg(text), sessionId: n, metadata: { deviceWidth: 1280, deviceHeight: 800 } }, session);
-const question: SiteQuestion = { id: "sq_secret", taskId: "t_1", origin: "https://a.example", kind: "public", at: 7 };
+const question: SiteQuestion = { type: "site", id: "sq_secret", taskId: "t_1", origin: "https://a.example", kind: "public", at: 7 };
 const job = (over: Partial<Job> = {}): Job => ({ taskId: "t_1", goal: "Find the opening hours", steps: ["Opened a.example"], startedAt: 5, question: null, ...over });
 const last = (w: Watcher) => w.states.at(-1) as Record<string, any>;
 
@@ -128,12 +128,24 @@ describe("the assistant's watcher", () => {
     const told = last(w).job as Record<string, any>;
     assert.equal(told.goal.length, 300);
     assert.deepEqual(told.steps, steps.slice(-8));
-    assert.deepEqual(told.question, { origin: "https://a.example", kind: "public" }, "the site and where it leads, nothing to act on");
+    assert.deepEqual(told.question, { type: "site", origin: "https://a.example", kind: "public" }, "the site and where it leads, nothing to act on");
     assert.equal(JSON.stringify(last(w)).includes("sq_secret"), false);
     r.source.set(job({ question: null }));
     await waitFor(() => last(w).job.question === null, "the question to go");
     r.source.set(null);
     await waitFor(() => last(w).job === null, "the task to go");
+    w.ws.close();
+  });
+
+  it("tells an action the person is asked to allow: what, where and what will be sent, still with no id", async () => {
+    const r = await rig();
+    const w = await watch(r.url);
+    await waitFor(() => w.states.length >= 1, "the first state");
+    const action: ActionQuestion = { type: "action", id: "sq_secret", taskId: "t_1", origin: "https://shop.example", kind: "public", at: 7, page: "Cart", what: "Click “Place order”", fields: [{ name: "item", value: "Blue Widget" }] };
+    r.source.set(job({ question: action }));
+    await waitFor(() => last(w).job?.question?.type === "action", "the action");
+    assert.deepEqual((last(w).job as Record<string, any>).question, { type: "action", origin: "https://shop.example", kind: "public", page: "Cart", what: "Click “Place order”", fields: [{ name: "item", value: "Blue Widget" }] });
+    assert.equal(JSON.stringify(last(w)).includes("sq_secret"), false, "nothing a window could act on");
     w.ws.close();
   });
 

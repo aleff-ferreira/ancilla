@@ -127,7 +127,7 @@ function untouched(req: AssistantRequest, sub: string): AssistantReply {
   return { status: 404, body: { error: "Nothing is saved yet.", kind: "not_found" } };
 }
 
-const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retry|confirm|extend|resolve|approve|site)$/;
+const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retry|confirm|extend|resolve|approve|site|action)$/;
 
 /** Tasks, what to do next, and schedules: the executive's side of the surface. Null when the path is not one of theirs. */
 async function handleWork(service: AssistantService, sub: string, req: AssistantRequest): Promise<AssistantReply | null> {
@@ -170,6 +170,9 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     if (!exec.removeBrowseSite(origin)) return { status: 404, body: { error: "That site has no saved rule.", kind: "not_found" } };
     return { status: 200, body: { rules: exec.browseSites() } };
   }
+  // What a web task is asking right now (a site, or an action with what will be sent): the Tasks row shows it.
+  const asked = sub.match(/^\/browse\/question\/([A-Za-z0-9_-]{1,64})$/);
+  if (asked && req.method === "GET") return { status: 200, body: { question: exec.browseQuestion(asked[1] as string) } };
   const one = sub.match(/^\/tasks\/([A-Za-z0-9_-]{1,64})$/);
   if (one && req.method === "GET") {
     const id = one[1] as string;
@@ -190,6 +193,10 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
       // The person's answer to the site a web task is waiting on: allow it for the task, always, not now, or block it.
       if (typeof body["answer"] !== "string") bad("answer is required", "answer");
       task = exec.answerSite(id, body["answer"]);
+    } else if (action === "action") {
+      // The person's answer to the action a web task is waiting on: do it, or not. Every action asks; nothing is remembered.
+      if (typeof body["answer"] !== "string") bad("answer is required", "answer");
+      task = exec.answerAction(id, body["answer"]);
     } else if (action === "cancel") task = await exec.cancel(id);
     else if (action === "extend") {
       const turns = typeof body["turns"] === "number" ? body["turns"] : 0;

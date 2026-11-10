@@ -3,7 +3,7 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { encodeFrame, parseClientMessage } from "./protocol.js";
 import type { BrowserEvent, BrowserService, ScreencastFrame } from "./service.js";
-import type { SiteQuestion } from "./sites.js";
+import { questionView, type GateQuestion, type QuestionView } from "./sites.js";
 
 /**
  * A second socket for the Browser panel, to watch the assistant work: the pictures of its one tab and what its web task is doing.
@@ -20,7 +20,7 @@ export interface WatchJob {
   goal: string;
   steps: string[];
   startedAt: number;
-  question: { origin: string; kind: "public" | "local" } | null;
+  question: QuestionView | null;
 }
 
 export interface WatchState {
@@ -32,7 +32,7 @@ export interface WatchState {
 
 /** What the watcher needs of the browsing runner. */
 export interface WatchSource {
-  current(): { taskId: string; goal: string; steps: string[]; startedAt: number; question: SiteQuestion | null } | null;
+  current(): { taskId: string; goal: string; steps: string[]; startedAt: number; question: GateQuestion | null } | null;
   on(listener: () => void): () => void;
 }
 
@@ -287,7 +287,7 @@ export class BrowserWatchServer {
             goal: job.goal.slice(0, 300),
             steps: job.steps.slice(-8),
             startedAt: job.startedAt,
-            question: job.question ? { origin: job.question.origin, kind: job.question.kind } : null,
+            question: job.question ? questionView(job.question) : null,
           }
         : null,
     };
