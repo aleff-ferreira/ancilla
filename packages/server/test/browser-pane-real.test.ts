@@ -58,8 +58,8 @@ before(async () => {
   });
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
-  service = new BrowserService({ dataDir });
-  sockets = new BrowserSocketServer(() => service, () => undefined);
+  service = new BrowserService({ dataDir, log: (line) => console.log(`# service: ${line}`) });
+  sockets = new BrowserSocketServer(() => service, (line) => console.log(`# pane: ${line}`));
   paneHttp = createServer();
   paneHttp.on("upgrade", (req, socket, head) => sockets.handleUpgrade(req, socket, head));
   await new Promise<void>((resolve) => paneHttp.listen(0, "127.0.0.1", resolve));
@@ -113,7 +113,8 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   };
 
   send({ type: "hello", v: BROWSER_PROTOCOL_VERSION, takeover: false });
-  await until(() => last("ready") !== undefined, "ready");
+  await until(() => last("ready") !== undefined || last("error") !== undefined, "ready", 40_000);
+  assert.ok(last("ready"), `the pane was not told ready: ${JSON.stringify(last("error"))}`);
   const first = (last("ready") as { tabs: Array<{ id: string }> }).tabs[0]!.id;
   send({ type: "viewport", id: first, width: 800, height: 600 });
   send({ type: "navigate", id: first, url: `${base}/` });
