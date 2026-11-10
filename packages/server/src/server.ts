@@ -100,6 +100,7 @@ import { VoiceService } from "./voice/service.js";
 import { handleBrowser, isBrowserPath } from "./browser/routes.js";
 import { BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
+import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
@@ -1019,6 +1020,7 @@ export class AncillaServer {
   /** The voice: models, the open call and its settings. Made the first time something asks for it; nothing runs until a call does. */
   private voiceService: VoiceService | null = null;
   private voiceSockets: VoiceSocketServer | null = null;
+  private browserSockets: BrowserSocketServer | null = null;
   /** The browser the server owns (see docs/browser.md). Made on first use; no browser process exists until a page is opened. */
   private browserService: BrowserService | null = null;
   private readonly researchEngine: ResearchEngine;
@@ -1171,7 +1173,7 @@ export class AncillaServer {
         refuse(400, "That address is not valid.");
         return;
       }
-      if (path !== VOICE_SOCKET_PATH) {
+      if (path !== VOICE_SOCKET_PATH && path !== BROWSER_SOCKET_PATH) {
         refuse(404, "Not found.");
         return;
       }
@@ -1191,6 +1193,11 @@ export class AncillaServer {
       }
       if (!this.authorized(req)) {
         refuse(401, "Missing or invalid token.");
+        return;
+      }
+      if (path === BROWSER_SOCKET_PATH) {
+        this.browserSockets ??= new BrowserSocketServer(() => this.browserFor(), (line) => this.log(line));
+        this.browserSockets.handleUpgrade(req, socket, head);
         return;
       }
       if (!this.voiceSockets) {
@@ -1713,6 +1720,8 @@ export class AncillaServer {
     }
     // Last, and flagged first: a frame from a host that outlived its close finds the store closed and is dropped.
     this.storeClosed = true;
+    this.browserSockets?.close();
+    this.browserSockets = null;
     await this.browserService?.dispose().catch(() => undefined);
     this.browserService = null;
     // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.

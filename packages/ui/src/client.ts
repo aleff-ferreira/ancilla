@@ -231,6 +231,8 @@ export interface AncillaClient {
   voice?<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
   /** The address of a call's WebSocket (`ws://` or `wss://`), carrying whatever the client's own calls carry; null where there is no voice. */
   voiceSocketUrl?(): string | null;
+  /** The address of the Browser panel's WebSocket; null or missing where there is no browser. */
+  browserSocketUrl?(): string | null;
   /** Subscribe to server events; returns an unsubscribe function. */
   subscribe(handler: EventHandler): () => void;
 }

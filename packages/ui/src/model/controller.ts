@@ -2158,6 +2158,11 @@ export class AncillaController {
   }
 
   /** Where a call's socket is, or null when this client has no voice. */
+  /** Where the Browser panel's socket is; null where this client has no browser. */
+  browserSocketUrl(): string | null {
+    return this.client.browserSocketUrl ? this.client.browserSocketUrl() : null;
+  }
+
   voiceSocketUrl(): string | null {
     return this.client.voiceSocketUrl ? this.client.voiceSocketUrl() : null;
   }
@@ -5278,6 +5283,12 @@ export class AncillaController {
   toggleCrewPanel(open?: boolean): void {
     const show = open ?? this.state.prefs.sidePanel !== "crew";
     this.setSidePanel(show ? "crew" : "none");
+  }
+
+  /** Shows or hides the Browser panel; it takes the same slot, so opening it closes the file viewer or the Crew panel. */
+  toggleBrowserPanel(open?: boolean): void {
+    const show = open ?? this.state.prefs.sidePanel !== "browser";
+    this.setSidePanel(show ? "browser" : "none");
   }
 
   setCrewWidth(width: number): void {

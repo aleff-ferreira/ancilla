@@ -1,5 +1,5 @@
 import { Command } from "cmdk";
-import { ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsClockwiseIcon, FolderIcon, FolderPlusIcon, GitForkIcon, MagnifyingGlassIcon, MagnifyingGlassMinusIcon, MagnifyingGlassPlusIcon, MonitorIcon, MoonIcon, NotePencilIcon, PulseIcon, ShieldSlashIcon, SidebarSimpleIcon, StackIcon, SunIcon } from "../ui/icons.js";
+import { ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowsClockwiseIcon, FolderIcon, FolderPlusIcon, GitForkIcon, GlobeIcon, MagnifyingGlassIcon, MagnifyingGlassMinusIcon, MagnifyingGlassPlusIcon, MonitorIcon, MoonIcon, NotePencilIcon, PulseIcon, ShieldSlashIcon, SidebarSimpleIcon, StackIcon, SunIcon } from "../ui/icons.js";
 import { useMemo, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { basename, relativeTime } from "../../model/format.js";
@@ -86,6 +86,9 @@ export function CommandPalette() {
             </Item>
             <Item value="Activity" keywords={["agents", "tasks", "running", "needs you", "drawer"]} icon={<PulseIcon size={15} />} onSelect={() => run(() => controller.setActivityOpen(true))} hint={<Shortcut keys={[MOD, "Shift", "A"]} />}>
               Activity
+            </Item>
+            <Item value="Browser" keywords={["web", "internet", "page", "site", "internal browser"]} icon={<GlobeIcon size={15} />} onSelect={() => run(() => controller.toggleBrowserPanel())} hint={<Shortcut keys={[MOD, "Shift", "B"]} />}>
+              Browser
             </Item>
             <Item value="Crew panel" keywords={["agents", "workflow", "timeline", "roster"]} icon={<GitForkIcon size={15} />} onSelect={() => run(() => controller.toggleCrewPanel())} hint={<Shortcut keys={[MOD, "Shift", "M"]} />}>
               Crew panel

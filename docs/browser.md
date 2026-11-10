@@ -1,9 +1,8 @@
-# The internal browser (engine)
+# The internal browser
 
 Ancilla's server can own a web browser: a Chromium-family browser it starts, drives and stops itself. It is the engine
-under the browser pane (a later slice) and under the browsing agent (a slice after that). This page describes what
-exists today: `packages/server/src/browser/`, with no UI and no agent on top yet. The only HTTP route is
-`GET /api/browser/status`.
+under the Browser panel you use (see "The pane" below) and, in a later slice, under the browsing agent. The server side is
+`packages/server/src/browser/`; the HTTP route is `GET /api/browser/status` and the panel's socket is `/api/browser/ws`.
 
 ## How it works
 
@@ -67,12 +66,28 @@ Without any browser, `GET /api/browser/status` says `available: false` with the 
   data dir (tests) a throwaway temp folder is used.
 - Status: `GET /api/browser/status` returns `{ available, browser: { kind, path, version } | null, reason?, running, tabs }`.
 
+## The pane (what you see)
+
+The Browser panel (`packages/ui/src/components/browser/`) sits beside the thread (`Ctrl/Cmd+Shift+B`, the globe in the thread header, or the command palette). It draws the page on a canvas and talks to the server over a WebSocket, `/api/browser/ws`
+(`packages/server/src/browser/ws.ts`, wire format in `protocol.ts`). The upgrade is checked like the call's: host, origin and token, before the handshake.
+
+- **One pane at a time.** The first connection controls the browser; a second is told it is open in another window and can take it over ("Use it here"). The pane sees only the `you` context (your tabs and saved sign-ins), never the assistant's: every tab id it names must be one of its own.
+- **Pictures** are binary frames (tag, sequence, size in CSS pixels, tab id, JPEG). Only one is in flight until the pane has acknowledged it (on arrival; the pane then decodes only the newest picture it holds); a newer picture on the server replaces one that is waiting, and the socket's backlog holds the next one back (the screencast is capped at 40 fps, 30 is what a page gets in practice). The panel is the viewport: its size (debounced) is sent and the page is drawn at density 1. Measured on Edge 157, the screencast never gives more pixels than the page's CSS size, even with a device scale factor of 2 on the viewport or a larger size asked for, so a high-DPI display sees the page slightly soft. Crisper would take screenshots instead of the screencast; that is for later, if wanted.
+- **Input** goes in order through one queue: mouse (move, press, release, wheel), keys, text, dialog answers (these skip the queue: a click that opened a dialog does not finish until it is answered). A hidden text field holds the focus. Keys that are not text (Enter, Backspace, Tab, Escape, arrows, F-keys, Ctrl/Cmd shortcuts such as select all, undo and redo) are key events; text, dead keys, composed letters, AltGr characters and a paste are inserted as text (`beforeinput`, `compositionend`, `paste`), so a Brazilian ABNT2 keyboard works. Copy asks the server for the page's selection and writes the system clipboard.
+- **What a screenshot of a page does not show.** A click on a `<select>` is answered by the pane's own list (the server reads the options, swallows the click, and sets the value with `input` and `change`); a script's dialog (alert, confirm, prompt, before-unload) is a small dialog in the pane; `window.open` and `target=_blank` open a new tab in front; a file chooser is intercepted and refused with a plain message; downloads stay denied, with a notice.
+- **Not there yet:** uploads and downloads, signed-in grants, the assistant using the browser (B3, B4).
+
 ## Measured (headless Edge 157, Windows 11, through the service API)
 
 Start plus first page about 0.7 s; stop about 0.4 s; screencast 29.5 fps with the default 30 fps cap and 58 fps at a
 60 fps cap on a fully animated page; click to the next frame p50 14 ms, max 22 ms (15 clicks).
 
+Through the pane's socket (Edge 157, Windows 11, a 800x600 page, the pane acknowledging at once): click to the changed picture p50 10 ms, p95 23 ms (24 clicks); 34.9 fps on a fully animated page at about 9 KB a frame. The test is `browser-pane-real.test.ts`.
+
 ## Tests
+
+`browser-pane.test.ts` (server) covers the wire format, the socket's front door (no token, wrong origin, foreign host), one controlling pane, ordered input, the select, dialog, popup and notice paths and that the assistant's tabs are never shown or touched, over a scripted browser; `browser-pane-real.test.ts` runs the whole path against a real browser. The UI's `browser-pane.test.ts` covers the key and text mapping (with the ABNT2 cases), pointer scaling, the address bar and the connection.
+
 
 `packages/server/test/browser-service.test.ts` uses a fake CDP transport and a fake child (framing, tabs, snapshot
 rules, scheme refusal, lifecycle). `browser-real.test.ts` drives whatever real browser exists (and is skipped, with the

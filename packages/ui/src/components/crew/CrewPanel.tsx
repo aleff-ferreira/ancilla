@@ -35,7 +35,7 @@ function subscribeResize(callback: () => void): () => void {
   return () => window.removeEventListener("resize", callback);
 }
 
-function useWindowWidth(): number {
+export function useWindowWidth(): number {
   return useSyncExternalStore(subscribeResize, () => window.innerWidth, () => SERVER_WINDOW);
 }
 

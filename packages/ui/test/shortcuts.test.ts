@@ -23,7 +23,9 @@ describe("crew shortcuts", () => {
     assert.equal(crewShortcut(key("a", { ctrlKey: true }), false), null);
     assert.equal(crewShortcut(key("A", { shiftKey: true }), false), null);
     assert.equal(crewShortcut(key("A", { ctrlKey: true, shiftKey: true, altKey: true }), false), null);
-    assert.equal(crewShortcut(key("B", { ctrlKey: true, shiftKey: true }), false), null);
+    assert.equal(crewShortcut(key("Q", { ctrlKey: true, shiftKey: true }), false), null);
+    assert.equal(crewShortcut(key("B", { ctrlKey: true, shiftKey: true }), false), "browser", "the Browser panel");
+    assert.equal(crewShortcut(key("B", { metaKey: true, shiftKey: true }), true), "browser");
   });
 
   it("stays out of text fields", () => {

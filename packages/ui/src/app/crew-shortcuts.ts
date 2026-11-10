@@ -13,7 +13,7 @@ export interface ShortcutKey {
   target?: EventTarget | null;
 }
 
-export type CrewShortcut = "activity" | "crew";
+export type CrewShortcut = "activity" | "crew" | "browser";
 
 function typingIn(target: EventTarget | null | undefined): boolean {
   const el = target as { tagName?: string; isContentEditable?: boolean } | null | undefined;
@@ -31,6 +31,8 @@ export function crewShortcut(event: ShortcutKey, mac: boolean): CrewShortcut | n
       return "activity";
     case "m":
       return "crew";
+    case "b":
+      return "browser";
     default:
       return null;
   }

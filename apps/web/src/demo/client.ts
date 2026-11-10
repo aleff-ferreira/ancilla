@@ -561,6 +561,11 @@ export class DemoAncillaClient implements AncillaClient {
 
   // ------------------------------------------------------------------------------------ threads
 
+  /** The demo has no browser of its own; a page opened with `?browser=ws://...` points the Browser panel at a server that has one. */
+  browserSocketUrl(): string | null {
+    return typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("browser");
+  }
+
   async listSessions(options?: { archived?: boolean }): Promise<SessionSummary[]> {
     const list = [...this.threads.values()].map((thread) => thread.summary).filter((summary) => summary.archived === (options?.archived ?? false));
     if (!this.hasListed) {

@@ -318,6 +318,16 @@ export class WebAncillaClient implements AncillaClient {
    * Where a call's WebSocket is. A socket cannot carry a header, so, like the event stream, it relies on the cookie the
    * token bought at the handshake: nothing secret is in the address.
    */
+  browserSocketUrl(): string | null {
+    try {
+      const address = new URL(url("/api/browser/ws"), window.location.href);
+      address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+      return address.toString();
+    } catch {
+      return null;
+    }
+  }
+
   voiceSocketUrl(): string | null {
     try {
       const address = new URL(url("/api/voice/ws"), window.location.href);

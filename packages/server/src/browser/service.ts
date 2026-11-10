@@ -51,6 +51,7 @@ export type BrowserEvent =
   | { type: "active"; id: string }
   | { type: "dialog"; dialog: DialogInfo }
   | { type: "dialog-closed"; tabId: string }
+  | { type: "notice"; kind: "download" | "file"; tabId?: string; text: string }
   | { type: "stopped" };
 
 export interface BrowserStatus {
@@ -68,6 +69,14 @@ export interface ScreencastFrame {
   height: number;
   /** Milliseconds since the epoch on the server, not the browser's clock. */
   at: number;
+}
+
+/** A `<select>` found under a point: what a pane needs to draw its own dropdown (the screencast never shows the native one). */
+export interface SelectProbe {
+  /** The select's box in page (CSS) pixels. */
+  rect: { x: number; y: number; width: number; height: number };
+  options: Array<{ index: number; label: string; disabled: boolean; selected: boolean }>;
+  multiple: boolean;
 }
 
 export interface MouseInput {
@@ -89,6 +98,8 @@ export interface KeyInput {
   text?: string;
   windowsVirtualKeyCode?: number;
   modifiers?: number;
+  /** Editing commands the browser runs for this key (CDP needs them for select all, undo and the like). */
+  commands?: string[];
 }
 
 export interface BrowserServiceOptions {
@@ -289,6 +300,11 @@ export class BrowserService {
     this.idleTimer.unref?.();
   }
 
+  /** Starts the browser if it is not running (the first tab of `you` is the blank page it opens with). */
+  async open(): Promise<void> {
+    await this.ensure();
+  }
+
   private async ensure(): Promise<Runtime> {
     if (this.disposed) throw new BrowserError("closed", "The browser service has been shut down.");
     this.touch();
@@ -327,7 +343,7 @@ export class BrowserService {
       conn.onClose(teardown);
       void proc.exited.then(teardown);
       await conn.send("Target.setDiscoverTargets", { discover: true });
-      await conn.send("Browser.setDownloadBehavior", { behavior: "deny" }).catch(() => undefined);
+      await conn.send("Browser.setDownloadBehavior", { behavior: "deny", eventsEnabled: true }).catch(() => undefined);
       await this.denyPermissions(rt, undefined);
       // The blank page the browser opens with becomes the first tab of `you`.
       const targets = await conn.send<{ targetInfos: Array<{ targetId: string; type: string; url: string; title: string }> }>("Target.getTargets");
@@ -442,9 +458,16 @@ export class BrowserService {
     rt.tabs.set(targetId, tab);
     rt.bySession.set(tab.sessionId, tab);
     await rt.conn.send("Page.enable", {}, tab.sessionId);
+    // A file chooser would open a native dialog nobody can see; it is intercepted so the pane can say uploads are not available yet.
+    await rt.conn.send("Page.setInterceptFileChooserDialog", { enabled: true }, tab.sessionId).catch(() => undefined);
     await this.setViewport(targetId, DEFAULT_SIZE.width, DEFAULT_SIZE.height, rt);
     if (!rt.activeId) rt.activeId = targetId;
     this.emit({ type: "tab", tab: this.info(rt, tab) });
+    // A popup may have finished loading before it was attached, so no load event will bring its title: ask now and once more shortly.
+    if (openerId) {
+      void this.refreshInfo(rt, tab);
+      setTimeout(() => void this.refreshInfo(rt, tab), 400).unref?.();
+    }
     return tab;
   }
 
@@ -743,6 +766,65 @@ export class BrowserService {
     await rt.conn.send("Input.insertText", { text: String(text) }, tab.sessionId);
   }
 
+  /** Brings the tab to the front and re-applies its size so the browser paints it again (a screencast sends nothing for a page that does not change). */
+  async repaint(id: string): Promise<void> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    await rt.conn.send("Page.bringToFront", {}, tab.sessionId);
+  }
+
+  /** The text selected in the tab's page (or in the focused field), for the pane's Copy. */
+  async selectionText(id: string): Promise<string> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    const reply = await rt.conn.send<{ result?: { value?: unknown } }>(
+      "Runtime.evaluate",
+      {
+        expression: `(() => { const a = document.activeElement; if (a && typeof a.value === "string" && a.selectionStart != null && a.selectionEnd > a.selectionStart) return a.value.slice(a.selectionStart, a.selectionEnd); return String(getSelection() || ""); })()`,
+        returnByValue: true,
+      },
+      tab.sessionId,
+    );
+    return typeof reply.result?.value === "string" ? reply.result.value.slice(0, 1_000_000) : "";
+  }
+
+  /** The `<select>` under a point, remembered in the page so `chooseOption` needs no second lookup; null when there is none. */
+  async selectAt(id: string, x: number, y: number): Promise<SelectProbe | null> {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    const reply: { result?: { value?: SelectProbe | null } } = await rt.conn
+      .send<{ result?: { value?: SelectProbe | null } }>(
+        "Runtime.evaluate",
+        {
+          expression: `(() => { let el = document.elementFromPoint(${Number(x)}, ${Number(y)}); el = el && el.closest && el.closest("select"); if (!el || el.disabled) return null; const r = el.getBoundingClientRect(); window.__ancillaSelect = el;
+          return { rect: { x: r.x, y: r.y, width: r.width, height: r.height }, multiple: el.multiple || el.size > 1,
+            options: [...el.options].slice(0, 500).map((o, index) => ({ index, label: String(o.label || o.text || "").slice(0, 200), disabled: !!(o.disabled || (o.parentElement && o.parentElement.disabled)), selected: o.selected })) }; })()`,
+          returnByValue: true,
+        },
+        tab.sessionId,
+      )
+      .catch(() => ({}));
+    const value = reply.result?.value;
+    return value && Array.isArray(value.options) ? value : null;
+  }
+
+  /** Picks an option of the select `selectAt` last found, and fires `input` and `change` the way a person's choice does. */
+  async chooseOption(id: string, index: number): Promise<void> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    if (!Number.isInteger(index) || index < 0) throw new BrowserError("invalid", "index must be a whole number.");
+    await rt.conn.send(
+      "Runtime.evaluate",
+      {
+        expression: `(() => { const el = window.__ancillaSelect; if (!el || !el.options[${index}]) return false; el.focus(); el.selectedIndex = ${index};
+          el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return true; })()`,
+        returnByValue: true,
+      },
+      tab.sessionId,
+    );
+  }
+
   async answerDialog(id: string, accept: boolean, promptText?: string): Promise<void> {
     const rt = await this.ensure();
     const tab = this.requireTab(rt, id);
@@ -839,6 +921,11 @@ export class BrowserService {
   // ---------------------------------------------------------------- browser events
 
   private onCdp(rt: Runtime, method: string, params: Record<string, any>, sessionId: string | undefined): void {
+    if (method === "Browser.downloadWillBegin") {
+      const name = String(params["suggestedFilename"] ?? "").slice(0, 80);
+      this.emit({ type: "notice", kind: "download", text: `Downloads are not allowed yet${name ? `, so ${name} was not saved` : ""}.` });
+      return;
+    }
     if (method === "Target.targetInfoChanged") {
       const target = params["targetInfo"] ?? {};
       const tab = rt.tabs.get(target.targetId);
@@ -895,6 +982,9 @@ export class BrowserService {
       case "Page.javascriptDialogClosed":
         tab.dialog = null;
         this.emit({ type: "dialog-closed", tabId: tab.id });
+        break;
+      case "Page.fileChooserOpened":
+        this.emit({ type: "notice", kind: "file", tabId: tab.id, text: "Choosing a file to upload is not available yet." });
         break;
       case "Page.screencastFrame":
         this.onScreencastFrame(rt, tab, params);

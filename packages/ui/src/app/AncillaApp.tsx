@@ -160,6 +160,11 @@ function GlobalShortcuts() {
         controller.setActivityOpen(!controller.store.get().crew.activityOpen);
         return;
       }
+      if (crew === "browser") {
+        event.preventDefault();
+        controller.toggleBrowserPanel();
+        return;
+      }
       if (crew === "crew") {
         event.preventDefault();
         controller.toggleCrewPanel();

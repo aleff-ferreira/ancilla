@@ -3,7 +3,7 @@ import { useController } from "../../app/context.js";
 import { DEFAULT_CREW_WIDTH } from "../../model/store.js";
 
 /** The Crew panel's left edge: drag to resize, arrows to nudge, double-click to reset. Like the file viewer's. */
-export function PanelResize() {
+export function PanelResize(props: { label?: string } = {}) {
   const controller = useController();
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -28,7 +28,7 @@ export function PanelResize() {
     <div
       role="separator"
       aria-orientation="vertical"
-      aria-label="Resize the Crew panel"
+      aria-label={props.label ?? "Resize the Crew panel"}
       tabIndex={0}
       onPointerDown={onPointerDown}
       onDoubleClick={() => controller.setCrewWidth(DEFAULT_CREW_WIDTH)}

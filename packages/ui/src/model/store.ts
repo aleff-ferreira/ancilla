@@ -157,7 +157,7 @@ export const DEFAULT_FILES_WIDTH = 480;
 export const FILES_WIDTH_MIN = 320;
 export const FILES_WIDTH_MAX = 1200;
 
-export type SidePanel = "none" | "files" | "crew";
+export type SidePanel = "none" | "files" | "crew" | "browser";
 export const DEFAULT_CREW_WIDTH = 520;
 export const CREW_WIDTH_MIN = 400;
 export const CREW_WIDTH_MAX = 800;
@@ -511,7 +511,7 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
   }
   const pick = <K extends keyof Prefs>(key: K, valid: (v: unknown) => boolean): Prefs[K] =>
     valid(r[key]) ? (r[key] as Prefs[K]) : fallback[key];
-  const sidePanel = pick("sidePanel", (v) => v === "none" || v === "files" || v === "crew");
+  const sidePanel = pick("sidePanel", (v) => v === "none" || v === "files" || v === "crew" || v === "browser");
   const isApprovalMode = (v: unknown): boolean =>
     v === "onRequest" || v === "promptUnmatched" || v === "denyUnmatched" || v === "allowAll";
   const isPreYolo = (v: unknown): boolean => {

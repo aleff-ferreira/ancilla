@@ -1,4 +1,4 @@
-import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, TreeStructureIcon } from "../ui/icons.js";
+import { ArchiveIcon, ArrowsInIcon, CodeIcon, CopyIcon, DotsThreeIcon, FolderIcon, FolderOpenIcon, GitBranchIcon, GlobeIcon, LockIcon, NotePencilIcon, PencilSimpleIcon, ShieldSlashIcon, SquareHalfBottomIcon, SquareIcon, TreeStructureIcon } from "../ui/icons.js";
 import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
@@ -24,6 +24,7 @@ import { CrewPanel } from "../crew/CrewPanel.js";
 import { Menu, MenuContent, MenuItem, MenuSeparator, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, MOD } from "../ui/primitives.js";
 import { FilesPanel } from "../files/FilesPanel.js";
+import { BrowserPanel } from "../browser/BrowserPanel.js";
 import { Transcript } from "./Transcript.js";
 
 /** Ages in the Crew card tick this often; the elapsed clocks tick on their own 1 s timer (SPEC §13). */
@@ -72,7 +73,8 @@ export function ThreadView(props: { sessionId: string }) {
           <Dock session={session} thread={thread} running={running} crew={crew} crewStale={crewStale} />
         </div>
         {sidePanel === "crew" ? <CrewPanel sessionId={props.sessionId} />
-          : sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} /> : null}
+          : sidePanel === "files" ? <FilesPanel sessionId={props.sessionId} cwd={session.cwd} />
+          : sidePanel === "browser" ? <BrowserPanel /> : null}
       </div>
     </div>
   );
@@ -169,6 +171,11 @@ function ThreadHeader(props: { session: SessionSummary; thread: ThreadState | nu
       ) : null}
       <HiddenCardsButton sessionId={session.sessionId} running={props.running} />
       <CrewToggle active={sidePanel === "crew"} count={props.crew ? (liveRun ? run.counts.total : 0) + props.crew.tasks.length + props.crew.subagents.length || null : null} onClick={() => controller.toggleCrewPanel()} />
+      <Tip label="Browser" shortcut={[MOD, "Shift", "B"]}>
+        <IconButton label={sidePanel === "browser" ? "Hide the browser" : "Show the browser"} active={sidePanel === "browser"} onClick={() => controller.toggleBrowserPanel()}>
+          <GlobeIcon size={15} />
+        </IconButton>
+      </Tip>
       <Tip label={filesOpen ? "Hide files" : "Show files"} shortcut={[MOD, "Shift", "E"]}>
         <IconButton label={filesOpen ? "Hide files" : "Show files"} active={filesOpen} onClick={() => controller.toggleFiles()}>
           <TreeStructureIcon size={15} />
