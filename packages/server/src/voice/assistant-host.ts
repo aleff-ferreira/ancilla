@@ -9,7 +9,7 @@ import { openingPhrase, taskPhrase, type TaskNotice } from "./prompt.js";
 import type { VoiceSettings } from "./settings.js";
 import { guessLanguage, type Lang } from "./text.js";
 import { ambientDigest, HARNESS_TOOL_NAMES, HarnessTools, type HarnessReader } from "./harness.js";
-import { VoiceTools } from "./tools.js";
+import { VoiceTools, type VoiceConnectors } from "./tools.js";
 
 /**
  * A call's view of Ancilla, built from the assistant: its character and notes, the conversation it keeps, the tasks it
@@ -73,6 +73,8 @@ export interface AssistantVoiceHostDeps {
   harness?: HarnessReader | null;
   /** The assistant's own browser, when the server has one: it is what lets the call offer `browse`. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> };
+  /** The connected accounts, when the server has any: it is what lets the call offer `use_connector`. */
+  connectors?: VoiceConnectors;
   log: (line: string) => void;
 }
 
@@ -84,7 +86,7 @@ export class AssistantVoiceHost implements VoiceHost {
   private readonly harnessTools: HarnessTools | null;
 
   constructor(private readonly deps: AssistantVoiceHostDeps) {
-    this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId, ...(deps.browse ? { browse: deps.browse } : {}) });
+    this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId, ...(deps.browse ? { browse: deps.browse } : {}), ...(deps.connectors ? { connectors: deps.connectors } : {}) });
     this.harnessTools = deps.harness ? new HarnessTools({ reader: deps.harness, taskCounts: () => this.taskCounts() }) : null;
   }
 

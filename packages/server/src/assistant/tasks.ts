@@ -16,8 +16,11 @@ export type StepStatus = "pending" | "running" | "done" | "failed" | "skipped" |
 /** `write` is any step that can change something (a file, anything outside the project): it is never run twice on a guess. */
 export type Effect = "read" | "write";
 export type AttemptOutcome = "running" | "succeeded" | "failed" | "cancelled" | "stale" | "unknown" | "timeout";
-/** `browse` is a web task: the assistant's own browser works on it in this process, with no Muse thread (see `Executive.createBrowse`). */
-export type TaskOrigin = "user" | "suggestion" | "schedule" | "voice" | "browse";
+/**
+ * `browse` is a web task: the assistant's own browser works on it in this process, with no Muse thread (see `Executive.createBrowse`).
+ * `connector` is the same for a connected account: a reading agent works on it, with no thread (see `Executive.createConnector`).
+ */
+export type TaskOrigin = "user" | "suggestion" | "schedule" | "voice" | "browse" | "connector";
 
 /**
  * A change the voice proposed that the user has not approved yet: paused, never started, and only the user's approval (a

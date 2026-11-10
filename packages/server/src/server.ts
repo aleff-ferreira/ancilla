@@ -104,6 +104,12 @@ import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
 import { BrowserWatchServer, BROWSER_WATCH_PATH } from "./browser/watch.js";
 import { BrowseRunner } from "./browser/runner.js";
 import { BrowseSites } from "./browser/sites.js";
+import { AuditLog } from "./connectors/audit.js";
+import { makeOpener } from "./connectors/connection.js";
+import { ConnectorRegistry } from "./connectors/registry.js";
+import { handleConnectors, isConnectorPath } from "./connectors/routes.js";
+import { ConnectorRunner } from "./connectors/runner.js";
+import { FileSecretStore } from "./connectors/secrets.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
@@ -1030,6 +1036,9 @@ export class AncillaServer {
   /** The sites the assistant's browser may open, and the browser at work on a web task (both made on first use). */
   private browseSites: BrowseSites | null = null;
   private browseRunner: BrowseRunner | null = null;
+  /** The connected accounts and the reading agent that works on them (both made on first use; see docs/connectors.md). */
+  private connectorState: { registry: ConnectorRegistry; audit: AuditLog } | null = null;
+  private connectorRunner: ConnectorRunner | null = null;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1166,6 +1175,29 @@ export class AncillaServer {
     return this.browseRunner;
   }
 
+  /** Which accounts are connected, and what was done with them: made on first use, kept in the data folder. */
+  private connectorsFor(): { registry: ConnectorRegistry; audit: AuditLog } {
+    if (!this.connectorState) {
+      const inMemory = this.options.dataDir === ":memory:";
+      const folder = inMemory ? null : join(this.options.dataDir, "connectors");
+      const log = (line: string): void => this.log(line);
+      const audit = new AuditLog(folder ? join(folder, "activity.jsonl") : null, log);
+      const secrets = new FileSecretStore(folder ? join(folder, "secrets.json") : null, () => Date.now(), log);
+      this.connectorState = { registry: new ConnectorRegistry({ file: folder ? join(folder, "connectors.json") : null, secrets, audit, open: makeOpener(ANCILLA_VERSION), log }), audit };
+    }
+    return this.connectorState;
+  }
+
+  /** The reading agent at work on a connected account: made on first use, it runs the connector tasks the executive makes. */
+  private connectorRunnerFor(): ConnectorRunner {
+    this.connectorRunner ??= new ConnectorRunner({
+      registry: this.connectorsFor().registry,
+      brain: () => this.voiceFor().browseBrain(),
+      log: (line) => this.log(line),
+    });
+    return this.connectorRunner;
+  }
+
   /** The voice, made on first use. */
   private voiceFor(): VoiceService {
     if (!this.voiceService) {
@@ -1182,6 +1214,14 @@ export class AncillaServer {
           return this.options.exec(plan.command, plan.args, { ...(plan.env ? { env: plan.env } : {}), timeoutMs: limits.timeoutMs, signal: limits.signal });
         },
         browse: this.browseRunnerFor(),
+        // The accounts the call may read: only those connected and switched on are named to it.
+        connectors: {
+          usable: () => {
+            const { registry } = this.connectorsFor();
+            return registry.usable().map((id) => ({ id, name: registry.view(id).name }));
+          },
+          available: (id) => this.connectorRunnerFor().available(id),
+        },
         lastProject: () => {
           try {
             return this.store.listProjects()[0]?.cwd ?? null;
@@ -1344,6 +1384,7 @@ export class AncillaServer {
         offsetMinutes: () => -new Date().getTimezoneOffset(),
         host: this.assistantHost(),
         browse: this.browseRunnerFor(),
+        connector: this.connectorRunnerFor(),
       });
       this.assistantUnavailable = null;
       // Settles what a restart left in the air and starts looking for work; it never fails the request that opened it.
@@ -1774,6 +1815,9 @@ export class AncillaServer {
     this.browseRunner?.stop();
     this.browseRunner = null;
     this.browseSites = null;
+    this.connectorRunner?.stop();
+    this.connectorRunner = null;
+    this.connectorState = null;
     await this.browserService?.dispose().catch(() => undefined);
     this.browserService = null;
     // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.
@@ -2700,6 +2744,11 @@ export class AncillaServer {
     }
     if (method === "GET" && path === "/api/title-settings") {
       this.json(res, 200, this.store.getTitleSettings());
+      return true;
+    }
+    if (isConnectorPath(path)) {
+      const { registry, audit } = this.connectorsFor();
+      this.sendAssistant(res, await handleConnectors({ registry, audit, assistant: () => this.assistantFor(true), project: () => this.store.listProjects()[0]?.cwd ?? null }, { method, path, query: url.searchParams, body: () => this.readBody(req) }));
       return true;
     }
     if (isAssistantPath(path)) {

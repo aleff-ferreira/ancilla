@@ -6,6 +6,7 @@ import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, t
 import type { BrainProvider } from "./brain.js";
 import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
+import type { VoiceConnectors } from "./tools.js";
 import type { HarnessReader } from "./harness.js";
 import { ConversationStore } from "./conversations.js";
 import type { Voice } from "./engines.js";
@@ -69,6 +70,8 @@ export interface VoiceServiceDeps {
   museExec?: MuseExecRunner | null;
   /** The assistant's own browser, which the `browse` tool starts web tasks on; without it the tool is not offered. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
+  /** The connected accounts, which the `use_connector` tool starts tasks on; without any the tool is not offered. */
+  connectors?: VoiceConnectors | null;
   scheduler?: Scheduler;
   /** For tests: the engines, instead of the downloaded ones. */
   engineFactory?: (layout: VoicePackLayout, options: SherpaEngineOptions) => SherpaEngineSet;
@@ -341,6 +344,7 @@ export class VoiceService {
       project: () => project,
       harness: this.deps.harness ?? null,
       ...(this.deps.browse ? { browse: this.deps.browse } : {}),
+      ...(this.deps.connectors ? { connectors: this.deps.connectors } : {}),
       log: (line) => this.deps.log(line),
     });
     const chosen = makeBrain(

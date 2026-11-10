@@ -3,6 +3,8 @@ import type {
   AssistantAttemptView,
   AssistantBondView,
   AssistantCharacterView,
+  AssistantConnectorActivity,
+  AssistantConnectorView,
   AssistantEmbeddingTestView,
   AssistantEmbeddingsView,
   AssistantGoalView,
@@ -128,6 +130,11 @@ export class DemoAssistant {
     order.task.origin = "browse";
     order.task.sessionId = null;
     this.tasks.unshift(order);
+    // A task on a connected account: read in this process, with no thread, and answered with where it came from.
+    const hub = this.task("t7", "What is open on my GitHub", "completed", "Done after 3 steps.", { cwd: "/work/atlas", turns: 0, result: "From GitHub (not checked):\nThree things involve you and are open: pull request #41 \"Notify when the assistant needs you\" (your review was asked for), issue #38 \"Connectors, the approval gate\" and issue #37 \"Rotate the Brevo key\".\nTools used: get_me, search_issues, search_pull_requests", steps: [["Look it up", "done", "", false]] });
+    hub.task.origin = "connector";
+    hub.task.sessionId = null;
+    this.tasks.unshift(hub);
     this.schedules = [{ id: "sc1", title: "Check the build every morning", goal: "Read last night's CI run and report what failed", cwd: "/work/atlas", kind: "daily", everyMinutes: null, atMinute: 540, tz: "Europe/Lisbon", endAt: this.t0 + 60 * DAY, maxRuns: null, runs: 12, enabled: true, note: "", nextRunAt: this.t0 + 14 * HOUR, lastRunAt: this.t0 - 10 * HOUR }];
     this.log("create", "m6", "capture");
   }
@@ -200,9 +207,119 @@ export class DemoAssistant {
     { origin: "https://ads.example.net", decision: "block", at: Date.now() - 2 * DAY },
   ];
 
+  /** The connected accounts, as the page shows them: one connected and on, two that can be (what the real catalog says of each). */
+  private connectors: AssistantConnectorView[] = [
+    {
+      id: "github",
+      name: "GitHub",
+      summary: "Your repositories, issues and pull requests.",
+      connected: true,
+      mode: "read",
+      connectedAt: Date.now() - 2 * HOUR,
+      token: { label: "Fine-grained personal access token", helpUrl: "https://github.com/settings/personal-access-tokens/new", recipe: "Choose the repositories it may see, then under Repository permissions set Contents, Issues, Pull requests and Metadata to Read-only and leave every other permission off. Give it an expiry." },
+      revoke: { url: "https://github.com/settings/personal-access-tokens", text: "Open Settings, Developer settings, Personal access tokens, and delete the token." },
+      caution: null,
+      test: {
+        at: Date.now() - 2 * HOUR,
+        ok: true,
+        message: "Works. 12 read tools are offered, and 11 more that it has are not offered because they can change things or are not on Ancilla's list.",
+        offered: [
+          { name: "get_me", text: "Who the token belongs to: the login, the name and the profile." },
+          { name: "search_issues", text: "Find issues. The query uses GitHub search syntax, for example is:open involves:LOGIN, or repo:OWNER/NAME is:open." },
+          { name: "search_pull_requests", text: "Find pull requests. The query uses GitHub search syntax, for example is:open author:LOGIN, or review-requested:LOGIN." },
+          { name: "list_issues", text: "List the issues of one repository." },
+          { name: "issue_read", text: "Read one issue: its text, its comments or its labels." },
+          { name: "pull_request_read", text: "Read one pull request: its details, files, comments or checks." },
+          { name: "list_pull_requests", text: "List the pull requests of one repository." },
+          { name: "get_file_contents", text: "Read a file, or list a folder, of a repository." },
+          { name: "list_commits", text: "List the recent commits of a repository." },
+          { name: "get_commit", text: "Read one commit." },
+          { name: "search_repositories", text: "Find repositories. The query uses GitHub search syntax, for example user:NAME." },
+          { name: "list_notifications", text: "List the user's unread notifications." },
+        ],
+        hidden: 11,
+        missing: [],
+      },
+    },
+    {
+      id: "supabase",
+      name: "Supabase",
+      summary: "Your projects, their tables, logs and functions.",
+      connected: false,
+      mode: "off",
+      connectedAt: null,
+      token: { label: "Personal access token", helpUrl: "https://supabase.com/dashboard/account/tokens", recipe: "Create an access token with a name you will recognise and an expiry." },
+      revoke: { url: "https://supabase.com/dashboard/account/tokens", text: "Open Account, Access Tokens, and revoke the token." },
+      caution: "A Supabase access token cannot be limited to one project or to reading, so it can do everything your account can. Ancilla asks the server for read-only mode and offers only its read tools.",
+      test: null,
+    },
+    {
+      id: "brevo",
+      name: "Brevo",
+      summary: "Your email campaigns, contacts and lists.",
+      connected: false,
+      mode: "off",
+      connectedAt: null,
+      token: { label: "MCP API key", helpUrl: "https://app.brevo.com/settings/keys/api", recipe: "Under SMTP & API, API Keys, generate a new API key and switch on the option that makes it an MCP server key. An ordinary API key does not work here." },
+      revoke: { url: "https://app.brevo.com/settings/keys/api", text: "Open SMTP & API, API Keys, and delete the key." },
+      caution: "A Brevo MCP key cannot be limited to reading: it can do everything your account can, sending campaigns included. Ancilla offers its read tools only, and that list is the only wall, so make the key just for Ancilla and delete it if you stop using it.",
+      test: null,
+    },
+  ];
+  private connectorLog: AssistantConnectorActivity[] = [
+    { at: Date.now() - 20 * MIN, kind: "call", connector: "github", task: "t6", tool: "search_issues", args: '{"query":"is:open involves:aleff"}', ok: true, size: 1840, ms: 412 },
+    { at: Date.now() - 21 * MIN, kind: "call", connector: "github", task: "t6", tool: "get_me", args: "{}", ok: true, size: 96, ms: 188 },
+    { at: Date.now() - 2 * HOUR, kind: "test", connector: "github", ok: true, note: "Works. 12 read tools are offered." },
+    { at: Date.now() - 2 * HOUR - MIN, kind: "connect", connector: "github", ok: true, note: "Works. 12 read tools are offered." },
+  ];
+
+  /** The connectors' surface of the demo: connect keeps nothing but a flag, and every call says what the real one would. */
+  private connectorRoute(method: string, sub: string, body: Record<string, unknown>): unknown {
+    const find = (id: string): AssistantConnectorView => {
+      const found = this.connectors.find((c) => c.id === id);
+      if (!found) throw Object.assign(new Error("That connector was not found"), { kind: "not_found" });
+      return found;
+    };
+    const note = (kind: AssistantConnectorActivity["kind"], connector: string, text?: string): void => {
+      this.connectorLog.unshift({ at: Date.now(), kind, connector, ok: true, ...(text ? { note: text } : {}) });
+    };
+    if (method === "GET" && sub === "") return { connectors: this.connectors, storage: "a file on this computer that only your user account can read" };
+    if (method === "GET" && sub === "/activity") return { entries: this.connectorLog.slice(0, 30) };
+    if (method === "POST" && sub === "/ask") return { task: this.tasks[0]?.task };
+    const act = sub.match(/^\/([a-z]+)\/(connect|test)$/);
+    if (act && method === "POST") {
+      const c = find(act[1] as string);
+      if (act[2] === "connect") {
+        const token = typeof body["token"] === "string" ? body["token"].trim() : "";
+        if (!/^[!-~]{8,2000}$/.test(token)) throw Object.assign(new Error("That does not look like a token: it is too short or too long, or has spaces or characters a token does not have."), { kind: "invalid" });
+        Object.assign(c, { connected: true, mode: "read", connectedAt: Date.now(), test: { at: Date.now(), ok: true, message: "Works. 3 read tools are offered.", offered: [{ name: "list_projects", text: "List the user's projects." }, { name: "list_tables", text: "List the tables of a project's database." }, { name: "search_docs", text: "Search the documentation." }], hidden: 6, missing: [] } });
+        note("connect", c.id, "Works. 3 read tools are offered.");
+      } else {
+        c.test = { ...(c.test ?? { offered: [], hidden: 0, missing: [], message: "" }), at: Date.now(), ok: true, message: "Works." };
+        note("test", c.id, "Works.");
+      }
+      return { connector: c };
+    }
+    const one = sub.match(/^\/([a-z]+)$/);
+    if (one && method === "PATCH") {
+      const c = find(one[1] as string);
+      c.mode = body["mode"] === "off" ? "off" : "read";
+      note("mode", c.id, `mode ${c.mode}`);
+      return { connector: c };
+    }
+    if (one && method === "DELETE") {
+      const c = find(one[1] as string);
+      Object.assign(c, { connected: false, mode: "off", connectedAt: null, test: null });
+      note("disconnect", c.id);
+      return { connector: c };
+    }
+    throw Object.assign(new Error("Nothing is here."), { kind: "not_found" });
+  }
+
   private route(method: string, fullPath: string, body: Record<string, unknown>): unknown {
     const [path, query = ""] = fullPath.split("?");
     const q = new URLSearchParams(query);
+    if (path === "/connectors" || path.startsWith("/connectors/")) return this.connectorRoute(method, path.slice("/connectors".length), body);
     const bump = (): void => {
       this.epoch += 1;
     };

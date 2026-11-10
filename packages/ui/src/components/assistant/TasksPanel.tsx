@@ -248,6 +248,8 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
   const proposal = task.origin === "voice" && task.status === "paused" && task.startedAt === null;
   // A web task is worked on by the assistant's own browser; while it waits it is the person's answer about a site it wants to open.
   const web = task.origin === "browse";
+  // A connector task is worked on in this process too, by a reading agent on a connected account: it asks nothing, and is only ever running or over.
+  const inProcess = web || task.origin === "connector";
   const asking = web && task.status === "paused";
   // What it asks: a site (four answers) or an action (two). The reason says which before the details have loaded.
   const question = useWebQuestion(task, asking, props.bump);
@@ -271,14 +273,14 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           <span className="flex flex-wrap items-center gap-2">
             <Chip tone={status.tone}>{status.label}</Chip>
             <span className="text-sm text-fg [overflow-wrap:anywhere]">{task.title}</span>
-            {task.origin !== "user" ? <Chip>{task.origin === "schedule" ? "Scheduled" : task.origin === "voice" ? "Proposed by voice" : task.origin === "browse" ? "Web task" : "Suggested"}</Chip> : null}
+            {task.origin !== "user" ? <Chip>{task.origin === "schedule" ? "Scheduled" : task.origin === "voice" ? "Proposed by voice" : task.origin === "browse" ? "Web task" : task.origin === "connector" ? "Connected account" : "Suggested"}</Chip> : null}
           </span>
-          {(proposal || web) && task.goal !== task.title ? <span className="mt-1 block text-xs text-fg [overflow-wrap:anywhere]">{task.goal}</span> : null}
+          {(proposal || inProcess) && task.goal !== task.title ? <span className="mt-1 block text-xs text-fg [overflow-wrap:anywhere]">{task.goal}</span> : null}
           <span className="mt-1 block text-xs text-muted [overflow-wrap:anywhere]">{task.reason || task.result}</span>
-          {web && task.result ? <span className="mt-1 block whitespace-pre-wrap text-xs text-fg [overflow-wrap:anywhere]">{task.result}</span> : null}
+          {inProcess && task.result ? <span className="mt-1 block whitespace-pre-wrap text-xs text-fg [overflow-wrap:anywhere]">{task.result}</span> : null}
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtle">
-            {web ? (
-              <span>browses in its own browser and asks before it changes anything</span>
+            {inProcess ? (
+              <span>{web ? "browses in its own browser and asks before it changes anything" : "reads a connected account and cannot change anything"}</span>
             ) : (
               <>
                 <span>
@@ -302,7 +304,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
               Open thread
             </Button>
           ) : null}
-          {open && !web ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
+          {open && !inProcess ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
           {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
           {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })} /> : null}
           {asking && action && !(question && isActionQuestion(question)) ? (
@@ -319,9 +321,9 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
               <Button size="xs" variant="danger" onClick={() => void act("site", { answer: "block" })}>Block</Button>
             </>
           ) : null}
-          {!proposal && !web && (task.status === "paused" || task.status === "waiting") ? <Button size="xs" variant="accent" onClick={() => void act("resume")}>Resume</Button> : null}
+          {!proposal && !inProcess && (task.status === "paused" || task.status === "waiting") ? <Button size="xs" variant="accent" onClick={() => void act("resume")}>Resume</Button> : null}
           {budgetStop ? <Button size="xs" variant="accent" onClick={() => void act("extend", { turns: 4, minutes: 10 })}>Give it more room</Button> : null}
-          {!web && (task.status === "failed" || (task.status === "blocked" && !budgetStop)) ? <Button size="xs" variant="secondary" onClick={() => void act("retry")}>Try again</Button> : null}
+          {!inProcess && (task.status === "failed" || (task.status === "blocked" && !budgetStop)) ? <Button size="xs" variant="secondary" onClick={() => void act("retry")}>Try again</Button> : null}
           {task.status === "unverified" || (task.status === "blocked" && /confirm/i.test(task.reason)) ? <Button size="xs" variant="accent" onClick={() => void act("confirm")}>It is right</Button> : null}
           {!["completed", "unverified", "failed", "cancelled"].includes(task.status) ? <Button size="xs" variant="danger" onClick={() => void act("cancel")}>{proposal ? "Decline" : "Cancel"}</Button> : null}
         </div>

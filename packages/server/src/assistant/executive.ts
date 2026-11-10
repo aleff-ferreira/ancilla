@@ -37,6 +37,19 @@ export interface BrowseRunnerPort {
 }
 
 /**
+ * A connected account, as the executive uses it: the same shape of work as a web task, with nothing to ask the person (a connector
+ * task reads, and what it reads is never a question). The executive owns the task's row; the runner owns the work.
+ */
+export interface ConnectorRunnerPort {
+  /** Starts the work in this process, on the connector named. It reports through `report` and never throws. */
+  run(task: Task, connector: string, report: BrowseReport): void;
+  cancel(taskId: string, reason: string): void;
+  owns(taskId: string): boolean;
+  /** Whether this connector is connected and switched on, and a model is there, and if not, why. */
+  available(connector: string): Promise<{ ok: boolean; reason?: string }>;
+}
+
+/**
  * The task executive: it takes work the user approved and sees it through, one step at a time, as turns in a thread
  * the user can open. It adds no runtime of its own. Muse does the work; this decides when a step starts, charges the
  * budget, records what happened, checks the result against something it can read, and says plainly what it does not
@@ -103,6 +116,8 @@ export interface ExecutiveOptions {
   initiative?: (now: number) => Promise<void> | void;
   /** The assistant's own browser, which runs web tasks; absent where there is none to use. */
   browse?: BrowseRunnerPort;
+  /** The connected accounts, which run connector tasks; absent where there are none to use. */
+  connector?: ConnectorRunnerPort;
 }
 
 const MIN = 60_000;
@@ -204,6 +219,14 @@ export class Executive {
   /** A web task is worked on by the assistant's browser in this process: it is only ever running, waiting for an answer, or over. */
   private refuseWeb(task: Task, what: string): void {
     if (task.origin === "browse") throw new ConflictError(`A web task cannot be ${what}. Cancel it and ask again.`);
+    if (task.origin === "connector") throw new ConflictError(`A connector task cannot be ${what}. Cancel it and ask again.`);
+  }
+
+  /** The runner that works on a task in this process (the browser, or a connected account), or null for a task that runs in a Muse thread. */
+  private runnerOf(task: Task): { cancel(taskId: string, reason: string): void; owns(taskId: string): boolean } | null {
+    if (task.origin === "browse") return this.opts.browse ?? null;
+    if (task.origin === "connector") return this.opts.connector ?? null;
+    return null;
   }
 
   /**
@@ -232,6 +255,34 @@ export class Executive {
   /** Whether a web task can be made now, and if not, why: said before the task exists, not after it fails. */
   async browseAvailable(): Promise<{ ok: boolean; reason?: string }> {
     return this.opts.browse ? this.opts.browse.available() : { ok: false, reason: "Browsing is not available here." };
+  }
+
+  /**
+   * Starts a connector task: a row the person can see and cancel, worked on at once by the reading agent on one connected
+   * account. Like a web task it is made running and never queued, and its end comes back through the report.
+   */
+  createConnector(spec: NewTask, connector: string): Task {
+    const profile = this.opts.profile();
+    if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
+    const runner = this.opts.connector;
+    if (!runner) throw new ConflictError("Connectors are not available here.");
+    // One at a time. A row that nothing is working on (the runner lost track of it) does not count.
+    for (const open of this.tasks.byStatus(["running"]).filter((t) => t.origin === "connector")) {
+      if (runner.owns(open.id)) throw new ConflictError("The assistant is already using a connector. Wait for it to finish, or cancel it.");
+      this.tasks.setStatus(open.id, "failed", "The assistant lost track of this connector task.");
+      this.opts.changed(open.id);
+    }
+    this.requireRoom();
+    const created = this.tasks.create({ ...spec, origin: "connector", allowWrites: false, steps: [{ title: "Look it up", prompt: null, effect: "read", verifier: null }] });
+    const task = this.tasks.setStatus(created.id, "running", "Connecting.");
+    this.opts.changed(task.id);
+    runner.run(task, connector, this.browseReport(task.id));
+    return task;
+  }
+
+  /** Whether a connector task can be made on this connector now, and if not, why. */
+  async connectorAvailable(connector: string): Promise<{ ok: boolean; reason?: string }> {
+    return this.opts.connector ? this.opts.connector.available(connector) : { ok: false, reason: "Connectors are not available here." };
   }
 
   /** The saved rules about which sites the assistant may open, and may not. */
@@ -323,10 +374,10 @@ export class Executive {
   pauseAll(reason: string): number {
     let n = 0;
     for (const task of this.tasks.byStatus(["queued", "running", "waiting", "paused"])) {
-      if (task.origin === "browse") {
-        // A web task cannot wait, not even for an answer: switching the assistant off stops it.
+      if (task.origin === "browse" || task.origin === "connector") {
+        // A task a runner works on cannot wait, not even for an answer: switching the assistant off stops it.
         this.tasks.setStatus(task.id, "cancelled", reason, { retryAt: null });
-        this.opts.browse?.cancel(task.id, reason);
+        this.runnerOf(task)?.cancel(task.id, reason);
       } else if (task.status !== "paused") {
         this.tasks.setStatus(task.id, "paused", reason, { retryAt: null });
       } else {
@@ -360,7 +411,7 @@ export class Executive {
     if (attempt) this.tasks.finishAttempt(attempt.id, "cancelled", reason);
     const out = this.tasks.setStatus(taskId, "cancelled", reason, { retryAt: null });
     this.opts.changed(taskId);
-    if (task.origin === "browse") this.opts.browse?.cancel(taskId, reason);
+    this.runnerOf(task)?.cancel(taskId, reason);
     if (attempt?.sessionId && attempt.turnId) {
       try {
         await this.host.interruptTurn(attempt.sessionId, attempt.turnId);
@@ -828,16 +879,19 @@ export class Executive {
    */
   async recover(): Promise<RecoverySummary> {
     const summary: RecoverySummary = { resumed: 0, reconciled: 0, blocked: 0 };
-    // A web task lives in the process that was working on it: one that is still open now has lost it, and is ended, never started again.
+    // A web or connector task lives in the process that was working on it: one that is still open now has lost it, and is ended, never started again.
     for (const task of this.tasks.byStatus(["running", "queued", "waiting", "paused", "blocked"])) {
-      if (task.origin !== "browse" || this.opts.browse?.owns(task.id)) continue;
-      this.tasks.setStatus(task.id, "failed", "Ancilla stopped while this web task ran, so it ended. Ask again to run it again.");
+      if (task.origin !== "browse" && task.origin !== "connector") continue;
+      if (this.runnerOf(task)?.owns(task.id)) continue;
+      this.tasks.setStatus(task.id, "failed", task.origin === "browse" ? "Ancilla stopped while this web task ran, so it ended. Ask again to run it again." : "Ancilla stopped while this connector task ran, so it ended. Ask again to run it again.");
       this.opts.changed(task.id);
     }
     for (const task of this.tasks.byStatus(["running", "queued", "waiting", "paused", "blocked"])) {
       if (task.sessionId) this.watch(task.sessionId);
     }
     for (const task of this.tasks.byStatus(["running"])) {
+      // A task a runner works on has no attempt and is never put back in the queue: it was ended above, or the runner has it.
+      if (task.origin === "browse" || task.origin === "connector") continue;
       const attempt = this.tasks.runningAttempt(task.id);
       if (!attempt) {
         this.tasks.setStatus(task.id, "queued", "Picked up again after a restart.", { retryAt: null });

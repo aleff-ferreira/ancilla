@@ -16,8 +16,15 @@ import type { Lang } from "./text.js";
  * is proposed (`propose_change`): it waits, paused and never started, and the approval is a click on the screen. No tool
  * here approves, and resuming a proposal is refused, so nothing said aloud can start one. `browse` starts a web task in the
  * assistant's own browser: it reads pages and changes nothing, and every site it wants is asked about on the screen, so a
- * spoken sentence cannot open one either.
+ * spoken sentence cannot open one either. `use_connector` starts a task that reads one connected account (GitHub, Brevo, Supabase)
+ * with the read tools Ancilla lists for it and nothing else, so it too can change nothing.
  */
+
+/** The connected accounts, as the call needs them: which can be used now, and whether one can be used for a task. */
+export interface VoiceConnectors {
+  usable(): Array<{ id: string; name: string }>;
+  available(connector: string): Promise<{ ok: boolean; reason?: string }>;
+}
 
 export interface VoiceToolDeps {
   assistant: AssistantService;
@@ -29,6 +36,8 @@ export interface VoiceToolDeps {
   conversationId: string;
   /** The assistant's own browser, when this server has one to give: without it the `browse` tool is not offered. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> };
+  /** The connected accounts, when there are any to use: without one the `use_connector` tool is not offered. */
+  connectors?: VoiceConnectors;
 }
 
 export const VOICE_TOOLS: readonly ToolSpec[] = [
@@ -70,6 +79,20 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
         title: { type: "string", description: "A short name for it, a few words." },
       },
       required: ["goal"],
+    },
+  },
+  {
+    name: "use_connector",
+    description:
+      "Look something up in one of the user's connected accounts (such as GitHub, Brevo or Supabase), in the background. It can only read: it cannot change, send or post anything. The user is told when it is done.",
+    parameters: {
+      type: "object",
+      properties: {
+        connector: { type: "string", description: "Which connected account." },
+        goal: { type: "string", description: "What to find out, complete enough to be understood on its own." },
+        title: { type: "string", description: "A short name for it, a few words." },
+      },
+      required: ["connector", "goal"],
     },
   },
   {
@@ -129,7 +152,13 @@ export class VoiceTools {
     // Without the executive (no host to run tasks on) the task tools are not offered, so the model never promises what it cannot do.
     // The same goes for `browse` where this server has no browser of its own to give.
     if (!this.deps.assistant.executive) return VOICE_TOOLS.filter((t) => t.name === "recall");
-    return VOICE_TOOLS.filter((t) => t.name !== "browse" || this.deps.browse !== undefined);
+    // `use_connector` is offered only while an account is connected and on, and it names them: the model picks from what exists.
+    const usable = this.deps.connectors?.usable() ?? [];
+    return VOICE_TOOLS.filter((t) => (t.name !== "browse" || this.deps.browse !== undefined) && (t.name !== "use_connector" || usable.length > 0)).map((t) => {
+      if (t.name !== "use_connector") return t;
+      const properties = (t.parameters["properties"] ?? {}) as Record<string, unknown>;
+      return { ...t, parameters: { ...t.parameters, properties: { ...properties, connector: { type: "string", enum: usable.map((u) => u.id), description: `Which connected account: ${usable.map((u) => u.name).join(", ")}.` } } } };
+    });
   }
 
   private find(id: string): Task {
@@ -197,6 +226,27 @@ export class VoiceTools {
           return {
             ok: true,
             text: `Started web task ${task.id}, "${sayable(task.title, 80)}". The assistant's own browser is on it. The user may be asked on the screen to allow a site, and is told when it finishes. Say that it is on it; do not say what it found until it has.`,
+            narration: taskPhrase(lang, "started", task.title),
+          };
+        }
+        case "use_connector": {
+          const connectors = this.deps.connectors;
+          if (!executive || !connectors) return { ok: false, text: "Connected accounts are not available right now." };
+          const goal = str(args["goal"], 1500);
+          if (goal === "") return { ok: false, text: "A task on a connected account needs a goal: say what to find out." };
+          const usable = connectors.usable();
+          const named = str(args["connector"], 40).toLowerCase();
+          const connector = usable.find((u) => u.id === named || u.name.toLowerCase() === named);
+          if (!connector) return { ok: false, text: `There is no connected account called "${named.slice(0, 40)}" that can be used now. ${usable.length > 0 ? `The accounts are: ${usable.map((u) => u.name).join(", ")}.` : "None is connected: the user connects one under Assistant, Connectors."}` };
+          const ready = await connectors.available(connector.id);
+          if (!ready.ok) return { ok: false, text: ready.reason ?? `${connector.name} cannot be used right now.` };
+          // A task on an account belongs to no project, but a task row names a folder: the project of the call, or the home folder.
+          const cwd = this.deps.project() ?? homedir();
+          const spec = parseTaskSpec({ goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const task = executive.createConnector(spec, connector.id);
+          return {
+            ok: true,
+            text: `Started task ${task.id}, "${sayable(task.title, 80)}". It reads ${connector.name} in the background and can change nothing. The user is told when it finishes. Say that it is on it; do not say what it found until it has.`,
             narration: taskPhrase(lang, "started", task.title),
           };
         }

@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_EMBEDDING_SETTINGS, embedderFor, EmbeddingRejected, keyIsSet, readEmbeddingSettings, writeEmbeddingSettings, type Embedder, type EmbeddingSettings } from "./embed.js";
-import { Executive, type BrowseRunnerPort, type ExecutiveHost, type RecoverySummary } from "./executive.js";
+import { Executive, type BrowseRunnerPort, type ConnectorRunnerPort, type ExecutiveHost, type RecoverySummary } from "./executive.js";
 import { withMeaningVectors, type MeaningOptions } from "./meaning.js";
 import { looksSecret } from "./secrets.js";
 import { digest, isPastQuestion, parseAsOf, tokens } from "./text.js";
@@ -83,6 +83,8 @@ export interface AssistantDeps {
   host?: ExecutiveHost;
   /** The assistant's own browser, which runs web tasks. Without it the executive makes none. */
   browse?: BrowseRunnerPort;
+  /** The connected accounts, which run connector tasks. Without it the executive makes none. */
+  connector?: ConnectorRunnerPort;
   /** How often the executive looks for work, in milliseconds. */
   tickMs?: number;
   /** The data folder, where the meaning-search settings are kept; without it they last only as long as the process. */
@@ -201,6 +203,7 @@ export class AssistantService {
           changed: (taskId) => this.announce({ reason: "task", ...(taskId ? { taskId } : {}) }),
           initiative: (now) => this.takeInitiative(now),
           ...(deps.browse ? { browse: deps.browse } : {}),
+          ...(deps.connector ? { connector: deps.connector } : {}),
         })
       : null;
   }

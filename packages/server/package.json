@@ -16,6 +16,7 @@
   "dependencies": {
     "@ancilla/daemon": "*",
     "@harjjotsinghh/aonia": "^0.1.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "docx": "^9.7.2",
     "hast-util-to-html": "^9.0.5",
     "mdast-util-from-markdown": "^2.0.3",

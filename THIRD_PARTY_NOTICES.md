@@ -10,7 +10,7 @@ Desktop builds of Ancilla also redistribute the third-party components below, ea
 An installed copy carries this file, [LICENSE](LICENSE), [LICENSE-HELICON](LICENSE-HELICON), [NOTICE.md](NOTICE.md), the Node.js license and the Rust crates' license texts in its
 `resources/legal` folder.
 
-- [JavaScript packages](#javascript-packages): 84 bundled into the local server, 135 into the interface
+- [JavaScript packages](#javascript-packages): 100 bundled into the local server, 135 into the interface
 - [Node.js runtime](#nodejs-runtime): Node.js v22.23.2
 - [Rust crates](#rust-crates): 535 crates from Cargo.lock
 
@@ -29,6 +29,7 @@ module-preload polyfill) is not listed.
 | @fontsource-variable/inter | 5.3.0 | OFL-1.1 | interface |
 | @fontsource-variable/jetbrains-mono | 5.3.0 | OFL-1.1 | interface |
 | @harjjotsinghh/aonia | 0.1.0 | MIT | server |
+| @modelcontextprotocol/sdk | 1.32.2 | MIT | server |
 | @muse-code/sdk | 0.1.1 | MIT | server |
 | @noble/ciphers | 1.3.0 | MIT | server |
 | @noble/hashes | 1.8.0 | MIT | server |
@@ -72,6 +73,8 @@ module-preload polyfill) is not listed.
 | @tauri-apps/plugin-process | 2.3.1 | MIT OR Apache-2.0 | interface |
 | @tauri-apps/plugin-updater | 2.11.0 | MIT OR Apache-2.0 | interface |
 | @ungap/structured-clone | 1.4.0 | ISC | interface, server |
+| ajv | 8.20.0 | MIT | server |
+| ajv-formats | 3.0.1 | MIT | server |
 | aria-hidden | 1.2.6 | MIT | interface |
 | bail | 2.0.2 | MIT | interface |
 | base64-js | 0.0.8 | MIT | server |
@@ -85,14 +88,18 @@ module-preload polyfill) is not listed.
 | clsx | 2.1.1 | MIT | interface |
 | cmdk | 1.1.1 | MIT | interface |
 | comma-separated-tokens | 2.0.3 | MIT | interface, server |
+| content-type | 1.0.5 | MIT | server |
+| cross-spawn | 7.0.6 | MIT | server |
 | decode-named-character-reference | 1.3.0 | MIT | interface, server |
 | devlop | 1.1.0 | MIT | interface, server |
 | dfa | 1.2.0 | MIT | server |
 | docx | 9.7.2 | MIT | server |
 | escape-string-regexp | 5.0.0 | MIT | interface, server |
 | estree-util-is-identifier-name | 3.0.0 | MIT | interface |
+| eventsource-parser | 3.1.1 | MIT | server |
 | extend | 3.0.2 | MIT | interface |
 | fast-deep-equal | 3.1.3 | MIT | server |
+| fast-uri | 3.1.9 | BSD-3-Clause | server |
 | fontkit | 2.0.4 | MIT | server |
 | framer-motion | 13.2.0 | MIT | interface |
 | get-nonce | 1.0.1 | MIT | interface |
@@ -103,6 +110,8 @@ module-preload polyfill) is not listed.
 | html-void-elements | 3.0.0 | MIT | server |
 | inline-style-parser | 0.2.7 | MIT | interface |
 | is-plain-obj | 4.1.0 | MIT | interface |
+| isexe | 2.0.0 | ISC | server |
+| json-schema-traverse | 1.0.0 | MIT | server |
 | linebreak | 1.1.0 | MIT | server |
 | longest-streak | 3.1.0 | MIT | interface, server |
 | markdown-table | 3.0.4 | MIT | interface, server |
@@ -147,7 +156,9 @@ module-preload polyfill) is not listed.
 | motion | 13.2.0 | MIT | interface |
 | motion-dom | 13.2.0 | MIT | interface |
 | motion-utils | 13.0.0 | MIT | interface |
+| path-key | 3.1.1 | MIT | server |
 | pdfkit | 0.20.2 | MIT | server |
+| pkce-challenge | 5.0.1 | MIT | server |
 | png-js | 2.0.0 | UNKNOWN | server |
 | property-information | 7.2.0 | MIT | interface, server |
 | react | 18.3.1 | MIT | interface |
@@ -161,6 +172,8 @@ module-preload polyfill) is not listed.
 | remark-rehype | 11.1.2 | MIT | interface |
 | restructure | 3.0.2 | MIT | server |
 | scheduler | 0.23.2 | MIT | interface |
+| shebang-command | 2.0.0 | MIT | server |
+| shebang-regex | 3.0.0 | MIT | server |
 | space-separated-tokens | 2.0.2 | MIT | interface, server |
 | stringify-entities | 4.0.4 | MIT | server |
 | style-to-js | 1.1.21 | MIT | interface |
@@ -184,7 +197,10 @@ module-preload polyfill) is not listed.
 | use-stick-to-bottom | 1.1.6 | MIT | interface |
 | vfile | 6.0.3 | MIT | interface |
 | vfile-message | 4.0.3 | MIT | interface |
+| which | 2.0.2 | ISC | server |
 | ws | 8.22.2 | MIT | server |
+| zod | 4.6.7 | MIT | server |
+| zod-to-json-schema | 3.25.2 | ISC | server |
 | zwitch | 2.0.4 | MIT | server |
 | Node.js | 22.23.2 | MIT, with bundled components under their own licenses | sidecar |
 
@@ -641,6 +657,38 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 MIT License
 
 Copyright (c) 2026 Harjot Singh Rana and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### @modelcontextprotocol/sdk 1.32.2
+
+- License: MIT
+- Source: <https://github.com/modelcontextprotocol/typescript-sdk>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2024 Anthropic, PBC
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -2528,6 +2576,70 @@ OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 ```
 
+### ajv 8.20.0
+
+- License: MIT
+- Source: <https://github.com/ajv-validator/ajv>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2015-2021 Evgeny Poberezkin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### ajv-formats 3.0.1
+
+- License: MIT
+- Source: <https://github.com/ajv-validator/ajv-formats>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2020 Evgeny Poberezkin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### aria-hidden 1.2.6
 
 - License: MIT
@@ -2937,6 +3049,71 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### content-type 1.0.5
+
+- License: MIT
+- Source: <https://github.com/jshttp/content-type>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+(The MIT License)
+
+Copyright (c) 2015 Douglas Christopher Wilson
+
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+'Software'), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED 'AS IS', WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### cross-spawn 7.0.6
+
+- License: MIT
+- Source: <https://github.com/moxystudio/node-cross-spawn>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2018 Made With MOXY Lda <hello@moxy.studio>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ### decode-named-character-reference 1.3.0
 
 - License: MIT
@@ -3122,6 +3299,38 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### eventsource-parser 3.1.1
+
+- License: MIT
+- Source: <https://github.com/rexxars/eventsource-parser>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2026 Espen Hovlandsdal <espen@hovlandsdal.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### extend 3.0.2
 
 - License: MIT
@@ -3185,6 +3394,47 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### fast-uri 3.1.9
+
+- License: BSD-3-Clause
+- Source: <https://github.com/fastify/fast-uri>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
+Copyright (c) 2021-present The Fastify team <https://github.com/fastify/fastify#team>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in the
+      documentation and/or other materials provided with the distribution.
+    * The names of any contributors may not be used to endorse or promote
+      products derived from this software without specific prior written
+      permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS AND CONTRIBUTORS BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+                                  *   *   *
+
+The complete list of contributors can be found at:
+- https://github.com/garycourt/uri-js/graphs/contributors
 ```
 
 ### fontkit 2.0.4
@@ -3487,6 +3737,64 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### isexe 2.0.0
+
+- License: ISC
+- Source: <https://github.com/isaacs/isexe>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The ISC License
+
+Copyright (c) Isaac Z. Schlueter and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+### json-schema-traverse 1.0.0
+
+- License: MIT
+- Source: <https://github.com/epoberezkin/json-schema-traverse>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2017 Evgeny Poberezkin
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### linebreak 1.1.0
@@ -4938,6 +5246,26 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+### path-key 3.1.1
+
+- License: MIT
+- Source: <https://github.com/sindresorhus/path-key>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+MIT License
+
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
 ### pdfkit 0.20.2
 
 - License: MIT
@@ -4955,6 +5283,38 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### pkce-challenge 5.0.1
+
+- License: MIT
+- Source: <https://github.com/crouchcd/pkce-challenge>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2019
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### png-js 2.0.0
@@ -5376,6 +5736,46 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### shebang-command 2.0.0
+
+- License: MIT
+- Source: <https://github.com/kevva/shebang-command>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+MIT License
+
+Copyright (c) Kevin Mårtensson <kevinmartensson@gmail.com> (github.com/kevva)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### shebang-regex 3.0.0
+
+- License: MIT
+- Source: <https://github.com/sindresorhus/shebang-regex>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`license`:
+
+```text
+MIT License
+
+Copyright (c) Sindre Sorhus <sindresorhus@gmail.com> (sindresorhus.com)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### space-separated-tokens 2.0.2
@@ -6090,6 +6490,32 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### which 2.0.2
+
+- License: ISC
+- Source: <https://github.com/isaacs/node-which>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+The ISC License
+
+Copyright (c) Isaac Z. Schlueter and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
 ### ws 8.22.2
 
 - License: MIT
@@ -6119,6 +6545,64 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+### zod 4.6.7
+
+- License: MIT
+- Source: <https://github.com/colinhacks/zod>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+MIT License
+
+Copyright (c) 2025 Colin McDonnell
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### zod-to-json-schema 3.25.2
+
+- License: ISC
+- Source: <https://github.com/StefanTerdell/zod-to-json-schema>
+- Shipped in: the local server (`resources/server.cjs`)
+
+`LICENSE`:
+
+```text
+ISC License
+
+Copyright (c) 2020, Stefan Terdell
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
 ### zwitch 2.0.4

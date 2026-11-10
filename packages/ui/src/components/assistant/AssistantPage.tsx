@@ -13,6 +13,7 @@ import { useTalk } from "../voice/talk.js";
 import { VoicePanel } from "../voice/VoicePanel.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
 import { CompanionHero, History, IdentityBar, Rules } from "./companion/Companion.js";
+import { ConnectorsPanel } from "./ConnectorsPanel.js";
 import { MemoryPanel } from "./MemoryPanel.js";
 import { Onboarding } from "./Onboarding.js";
 import { Notice } from "./parts.js";
@@ -20,8 +21,8 @@ import { PersonaPanel } from "./PersonaPanel.js";
 import { ProfilePanel } from "./ProfilePanel.js";
 import { Suggestion, TasksPanel } from "./TasksPanel.js";
 
-type Tab = "home" | "memory" | "tasks" | "persona" | "voice" | "settings";
-const TABS: readonly Tab[] = ["home", "memory", "tasks", "persona", "voice", "settings"];
+type Tab = "home" | "memory" | "tasks" | "connectors" | "persona" | "voice" | "settings";
+const TABS: readonly Tab[] = ["home", "memory", "tasks", "connectors", "persona", "voice", "settings"];
 
 /**
  * The assistant's home. A first visit is an introduction: a face, a voice, a name, and only then is it switched on. After
@@ -125,6 +126,7 @@ export function AssistantPage() {
                     { value: "home", label: "Home" },
                     { value: "memory", label: `Memory (${data.stats.items.active + data.stats.items.contested})` },
                     { value: "tasks", label: `Tasks${data.tasks && data.tasks.needsYou > 0 ? ` (${data.tasks.needsYou} need you)` : data.tasks && data.tasks.open > 0 ? ` (${data.tasks.open})` : ""}` },
+                    { value: "connectors", label: "Connectors" },
                     { value: "persona", label: "Persona" },
                     ...(controller.hasVoice ? [{ value: "voice" as const, label: "Voice" }] : []),
                     { value: "settings", label: "Settings" },
@@ -142,6 +144,7 @@ export function AssistantPage() {
                   {!profile.enabled ? <Asleep onWake={() => setConfirmOn(true)} /> : data.executive === false ? <div className="mt-6"><Notice>Tasks need a Muse host, and this server was not given one.</Notice></div> : <TasksPanel profile={profile} changed={changed} bump={bump} />}
                 </>
               ) : null}
+              {tab === "connectors" ? <><IdentityBar status={data} />{!profile.enabled ? <Asleep onWake={() => setConfirmOn(true)} /> : <ConnectorsPanel changed={changed} bump={bump} />}</> : null}
               {tab === "persona" ? <PersonaPanel profile={profile} changed={changed} /> : null}
               {tab === "voice" ? <><IdentityBar status={data} /><VoicePanel changed={changed} /></> : null}
               {tab === "settings" ? <><IdentityBar status={data} /><ProfilePanel profile={profile} changed={changed} bump={bump} /></> : null}

@@ -971,6 +971,56 @@ export interface AssistantWaitingView {
   reason: string;
 }
 
+/** What the last test of a connected account found. */
+export interface AssistantConnectorTest {
+  at: number;
+  ok: boolean;
+  message: string;
+  /** The tools the assistant is given, with our words for each. */
+  offered: Array<{ name: string; text: string }>;
+  /** How many other tools the server has that are not offered. */
+  hidden: number;
+  /** Tools on our list that the server did not list. */
+  missing: string[];
+}
+
+/** A connected account (or one that can be): never the token, nor anything made from it. */
+export interface AssistantConnectorView {
+  id: string;
+  name: string;
+  summary: string;
+  connected: boolean;
+  /** `read`: the assistant may look things up in it. `off`: it may not, and stays connected. */
+  mode: "off" | "read";
+  connectedAt: number | null;
+  token: { label: string; helpUrl: string; recipe: string };
+  /** Removing a connection does not revoke the token at the provider: this says where that is done. */
+  revoke: { url: string; text: string };
+  /** Said before connecting when the provider cannot limit the token. */
+  caution: string | null;
+  test: AssistantConnectorTest | null;
+}
+
+export interface AssistantConnectorsView {
+  connectors: AssistantConnectorView[];
+  /** Where the tokens are kept, in words. */
+  storage: string;
+}
+
+/** One line of what the connectors did. */
+export interface AssistantConnectorActivity {
+  at: number;
+  kind: "call" | "connect" | "test" | "mode" | "disconnect";
+  connector: string;
+  task?: string | null;
+  tool?: string;
+  args?: string;
+  ok: boolean;
+  size?: number;
+  ms?: number;
+  note?: string;
+}
+
 /** How the voice is set up; a key is never part of it. */
 export type VoiceBrainSetting =
   /** Through Muse; `model` is the Muse model that answers, or null for Muse's own choice. */
@@ -1051,7 +1101,7 @@ export interface AssistantTaskView {
   goal: string;
   status: AssistantTaskStatus;
   reason: string;
-  origin: "user" | "suggestion" | "schedule" | "voice" | "browse";
+  origin: "user" | "suggestion" | "schedule" | "voice" | "browse" | "connector";
   cwd: string;
   sessionId: string | null;
   allowWrites: boolean;
