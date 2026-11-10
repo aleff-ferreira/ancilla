@@ -153,6 +153,32 @@ describe("the pane's socket", () => {
     pane.ws.close();
   });
 
+  it("takes a picture itself when a tab that was just shown sends none, and not when one comes", async () => {
+    const shot = Buffer.from("jpeg-shot").toString("base64");
+    const quiet = await rig((method) => (method === "Page.captureScreenshot" ? { data: shot } : undefined));
+    const pane = await connect(quiet.url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    // The page never paints again: the screencast says nothing, as a popup that loaded before it was attached does not.
+    await waitFor(() => pane.frames.length === 1, "a picture taken instead");
+    assert.equal(pane.frames[0]?.tabId, "T0");
+    assert.equal(pane.frames[0]?.jpeg.toString(), "jpeg-shot");
+    assert.deepEqual([pane.frames[0]?.width, pane.frames[0]?.height], [1280, 800], "at the size the page has");
+    assert.equal(sent(quiet.fake, "Page.captureScreenshot").length, 1);
+    pane.ws.close();
+
+    const busy = await rig((method) => (method === "Page.captureScreenshot" ? { data: shot } : undefined));
+    const other = await connect(busy.url);
+    other.send(hello());
+    await other.waitFor((m) => m.type === "ready", "ready");
+    busy.fake.emit("Page.screencastFrame", { data: Buffer.from("real").toString("base64"), sessionId: 1, metadata: { deviceWidth: 800, deviceHeight: 600 } }, "S-T0");
+    await waitFor(() => other.frames.length === 1, "the real picture");
+    await new Promise((r) => setTimeout(r, 450));
+    assert.equal(sent(busy.fake, "Page.captureScreenshot").length, 0, "a page that paints needs no screenshot");
+    assert.equal(other.frames.length, 1);
+    other.ws.close();
+  });
+
   it("holds the next picture until the last one is acknowledged", async () => {
     const { fake, url } = await rig();
     const ws = new WebSocket(url);

@@ -23,6 +23,8 @@ const JPEG_QUALITY = 60;
 /** A client that has this much not yet sent to it is given time to catch up before the next picture. */
 const BACKLOG_BYTES = 1_000_000;
 const FRAME_ACK_TIMEOUT_MS = 1_500;
+/** How long a tab that has just been shown may go without a picture before one is taken for it. */
+const FIRST_FRAME_MS = 300;
 const MAX_PENDING_MOVES = 4;
 
 function toBuffer(data: RawData): Buffer {
@@ -311,9 +313,11 @@ class PaneSession {
     this.stopCast?.();
     this.stopCast = null;
     this.castFor = id;
+    let got = false;
     const stop = await this.service.screencast(
       id,
       (frame) => {
+        got = true;
         // The newest picture replaces one that is still waiting; the one being sent is never overtaken.
         this.latest = { id, frame };
         void this.pump();
@@ -327,6 +331,20 @@ class PaneSession {
     this.stopCast = stop;
     // A page that is not changing sends no picture, and the pane would keep showing the last tab's: ask for a repaint.
     void this.service.repaint(id).catch(() => undefined);
+    // A repaint does not always make a quiet page send one (a popup that finished loading before it was attached does not), so
+    // after a moment, if none has come, one is taken instead and a quiet tab is not left blank.
+    setTimeout(() => {
+      if (got || this.stopped || this.castFor !== id) return;
+      void this.service.screenshot(id, "jpeg").then(
+        (jpeg) => {
+          if (got || this.stopped || this.castFor !== id) return;
+          const size = this.viewport ?? { width: 1280, height: 800 };
+          this.latest = { id, frame: { data: jpeg.toString("base64"), width: size.width, height: size.height, at: Date.now() } };
+          void this.pump();
+        },
+        () => undefined,
+      );
+    }, FIRST_FRAME_MS).unref?.();
   }
 
   /** Sends the newest waiting picture, then waits for the pane to acknowledge it (or for a pause) before the next. */

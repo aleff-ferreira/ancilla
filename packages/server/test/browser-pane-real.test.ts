@@ -74,7 +74,11 @@ after(async () => {
   http.close();
   paneHttp.closeAllConnections?.();
   paneHttp.close();
-  rmSync(dataDir, { recursive: true, force: true });
+  try {
+    rmSync(dataDir, { recursive: true, force: true });
+  } catch {
+    // Windows may hold a profile file (Default\DIPS) for a moment after the browser exits; a leftover temp folder is not a failure
+  }
   console.log(`PANE-METRICS ${JSON.stringify({ browser: found.browser, ...metrics })}`);
 });
 
