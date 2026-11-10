@@ -119,9 +119,8 @@ test("a pane over a real browser: pictures, a click that navigates, accented tex
   send({ type: "navigate", id: first, url: `${base}/` });
   await until(() => frames.some((f) => f.tabId === first && f.jpeg[0] === 0xff && f.jpeg[1] === 0xd8), "a JPEG frame");
   await until(() => (last("tabs") as { tabs: Array<{ id: string; title: string }> } | undefined)?.tabs.some((t) => t.title === "Fixture") === true, "the page title");
-  const frame = frames.find((f) => f.tabId === first)!;
-  assert.equal(frame.width, 800);
-  assert.equal(frame.height, 600);
+  // The first picture may predate the viewport; one at the size asked for follows.
+  await until(() => frames.some((f) => f.tabId === first && f.width === 800 && f.height === 600), "a picture at the viewport's size");
 
   // Click to updated pixels over the whole path, alternating the button's colour so each click changes the picture.
   const latencies: number[] = [];
