@@ -1,5 +1,6 @@
 import type { AssistantService } from "../assistant/service.js";
 import { awaitsApproval, type Task } from "../assistant/tasks.js";
+import { waitingCause } from "../assistant/waiting.js";
 import { VOICES } from "../assistant/context.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
@@ -44,6 +45,8 @@ export class TaskHub {
 
 /** What is worth saying about a task now, or null when its state is not news. */
 export function noticeOf(task: Task): TaskNotice | null {
+  // Whether a task waits on the person is `waitingCause`'s to say: here, on the screens and in the notifications alike.
+  if (waitingCause(task, null)) return "needs";
   switch (task.status) {
     case "completed":
       return "done";
@@ -51,12 +54,8 @@ export function noticeOf(task: Task): TaskNotice | null {
       return "unverified";
     case "failed":
       return "failed";
-    case "blocked":
-      return "needs";
     case "cancelled":
       return "cancelled";
-    case "paused":
-      return /approval|approve|needs you|waiting for you/i.test(task.reason) ? "needs" : null;
     default:
       return null;
   }

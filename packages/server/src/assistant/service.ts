@@ -9,6 +9,7 @@ import { MemoryStore, type Change, type CaptureResult } from "./store.js";
 import { DEFAULT_PROFILE } from "./profile.js";
 import { startAutonomous } from "./suggest.js";
 import { parseTaskSpec, TaskStore } from "./tasks.js";
+import { waitingTasks, type WaitingTask } from "./waiting.js";
 import type { AssembledContext, AssistantProfile, Goal, MemoryKind, MemoryStatus } from "./types.js";
 
 /**
@@ -246,12 +247,16 @@ export class AssistantService {
     return this.deps.host ? this.deps.host.projectKey(cwd) : cwd;
   }
 
-  /** What the page shows at a glance about the work: how much is open and how much waits on the user. */
-  taskSummary(): { open: number; needsYou: number; running: number } {
+  /**
+   * What the page shows at a glance about the work: how much is open and how much waits on the user, and which tasks have
+   * stopped for the person (`waiting`, at most a few: what a notification names, told apart from a task they paused themselves).
+   */
+  taskSummary(): { open: number; needsYou: number; running: number; waiting: WaitingTask[] } {
     return {
       open: this.tasks.count(["queued", "running", "waiting", "paused", "blocked"]),
       needsYou: this.tasks.count(["blocked", "unverified", "paused"]),
       running: this.tasks.count(["running"]),
+      waiting: waitingTasks(this.tasks.byStatus(["paused", "blocked"]), (id) => this.executive?.browseQuestion(id) ?? null),
     };
   }
 

@@ -5,6 +5,7 @@ import { AncillaController, hashToRoute, routeToHash, staleThreadReason, type Pl
 import { buildTurns } from "../src/model/fold.js";
 import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } from "../src/model/store.js";
 import { crewBusy, crewView } from "../src/model/crew.js";
+import { takeWantedTab } from "../src/model/wantedTab.js";
 import { modelIdError, modelMenu, modelsShown, offeredByAnother, tryTypedModel } from "../src/model/models.js";
 import type { AncillaEvent, ModelCatalog, ModelOption, ProjectView, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
@@ -6426,6 +6427,95 @@ describe("the assistant page", () => {
     assert.equal(controller.store.get().assistantGlance?.enabled, false);
     assert.equal(controller.store.get().assistantGlance?.needsYou, 0);
     stop();
+  });
+
+  describe("a task that waits on the person", () => {
+    const waiting = (cause: string, reason: string, id = "t1") => [{ id, title: "Look at A", cause, reason }];
+    const reading = (list: unknown[] | undefined) => ({ ...status({}), tasks: { open: 1, needsYou: list?.length ?? 0, running: 0, ...(list ? { waiting: list } : {}) } });
+    const armed = async (client: FakeClient) => {
+      const shown: Array<{ tag: string; body: string; onClick?: () => void }> = [];
+      // Notifications are on and the notifier is there before the first reading, as for a person who turned them on.
+      const controller = new AncillaController(client, { ...platform("#/t/s1"), loadPrefs: () => ({ notifications: true }) });
+      controller.attachNotifier({ permission: async () => "granted", request: async () => "granted", show: async (note) => { shown.push(note); } });
+      const stop = controller.start();
+      await settle();
+      await settle();
+      const read = async () => {
+        await controller.loadAssistantGlance();
+        await settle();
+      };
+      return { controller, stop, shown, read };
+    };
+
+    it("is said once, when it begins to wait: not what was waiting at the start, nor the same reading again", async () => {
+      const client = new FakeClient();
+      client.assistantReply = reading(waiting("approval", "Waiting for your approval to change files in atlas."));
+      const { controller, stop, shown, read } = await armed(client);
+      await read();
+      assert.equal(shown.length, 0, "what was already waiting when the app began is not news");
+
+      client.assistantReply = reading([...waiting("approval", "Waiting for your approval to change files in atlas."), ...waiting("site", "Waiting for your approval to open https://a.example.", "t2")]);
+      await read();
+      assert.deepEqual(shown.map((note) => [note.tag, note.body]), [["task:t2", '"Look at A" asks before opening a site.']]);
+
+      await read();
+      assert.equal(shown.length, 1, "the same reading says nothing again");
+      stop();
+    });
+
+    it("is said again when it stops waiting and begins again, and not when it only asks the next question at once", async () => {
+      const client = new FakeClient();
+      client.assistantReply = reading([]);
+      const { controller, stop, shown, read } = await armed(client);
+      await read();
+
+      client.assistantReply = reading(waiting("site", "first"));
+      await read();
+      assert.equal(shown.length, 1);
+
+      // The person answered and the task asked the next question in the same breath: they are at the screen.
+      client.assistantReply = reading(waiting("action", "second"));
+      await read();
+      assert.equal(shown.length, 1, "within the repeat window a second question does not buzz");
+
+      client.assistantReply = reading([]);
+      await read();
+      client.assistantReply = reading(waiting("action", "third"));
+      await read();
+      assert.deepEqual(shown.map((note) => note.tag), ["task:t1", "task:t1"], "once it was dealt with, it may speak again");
+      stop();
+    });
+
+    it("says nothing for a server that does not list them, and what began to wait while the stream was down is read when it comes back", async () => {
+      const client = new FakeClient();
+      client.assistantReply = reading(undefined);
+      const { controller, stop, shown, read } = await armed(client);
+      await read();
+      assert.equal(shown.length, 0);
+
+      client.handler?.({ type: "connection", state: "lost" });
+      client.assistantReply = reading(waiting("blocked", "A step may have changed something."));
+      client.handler?.({ type: "hello", version: "x" });
+      await settle();
+      assert.deepEqual(shown.map((note) => [note.tag, note.body]), [["task:t1", '"Look at A" stopped and is waiting for you.']]);
+      stop();
+    });
+
+    it("takes a press on the notice to the assistant's Tasks tab", async () => {
+      const client = new FakeClient();
+      client.assistantReply = reading([]);
+      const { controller, stop, shown, read } = await armed(client);
+      await read();
+      client.assistantReply = reading(waiting("site", "ask"));
+      await read();
+      assert.equal(typeof shown[0]?.onClick, "function");
+
+      takeWantedTab();
+      shown[0]?.onClick?.();
+      assert.equal(controller.store.get().route.kind, "assistant");
+      assert.equal(takeWantedTab(), "tasks", "the page opens on the tab with the question");
+      stop();
+    });
   });
 
   it("leaves the glance unknown when the server has no assistant, so nothing is shown for it", async () => {

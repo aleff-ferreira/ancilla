@@ -958,7 +958,17 @@ export interface AssistantStatusView {
   bond: AssistantBondView;
   epoch: number;
   executive?: boolean;
-  tasks?: { open: number; needsYou: number; running: number };
+  tasks?: { open: number; needsYou: number; running: number; waiting?: AssistantWaitingView[] };
+}
+
+/** A task that has stopped for the person, and why (an older server does not say). */
+export interface AssistantWaitingView {
+  id: string;
+  title: string;
+  /** `approval` a proposal, `site` / `action` / `download` a web task's question, `question` one that is not known, `blocked` a task that asks what to do. */
+  cause: "approval" | "site" | "action" | "download" | "question" | "blocked";
+  /** Why, in the task's own words: it changes when the task asks something else. Never shown in a notice. */
+  reason: string;
 }
 
 /** How the voice is set up; a key is never part of it. */

@@ -4,6 +4,7 @@ import type {
   ApprovalRequest,
   AssistantEventView,
   AssistantStatusView,
+  AssistantWaitingView,
   AttachmentView,
   GoalAction,
   LinuxDesktopStatus,
@@ -113,6 +114,7 @@ import {
   type Toast,
 } from "./store.js";
 import { NotificationManager, type NotifyEvent, type Notifier } from "./notify.js";
+import { wantAssistantTab } from "./wantedTab.js";
 import { UpdateManager, type AppUpdater } from "./updates.js";
 import { saveBrowserFile, type FileSaver } from "./fileSave.js";
 
@@ -675,6 +677,8 @@ export class AncillaController {
   /** Bumped by every research-settings request, so only the latest completion or rollback lands. */
   private researchSettingsRev = 0;
   private assistantGlanceRev = 0;
+  /** The tasks that waited on the person at the last reading, by id, and why: what is new in the next one is what gets said. Null before the first. */
+  private waitingSeen: Map<string, string> | null = null;
   /** Sandbox PATCHes queue behind each other so rapid opposite flips land in order. */
   private sandboxSettingsChain: Promise<void> = Promise.resolve();
   /** Bumped by every yolo-settings request, so only the latest completion or rollback lands. */
@@ -1517,9 +1521,42 @@ export class AncillaController {
         ...s,
         assistantGlance: { enabled: profile.enabled, name: profile.name, character: profile.character, open: status.tasks?.open ?? 0, needsYou: status.tasks?.needsYou ?? 0, running: status.tasks?.running ?? 0 },
       }));
+      this.noteWaiting(status.tasks?.waiting);
     } catch {
       /* an older server answers 404: there is no assistant to show */
     }
+  }
+
+  /**
+   * What began to wait on the person since the last reading is said once, out loud, for someone who is not looking: an
+   * approval, a web task's question, a task that asks what to do. What was already waiting when the app began is not news, a
+   * reading that says the same again says nothing, and a task that stops waiting and starts again is said again.
+   */
+  private noteWaiting(waiting: AssistantWaitingView[] | undefined): void {
+    const list = waiting ?? [];
+    const now = new Map(list.map((item) => [item.id, `${item.cause}|${item.reason}`] as const));
+    const before = this.waitingSeen;
+    this.waitingSeen = now;
+    const manager = this.notifications;
+    if (!before || !manager) {
+      return;
+    }
+    for (const id of before.keys()) {
+      if (!now.has(id)) {
+        manager.forget(id);
+      }
+    }
+    for (const item of list) {
+      if (before.get(item.id) !== now.get(item.id)) {
+        void manager.announce({ kind: "task", taskId: item.id, cause: item.cause, title: item.title }, () => this.openWaiting());
+      }
+    }
+  }
+
+  /** Where pressing a notice about a waiting task leads: the assistant's Tasks tab, where its question is. */
+  private openWaiting(): void {
+    wantAssistantTab("tasks");
+    this.navigate({ kind: "assistant" });
   }
 
   private async loadResearchSettings(): Promise<void> {
@@ -2019,6 +2056,8 @@ export class AncillaController {
         this.update((s) => ({ ...s, connection: "open" }));
         if (wasLost && this.state.boot === "ready") {
           this.resyncAfterLost();
+          // A task may have begun to wait on the person while the stream was down: reading again says so.
+          void this.loadAssistantGlance();
         }
         break;
       }

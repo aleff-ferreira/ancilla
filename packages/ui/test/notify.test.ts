@@ -6,6 +6,7 @@ interface Shown {
   title: string;
   body: string;
   tag: string;
+  onClick?: () => void;
 }
 
 function notifier(permission: NotifyPermission = "granted") {
@@ -102,5 +103,73 @@ describe("notifications", () => {
     await manager.announce({ kind: "approval", sessionId: "s1", thread: "notes-app" });
 
     assert.equal(shown.length, 2);
+  });
+
+  it("tells the user a task is waiting on them: its name and why, and nothing else", async () => {
+    const { fake, shown } = notifier();
+    const manager = new NotificationManager(fake, () => ({ enabled: true, focused: false }));
+
+    await manager.announce({ kind: "task", taskId: "t1", cause: "approval", title: "Fix the login redirect" });
+    await manager.announce({ kind: "task", taskId: "t2", cause: "site", title: "Look at A" });
+    await manager.announce({ kind: "task", taskId: "t3", cause: "action", title: "Order it" });
+    await manager.announce({ kind: "task", taskId: "t4", cause: "download", title: "Get the PDF" });
+    await manager.announce({ kind: "task", taskId: "t5", cause: "question", title: "Check prices" });
+    await manager.announce({ kind: "task", taskId: "t6", cause: "blocked", title: "Rename the key" });
+
+    assert.deepEqual(
+      shown.map((note) => [note.tag, note.title, note.body]),
+      [
+        ["task:t1", "The assistant needs your approval", '"Fix the login redirect" is waiting for you to approve it.'],
+        ["task:t2", "The assistant is waiting on you", '"Look at A" asks before opening a site.'],
+        ["task:t3", "The assistant is waiting on you", '"Order it" asks before it does something on a page.'],
+        ["task:t4", "The assistant is waiting on you", '"Get the PDF" asks where to save a file.'],
+        ["task:t5", "The assistant is waiting on you", '"Check prices" has a question for you.'],
+        ["task:t6", "A task needs you", '"Rename the key" stopped and is waiting for you.'],
+      ],
+    );
+  });
+
+  it("keeps a task's name to one short line, whatever it holds", async () => {
+    const { fake, shown } = notifier();
+    const manager = new NotificationManager(fake, () => ({ enabled: true, focused: false }));
+
+    await manager.announce({ kind: "task", taskId: "t1", cause: "site", title: `Look\n  at\tA\u0007 ${"very long ".repeat(20)}` });
+    await manager.announce({ kind: "task", taskId: "t2", cause: "site", title: "   \n " });
+
+    const first = shown[0]?.body ?? "";
+    assert.doesNotMatch(first, /[\n\t\u0007]/);
+    assert.match(first, /^"Look at A very long/);
+    assert.ok(first.includes('..." asks before opening a site.'), "cut with an ellipsis");
+    assert.ok(first.length < 100, "short enough to read on a lock screen");
+    assert.equal(shown[1]?.body, "A task asks before opening a site.", "a task with no name is only a task");
+  });
+
+  it("says a task once, lets it speak again when it was dealt with, and hands over what a press should do", async () => {
+    const { fake, shown } = notifier();
+    const manager = new NotificationManager(fake, () => ({ enabled: true, focused: false }));
+    const press = () => undefined;
+
+    await manager.announce({ kind: "task", taskId: "t1", cause: "site", title: "Look at A" }, press);
+    await manager.announce({ kind: "task", taskId: "t1", cause: "action", title: "Look at A" }, press);
+    assert.equal(shown.length, 1, "a task asking twice in a moment buzzes once");
+    assert.equal(shown[0]?.onClick, press);
+
+    manager.forget("t1");
+    await manager.announce({ kind: "task", taskId: "t1", cause: "action", title: "Look at A" });
+    assert.equal(shown.length, 2);
+    assert.equal("onClick" in (shown[1] ?? {}), false, "no press to hear, none is offered");
+
+    // A task and a thread that happen to share a name never share a say.
+    await manager.announce({ kind: "approval", sessionId: "t1", thread: "notes-app" });
+    assert.equal(shown.length, 3);
+  });
+
+  it("says nothing about a waiting task to someone who is looking, or who switched notifications off", async () => {
+    for (const settings of [{ enabled: true, focused: true }, { enabled: false, focused: false }]) {
+      const { fake, shown } = notifier();
+      const manager = new NotificationManager(fake, () => settings);
+      await manager.announce({ kind: "task", taskId: "t1", cause: "approval", title: "Fix it" });
+      assert.deepEqual(shown, []);
+    }
   });
 });

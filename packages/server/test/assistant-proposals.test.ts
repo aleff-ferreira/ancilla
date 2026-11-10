@@ -55,6 +55,7 @@ describe("a change the voice proposes", () => {
     assert.match(task.reason, /Waiting for your approval to change files in atlas/);
     assert.equal(awaitsApproval(task), true);
     assert.equal(noticeOf(task), "needs", "the call counts it as something that waits on the user");
+    assert.deepEqual(r.service.taskSummary().waiting.map((w) => [w.id, w.cause, w.title]), [[task.id, "approval", "Login redirect"]], "and the status names it, for a notification");
 
     r.exec.kick();
     await flush();

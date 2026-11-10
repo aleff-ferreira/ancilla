@@ -4,6 +4,8 @@
  * here touches either, so the decision of what is worth announcing stays testable on its own.
  */
 
+import type { AssistantWaitingView } from "../types.js";
+
 export type NotifyPermission = "granted" | "denied" | "default";
 
 export interface Notifier {
@@ -11,7 +13,8 @@ export interface Notifier {
   permission(): Promise<NotifyPermission>;
   /** Asks once. Browsers only honour this from a real user gesture, which is why it is not automatic. */
   request(): Promise<NotifyPermission>;
-  show(note: { title: string; body: string; tag: string }): Promise<void>;
+  /** `onClick` is what pressing the notice does, for a shell that can hear it; one that cannot just brings the window forward. */
+  show(note: { title: string; body: string; tag: string; onClick?: () => void }): Promise<void>;
 }
 
 export interface NotifySettings {
@@ -28,13 +31,57 @@ export type NotifyEvent =
   | { kind: "finished"; sessionId: string; thread: string; failed: boolean }
   | { kind: "goal"; sessionId: string; thread: string; status: string }
   /** Several turns that ended while the app was not hearing the stream, said once instead of once each. */
-  | { kind: "finishedMany"; count: number; failed: number };
+  | { kind: "finishedMany"; count: number; failed: number }
+  /** An assistant task stopped for the person: an approval, a web task's question, a task that asks what to do. */
+  | { kind: "task"; taskId: string; cause: AssistantWaitingView["cause"]; title: string };
 
 /** One thread flapping between states should not buzz over and over. */
 const REPEAT_MS = 20_000;
 
+/** The most of a task's name a notice carries: it can be read on a lock screen, and it is only a name. */
+const TASK_NAME_MAX = 60;
+
+/** A task's name as one short line in quotes: no control characters, no breaks, and nothing but the name. */
+function quotedName(title: string): string {
+  const line = title.replace(/\p{C}+/gu, " ").replace(/\s+/g, " ").trim();
+  if (line === "") {
+    return "A task";
+  }
+  return `"${line.length > TASK_NAME_MAX ? `${line.slice(0, TASK_NAME_MAX - 3)}...` : line}"`;
+}
+
+function taskCopy(cause: AssistantWaitingView["cause"], name: string): { title: string; body: string } {
+  switch (cause) {
+    case "approval":
+      return { title: "The assistant needs your approval", body: `${name} is waiting for you to approve it.` };
+    case "site":
+      return { title: "The assistant is waiting on you", body: `${name} asks before opening a site.` };
+    case "action":
+      return { title: "The assistant is waiting on you", body: `${name} asks before it does something on a page.` };
+    case "download":
+      return { title: "The assistant is waiting on you", body: `${name} asks where to save a file.` };
+    case "question":
+      return { title: "The assistant is waiting on you", body: `${name} has a question for you.` };
+    case "blocked":
+      return { title: "A task needs you", body: `${name} stopped and is waiting for you.` };
+  }
+}
+
+function tagOf(event: NotifyEvent): string {
+  switch (event.kind) {
+    case "finishedMany":
+      return event.kind;
+    case "task":
+      return `task:${event.taskId}`;
+    default:
+      return `${event.kind}:${event.sessionId}`;
+  }
+}
+
 function copy(event: NotifyEvent): { title: string; body: string } {
   switch (event.kind) {
+    case "task":
+      return taskCopy(event.cause, quotedName(event.title));
     case "approval":
       return { title: "Muse is waiting on you", body: `${event.thread} wants to run something.` };
     case "question":
@@ -68,7 +115,8 @@ export class NotificationManager {
     private readonly now: () => number = () => Date.now(),
   ) {}
 
-  async announce(event: NotifyEvent): Promise<void> {
+  /** `onClick` is where pressing the notice should lead, when the shell can hear a press. */
+  async announce(event: NotifyEvent, onClick?: () => void): Promise<void> {
     const { enabled, focused } = this.settings();
     if (!enabled || focused) {
       return;
@@ -77,7 +125,7 @@ export class NotificationManager {
     if ((await this.notifier.permission()) !== "granted") {
       return;
     }
-    const tag = event.kind === "finishedMany" ? event.kind : `${event.kind}:${event.sessionId}`;
+    const tag = tagOf(event);
     const at = this.now();
     if (at - (this.shown.get(tag) ?? Number.NEGATIVE_INFINITY) < REPEAT_MS) {
       return;
@@ -85,13 +133,13 @@ export class NotificationManager {
     this.shown.set(tag, at);
     const { title, body } = copy(event);
     try {
-      await this.notifier.show({ title, body, tag });
+      await this.notifier.show({ title, body, tag, ...(onClick ? { onClick } : {}) });
     } catch {
       // A notifier that refuses is not worth breaking a turn over.
     }
   }
 
-  /** Lets a thread announce itself again, once the user has dealt with whatever it said. */
+  /** Lets a thread (or a task, by its id) announce itself again, once the user has dealt with whatever it said. */
   forget(sessionId: string): void {
     for (const key of [...this.shown.keys()]) {
       if (key.endsWith(`:${sessionId}`)) {

@@ -28,9 +28,17 @@ function browserNotifier(): Notifier | undefined {
         return "denied";
       }
     },
-    async show({ title, body, tag }) {
+    async show({ title, body, tag, onClick }) {
       // `tag` replaces an earlier notice about the same thread instead of stacking another one up.
-      new Notification(title, { body, tag });
+      const notice = new Notification(title, { body, tag });
+      if (onClick) {
+        // Pressing it brings this tab forward and goes where the notice points; the notice has done its job.
+        notice.onclick = () => {
+          window.focus();
+          notice.close();
+          onClick();
+        };
+      }
     },
   };
 }
@@ -57,7 +65,8 @@ function desktopNotifier(): Notifier {
     },
     async show({ title, body }) {
       // The plugin has no notion of replacing an earlier notice, so the manager's own repeat window
-      // is the only thing keeping one thread from stacking up.
+      // is the only thing keeping one thread from stacking up. It reports no press on a desktop either: the OS
+      // brings the window forward, and the assistant's card in the sidebar says what waits.
       sendNotification({ title, body });
     },
   };

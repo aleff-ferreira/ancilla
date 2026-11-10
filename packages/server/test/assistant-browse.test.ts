@@ -145,9 +145,11 @@ describe("a web task", () => {
     assert.equal(noticeOf(asking), "needs", "the call counts it as waiting on the person");
     assert.equal(r.sites.gate.pending()?.origin, "https://a.example");
     assert.deepEqual(r.runner.current()?.question?.origin, "https://a.example");
+    assert.deepEqual(r.service.taskSummary().waiting, [{ id, title: "Look at A", cause: "site", reason: "Waiting for your approval to open https://a.example." }], "the status names what it waits on, and why");
 
     r.exec.answerSite(id, "task");
     await until(() => r.task(id).status === "completed", "the answer");
+    assert.deepEqual(r.service.taskSummary().waiting, [], "answered, it waits on nobody");
     const done = r.task(id);
     assert.equal(done.result, "From the web (not checked):\nA says hello.\nPages: https://a.example/page");
     assert.match(done.reason, /^Done after 2 steps\.$/);
