@@ -2,12 +2,15 @@ import type { BrowseReport, ConnectorRunnerPort } from "../assistant/executive.j
 import type { Task } from "../assistant/tasks.js";
 import type { BrainProvider } from "../voice/brain.js";
 import { ConnectorAgent, type ConnectorOutcome } from "./agent.js";
+import type { Trigger } from "./gate.js";
 import type { ConnectorRegistry } from "./registry.js";
 
 /**
- * Runs the connector task the executive made: the reading agent, on one connected account, with the model the voice is set to
- * use. It owns nothing of the task's row; it reports what happens, and the executive writes it down. One task at a time, which
- * keeps what a Muse-backed task costs (about 16k tokens a step) from stacking up unseen. A cancel comes in through `cancel`.
+ * Runs the connector task the executive made: the agent, on one connected account, with the model the voice is set to use. It
+ * owns nothing of the task's row; it reports what happens, and the executive writes it down. A change the agent wants waits for
+ * the person: the task then shows as waiting (`asking`), the time it waits is not counted against its working time, and a cancel
+ * lets go of the card. One task at a time, which keeps what a Muse-backed task costs (about 16k tokens a step) from stacking up
+ * unseen. A cancel comes in through `cancel`.
  */
 
 export interface ConnectorRunnerDeps {
@@ -22,6 +25,10 @@ interface Job {
   taskId: string;
   abort: AbortController;
   startedAt: number;
+  /** Time spent waiting for the person, which is not the task's working time. */
+  waited: number;
+  /** When the current wait began, or null. */
+  since: number | null;
 }
 
 /** What is kept of a task that answered: the answer, labelled as what it is, and where it came from. */
@@ -56,14 +63,15 @@ export class ConnectorRunner implements ConnectorRunnerPort {
     return chosen.problem ? { ok: false, reason: chosen.problem } : { ok: true };
   }
 
-  run(task: Task, connector: string, report: BrowseReport): void {
+  /** `trigger`: who started the task. A task nobody started in person may not change anything: what it wants becomes a proposal. */
+  run(task: Task, connector: string, report: BrowseReport, trigger: Trigger): void {
     if (this.job) {
-      report.settle({ ok: false, result: "", reason: "The assistant is already using a connector.", });
+      report.settle({ ok: false, result: "", reason: "The assistant is already using a connector." });
       return;
     }
-    const job: Job = { taskId: task.id, abort: new AbortController(), startedAt: this.now() };
+    const job: Job = { taskId: task.id, abort: new AbortController(), startedAt: this.now(), waited: 0, since: null };
     this.job = job;
-    void this.execute(job, task, connector, report).catch((error: unknown) => this.deps.log(`connector: ${error instanceof Error ? error.message : String(error)}`));
+    void this.execute(job, task, connector, report, trigger).catch((error: unknown) => this.deps.log(`connector: ${error instanceof Error ? error.message : String(error)}`));
   }
 
   cancel(taskId: string, _reason: string): void {
@@ -75,23 +83,40 @@ export class ConnectorRunner implements ConnectorRunnerPort {
     this.job?.abort.abort();
   }
 
-  private async execute(job: Job, task: Task, connector: string, report: BrowseReport): Promise<void> {
+  private async execute(job: Job, task: Task, connector: string, report: BrowseReport, trigger: Trigger): Promise<void> {
     let outcome: ConnectorOutcome;
     let source = connector;
     try {
       source = this.deps.registry.view(connector).name;
       const chosen = this.deps.brain();
       if (chosen.problem) throw new Error(chosen.problem);
-      const session = await this.deps.registry.open(connector);
+      const session = await this.deps.registry.open(connector, {
+        task: task.id,
+        trigger,
+        goal: task.goal,
+        ask: {
+          asking: (reason) => {
+            job.since ??= this.now();
+            report.asking(reason);
+          },
+          resumed: (reason) => {
+            if (job.since !== null) job.waited += this.now() - job.since;
+            job.since = null;
+            report.resumed(reason);
+          },
+        },
+      });
       try {
         outcome = await new ConnectorAgent(chosen.brain, session).run(task.goal, {
           signal: job.abort.signal,
           task: task.id,
-          elapsedMs: () => this.now() - job.startedAt,
+          elapsedMs: () => this.now() - job.startedAt - job.waited - (job.since !== null ? this.now() - job.since : 0),
           onStep: (line) => report.progress(line),
           log: this.deps.log,
         });
       } finally {
+        // Whatever it still had waiting for the person is refused: a card does not outlive its task.
+        this.deps.registry.gate.end(task.id);
         await session.close().catch(() => undefined);
       }
     } catch (error) {

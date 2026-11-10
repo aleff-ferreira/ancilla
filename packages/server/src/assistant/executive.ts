@@ -1,4 +1,5 @@
 import type { QuestionView } from "../browser/sites.js";
+import type { Trigger } from "../connectors/gate.js";
 import { ConflictError, NotFoundError, ValidationError } from "./store.js";
 import { awaitsApproval, stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
 import type { AssistantProfile } from "./types.js";
@@ -37,12 +38,13 @@ export interface BrowseRunnerPort {
 }
 
 /**
- * A connected account, as the executive uses it: the same shape of work as a web task, with nothing to ask the person (a connector
- * task reads, and what it reads is never a question). The executive owns the task's row; the runner owns the work.
+ * A connected account, as the executive uses it: the same shape of work as a web task. What it reads is never a question, but a
+ * change it wants is: the task then shows as waiting for the person (`report.asking`), and goes on when they answer. The
+ * executive owns the task's row; the runner owns the work.
  */
 export interface ConnectorRunnerPort {
-  /** Starts the work in this process, on the connector named. It reports through `report` and never throws. */
-  run(task: Task, connector: string, report: BrowseReport): void;
+  /** Starts the work in this process, on the connector named. `trigger` says who started it. It reports through `report` and never throws. */
+  run(task: Task, connector: string, report: BrowseReport, trigger: Trigger): void;
   cancel(taskId: string, reason: string): void;
   owns(taskId: string): boolean;
   /** Whether this connector is connected and switched on, and a model is there, and if not, why. */
@@ -258,16 +260,17 @@ export class Executive {
   }
 
   /**
-   * Starts a connector task: a row the person can see and cancel, worked on at once by the reading agent on one connected
-   * account. Like a web task it is made running and never queued, and its end comes back through the report.
+   * Starts a connector task: a row the person can see and cancel, worked on at once by the agent on one connected account. Like a
+   * web task it is made running and never queued, and its end comes back through the report. `trigger` is required, so that no
+   * caller can forget to say who started it: a task nobody started in person may not change anything in the account.
    */
-  createConnector(spec: NewTask, connector: string): Task {
+  createConnector(spec: NewTask, connector: string, trigger: Trigger): Task {
     const profile = this.opts.profile();
     if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
     const runner = this.opts.connector;
     if (!runner) throw new ConflictError("Connectors are not available here.");
-    // One at a time. A row that nothing is working on (the runner lost track of it) does not count.
-    for (const open of this.tasks.byStatus(["running"]).filter((t) => t.origin === "connector")) {
+    // One at a time. A row that nothing is working on (the runner lost track of it) does not count. One that waits for an answer is still the one.
+    for (const open of this.tasks.byStatus(["running", "paused"]).filter((t) => t.origin === "connector")) {
       if (runner.owns(open.id)) throw new ConflictError("The assistant is already using a connector. Wait for it to finish, or cancel it.");
       this.tasks.setStatus(open.id, "failed", "The assistant lost track of this connector task.");
       this.opts.changed(open.id);
@@ -276,7 +279,7 @@ export class Executive {
     const created = this.tasks.create({ ...spec, origin: "connector", allowWrites: false, steps: [{ title: "Look it up", prompt: null, effect: "read", verifier: null }] });
     const task = this.tasks.setStatus(created.id, "running", "Connecting.");
     this.opts.changed(task.id);
-    runner.run(task, connector, this.browseReport(task.id));
+    runner.run(task, connector, this.browseReport(task.id), trigger);
     return task;
   }
 

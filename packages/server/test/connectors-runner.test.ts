@@ -96,7 +96,7 @@ describe("a task on a connected account", () => {
     assert.deepEqual((spec?.parameters["properties"] as Record<string, { enum?: string[] }>)["connector"]?.enum, ["github"], "it names what exists");
 
     const { result, id } = await r.start();
-    assert.match(result.text, /Started task .*It reads GitHub in the background and can change nothing/);
+    assert.match(result.text, /Started task .*It works in GitHub in the background\. It can change something only if the user asked for that/);
     assert.equal(result.narration, "I've started that in the background.");
     const made = r.task(id);
     assert.deepEqual([made.origin, made.allowWrites, made.title, made.cwd], ["connector", false, "Open on GitHub", "/work/atlas"]);

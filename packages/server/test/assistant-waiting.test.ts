@@ -33,6 +33,23 @@ describe("a task that waits on the person", () => {
     assert.equal(waitingCause(asking, null), "question");
   });
 
+  it("says a task on a connected account waits when it holds a change for the person, and at no other time", () => {
+    const holding = task({ origin: "connector", status: "paused", reason: "Waiting for your approval: Merge a pull request (o/r #3) on GitHub." });
+    assert.equal(waitingCause(holding, null), "change");
+    assert.equal(waitingCause(holding, SITE), "change", "a connector task has no web question to look at");
+    for (const status of ["queued", "running", "waiting", "completed", "unverified", "failed", "cancelled"] as TaskStatus[]) {
+      assert.equal(waitingCause(task({ origin: "connector", status }), null), null, status);
+    }
+    const asked: string[] = [];
+    const out = waitingTasks([holding], (id) => {
+      asked.push(id);
+      return SITE;
+    });
+    assert.deepEqual(out, [{ id: "t_1", title: "Look at A", cause: "change", reason: holding.reason }], "the notification names it and says why");
+    assert.deepEqual(asked, [], "and no question is asked about it");
+    assert.equal(noticeOf(holding), "needs", "the call counts it too");
+  });
+
   it("counts a proposal nobody approved yet, and a task that stopped and asks what to do", () => {
     assert.equal(waitingCause(task({ origin: "voice", status: "paused", startedAt: null }), null), "approval");
     assert.equal(waitingCause(task({ status: "blocked" }), null), "blocked");

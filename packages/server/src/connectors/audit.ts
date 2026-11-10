@@ -8,7 +8,10 @@ import { redact } from "./manifest.js";
  * Connectors page. No model tool can reach it, so what a task did cannot be rewritten by the task.
  */
 
-export type AuditKind = "call" | "connect" | "test" | "mode" | "disconnect";
+export type AuditKind = "call" | "connect" | "test" | "mode" | "policy" | "disconnect" | "write";
+
+/** The steps of a change to an account: asked about, approved, refused, expired, kept for the person, sent. */
+export type WritePhase = "held" | "approved" | "refused" | "expired" | "proposed" | "executed";
 
 export interface AuditEntry {
   at: number;
@@ -18,6 +21,9 @@ export interface AuditEntry {
   tool?: string;
   /** The arguments of a call, as text. */
   args?: string;
+  /** A change (`write`): which step, and the hash of its arguments, whole, so that what was approved can be told from what was sent. */
+  phase?: WritePhase;
+  hash?: string;
   ok: boolean;
   /** How much came back, in characters. */
   size?: number;

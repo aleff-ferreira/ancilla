@@ -2,16 +2,63 @@
  * What a connector is before any account is involved: where its server is, how a person makes the token it takes, and the one
  * list that matters, the tools the assistant is given. That list is OURS. A server says what its tools are and what they do, and
  * a server can say anything (what it returns can be what a stranger wrote in an issue or an email), so only the tools on our
- * list are offered, in our words, and a tool that is not on it cannot be called, even by name. This slice offers reads only.
+ * list are offered, in our words, and a tool that is not on it cannot be called, even by name. Each tool has a class, and a
+ * tool that changes something is offered only where the person switched its class on, and runs only with an approval (gate.ts).
  */
 
-/** `read` looks and changes nothing. Writes, and the approval they need, are a later slice: nothing else is offered. */
-export type ToolClass = "read";
+/**
+ * What a tool does to the account. `read` looks and changes nothing. The others change something, and the person is asked
+ * about each call: `reversible` can be undone in a click (a branch, a draft, a label), `communicates` is seen by other people
+ * (a comment, an issue, a pull request), `destructive` can lose work or cannot be taken back (a merge, a close, a delete).
+ */
+export type WriteClass = "reversible" | "communicates" | "destructive";
+export type ToolClass = "read" | WriteClass;
+export const WRITE_CLASSES: readonly WriteClass[] = ["reversible", "communicates", "destructive"];
+const RANK: Record<ToolClass, number> = { read: 0, reversible: 1, communicates: 2, destructive: 3 };
+
+/** What a call is about, for the card and for noticing what the person did not name. */
+export interface Target {
+  /** In words, for the card: "aleff-ferreira/ancilla #12". */
+  label: string;
+  /** The item as one key, so that what was read of it and what is written to it can be told from other items; null for a whole repository. */
+  item: string | null;
+  /** The parts of the target, each with the spellings under which the person's own words would have named it. */
+  parts: Array<{ shown: string; accepts: string[] }>;
+}
 
 export interface ToolEntry {
   class: ToolClass;
   /** What the model is told the tool does: ours, and short, because every offered tool costs tokens on every step. */
   text: string;
+  /** Reads only: what comes back is something nobody else could have written (who the token is, the person's own projects). Absent means a stranger may have written it, and reading it taints the task. */
+  own?: true;
+  target?: (args: Record<string, unknown>) => Target | null;
+  /** A tool that is more than its class says for some arguments (an update that closes an issue is a close): the class such a call is held to. Never lower than `class`. */
+  escalate?: (args: Record<string, unknown>) => ToolClass | null;
+}
+
+/** The class a call is held to: the tool's own, or higher when its arguments make it more. */
+export function classOf(entry: ToolEntry, args: Record<string, unknown>): ToolClass {
+  const up = entry.escalate?.(args) ?? null;
+  return up !== null && RANK[up] > RANK[entry.class] ? up : entry.class;
+}
+
+/** The person's setting for each class of change. `always` is only ever for `reversible`, and only after a first yes. */
+export type WriteSetting = "off" | "ask" | "always";
+export type WritePolicy = Record<WriteClass, WriteSetting>;
+/** A connector starts as it was promised: reads only. The person switches each class on. */
+export const DEFAULT_POLICY: WritePolicy = { reversible: "off", communicates: "off", destructive: "off" };
+
+/** What is stored, made safe: an unknown value is off, and nothing but a reversible change can be allowed without asking. */
+export function cleanPolicy(raw: unknown): WritePolicy {
+  const out: WritePolicy = { ...DEFAULT_POLICY };
+  if (typeof raw !== "object" || raw === null) return out;
+  for (const cls of WRITE_CLASSES) {
+    const value = (raw as Record<string, unknown>)[cls];
+    if (value === "ask" || value === "off") out[cls] = value;
+    else if (value === "always") out[cls] = cls === "reversible" ? "always" : "ask";
+  }
+  return out;
 }
 
 export interface ConnectorManifest {
@@ -39,6 +86,7 @@ export interface ServerTool {
 
 export interface OfferedTool {
   name: string;
+  class: ToolClass;
   text: string;
   parameters: Record<string, unknown>;
 }
@@ -49,6 +97,8 @@ export interface Offering {
   hidden: string[];
   /** Tools on the list that the server did not list: renamed or removed, and so not offered either. */
   missing: string[];
+  /** Tools on the list that the server has, which the person's settings switch off. */
+  off: string[];
 }
 
 const SCHEMA_TYPES = new Set(["string", "number", "integer", "boolean", "array", "object", "null"]);
@@ -97,22 +147,26 @@ export function parametersOf(schema: unknown): Record<string, unknown> {
   return { type: "object", properties, ...(Array.isArray(clean["required"]) && clean["required"].length > 0 ? { required: clean["required"] } : {}) };
 }
 
-/** What the server's tools come to once our list has been laid over them. */
-export function offerTools(manifest: ConnectorManifest, serverTools: readonly ServerTool[]): Offering {
+/** What the server's tools come to once our list, and the person's settings, have been laid over them. */
+export function offerTools(manifest: ConnectorManifest, serverTools: readonly ServerTool[], policy: WritePolicy = DEFAULT_POLICY): Offering {
   const listed = new Map(serverTools.map((tool) => [tool.name, tool]));
   const offered: OfferedTool[] = [];
   const missing: string[] = [];
+  const off: string[] = [];
   for (const [name, entry] of Object.entries(manifest.tools)) {
     const found = listed.get(name);
     if (!found) {
       missing.push(name);
       continue;
     }
-    if (entry.class !== "read") continue;
-    offered.push({ name, text: entry.text, parameters: parametersOf(found.inputSchema) });
+    if (entry.class !== "read" && policy[entry.class] === "off") {
+      off.push(name);
+      continue;
+    }
+    offered.push({ name, class: entry.class, text: entry.text, parameters: parametersOf(found.inputSchema) });
   }
   const hidden = serverTools.map((tool) => tool.name).filter((name) => !Object.hasOwn(manifest.tools, name));
-  return { offered, hidden, missing };
+  return { offered, hidden, missing, off };
 }
 
 // ---------------------------------------------------------------------------------------------------------------- what comes back

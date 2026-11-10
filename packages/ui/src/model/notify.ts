@@ -62,6 +62,8 @@ function taskCopy(cause: AssistantWaitingView["cause"], name: string): { title: 
       return { title: "The assistant is waiting on you", body: `${name} asks where to save a file.` };
     case "question":
       return { title: "The assistant is waiting on you", body: `${name} has a question for you.` };
+    case "change":
+      return { title: "The assistant is waiting on you", body: `${name} asks before it changes something in an account.` };
     case "blocked":
       return { title: "A task needs you", body: `${name} stopped and is waiting for you.` };
   }

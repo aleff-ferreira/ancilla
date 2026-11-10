@@ -965,11 +965,18 @@ export interface AssistantStatusView {
 export interface AssistantWaitingView {
   id: string;
   title: string;
-  /** `approval` a proposal, `site` / `action` / `download` a web task's question, `question` one that is not known, `blocked` a task that asks what to do. */
-  cause: "approval" | "site" | "action" | "download" | "question" | "blocked";
+  /** `approval` a proposal, `site` / `action` / `download` a web task's question, `question` one that is not known, `change` a task on a connected account that asks before it changes something, `blocked` a task that asks what to do. */
+  cause: "approval" | "site" | "action" | "download" | "question" | "change" | "blocked";
   /** Why, in the task's own words: it changes when the task asks something else. Never shown in a notice. */
   reason: string;
 }
+
+/** What a tool does to an account: `read` looks; the others change something and are asked about, one call at a time. */
+export type AssistantToolClass = "read" | "reversible" | "communicates" | "destructive";
+export type AssistantWriteClass = Exclude<AssistantToolClass, "read">;
+
+/** The person's setting for each kind of change. `always` is only ever for `reversible`, and only after a first yes. */
+export type AssistantWritePolicy = Record<AssistantWriteClass, "off" | "ask" | "always">;
 
 /** What the last test of a connected account found. */
 export interface AssistantConnectorTest {
@@ -977,7 +984,7 @@ export interface AssistantConnectorTest {
   ok: boolean;
   message: string;
   /** The tools the assistant is given, with our words for each. */
-  offered: Array<{ name: string; text: string }>;
+  offered: Array<{ name: string; text: string; class: AssistantToolClass }>;
   /** How many other tools the server has that are not offered. */
   hidden: number;
   /** Tools on our list that the server did not list. */
@@ -998,6 +1005,10 @@ export interface AssistantConnectorView {
   revoke: { url: string; text: string };
   /** Said before connecting when the provider cannot limit the token. */
   caution: string | null;
+  /** The person's setting for each kind of change: all off until they switch one on. */
+  policy: AssistantWritePolicy;
+  /** The tools that change something, with our words for each: what the settings switch on. */
+  writeTools: Array<{ name: string; class: AssistantWriteClass; text: string }>;
   test: AssistantConnectorTest | null;
 }
 
@@ -1007,14 +1018,43 @@ export interface AssistantConnectorsView {
   storage: string;
 }
 
+/** A change that waits for the person: made from the call itself, never from what the model said about it. */
+export interface AssistantWriteCard {
+  id: string;
+  taskId: string | null;
+  connector: string;
+  connectorName: string;
+  tool: string;
+  class: AssistantWriteClass;
+  /** What the tool does, in Ancilla's words. */
+  what: string;
+  /** What it is about ("owner/repo #12"), when the tool says. */
+  target: string | null;
+  /** Every argument, whole. */
+  fields: Array<{ name: string; value: string }>;
+  /** What code noticed that the person should look at before saying yes. */
+  flags: Array<{ code: string; text: string }>;
+  /** The hash of the arguments that an approval is bound to. */
+  hash: string;
+  at: number;
+  expiresAt: number;
+  /** Whether "always" may be answered. */
+  offerAlways: boolean;
+  /** Nobody was there when it was asked for: it waits for the person, with no task holding it. */
+  proposal: boolean;
+}
+
 /** One line of what the connectors did. */
 export interface AssistantConnectorActivity {
   at: number;
-  kind: "call" | "connect" | "test" | "mode" | "disconnect";
+  kind: "call" | "connect" | "test" | "mode" | "policy" | "disconnect" | "write";
   connector: string;
   task?: string | null;
   tool?: string;
   args?: string;
+  /** A change (`write`): which step, and the hash of its arguments. */
+  phase?: "held" | "approved" | "refused" | "expired" | "proposed" | "executed";
+  hash?: string;
   ok: boolean;
   size?: number;
   ms?: number;

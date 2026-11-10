@@ -243,10 +243,10 @@ export class VoiceTools {
           // A task on an account belongs to no project, but a task row names a folder: the project of the call, or the home folder.
           const cwd = this.deps.project() ?? homedir();
           const spec = parseTaskSpec({ goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
-          const task = executive.createConnector(spec, connector.id);
+          const task = executive.createConnector(spec, connector.id, "person");
           return {
             ok: true,
-            text: `Started task ${task.id}, "${sayable(task.title, 80)}". It reads ${connector.name} in the background and can change nothing. The user is told when it finishes. Say that it is on it; do not say what it found until it has.`,
+            text: `Started task ${task.id}, "${sayable(task.title, 80)}". It works in ${connector.name} in the background. It can change something only if the user asked for that, and then the user must approve each change on the screen. The user is told when it finishes or when it waits for them. Say that it is on it; do not say what it found until it has.`,
             narration: taskPhrase(lang, "started", task.title),
           };
         }

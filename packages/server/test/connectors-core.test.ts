@@ -7,7 +7,7 @@ import { AuditLog, maskArgs } from "../src/connectors/audit.js";
 import { BREVO, CATALOG, GITHUB, SUPABASE } from "../src/connectors/catalog.js";
 import { cut, flattenResult, HIDDEN, offerTools, parametersOf, redact, sanitizeSchema } from "../src/connectors/manifest.js";
 import { FileSecretStore } from "../src/connectors/secrets.js";
-import { OTHER_KEY, SCHEMA, TOKEN, WRITE_TOOLS, fakeServer, piece } from "./connectors-fixtures.js";
+import { LISTED_WRITES, OTHER_KEY, SCHEMA, TOKEN, WRITE_TOOLS, fakeServer, piece, readNames } from "./connectors-fixtures.js";
 
 /**
  * The parts of a connector that need no server: the tool list that is ours alone, what is stripped from a server's words, what
@@ -20,9 +20,13 @@ describe("the tool list that is ours", () => {
   it("offers only the tools on the list, in the list's order, in our words, and says what it left out", () => {
     const server = fakeServer();
     const offering = offerTools(GITHUB, server.tools);
-    assert.deepEqual(offering.offered.map((t) => t.name), Object.keys(GITHUB.tools), "every read tool of the list, and nothing else");
+    assert.deepEqual(offering.offered.map((t) => t.name), readNames(GITHUB), "every read tool of the list, and nothing else: no kind of change is switched on");
+    assert.deepEqual(offering.off, LISTED_WRITES, "the changes on the list are held back by the settings, not hidden");
     assert.equal(offering.offered[0]?.text, GITHUB.tools["get_me"]?.text, "our description, never the server's");
     for (const name of WRITE_TOOLS) assert.ok(offering.hidden.includes(name), `${name} is hidden`);
+    const on = offerTools(GITHUB, server.tools, { reversible: "off", communicates: "ask", destructive: "off" });
+    assert.deepEqual(on.offered.filter((t) => t.class !== "read").map((t) => t.name), ["add_issue_comment", "issue_write", "create_pull_request"], "one kind switched on offers the tools of that kind and no other");
+    assert.deepEqual(on.off, ["create_branch", "merge_pull_request"]);
     assert.ok(offering.hidden.includes("get_secret_scanning_alert"), "a read tool that is not on the list is not offered either");
     assert.deepEqual(offering.missing, []);
   });
@@ -36,15 +40,20 @@ describe("the tool list that is ours", () => {
     assert.ok(!offering.offered.some((t) => t.name === "__proto__" || t.name === "constructor"));
   });
 
-  it("never offers a tool of a class it was not given: the list can hold nothing that changes anything", () => {
+  it("classes every tool: a read never reads like a change, a change is in a class the person can switch, and the check is a read", () => {
+    const changes = /(^|_)(create|update|delete|write|merge|push|send|run|apply|deploy|remove|set|post|add|dismiss|mark|manage|assign|fork|star|unstar|submit|restore|pause|reset|rebase)(_|$)/;
     for (const manifest of CATALOG) {
       for (const [name, entry] of Object.entries(manifest.tools)) {
-        assert.equal(entry.class, "read", `${manifest.id}.${name}`);
-        assert.ok(!/(^|_)(create|update|delete|write|merge|push|send|run|apply|deploy|remove|set|post|add|dismiss|mark|manage|assign|fork|star|unstar|submit|restore|pause|reset|rebase)(_|$)/.test(name), `${manifest.id}.${name} reads like a change`);
+        if (entry.class === "read") assert.ok(!changes.test(name), `${manifest.id}.${name} is classed as a read but reads like a change`);
+        else assert.ok(["reversible", "communicates", "destructive"].includes(entry.class) && changes.test(name), `${manifest.id}.${name}`);
       }
-      assert.ok(Object.hasOwn(manifest.tools, manifest.probe.tool), `${manifest.id}: the check is a tool on the list`);
-      assert.ok(Object.keys(manifest.tools).length <= 14, `${manifest.id}: every offered tool costs tokens on every step`);
+      assert.equal(manifest.tools[manifest.probe.tool]?.class, "read", `${manifest.id}: the check is a read on the list`);
+      assert.ok(readNames(manifest).length <= 14, `${manifest.id}: every offered tool costs tokens on every step`);
+      assert.ok(Object.keys(manifest.tools).length - readNames(manifest).length <= 8, `${manifest.id}: and so does every tool that changes something`);
     }
+    assert.deepEqual(Object.entries(GITHUB.tools).filter(([, e]) => e.class !== "read").map(([n, e]) => [n, e.class]), [["create_branch", "reversible"], ["add_issue_comment", "communicates"], ["issue_write", "communicates"], ["create_pull_request", "communicates"], ["merge_pull_request", "destructive"]]);
+    assert.ok(Object.entries(GITHUB.tools).filter(([, e]) => e.class !== "read").every(([, e]) => e.target !== undefined), "a change to GitHub names the repository it is about");
+    assert.deepEqual(Object.entries(SUPABASE.tools).concat(Object.entries(BREVO.tools)).filter(([, e]) => e.class !== "read"), [], "the writes of Supabase and Brevo come later");
     assert.deepEqual(CATALOG.map((m) => m.id), ["github", "supabase", "brevo"]);
     assert.ok(!Object.hasOwn(SUPABASE.tools, "execute_sql"), "arbitrary SQL waits for the gate that reads the statement");
     assert.ok(BREVO.caution && SUPABASE.caution, "a provider that cannot limit the token says so before the token is given");

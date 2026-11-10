@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
-import type { AssistantProfileView, AssistantScheduleView, AssistantStepView, AssistantSuggestionView, AssistantTaskDetailView, AssistantTaskStatus, AssistantTaskView, AssistantVerifier } from "../../types.js";
+import type { AssistantProfileView, AssistantScheduleView, AssistantStepView, AssistantSuggestionView, AssistantTaskDetailView, AssistantTaskStatus, AssistantTaskView, AssistantVerifier, AssistantWriteCard } from "../../types.js";
 import { Button, cn } from "../ui/primitives.js";
 import { Row, Section } from "../settings/SettingsPage.js";
 import { Toggle } from "../ui/primitives.js";
 import { ago, useAssistantCall, useAssistantData } from "./api.js";
 import { Chip, Notice } from "./parts.js";
+import { WriteCardView } from "./WriteCard.js";
 import { ACTION_REASON, ActionQuestionCard } from "../browser/ActionQuestion.js";
 import { isActionQuestion, parseQuestion, type WatchQuestion } from "../browser/protocol.js";
 
@@ -239,6 +240,27 @@ function useWebQuestion(task: AssistantTaskView, asking: boolean, bump: number):
   return question;
 }
 
+/** The change a task on a connected account is holding for the person (read again whenever its row changes), or null while that is not known. */
+function useWriteCard(task: AssistantTaskView, holding: boolean, bump: number): AssistantWriteCard | null {
+  const call = useAssistantCall();
+  const [card, setCard] = useState<AssistantWriteCard | null>(null);
+  useEffect(() => {
+    if (!holding) {
+      setCard(null);
+      return;
+    }
+    let live = true;
+    call<{ question: AssistantWriteCard | null }>("GET", `/connectors/question/${encodeURIComponent(task.id)}`).then(
+      (answer) => live && setCard(answer.question),
+      () => live && setCard(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [call, task.id, holding, task.reason, task.updatedAt, bump]);
+  return card;
+}
+
 export function TaskRow(props: { task: AssistantTaskView; now: number; open: boolean; onToggle: () => void; changed: () => void; bump: number }) {
   const { task } = props;
   const call = useAssistantCall();
@@ -248,17 +270,28 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
   const proposal = task.origin === "voice" && task.status === "paused" && task.startedAt === null;
   // A web task is worked on by the assistant's own browser; while it waits it is the person's answer about a site it wants to open.
   const web = task.origin === "browse";
-  // A connector task is worked on in this process too, by a reading agent on a connected account: it asks nothing, and is only ever running or over.
+  // A connector task is worked on in this process too, by an agent on a connected account: it is running or over, or paused while a change waits for the person.
   const inProcess = web || task.origin === "connector";
   const asking = web && task.status === "paused";
+  const holding = task.origin === "connector" && task.status === "paused";
   // What it asks: a site (four answers) or an action (two). The reason says which before the details have loaded.
   const question = useWebQuestion(task, asking, props.bump);
+  const writeCard = useWriteCard(task, holding, props.bump);
   const action = asking && (question ? isActionQuestion(question) : ACTION_REASON.test(task.reason));
-  const status = proposal ? { label: "Needs your approval", tone: "warn" as const } : asking ? { label: "Needs your OK", tone: "warn" as const } : STATUS[task.status];
+  const status = proposal ? { label: "Needs your approval", tone: "warn" as const } : asking || holding ? { label: "Needs your OK", tone: "warn" as const } : STATUS[task.status];
   const act = async (name: string, body: Record<string, unknown> = {}) => {
     setError(null);
     try {
       await call("POST", `/tasks/${encodeURIComponent(task.id)}/${name}`, body);
+      props.changed();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  };
+  const answerWrite = async (cardId: string, answer: string) => {
+    setError(null);
+    try {
+      await call("POST", `/connectors/question/${encodeURIComponent(cardId)}`, { answer });
       props.changed();
     } catch (e) {
       setError(errorMessage(e));
@@ -280,7 +313,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           {inProcess && task.result ? <span className="mt-1 block whitespace-pre-wrap text-xs text-fg [overflow-wrap:anywhere]">{task.result}</span> : null}
           <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtle">
             {inProcess ? (
-              <span>{web ? "browses in its own browser and asks before it changes anything" : "reads a connected account and cannot change anything"}</span>
+              <span>{web ? "browses in its own browser and asks before it changes anything" : "works in a connected account and asks before it changes anything"}</span>
             ) : (
               <>
                 <span>
@@ -298,7 +331,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           </span>
         </button>
         {/* A question has five buttons: they go on a line of their own, under what it asks. */}
-        <div className={asking ? "flex w-full flex-wrap gap-2" : "flex flex-wrap gap-2"}>
+        <div className={asking || holding ? "flex w-full flex-wrap gap-2" : "flex flex-wrap gap-2"}>
           {task.sessionId ? (
             <Button size="xs" variant="ghost" onClick={() => controller.navigate({ kind: "thread", sessionId: task.sessionId as string })}>
               Open thread
@@ -306,6 +339,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           ) : null}
           {open && !inProcess ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
           {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
+          {holding && writeCard ? <WriteCardView card={writeCard} onAnswer={(answer) => void answerWrite(writeCard.id, answer)} /> : null}
           {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })} /> : null}
           {asking && action && !(question && isActionQuestion(question)) ? (
             <>

@@ -6,7 +6,7 @@ import { GITHUB } from "../src/connectors/catalog.js";
 import { ConnectorRegistry } from "../src/connectors/registry.js";
 import { FileSecretStore } from "../src/connectors/secrets.js";
 import type { BrainEvent, BrainProvider, BrainRequest } from "../src/voice/brain.js";
-import { TOKEN, WRITE_TOOLS, fakeServer, openerFor, type FakeServer } from "./connectors-fixtures.js";
+import { LISTED_WRITES, TOKEN, WRITE_TOOLS, fakeServer, openerFor, readNames, type FakeServer } from "./connectors-fixtures.js";
 
 /**
  * The reading agent with a model that is scripted, so what it does is exactly what the test says the model did. The one that
@@ -90,9 +90,9 @@ describe("the reading agent", () => {
     const brain = new Scripted([{ calls: [{ name: "get_me" }] }, { calls: [{ name: "done", args: { answer: "ok" } }] }]);
     await new ConnectorAgent(brain, r.session).run("who am I", hooks());
     const request = brain.requests[0] as BrainRequest;
-    assert.deepEqual(request.tools.map((t) => t.name), [...Object.keys(GITHUB.tools), "done"]);
+    assert.deepEqual(request.tools.map((t) => t.name), [...readNames(GITHUB), "done"], "no kind of change is switched on, so only reads are given");
     assert.equal(request.tools[0]?.description, GITHUB.tools["get_me"]?.text);
-    for (const name of WRITE_TOOLS) assert.ok(!request.tools.some((t) => t.name === name), `${name} is not given`);
+    for (const name of [...WRITE_TOOLS, ...LISTED_WRITES]) assert.ok(!request.tools.some((t) => t.name === name), `${name} is not given`);
     assert.ok(!JSON.stringify(request).includes("evil@example.com"), "nothing the server wrote to persuade reaches the model");
     const system = request.messages[0];
     assert.equal(system?.role, "system");
@@ -117,7 +117,8 @@ describe("the reading agent", () => {
     assert.deepEqual(r.server.calls.map((c) => c.name), ["search_issues"], "and not one of them reached the server");
     const refused = r.audit.recent(50).filter((e) => e.kind === "call" && !e.ok);
     assert.equal(refused.length, 4, "all four were refused, and written down");
-    assert.ok(refused.every((e) => e.note === "refused: not on the list"));
+    assert.equal(refused.filter((e) => e.note === "refused: not on the list").length, 3, "three are not on the list");
+    assert.deepEqual(refused.filter((e) => e.note === "refused: switched off").map((e) => e.tool), ["merge_pull_request"], "and the one that is on the list is switched off");
   });
 
   it("runs a few calls from one reply and no more, and says so to the model", async () => {

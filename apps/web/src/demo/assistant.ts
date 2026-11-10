@@ -5,6 +5,7 @@ import type {
   AssistantCharacterView,
   AssistantConnectorActivity,
   AssistantConnectorView,
+  AssistantWriteCard,
   AssistantEmbeddingTestView,
   AssistantEmbeddingsView,
   AssistantGoalView,
@@ -135,6 +136,11 @@ export class DemoAssistant {
     hub.task.origin = "connector";
     hub.task.sessionId = null;
     this.tasks.unshift(hub);
+    // A task on a connected account that wants to change something: it waits, and the card is answered in the row.
+    const comment = this.task("t8", "Answer the report on issue 12", "paused", "Waiting for your approval: Comment on an issue or a pull request (aleff-ferreira/ancilla #12) on GitHub.", { cwd: "/work/atlas", turns: 0, steps: [["Look it up", "running", "", false]] });
+    comment.task.origin = "connector";
+    comment.task.sessionId = null;
+    this.tasks.unshift(comment);
     this.schedules = [{ id: "sc1", title: "Check the build every morning", goal: "Read last night's CI run and report what failed", cwd: "/work/atlas", kind: "daily", everyMinutes: null, atMinute: 540, tz: "Europe/Lisbon", endAt: this.t0 + 60 * DAY, maxRuns: null, runs: 12, enabled: true, note: "", nextRunAt: this.t0 + 14 * HOUR, lastRunAt: this.t0 - 10 * HOUR }];
     this.log("create", "m6", "capture");
   }
@@ -219,25 +225,36 @@ export class DemoAssistant {
       token: { label: "Fine-grained personal access token", helpUrl: "https://github.com/settings/personal-access-tokens/new", recipe: "Choose the repositories it may see, then under Repository permissions set Contents, Issues, Pull requests and Metadata to Read-only and leave every other permission off. Give it an expiry." },
       revoke: { url: "https://github.com/settings/personal-access-tokens", text: "Open Settings, Developer settings, Personal access tokens, and delete the token." },
       caution: null,
+      policy: { reversible: "off", communicates: "ask", destructive: "off" },
+      writeTools: [
+        { name: "create_branch", class: "reversible", text: "Create a branch in a repository." },
+        { name: "add_issue_comment", class: "communicates", text: "Comment on an issue or a pull request." },
+        { name: "issue_write", class: "communicates", text: "Open an issue (method create), or change one (method update, which can also close it)." },
+        { name: "create_pull_request", class: "communicates", text: "Open a pull request from one branch into another." },
+        { name: "merge_pull_request", class: "destructive", text: "Merge a pull request." },
+      ],
       test: {
         at: Date.now() - 2 * HOUR,
         ok: true,
-        message: "Works. 12 read tools are offered, and 11 more that it has are not offered because they can change things or are not on Ancilla's list.",
+        message: "Works. 12 read tools are offered, and 3 that ask you before they change something, and 7 more that it has are not offered because they can change things or are not on Ancilla's list.",
         offered: [
-          { name: "get_me", text: "Who the token belongs to: the login, the name and the profile." },
-          { name: "search_issues", text: "Find issues. The query uses GitHub search syntax, for example is:open involves:LOGIN, or repo:OWNER/NAME is:open." },
-          { name: "search_pull_requests", text: "Find pull requests. The query uses GitHub search syntax, for example is:open author:LOGIN, or review-requested:LOGIN." },
-          { name: "list_issues", text: "List the issues of one repository." },
-          { name: "issue_read", text: "Read one issue: its text, its comments or its labels." },
-          { name: "pull_request_read", text: "Read one pull request: its details, files, comments or checks." },
-          { name: "list_pull_requests", text: "List the pull requests of one repository." },
-          { name: "get_file_contents", text: "Read a file, or list a folder, of a repository." },
-          { name: "list_commits", text: "List the recent commits of a repository." },
-          { name: "get_commit", text: "Read one commit." },
-          { name: "search_repositories", text: "Find repositories. The query uses GitHub search syntax, for example user:NAME." },
-          { name: "list_notifications", text: "List the user's unread notifications." },
+          { name: "get_me", text: "Who the token belongs to: the login, the name and the profile.", class: "read" },
+          { name: "search_issues", text: "Find issues. The query uses GitHub search syntax, for example is:open involves:LOGIN, or repo:OWNER/NAME is:open.", class: "read" },
+          { name: "search_pull_requests", text: "Find pull requests. The query uses GitHub search syntax, for example is:open author:LOGIN, or review-requested:LOGIN.", class: "read" },
+          { name: "list_issues", text: "List the issues of one repository.", class: "read" },
+          { name: "issue_read", text: "Read one issue: its text, its comments or its labels.", class: "read" },
+          { name: "pull_request_read", text: "Read one pull request: its details, files, comments or checks.", class: "read" },
+          { name: "list_pull_requests", text: "List the pull requests of one repository.", class: "read" },
+          { name: "get_file_contents", text: "Read a file, or list a folder, of a repository.", class: "read" },
+          { name: "list_commits", text: "List the recent commits of a repository.", class: "read" },
+          { name: "get_commit", text: "Read one commit.", class: "read" },
+          { name: "search_repositories", text: "Find repositories. The query uses GitHub search syntax, for example user:NAME.", class: "read" },
+          { name: "list_notifications", text: "List the user's unread notifications.", class: "read" },
+          { name: "add_issue_comment", text: "Comment on an issue or a pull request.", class: "communicates" },
+          { name: "issue_write", text: "Open an issue (method create), or change one (method update, which can also close it).", class: "communicates" },
+          { name: "create_pull_request", text: "Open a pull request from one branch into another.", class: "communicates" },
         ],
-        hidden: 11,
+        hidden: 7,
         missing: [],
       },
     },
@@ -251,6 +268,8 @@ export class DemoAssistant {
       token: { label: "Personal access token", helpUrl: "https://supabase.com/dashboard/account/tokens", recipe: "Create an access token with a name you will recognise and an expiry." },
       revoke: { url: "https://supabase.com/dashboard/account/tokens", text: "Open Account, Access Tokens, and revoke the token." },
       caution: "A Supabase access token cannot be limited to one project or to reading, so it can do everything your account can. Ancilla asks the server for read-only mode and offers only its read tools.",
+      policy: { reversible: "off", communicates: "off", destructive: "off" },
+      writeTools: [],
       test: null,
     },
     {
@@ -263,10 +282,40 @@ export class DemoAssistant {
       token: { label: "MCP API key", helpUrl: "https://app.brevo.com/settings/keys/api", recipe: "Under SMTP & API, API Keys, generate a new API key and switch on the option that makes it an MCP server key. An ordinary API key does not work here." },
       revoke: { url: "https://app.brevo.com/settings/keys/api", text: "Open SMTP & API, API Keys, and delete the key." },
       caution: "A Brevo MCP key cannot be limited to reading: it can do everything your account can, sending campaigns included. Ancilla offers its read tools only, and that list is the only wall, so make the key just for Ancilla and delete it if you stop using it.",
+      policy: { reversible: "off", communicates: "off", destructive: "off" },
+      writeTools: [],
       test: null,
     },
   ];
+  /** The change the demo's task t8 holds for the person: what the real card is made of, from a call the task read an issue to make. */
+  private demoCard: AssistantWriteCard = {
+    id: "wq_demo",
+    taskId: "t8",
+    connector: "github",
+    connectorName: "GitHub",
+    tool: "add_issue_comment",
+    class: "communicates",
+    what: "Comment on an issue or a pull request.",
+    target: "aleff-ferreira/ancilla #12",
+    fields: [
+      { name: "owner", value: "aleff-ferreira" },
+      { name: "repo", value: "ancilla" },
+      { name: "issue_number", value: "12" },
+      { name: "body", value: "Thanks for the report. This is fixed in 0.27 (see https://github.com/aleff-ferreira/ancilla/pull/41).\nIf it still happens, send the log from Settings, About." },
+    ],
+    flags: [
+      { code: "stranger-text", text: "This task has read text that other people can write (issues, comments, pull requests). Check that this is what you asked for, and not what that text asked for." },
+      { code: "link", text: "The text has a link or an address that you did not write: https://github.com/aleff-ferreira/ancilla/pull/41." },
+    ],
+    hash: `${"3f9a1c7e0b5d".repeat(5)}3f9a`,
+    at: Date.now() - 2 * MIN,
+    expiresAt: Date.now() + 8 * MIN,
+    offerAlways: false,
+    proposal: false,
+  };
   private connectorLog: AssistantConnectorActivity[] = [
+    { at: Date.now() - 2 * MIN, kind: "write", connector: "github", task: "t8", tool: "add_issue_comment", phase: "held", hash: `${"3f9a1c7e0b5d".repeat(5)}3f9a`, ok: true },
+    { at: Date.now() - 3 * MIN, kind: "call", connector: "github", task: "t8", tool: "issue_read", args: '{"owner":"aleff-ferreira","repo":"ancilla","issue_number":12}', ok: true, size: 902, ms: 301 },
     { at: Date.now() - 20 * MIN, kind: "call", connector: "github", task: "t6", tool: "search_issues", args: '{"query":"is:open involves:aleff"}', ok: true, size: 1840, ms: 412 },
     { at: Date.now() - 21 * MIN, kind: "call", connector: "github", task: "t6", tool: "get_me", args: "{}", ok: true, size: 96, ms: 188 },
     { at: Date.now() - 2 * HOUR, kind: "test", connector: "github", ok: true, note: "Works. 12 read tools are offered." },
@@ -286,6 +335,18 @@ export class DemoAssistant {
     if (method === "GET" && sub === "") return { connectors: this.connectors, storage: "a file on this computer that only your user account can read" };
     if (method === "GET" && sub === "/activity") return { entries: this.connectorLog.slice(0, 30) };
     if (method === "POST" && sub === "/ask") return { task: this.tasks[0]?.task };
+    // The change task t8 holds is shown as a card; answering it ends the task, as the real one does.
+    const held = sub.match(/^\/question\/([A-Za-z0-9_-]+)$/);
+    if (held && method === "GET") return { question: held[1] === "t8" && this.tasks.some((t) => t.task.id === "t8" && t.task.status === "paused") ? this.demoCard : null };
+    if (held && method === "POST") {
+      const row = this.tasks.find((t) => t.task.id === "t8");
+      if (!row || row.task.status !== "paused" || held[1] !== this.demoCard.id) throw Object.assign(new Error("That change is not waiting any more."), { kind: "conflict" });
+      const yes = body["answer"] === "do";
+      Object.assign(row.task, { status: "completed", reason: "Done after 2 steps.", result: yes ? "From GitHub (not checked):\nCommented on issue 12 of aleff-ferreira/ancilla.\nTools used: issue_read, add_issue_comment" : "From GitHub (not checked):\nYou chose not to post the comment, so nothing was changed." });
+      this.connectorLog.unshift({ at: Date.now(), kind: "write", connector: "github", task: "t8", tool: "add_issue_comment", phase: yes ? "approved" : "refused", hash: this.demoCard.hash, ok: yes, ...(yes ? {} : { note: "the person said no" }) });
+      return { ok: true };
+    }
+    if (method === "GET" && sub === "/proposals") return { proposals: [] };
     const act = sub.match(/^\/([a-z]+)\/(connect|test)$/);
     if (act && method === "POST") {
       const c = find(act[1] as string);
@@ -303,6 +364,14 @@ export class DemoAssistant {
     const one = sub.match(/^\/([a-z]+)$/);
     if (one && method === "PATCH") {
       const c = find(one[1] as string);
+      const policy = body["policy"];
+      if (typeof policy === "object" && policy !== null) {
+        for (const [kind, value] of Object.entries(policy)) {
+          if (kind in c.policy && (value === "off" || value === "ask")) c.policy[kind as keyof typeof c.policy] = value;
+        }
+        note("policy", c.id, Object.entries(policy).map(([kind, value]) => `${kind} ${String(value)}`).join(", "));
+        return { connector: c };
+      }
       c.mode = body["mode"] === "off" ? "off" : "read";
       note("mode", c.id, `mode ${c.mode}`);
       return { connector: c };

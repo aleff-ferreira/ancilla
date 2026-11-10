@@ -18,6 +18,8 @@ export type WaitingCause =
   | "download"
   /** A web task is asking, and what the question is has just gone. */
   | "question"
+  /** A task on a connected account asks before it changes something in it (a comment, a merge). */
+  | "change"
   /** A task stopped and asks the person what to do. */
   | "blocked";
 
@@ -36,6 +38,8 @@ export const MAX_WAITING = 10;
 export function waitingCause(task: Pick<Task, "origin" | "status" | "startedAt">, question: QuestionView | null): WaitingCause | null {
   if (awaitsApproval(task)) return "approval";
   if (task.status === "blocked") return "blocked";
+  // A connector task is only ever running, over, or paused with a change in front of the person.
+  if (task.origin === "connector" && task.status === "paused") return "change";
   if (task.origin === "browse" && task.status === "paused") {
     if (!question) return "question";
     if (question.type === "site") return "site";

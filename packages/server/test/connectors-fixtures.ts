@@ -1,5 +1,6 @@
 import { GITHUB } from "../src/connectors/catalog.js";
 import { ConnectorError, type Opener } from "../src/connectors/connection.js";
+import type { ConnectorManifest } from "../src/connectors/manifest.js";
 
 /** A server that exists only in memory: what it lists, what it answers, and every call that reached it. */
 export interface FakeServer {
@@ -22,8 +23,16 @@ export const TOKEN = piece("github", "_pat_", "1234567890abcdefghij_ABCDEFGHIJKL
 /** The shape of a classic GitHub token, in a result that a server (or a stranger's issue) put there. */
 export const OTHER_KEY = piece("gh", "p_", "abcdefghijklmnopqrstuvwxyz0123456789");
 
-/** Tools that change things, which a real GitHub server lists beside the reads. */
-export const WRITE_TOOLS = ["create_pull_request", "merge_pull_request", "issue_write", "add_issue_comment", "delete_file", "push_files", "create_or_update_file", "actions_run_trigger"];
+/** Tools that change things and are NOT on Ancilla's list, which a real GitHub server lists beside the reads. */
+export const WRITE_TOOLS = ["delete_file", "push_files", "create_or_update_file", "actions_run_trigger"];
+/** Tools that change things and ARE on the list: offered only where the person switched their kind on. */
+export const LISTED_WRITES = ["create_branch", "add_issue_comment", "issue_write", "create_pull_request", "merge_pull_request"];
+
+/** The names of a manifest's read tools, in its order. */
+export const readNames = (manifest: ConnectorManifest): string[] =>
+  Object.entries(manifest.tools)
+    .filter(([, entry]) => entry.class === "read")
+    .map(([name]) => name);
 
 /** A schema as a server writes one: with descriptions, which are the server's words and must never reach the model. */
 export const SCHEMA = {

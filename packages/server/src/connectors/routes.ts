@@ -60,10 +60,27 @@ export async function handleConnectors(deps: ConnectorRouteDeps, req: AssistantR
       const ready = await exec.connectorAvailable(connector);
       if (!ready.ok) return { status: 409, body: { error: ready.reason ?? "That account cannot be used right now.", kind: "connector_unavailable" } };
       const spec = parseTaskSpec({ goal, cwd: deps.project() ?? homedir(), ...(title ? { title } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
-      return { status: 201, body: { task: exec.createConnector(spec, connector) } };
+      // Typed in this box by the person: they are here, so a change it asks for is put to them, as it is for a spoken one.
+      return { status: 201, body: { task: exec.createConnector(spec, connector, "person") } };
     }
+    // What a task is waiting to change, as a card, and the person's answer to it (do, dont, or always for a small reversible change).
+    const waiting = sub.match(/^\/question\/([A-Za-z0-9_-]{1,64})$/);
+    if (waiting && req.method === "GET") return { status: 200, body: { question: registry.gate.question(waiting[1] as string) } };
+    if (waiting && req.method === "POST") {
+      registry.gate.answer(waiting[1] as string, (await req.body())["answer"]);
+      return { status: 200, body: { ok: true } };
+    }
+    // Changes that no one was there to look at: they wait here for the person, and run only when this very card is approved.
+    if (req.method === "GET" && sub === "/proposals") return { status: 200, body: { proposals: registry.proposals() } };
+    const proposal = sub.match(/^\/proposals\/([A-Za-z0-9_-]{1,64})$/);
+    if (proposal && req.method === "POST") return { status: 200, body: await registry.answerProposal(proposal[1] as string, (await req.body())["answer"]) };
     const one = sub.match(ID);
-    if (one && req.method === "PATCH") return { status: 200, body: { connector: registry.setMode(one[1] as string, (await req.body())["mode"]) } };
+    if (one && req.method === "PATCH") {
+      const body = await req.body();
+      if (body["policy"] === undefined && body["mode"] === undefined) throw new ValidationError("mode", "mode must be off or read, or policy must say which kinds of change to allow");
+      if (body["mode"] !== undefined) registry.setMode(one[1] as string, body["mode"]);
+      return { status: 200, body: { connector: body["policy"] !== undefined ? registry.setPolicy(one[1] as string, body["policy"]) : registry.view(one[1] as string) } };
+    }
     if (one && req.method === "DELETE") return { status: 200, body: { connector: registry.disconnect(one[1] as string) } };
     const act = sub.match(/^\/([A-Za-z0-9_-]{1,40})\/(connect|test)$/);
     if (act && req.method === "POST") {

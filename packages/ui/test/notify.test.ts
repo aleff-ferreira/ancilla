@@ -115,6 +115,7 @@ describe("notifications", () => {
     await manager.announce({ kind: "task", taskId: "t4", cause: "download", title: "Get the PDF" });
     await manager.announce({ kind: "task", taskId: "t5", cause: "question", title: "Check prices" });
     await manager.announce({ kind: "task", taskId: "t6", cause: "blocked", title: "Rename the key" });
+    await manager.announce({ kind: "task", taskId: "t7", cause: "change", title: "Comment on issue 12" });
 
     assert.deepEqual(
       shown.map((note) => [note.tag, note.title, note.body]),
@@ -125,6 +126,7 @@ describe("notifications", () => {
         ["task:t4", "The assistant is waiting on you", '"Get the PDF" asks where to save a file.'],
         ["task:t5", "The assistant is waiting on you", '"Check prices" has a question for you.'],
         ["task:t6", "A task needs you", '"Rename the key" stopped and is waiting for you.'],
+        ["task:t7", "The assistant is waiting on you", '"Comment on issue 12" asks before it changes something in an account.'],
       ],
     );
   });

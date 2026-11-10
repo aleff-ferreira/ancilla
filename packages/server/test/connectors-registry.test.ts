@@ -10,7 +10,7 @@ import { ConnectorError } from "../src/connectors/connection.js";
 import { RESULT_MAX } from "../src/connectors/manifest.js";
 import { ConnectorRegistry } from "../src/connectors/registry.js";
 import { FileSecretStore } from "../src/connectors/secrets.js";
-import { OTHER_KEY, TOKEN, WRITE_TOOLS, fakeServer, openerFor, type FakeServer } from "./connectors-fixtures.js";
+import { OTHER_KEY, TOKEN, WRITE_TOOLS, fakeServer, openerFor, readNames, type FakeServer } from "./connectors-fixtures.js";
 
 /** Which accounts are connected, what is kept, and the one door to a connection: the registry and the session it opens. */
 
@@ -33,9 +33,10 @@ describe("connecting an account", () => {
     assert.equal(view.connected, true);
     assert.equal(view.mode, "read");
     assert.equal(view.test?.ok, true);
-    assert.deepEqual(view.test?.offered.map((t) => t.name), Object.keys(GITHUB.tools));
-    assert.equal(view.test?.hidden, WRITE_TOOLS.length + 3, "the writes, a read tool that is not on the list, and the two odd names are not offered");
-    assert.match(view.test?.message ?? "", /Works\. 12 read tools are offered, and 11 more that it has are not offered/);
+    assert.deepEqual(view.test?.offered.map((t) => t.name), readNames(GITHUB), "a new connection offers reads only: every kind of change starts off");
+    assert.deepEqual(view.policy, { reversible: "off", communicates: "off", destructive: "off" });
+    assert.equal(view.test?.hidden, WRITE_TOOLS.length + 3, "the writes that are not on the list, a read tool that is not on the list, and the two odd names are not offered");
+    assert.match(view.test?.message ?? "", /Works\. 12 read tools are offered, and 7 more that it has are not offered/);
     assert.equal(r.secrets.get("github"), TOKEN, "trimmed, and kept where only the user can read it");
     assert.deepEqual(r.registry.usable(), ["github"]);
     assert.equal(r.server.closed, r.server.opened, "every connection it opened was closed");
@@ -130,7 +131,7 @@ describe("a connection used for a task", () => {
     await r.registry.connect("github", TOKEN);
     r.server.calls.length = 0;
     const session = await r.registry.open("github");
-    assert.deepEqual(session.offered.map((t) => t.name), Object.keys(GITHUB.tools));
+    assert.deepEqual(session.offered.map((t) => t.name), readNames(GITHUB));
     assert.equal(await session.call("search_issues", { query: "is:open involves:aleff" }, ctx()), "answer of search_issues");
     for (const name of [...WRITE_TOOLS, "get_secret_scanning_alert", "__proto__", "constructor", "toString"]) {
       const refused = await session.call(name, { title: "x" }, ctx());
