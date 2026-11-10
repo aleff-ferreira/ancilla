@@ -71,8 +71,8 @@ describe("a change the voice proposes", () => {
     const { task } = await propose(r, "Rename the config key", "Rename key");
     assert.deepEqual(
       VOICE_TOOLS.map((t) => t.name),
-      ["delegate_task", "propose_change", "list_tasks", "task_status", "pause_task", "resume_task", "cancel_task", "recall"],
-      "a tool added here must be thought through: none of these approves",
+      ["delegate_task", "propose_change", "browse", "list_tasks", "task_status", "pause_task", "resume_task", "cancel_task", "recall"],
+      "a tool added here must be thought through: none of these approves (browse opens only the sites the person allows, on the screen)",
     );
     for (const id of [task.id, "last"]) {
       const resumed = await r.tools.run(call("resume_task", { id }));

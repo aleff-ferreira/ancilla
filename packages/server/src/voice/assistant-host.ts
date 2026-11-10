@@ -72,6 +72,8 @@ export interface AssistantVoiceHostDeps {
   project: () => string | null;
   /** The harness the call may look at (read only), when the server gives one. */
   harness?: HarnessReader | null;
+  /** The assistant's own browser, when the server has one: it is what lets the call offer `browse`. */
+  browse?: { available(): Promise<{ ok: boolean; reason?: string }> };
   log: (line: string) => void;
 }
 
@@ -83,7 +85,7 @@ export class AssistantVoiceHost implements VoiceHost {
   private readonly harnessTools: HarnessTools | null;
 
   constructor(private readonly deps: AssistantVoiceHostDeps) {
-    this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId });
+    this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId, ...(deps.browse ? { browse: deps.browse } : {}) });
     this.harnessTools = deps.harness ? new HarnessTools({ reader: deps.harness, taskCounts: () => this.taskCounts() }) : null;
   }
 

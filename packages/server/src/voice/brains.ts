@@ -1,3 +1,5 @@
+import type { ExecResult } from "@ancilla/daemon";
+import { MuseExecBrain } from "../browser/muse-brain.js";
 import { OpenAiCompatibleProvider, withTextTools, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "./brain.js";
 import { MuseThreadBrain, type MuseBrainHost } from "./muse-brain.js";
 import type { BrainSetting, VoiceSettings } from "./settings.js";
@@ -71,4 +73,36 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
     return { brain: withTextTools(thread), problem: null };
   }
   return { brain: new StaticBrain("No model is set up for the voice yet. Open the voice settings and choose one."), problem: "No model is chosen." };
+}
+
+/** Runs one `muse exec` the way the server does every one-shot Muse call: its binary, WSL routing and account. */
+export type MuseExecRunner = (args: string[], limits: { timeoutMs: number; signal: AbortSignal }) => Promise<ExecResult>;
+
+export interface BrowseBrainDeps {
+  keyFor: (brain: BrainSetting) => string | null;
+  /** Absent where there is no Muse to run. */
+  museExec: MuseExecRunner | null;
+  log: (line: string) => void;
+}
+
+/**
+ * The model that browses for the assistant: the one chosen for the voice, but used only to answer in text. A server that takes
+ * tools gets the browser's; Muse is run as `muse exec` with no tools of its own (see browser/muse-brain.ts), because a Muse thread
+ * can read the person's files and the pages it reads are written by strangers.
+ */
+export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps): ChosenBrain {
+  const choice = settings.brain;
+  if (choice.kind === "openai") {
+    const apiKey = deps.keyFor(choice);
+    const provider = new OpenAiCompatibleProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });
+    return {
+      brain: withToolFallback(provider, { key: `${choice.baseUrl}|${choice.model}` }),
+      problem: apiKey === null && !choice.local ? "No key is set for the model that browses. Add one in Settings, Voice." : null,
+    };
+  }
+  if (choice.kind === "muse") {
+    if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model in the voice settings." };
+    return { brain: withTextTools(new MuseExecBrain({ run: deps.museExec, model: choice.model, log: deps.log })), problem: null };
+  }
+  return { brain: new StaticBrain("No model is set up yet."), problem: "No model is chosen for the assistant. Open the voice settings and choose one." };
 }

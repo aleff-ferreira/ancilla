@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AssistantService } from "../assistant/service.js";
-import { makeBrain, type BrainContext, type BrainFactoryDeps } from "./brains.js";
+import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner } from "./brains.js";
 import type { BrainProvider } from "./brain.js";
 import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
@@ -65,6 +65,10 @@ export interface VoiceServiceDeps {
   lastProject?: () => string | null;
   /** The read-only view of the harness the call may look at. */
   harness?: HarnessReader | null;
+  /** One `muse exec` through the server's routing, for the model that browses when it is Muse. */
+  museExec?: MuseExecRunner | null;
+  /** The assistant's own browser, which the `browse` tool starts web tasks on; without it the tool is not offered. */
+  browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
   scheduler?: Scheduler;
   /** For tests: the engines, instead of the downloaded ones. */
   engineFactory?: (layout: VoicePackLayout, options: SherpaEngineOptions) => SherpaEngineSet;
@@ -193,6 +197,11 @@ export class VoiceService {
 
   private brainDeps(): BrainFactoryDeps {
     return { museHost: this.deps.museHost ?? null, muse: this.deps.museBrain ?? null, keyFor: (b) => this.settings.keyFor(b) };
+  }
+
+  /** The model that browses for the assistant: the voice's own, used with the browser's tools only (see browser/agent.ts). */
+  browseBrain(): ChosenBrain {
+    return makeBrowseBrain(this.settings.get(), { keyFor: (b) => this.settings.keyFor(b), museExec: this.deps.museExec ?? null, log: this.deps.log });
   }
 
   /** What the model of a call is told about it. Used by the settings page's test as well. */
@@ -331,6 +340,7 @@ export class VoiceService {
       hub: this.hub,
       project: () => project,
       harness: this.deps.harness ?? null,
+      ...(this.deps.browse ? { browse: this.deps.browse } : {}),
       log: (line) => this.deps.log(line),
     });
     const chosen = makeBrain(

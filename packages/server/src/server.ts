@@ -101,6 +101,8 @@ import { handleBrowser, isBrowserPath } from "./browser/routes.js";
 import { BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
+import { BrowseRunner } from "./browser/runner.js";
+import { BrowseSites } from "./browser/sites.js";
 import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
@@ -1023,6 +1025,9 @@ export class AncillaServer {
   private browserSockets: BrowserSocketServer | null = null;
   /** The browser the server owns (see docs/browser.md). Made on first use; no browser process exists until a page is opened. */
   private browserService: BrowserService | null = null;
+  /** The sites the assistant's browser may open, and the browser at work on a web task (both made on first use). */
+  private browseSites: BrowseSites | null = null;
+  private browseRunner: BrowseRunner | null = null;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1128,8 +1133,31 @@ export class AncillaServer {
   }
 
   private browserFor(): BrowserService {
-    this.browserService ??= new BrowserService({ dataDir: this.options.dataDir, log: (line) => this.log(line) });
+    this.browserService ??= new BrowserService({
+      dataDir: this.options.dataDir,
+      log: (line) => this.log(line),
+      // The assistant's pages are asked about before they load; the person's own tabs never are.
+      siteGate: (request) => this.browseGate().decide(request),
+    });
     return this.browserService;
+  }
+
+  /** The sites the assistant's browser may open: the saved rules, and the question the person is looking at. */
+  private browseGate(): BrowseSites {
+    // With an in-memory data folder (tests) the rules last as long as the process.
+    this.browseSites ??= new BrowseSites(this.options.dataDir === ":memory:" ? null : join(this.options.dataDir, "browser", "sites.json"), () => this.browseRunnerFor());
+    return this.browseSites;
+  }
+
+  /** The assistant's browser at work: made on first use, it runs the web tasks the executive makes. */
+  private browseRunnerFor(): BrowseRunner {
+    this.browseRunner ??= new BrowseRunner({
+      service: () => this.browserFor(),
+      brain: () => this.voiceFor().browseBrain(),
+      gate: this.browseGate().gate,
+      log: (line) => this.log(line),
+    });
+    return this.browseRunner;
   }
 
   /** The voice, made on first use. */
@@ -1142,6 +1170,12 @@ export class AncillaServer {
         // The same four things a task uses to run in a Muse thread: a call thinks in one, and shows in the sidebar like any other.
         museHost: this.assistantHost(),
         harness: this.harnessReader(),
+        // The model that browses is the voice's own; Muse is run with no tools of its own (see browser/muse-brain.ts).
+        museExec: async (args, limits) => {
+          const plan = await this.planMuseExec(args, null);
+          return this.options.exec(plan.command, plan.args, { ...(plan.env ? { env: plan.env } : {}), timeoutMs: limits.timeoutMs, signal: limits.signal });
+        },
+        browse: this.browseRunnerFor(),
         lastProject: () => {
           try {
             return this.store.listProjects()[0]?.cwd ?? null;
@@ -1297,6 +1331,7 @@ export class AncillaServer {
         },
         offsetMinutes: () => -new Date().getTimezoneOffset(),
         host: this.assistantHost(),
+        browse: this.browseRunnerFor(),
       });
       this.assistantUnavailable = null;
       // Settles what a restart left in the air and starts looking for work; it never fails the request that opened it.
@@ -1722,6 +1757,9 @@ export class AncillaServer {
     this.storeClosed = true;
     this.browserSockets?.close();
     this.browserSockets = null;
+    this.browseRunner?.stop();
+    this.browseRunner = null;
+    this.browseSites = null;
     await this.browserService?.dispose().catch(() => undefined);
     this.browserService = null;
     // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.

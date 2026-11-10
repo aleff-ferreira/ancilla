@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import type { AssistantService } from "../assistant/service.js";
 import type { Task } from "../assistant/tasks.js";
 import { parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks.js";
@@ -13,7 +14,9 @@ import type { Lang } from "./text.js";
  * change a file: a task started by voice reads and researches only, so a spoken sentence (which may have been misheard,
  * or may not have been the user's at all) can never be what lets something be altered. Work that would change something
  * is proposed (`propose_change`): it waits, paused and never started, and the approval is a click on the screen. No tool
- * here approves, and resuming a proposal is refused, so nothing said aloud can start one.
+ * here approves, and resuming a proposal is refused, so nothing said aloud can start one. `browse` starts a web task in the
+ * assistant's own browser: it reads pages and changes nothing, and every site it wants is asked about on the screen, so a
+ * spoken sentence cannot open one either.
  */
 
 export interface VoiceToolDeps {
@@ -24,13 +27,15 @@ export interface VoiceToolDeps {
   lang: () => Lang;
   /** The conversation, to look notes up in its scope. */
   conversationId: string;
+  /** The assistant's own browser, when this server has one to give: without it the `browse` tool is not offered. */
+  browse?: { available(): Promise<{ ok: boolean; reason?: string }> };
 }
 
 export const VOICE_TOOLS: readonly ToolSpec[] = [
   {
     name: "delegate_task",
     description:
-      "Start a task in the background and carry on talking. Use it for work that takes more than a few seconds: reading a codebase, researching, summarising files, checking something. The task can read and research only; it cannot change files. For a change, use propose_change.",
+      "Start a task in the background and carry on talking. Use it for work that takes more than a few seconds: reading a codebase, researching, summarising files, checking something. The task can read and research only; it cannot change files. For a change, use propose_change. For a page on the web, use browse.",
     parameters: {
       type: "object",
       properties: {
@@ -48,6 +53,20 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
       type: "object",
       properties: {
         goal: { type: "string", description: "What is to be changed and how, in a sentence or two, complete enough to be understood on its own." },
+        title: { type: "string", description: "A short name for it, a few words." },
+      },
+      required: ["goal"],
+    },
+  },
+  {
+    name: "browse",
+    description:
+      "Look something up on the web, or do a short task on a web page, in the background, in a browser of its own. It reads pages; it cannot sign in, buy, post or download. The user is asked on the screen to allow each new site, and is told when it is done.",
+    parameters: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "What to find out or do on the web, complete enough to be understood on its own." },
+        url: { type: "string", description: "A page to start from, if the user named one." },
         title: { type: "string", description: "A short name for it, a few words." },
       },
       required: ["goal"],
@@ -108,7 +127,9 @@ export class VoiceTools {
 
   specs(): ToolSpec[] {
     // Without the executive (no host to run tasks on) the task tools are not offered, so the model never promises what it cannot do.
-    return this.deps.assistant.executive ? [...VOICE_TOOLS] : VOICE_TOOLS.filter((t) => t.name === "recall");
+    // The same goes for `browse` where this server has no browser of its own to give.
+    if (!this.deps.assistant.executive) return VOICE_TOOLS.filter((t) => t.name === "recall");
+    return VOICE_TOOLS.filter((t) => t.name !== "browse" || this.deps.browse !== undefined);
   }
 
   private find(id: string): Task {
@@ -159,6 +180,24 @@ export class VoiceTools {
             ok: true,
             text: `Proposed task ${task.id}, "${sayable(task.title, 80)}". Nothing has started: it waits on the user's screen, and only they can approve or decline it there. Say that it waits for their approval; do not say it is under way.`,
             narration: taskPhrase(lang, "proposed", task.title),
+          };
+        }
+        case "browse": {
+          const browse = this.deps.browse;
+          if (!executive || !browse) return { ok: false, text: "Browsing is not available right now." };
+          const goal = str(args["goal"], 1500);
+          if (goal === "") return { ok: false, text: "A web task needs a goal: say what to find out." };
+          const url = str(args["url"], 500);
+          const ready = await browse.available();
+          if (!ready.ok) return { ok: false, text: `The browser cannot be used right now: ${ready.reason ?? "it is not available"}` };
+          // A web task belongs to no project, but a task row names a folder: the project of the call, or the home folder.
+          const cwd = this.deps.project() ?? homedir();
+          const spec = parseTaskSpec({ goal: url ? `${goal}\nStart at: ${url}` : goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const task = executive.createBrowse(spec);
+          return {
+            ok: true,
+            text: `Started web task ${task.id}, "${sayable(task.title, 80)}". The assistant's own browser is on it. The user may be asked on the screen to allow a site, and is told when it finishes. Say that it is on it; do not say what it found until it has.`,
+            narration: taskPhrase(lang, "started", task.title),
           };
         }
         case "list_tasks": {

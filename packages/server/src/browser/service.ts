@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { CdpConnection, CdpError } from "./cdp.js";
 import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
+import { originOf } from "./sites.js";
 import { buildSnapshot, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
 /**
@@ -15,7 +16,7 @@ import { buildSnapshot, visibleBackendIds, type AxNode, type DomSnapshotLike } f
  */
 
 export type BrowserContextName = "you" | "assistant";
-export type BrowserErrorCode = "unavailable" | "scheme" | "limit" | "no-tab" | "stale-ref" | "invalid" | "closed";
+export type BrowserErrorCode = "unavailable" | "scheme" | "limit" | "no-tab" | "stale-ref" | "invalid" | "closed" | "blocked";
 
 export class BrowserError extends Error {
   constructor(
@@ -51,7 +52,7 @@ export type BrowserEvent =
   | { type: "active"; id: string }
   | { type: "dialog"; dialog: DialogInfo }
   | { type: "dialog-closed"; tabId: string }
-  | { type: "notice"; kind: "download" | "file"; tabId?: string; text: string }
+  | { type: "notice"; kind: "download" | "file" | "popup"; tabId?: string; text: string }
   | { type: "stopped" };
 
 export interface BrowserStatus {
@@ -114,12 +115,20 @@ export interface BrowserServiceOptions {
   gracefulMs?: number;
   /** Version lookup for a browser that is not running (the real one reads the install folder or asks `--version`). */
   versionOf?: (browser: FoundBrowser) => Promise<string | null>;
+  /**
+   * Asked before the assistant's browser loads a page: a page it was sent to, a redirect, a link it followed, or a frame inside
+   * a page. A main-frame request waits for the answer (it may take as long as a person does); `false` fails it as blocked.
+   * The person's own tabs are never asked about. Absent: the assistant's context is not gated.
+   */
+  siteGate?: (request: { url: string; origin: string; tabId: string; mainFrame: boolean }) => Promise<boolean>;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60_000;
 const DEFAULT_SIZE = { width: 1280, height: 800 };
 const SETTLE_MS = 150;
 const NAVIGATION_WAIT_MS = 15_000;
+/** How long `Page.navigate` may wait in the assistant's browser, where a question to the person can hold it. */
+const GATED_NAVIGATION_MS = 15 * 60_000;
 const DENIED_PERMISSIONS = [
   "geolocation", "notifications", "audioCapture", "videoCapture", "midi", "midiSysex", "clipboardReadWrite",
   "clipboardSanitizedWrite", "sensors", "idleDetection", "backgroundSync", "paymentHandler", "displayCapture", "wakeLockScreen",
@@ -171,6 +180,10 @@ interface Tab {
   loadWaiters: Array<() => void>;
   screencast: ScreencastState | null;
   axEnabled: boolean;
+  /** What the page did that the assistant should hear about (a site that was refused, a popup that was closed); read once by `takeNotes`. */
+  notes: string[];
+  /** A page of this tab was refused by the gate since its last navigation began: an aborted load is then a refusal, not a broken page. */
+  blocked: boolean;
 }
 
 interface ScreencastState {
@@ -454,12 +467,18 @@ export class BrowserService {
       loadWaiters: [],
       screencast: null,
       axEnabled: false,
+      notes: [],
+      blocked: false,
     };
     rt.tabs.set(targetId, tab);
     rt.bySession.set(tab.sessionId, tab);
     await rt.conn.send("Page.enable", {}, tab.sessionId);
     // A file chooser would open a native dialog nobody can see; it is intercepted so the pane can say uploads are not available yet.
     await rt.conn.send("Page.setInterceptFileChooserDialog", { enabled: true }, tab.sessionId).catch(() => undefined);
+    // The assistant's pages are asked about before they load: every document request (a page, a redirect, a frame) pauses until the gate answers.
+    if (context === "assistant" && this.options.siteGate) {
+      await rt.conn.send("Fetch.enable", { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] }, tab.sessionId);
+    }
     await this.setViewport(targetId, DEFAULT_SIZE.width, DEFAULT_SIZE.height, rt);
     if (!rt.activeId) rt.activeId = targetId;
     this.emit({ type: "tab", tab: this.info(rt, tab) });
@@ -549,10 +568,13 @@ export class BrowserService {
   // ---------------------------------------------------------------- navigation
 
   private async navigateTab(rt: Runtime, tab: Tab, url: string): Promise<void> {
+    tab.blocked = false;
     const loaded = this.waitLoad(tab);
-    const result = await rt.conn.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url }, tab.sessionId);
+    // A redirect to a site nobody has been asked about holds the navigation until the person answers, which can take minutes.
+    const result = await rt.conn.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url }, tab.sessionId, tab.context === "assistant" && this.options.siteGate ? GATED_NAVIGATION_MS : undefined);
     if (result.errorText) {
       loaded.cancel();
+      if (tab.blocked || /BLOCKED_BY_CLIENT/i.test(result.errorText)) throw new BrowserError("blocked", "The person did not allow that site, so it was not opened.");
       throw new BrowserError("invalid", `The page could not be loaded: ${result.errorText}`);
     }
     if (result.loaderId) await loaded.promise;
@@ -584,6 +606,12 @@ export class BrowserService {
   private async settle(tab: Tab): Promise<void> {
     await sleep(SETTLE_MS);
     if (tab.loading) await this.waitLoad(tab, 5000).promise;
+  }
+
+  /** Waits, bounded, for a tab that is still loading: a page the person was asked about may only now be arriving. */
+  async waitLoaded(id: string, ms: number): Promise<void> {
+    const tab = this.runtime?.tabs.get(id);
+    if (tab?.loading) await this.waitLoad(tab, ms).promise;
   }
 
   async navigate(id: string, url: string): Promise<TabInfo> {
@@ -627,7 +655,7 @@ export class BrowserService {
   // ---------------------------------------------------------------- reading the page
 
   /** The page as compact accessibility text with refs; see snapshot.ts. */
-  async snapshot(id: string): Promise<{ text: string; refs: number; truncated: boolean }> {
+  async snapshot(id: string, options: { maxChars?: number } = {}): Promise<{ text: string; refs: number; truncated: boolean }> {
     const rt = await this.ensure();
     const tab = this.requireTab(rt, id);
     if (!tab.axEnabled) {
@@ -640,9 +668,18 @@ export class BrowserService {
         .send<DomSnapshotLike>("DOMSnapshot.captureSnapshot", { computedStyles: ["opacity", "visibility", "font-size"] }, tab.sessionId)
         .catch(() => null),
     ]);
-    const result = buildSnapshot(tree.nodes ?? [], { url: tab.url, title: tab.title, visible: dom ? visibleBackendIds(dom) : null });
+    const result = buildSnapshot(tree.nodes ?? [], { url: tab.url, title: tab.title, visible: dom ? visibleBackendIds(dom) : null, ...(options.maxChars ? { maxChars: options.maxChars } : {}) });
     tab.refs = result.refs;
     return { text: result.text, refs: result.refs.size, truncated: result.truncated };
+  }
+
+  /** What the page did that the assistant should hear about since it last asked: a site refused, a popup closed, a dialog dismissed. */
+  takeNotes(id: string): string[] {
+    return this.runtime?.tabs.get(id)?.notes.splice(0) ?? [];
+  }
+
+  private note(tab: Tab, text: string): void {
+    if (tab.notes.length < 6) tab.notes.push(text);
   }
 
   async screenshot(id: string, format: "png" | "jpeg" = "png"): Promise<Buffer> {
@@ -945,6 +982,13 @@ export class BrowserService {
       const target = params["targetInfo"] ?? {};
       const opener = target.openerId ? rt.tabs.get(target.openerId) : undefined;
       if (target.type !== "page" || !opener || rt.tabs.has(target.targetId)) return;
+      if (opener.context === "assistant") {
+        // The assistant works in one tab, and a popup would load before anyone was asked about it: it is closed, and the assistant is told.
+        void rt.conn.send("Target.closeTarget", { targetId: target.targetId }).catch(() => undefined);
+        this.note(opener, "A page tried to open a popup window, which was closed.");
+        this.emit({ type: "notice", kind: "popup", tabId: opener.id, text: "A page tried to open a popup window, which was closed." });
+        return;
+      }
       void this.adoptPopup(rt, target, opener);
       return;
     }
@@ -969,7 +1013,17 @@ export class BrowserService {
           for (const wake of tab.loadWaiters.splice(0)) wake();
         });
         break;
+      case "Fetch.requestPaused":
+        void this.onRequestPaused(rt, tab, params);
+        break;
       case "Page.javascriptDialogOpening":
+        if (tab.context === "assistant") {
+          // Nobody is there to answer a dialog and the page is frozen until it is: alerts and "leave this page?" are accepted, questions are declined.
+          const kind = String(params["type"] ?? "alert");
+          this.note(tab, `A page showed a ${kind} dialog (“${String(params["message"] ?? "").replace(/\s+/g, " ").slice(0, 120)}”), which was dismissed.`);
+          void rt.conn.send("Page.handleJavaScriptDialog", { accept: kind === "alert" || kind === "beforeunload" }, tab.sessionId).catch(() => undefined);
+          break;
+        }
         tab.dialog = {
           tabId: tab.id,
           kind: String(params["type"] ?? "alert"),
@@ -992,6 +1046,38 @@ export class BrowserService {
       default:
         break;
     }
+  }
+
+  /**
+   * A page is about to load in the assistant's browser. The request waits for the gate: allowed, it goes on; refused, it fails
+   * as blocked, and for a main frame the assistant is told which site it was. A frame inside a page is a main-frame page's
+   * business only when the gate says so: the gate is told which kind it is.
+   */
+  private async onRequestPaused(rt: Runtime, tab: Tab, params: Record<string, any>): Promise<void> {
+    const requestId = String(params["requestId"] ?? "");
+    const url = String(params["request"]?.url ?? "");
+    const origin = originOf(url);
+    // For a page target the main frame has the target's own id.
+    const mainFrame = params["frameId"] === undefined || params["frameId"] === tab.id;
+    let allowed = false;
+    if (origin && this.options.siteGate) {
+      try {
+        allowed = await this.options.siteGate({ url, origin, tabId: tab.id, mainFrame });
+      } catch {
+        allowed = false;
+      }
+    }
+    // The browser, or this tab, went away while the person was deciding.
+    if (rt.conn.isClosed || rt.tabs.get(tab.id) !== tab) return;
+    if (!allowed && mainFrame) {
+      tab.blocked = true;
+      this.note(tab, `${origin ?? url.slice(0, 80)} was not opened: the person did not allow it.`);
+    }
+    // Refused, a request is aborted rather than blocked: an aborted navigation leaves the page that had the link where it was,
+    // as Stop does, where a blocked one replaces it with the browser's error page.
+    await rt.conn
+      .send(allowed ? "Fetch.continueRequest" : "Fetch.failRequest", allowed ? { requestId } : { requestId, errorReason: "Aborted" }, tab.sessionId)
+      .catch(() => undefined);
   }
 
   private async refreshInfo(rt: Runtime, tab: Tab): Promise<void> {

@@ -273,7 +273,17 @@ export class TextToolFilter {
     try {
       JSON.parse(json);
     } catch {
-      json = "{}";
+      // Models often write the arguments as a script object: bare keys, and line breaks inside a string. Mended once, then given up on.
+      const keyed = json.replace(/([{,]\s*)([A-Za-z_][\w-]*)\s*:/g, '$1"$2":');
+      const mended = [keyed, keyed.replace(/\r?\n/g, "\\n")].find((candidate) => {
+        try {
+          JSON.parse(candidate);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      json = mended ?? "{}";
     }
     this.calls.push({ id: `text_${++this.counter}`, name: m[1] as string, arguments: json });
   }

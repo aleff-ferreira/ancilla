@@ -99,7 +99,11 @@ nothing else**:
   may change files; **Decline** drops it; one nobody answers is dropped after a day. Resuming it by voice is refused,
   no voice tool approves, and at most three wait at once. It needs project writes switched on in the assistant's
   settings, and approving checks that again.
-- No approval is ever given by voice. An approval, or a change to a file, is a click on the screen.
+- For something on the web, the call can start a **web task** (`browse`): the assistant's own browser looks at pages and
+  changes nothing. Every site it wants is asked about on the screen (Assistant, Tasks, *Needs your OK*), so a spoken
+  sentence cannot open one either; see [the internal browser](browser.md#the-assistant-browsing-web-tasks). What it
+  found comes back as untrusted text, labelled so, and it can start nothing by itself.
+- No approval is ever given by voice. An approval, or a change to a file, or a site opened, is a click on the screen.
 - A Muse turn that asks to use a tool is stopped, and the call says it is waiting on the screen.
 - What it hears is kept as what you said, with the words as the recogniser wrote them; the memory treats a spoken
   statement like a typed one but records that it was spoken.

@@ -275,7 +275,8 @@ class PaneSession {
         if (this.own(event.tabId)) this.send({ type: "dialog-closed", tabId: event.tabId });
         return;
       case "notice":
-        if (event.tabId === undefined || this.own(event.tabId)) this.send({ type: "notice", kind: event.kind, text: event.text });
+        // A popup notice is about the assistant's tabs, which this pane never shows.
+        if (event.kind !== "popup" && (event.tabId === undefined || this.own(event.tabId))) this.send({ type: "notice", kind: event.kind, text: event.text });
         return;
       case "stopped":
         // The browser went away (idle, or it crashed): start over on the next breath, which brings a blank tab.

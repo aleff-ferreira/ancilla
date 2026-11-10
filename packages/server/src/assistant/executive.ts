@@ -2,6 +2,30 @@ import { ConflictError, NotFoundError, ValidationError } from "./store.js";
 import { awaitsApproval, stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
 import type { AssistantProfile } from "./types.js";
 
+/** What a web task reports about itself while the assistant's browser works on it. */
+export interface BrowseReport {
+  /** What the task is doing now, for its row. */
+  progress(reason: string): void;
+  /** A site needs the person's answer: the task shows as waiting for their approval. */
+  asking(reason: string): void;
+  /** The question was answered: the task goes on. */
+  resumed(reason: string): void;
+  /** The task is over. `result` is untrusted text from the web, already labelled. */
+  settle(outcome: { ok: boolean; result: string; reason: string }): void;
+}
+
+/** The assistant's browser, as the executive uses it. The executive owns the task's row and lifecycle; the runner owns the work. */
+export interface BrowseRunnerPort {
+  /** Starts the work in this process. It reports through `report` and never throws. */
+  run(task: Task, report: BrowseReport): void;
+  /** The person (or a limit) ended the task: stop the work. */
+  cancel(taskId: string, reason: string): void;
+  /** Whether the runner is working on this task now. */
+  owns(taskId: string): boolean;
+  /** The person's answer to the site the task is waiting on ("task", "always", "not-now" or "block"); throws when none is waiting. */
+  answer(taskId: string, answer: string): void;
+}
+
 /**
  * The task executive: it takes work the user approved and sees it through, one step at a time, as turns in a thread
  * the user can open. It adds no runtime of its own. Muse does the work; this decides when a step starts, charges the
@@ -67,6 +91,8 @@ export interface ExecutiveOptions {
   changed: (taskId: string | null) => void;
   /** Rules for what to do on its own beyond what the user created; null when there are none. */
   initiative?: (now: number) => Promise<void> | void;
+  /** The assistant's own browser, which runs web tasks; absent where there is none to use. */
+  browse?: BrowseRunnerPort;
 }
 
 const MIN = 60_000;
@@ -163,6 +189,80 @@ export class Executive {
     return out;
   }
 
+  // ------------------------------------------------------------------------------------------------ web tasks
+
+  /** A web task is worked on by the assistant's browser in this process: it is only ever running, waiting for an answer, or over. */
+  private refuseWeb(task: Task, what: string): void {
+    if (task.origin === "browse") throw new ConflictError(`A web task cannot be ${what}. Cancel it and ask again.`);
+  }
+
+  /**
+   * Starts a web task: a row the person can see and cancel, worked on at once by the assistant's own browser. The row is made
+   * running and never queued, so the step machine never meets it; its end comes back through the report.
+   */
+  createBrowse(spec: NewTask): Task {
+    const profile = this.opts.profile();
+    if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
+    const runner = this.opts.browse;
+    if (!runner) throw new ConflictError("Browsing is not available here.");
+    // One at a time: there is one assistant tab. A row that nothing is working on (the runner lost track of it) does not count.
+    for (const open of this.tasks.byStatus(["running", "paused"]).filter((t) => t.origin === "browse")) {
+      if (runner.owns(open.id)) throw new ConflictError("The assistant is already browsing. Wait for it to finish, or cancel it.");
+      this.tasks.setStatus(open.id, "failed", "The assistant lost track of this web task.");
+      this.opts.changed(open.id);
+    }
+    this.requireRoom();
+    const created = this.tasks.create({ ...spec, origin: "browse", allowWrites: false, steps: [{ title: "Look it up on the web", prompt: null, effect: "read", verifier: null }] });
+    const task = this.tasks.setStatus(created.id, "running", "Starting the browser.");
+    this.opts.changed(task.id);
+    runner.run(task, this.browseReport(task.id));
+    return task;
+  }
+
+  /** The person's answer, on the screen, to the site a web task is waiting on. */
+  answerSite(taskId: string, answer: string): Task {
+    const task = this.tasks.require(taskId);
+    if (task.origin !== "browse" || TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is not waiting on a site.");
+    if (!this.opts.browse) throw new ConflictError("Browsing is not available here.");
+    this.opts.browse.answer(taskId, answer);
+    return this.tasks.require(taskId);
+  }
+
+  private browseReport(taskId: string): BrowseReport {
+    const open = (status: TaskStatus): Task | null => {
+      const task = this.tasks.get(taskId);
+      return task && task.status === status ? task : null;
+    };
+    return {
+      progress: (reason) => {
+        if (!open("running")) return;
+        this.tasks.setStatus(taskId, "running", reason);
+        this.opts.changed(taskId);
+      },
+      asking: (reason) => {
+        // Also when it already waits: the question on the screen may have changed to the next one.
+        const task = this.tasks.get(taskId);
+        if (!task || (task.status !== "running" && task.status !== "paused") || (task.status === "paused" && task.reason === reason)) return;
+        this.tasks.setStatus(taskId, "paused", reason);
+        this.opts.changed(taskId);
+      },
+      resumed: (reason) => {
+        if (!open("paused")) return;
+        this.tasks.setStatus(taskId, "running", reason);
+        this.opts.changed(taskId);
+      },
+      settle: ({ ok, result, reason }) => {
+        const task = this.tasks.get(taskId);
+        // A task the person cancelled in the meantime stays cancelled.
+        if (!task || TERMINAL_TASK.has(task.status)) return;
+        const step = this.tasks.steps(taskId)[0];
+        if (step) this.tasks.updateStep(step.id, { status: ok ? "done" : "failed", evidence: reason });
+        this.tasks.setStatus(taskId, ok ? "completed" : "failed", reason, { result });
+        this.opts.changed(taskId);
+      },
+    };
+  }
+
   /** Runs a tick without making the caller wait for it. */
   kick(): void {
     void this.tick().catch((error) => this.log(`a tick failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -171,6 +271,7 @@ export class Executive {
   pause(taskId: string): Task {
     const task = this.tasks.require(taskId);
     if (TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is finished.");
+    this.refuseWeb(task, "paused");
     if (task.status === "paused") return task;
     // Pausing stops new work. A turn that is running is left to finish, and its result is recorded.
     const out = this.tasks.setStatus(taskId, "paused", this.tasks.runningAttempt(taskId) ? "Paused. The turn in progress will finish first." : "Paused by you.", { retryAt: null });
@@ -181,8 +282,16 @@ export class Executive {
   /** The assistant was switched off: nothing new starts. A turn already running finishes and is recorded. */
   pauseAll(reason: string): number {
     let n = 0;
-    for (const task of this.tasks.byStatus(["queued", "running", "waiting"])) {
-      this.tasks.setStatus(task.id, "paused", reason, { retryAt: null });
+    for (const task of this.tasks.byStatus(["queued", "running", "waiting", "paused"])) {
+      if (task.origin === "browse") {
+        // A web task cannot wait, not even for an answer: switching the assistant off stops it.
+        this.tasks.setStatus(task.id, "cancelled", reason, { retryAt: null });
+        this.opts.browse?.cancel(task.id, reason);
+      } else if (task.status !== "paused") {
+        this.tasks.setStatus(task.id, "paused", reason, { retryAt: null });
+      } else {
+        continue;
+      }
       this.opts.changed(task.id);
       n += 1;
     }
@@ -192,6 +301,7 @@ export class Executive {
   resume(taskId: string): Task {
     const task = this.tasks.require(taskId);
     if (awaitsApproval(task)) throw new ConflictError("This proposal waits for the user's approval on the screen, and a resume does not give it.");
+    this.refuseWeb(task, "resumed");
     if (task.status !== "paused" && task.status !== "waiting") throw new ConflictError("Only a paused or waiting task can be resumed.");
     const out = this.tasks.setStatus(taskId, this.tasks.runningAttempt(taskId) ? "running" : "queued", "Resumed.", { retryAt: null });
     this.opts.changed(taskId);
@@ -210,6 +320,7 @@ export class Executive {
     if (attempt) this.tasks.finishAttempt(attempt.id, "cancelled", reason);
     const out = this.tasks.setStatus(taskId, "cancelled", reason, { retryAt: null });
     this.opts.changed(taskId);
+    if (task.origin === "browse") this.opts.browse?.cancel(taskId, reason);
     if (attempt?.sessionId && attempt.turnId) {
       try {
         await this.host.interruptTurn(attempt.sessionId, attempt.turnId);
@@ -224,6 +335,7 @@ export class Executive {
 
   retry(taskId: string): Task {
     const task = this.tasks.require(taskId);
+    this.refuseWeb(task, "tried again");
     if (task.status !== "failed" && task.status !== "blocked") throw new ConflictError("Only a failed or blocked task can be tried again.");
     if (this.tasks.runningAttempt(taskId)) throw new ConflictError("A turn of this task is still running.");
     for (const step of this.tasks.steps(taskId)) {
@@ -239,6 +351,7 @@ export class Executive {
   extend(taskId: string, turns: number, minutes: number): Task {
     const task = this.tasks.require(taskId);
     if (TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is finished.");
+    this.refuseWeb(task, "extended");
     const p = this.opts.profile().policy;
     const t = Math.max(0, Math.min(50, Math.floor(turns)));
     const m = Math.max(0, Math.min(240, Math.floor(minutes)));
@@ -255,6 +368,7 @@ export class Executive {
   /** The user's answer for a step the executive could not settle: it did run, run it again, or leave it out. */
   resolve(taskId: string, stepId: string, resolution: "done" | "retry" | "skip"): Task {
     const task = this.tasks.require(taskId);
+    this.refuseWeb(task, "resolved by hand");
     const step = this.tasks.step(stepId);
     if (!step || step.taskId !== taskId) throw new NotFoundError("The step");
     if (TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is finished.");
@@ -273,6 +387,7 @@ export class Executive {
   /** The user looked at a task that finished without a check, or waits on a manual one, and says it is right. */
   confirm(taskId: string): Task {
     const task = this.tasks.require(taskId);
+    this.refuseWeb(task, "confirmed");
     const steps = this.tasks.steps(taskId);
     const waiting = task.status === "unverified" || (task.status === "blocked" && steps.every((st) => st.status === "done" || st.status === "skipped"));
     if (!waiting) throw new ConflictError("There is nothing here to confirm.");
@@ -673,6 +788,12 @@ export class Executive {
    */
   async recover(): Promise<RecoverySummary> {
     const summary: RecoverySummary = { resumed: 0, reconciled: 0, blocked: 0 };
+    // A web task lives in the process that was working on it: one that is still open now has lost it, and is ended, never started again.
+    for (const task of this.tasks.byStatus(["running", "queued", "waiting", "paused", "blocked"])) {
+      if (task.origin !== "browse" || this.opts.browse?.owns(task.id)) continue;
+      this.tasks.setStatus(task.id, "failed", "Ancilla stopped while this web task ran, so it ended. Ask again to run it again.");
+      this.opts.changed(task.id);
+    }
     for (const task of this.tasks.byStatus(["running", "queued", "waiting", "paused", "blocked"])) {
       if (task.sessionId) this.watch(task.sessionId);
     }

@@ -173,13 +173,14 @@ test("at most 8 tabs; a popup opens as a tab of its opener's context, over the c
   const events: BrowserEvent[] = [];
   svc.on((e) => events.push(e));
   const a = await svc.openTab("assistant");
-  await svc.openTab("assistant");
+  await svc.openTab("you");
   await assert.rejects(svc.openTab("assistant"), (e: unknown) => e instanceof BrowserError && e.code === "limit");
   await svc.closeTab(a.id);
   fake.emit("Target.targetCreated", { targetInfo: { targetId: "P1", type: "page", openerId: "T2", url: "https://pop.example/", title: "" } });
   await new Promise((r) => setTimeout(r, 30));
   const pop = (await svc.listTabs()).find((t) => t.id === "P1");
-  assert.equal(pop?.context, "assistant");
+  // (A popup of the assistant's tab is closed instead: see browser-sites.test.ts.)
+  assert.equal(pop?.context, "you");
   assert.equal(pop?.openerId, "T2");
   fake.emit("Target.targetCreated", { targetInfo: { targetId: "P2", type: "page", openerId: "T2", url: "x", title: "" } });
   await new Promise((r) => setTimeout(r, 30));

@@ -126,7 +126,7 @@ function untouched(req: AssistantRequest, sub: string): AssistantReply {
   return { status: 404, body: { error: "Nothing is saved yet.", kind: "not_found" } };
 }
 
-const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retry|confirm|extend|resolve|approve)$/;
+const TASK_ACTIONS = /^\/tasks\/([A-Za-z0-9_-]{1,64})\/(pause|resume|cancel|retry|confirm|extend|resolve|approve|site)$/;
 
 /** Tasks, what to do next, and schedules: the executive's side of the surface. Null when the path is not one of theirs. */
 async function handleWork(service: AssistantService, sub: string, req: AssistantRequest): Promise<AssistantReply | null> {
@@ -164,7 +164,11 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     else if (action === "retry") task = exec.retry(id);
     else if (action === "confirm") task = exec.confirm(id);
     else if (action === "approve") task = exec.approve(id);
-    else if (action === "cancel") task = await exec.cancel(id);
+    else if (action === "site") {
+      // The person's answer to the site a web task is waiting on: allow it for the task, always, not now, or block it.
+      if (typeof body["answer"] !== "string") bad("answer is required", "answer");
+      task = exec.answerSite(id, body["answer"]);
+    } else if (action === "cancel") task = await exec.cancel(id);
     else if (action === "extend") {
       const turns = typeof body["turns"] === "number" ? body["turns"] : 0;
       const minutes = typeof body["minutes"] === "number" ? body["minutes"] : 0;

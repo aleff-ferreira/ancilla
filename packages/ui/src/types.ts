@@ -1041,7 +1041,7 @@ export interface AssistantTaskView {
   goal: string;
   status: AssistantTaskStatus;
   reason: string;
-  origin: "user" | "suggestion" | "schedule" | "voice";
+  origin: "user" | "suggestion" | "schedule" | "voice" | "browse";
   cwd: string;
   sessionId: string | null;
   allowWrites: boolean;

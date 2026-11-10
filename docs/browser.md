@@ -34,7 +34,8 @@ BrowserService (service.ts)      tabs, contexts, snapshot, input, screencast, li
 | `assistant` | an ephemeral context (`Target.createBrowserContext`) | what the assistant browses; gone on `resetAssistant()` or when the browser stops |
 
 Cookies and storage are never shared between them. At most 8 tabs are open at once; a popup opens as a tab of its
-opener's context, or is closed over the limit.
+opener's context, or is closed over the limit (a popup of an assistant tab is always closed). The assistant's context is
+thrown away at the end of every web task.
 
 ## Security defaults
 
@@ -42,7 +43,7 @@ opener's context, or is closed over the limit.
   `view-source:`, `javascript:`, `data:` and everything else is refused before the browser hears of it.
 - Downloads are denied (`Browser.setDownloadBehavior`), in both contexts. Every permission prompt (camera, microphone,
   location, notifications, clipboard, sensors, ...) is denied.
-- JavaScript dialogs are surfaced as events and are never accepted automatically; whoever drives answers them.
+- JavaScript dialogs in your tabs are surfaced as events and are never accepted automatically; whoever drives answers them. (The assistant's tabs have nobody to answer: the browser dismisses them.)
 - The browser has its own profile (`<data dir>/browser/profile`), never the user's everyday one, with background
   network traffic, sync, component updates and crash reporting switched off (`launch.ts` lists each flag and why).
 - No user-agent or fingerprint tricks. A site that blocks the browser is the user's to take over.
@@ -75,7 +76,17 @@ The Browser panel (`packages/ui/src/components/browser/`) sits beside the thread
 - **Pictures** are binary frames (tag, sequence, size in CSS pixels, tab id, JPEG). Only one is in flight until the pane has acknowledged it (on arrival; the pane then decodes only the newest picture it holds); a newer picture on the server replaces one that is waiting, and the socket's backlog holds the next one back (the screencast is capped at 40 fps, 30 is what a page gets in practice). The panel is the viewport: its size (debounced) is sent and the page is drawn at density 1. Measured on Edge 157, the screencast never gives more pixels than the page's CSS size, even with a device scale factor of 2 on the viewport or a larger size asked for, so a high-DPI display sees the page slightly soft. Crisper would take screenshots instead of the screencast; that is for later, if wanted.
 - **Input** goes in order through one queue: mouse (move, press, release, wheel), keys, text, dialog answers (these skip the queue: a click that opened a dialog does not finish until it is answered). A hidden text field holds the focus. Keys that are not text (Enter, Backspace, Tab, Escape, arrows, F-keys, Ctrl/Cmd shortcuts such as select all, undo and redo) are key events; text, dead keys, composed letters, AltGr characters and a paste are inserted as text (`beforeinput`, `compositionend`, `paste`), so a Brazilian ABNT2 keyboard works. Copy asks the server for the page's selection and writes the system clipboard.
 - **What a screenshot of a page does not show.** A click on a `<select>` is answered by the pane's own list (the server reads the options, swallows the click, and sets the value with `input` and `change`); a script's dialog (alert, confirm, prompt, before-unload) is a small dialog in the pane; `window.open` and `target=_blank` open a new tab in front; a file chooser is intercepted and refused with a plain message; downloads stay denied, with a notice.
-- **Not there yet:** uploads and downloads, signed-in grants, the assistant using the browser (B3, B4).
+- **Not there yet:** uploads and downloads, signed-in grants, the assistant's work shown in the pane (watch and stop), the assistant acting on a page with confirmation (B4).
+
+## The assistant browsing (web tasks)
+
+The assistant can use the browser: ask it by voice, or in text, to look something up and it starts a **web task** (the `browse` tool). It works in the `assistant` context, on one tab, with eight tools and nothing else (`open`, `read`, `click`, `type`, `press`, `scroll`, `back`, `done`; `packages/server/src/browser/agent.ts`). A page is text anyone can write, so the loop has no tool that reads a file, runs a command or starts a task: the worst a page can do is waste its steps, and what it answers is kept and shown as "From the web (not checked)", with the pages it came from.
+
+- **Every new site asks first.** The first time a task wants an origin (scheme, host and port) it has no rule for, it waits and the Tasks list shows *Needs your OK* with four answers: **Allow for this task**, **Always allow**, **Not now** (this task only) and **Block** (saved). Nothing is sent to the site until you answer. Saved rules live in `<data dir>/browser/sites.json`. A site that leads into this computer or its network (`localhost`, `192.168.x.x`, a name with no dot, `.local`) is said to be, and is only ever allowed by an answer for that exact origin. `file:`, `chrome:` and the like are never opened.
+- **The gate is in the browser, not in the agent.** Every document request of an assistant tab is paused (`Fetch.enable` on documents) until the gate has answered: a page typed in, a link, a redirect, a script's navigation. A refused request is aborted, so the page that had the link stays where it was. A frame inside a page is part of the page, unless it leads inside and nobody allowed that site. Popups of an assistant tab are closed and the task is told; a script's dialog is dismissed by the browser (alerts accepted, questions declined) so it cannot freeze the page. Your own tabs are never asked about. Not gated: images, scripts and requests a page makes for itself, as in any browser; and a site name that points at a computer on your network is treated as public (the browser does the lookup).
+- **It is a task.** The web task is a row in Assistant, Tasks (origin `browse`), made running at once and never queued; only one at a time. It cannot be paused, resumed, retried or extended (it is cancelled and asked again), switching the assistant off stops it, and a restart ends one that was open. Limits: 25 steps and 5 minutes of work (the time you take to answer a question is not counted).
+- **Which model browses.** The one chosen for the voice. A server that takes tools (a hosted model, or Ollama, LM Studio, llama.cpp, vLLM on this computer) gets the browser's tools, or asks for them in text if it cannot take tools. **Muse is run as `muse exec --preset empty`, one process for each step, with no tools at all** (Muse reports `Session tool ids: (none)`). Measured on a real Muse 1.4.14: a Muse *thread* started with an approval mode (`onRequest`, `denyUnmatched`) still read a file outside its folder without asking, and its network approval offered no way to deny it; the `empty` preset said no file tool exists. So Muse does not browse as a thread. The price: every `muse exec` carries about 15,000 tokens of Muse's own instructions, so a three-step task is about 50,000 tokens on your Muse plan, where a hosted or local model costs only the pages.
+- **Where it shows.** Only in the Tasks list for now (state, the question, the answer); watching the assistant's tab in the Browser panel and stopping it there is the next slice.
 
 ## Measured (headless Edge 157, Windows 11, through the service API)
 
@@ -84,7 +95,11 @@ Start plus first page about 0.7 s; stop about 0.4 s; screencast 29.5 fps with th
 
 Through the pane's socket (Edge 157, Windows 11, a 800x600 page, the pane acknowledging at once): click to the changed picture p50 10 ms, p95 23 ms (24 clicks); 34.9 fps on a fully animated page at about 9 KB a frame. The test is `browser-pane-real.test.ts`.
 
+Through the whole loop on this machine (Edge 157 behind the gate, `muse exec` as the mind, a local shop for the pages): "what is the price of the Blue Widget?" took 3 steps and 42 s (the Muse steps took 4, 33 and 4 s; the 33 was Muse's service being slow), and answered correctly with the page it came from; a page that told the model to read `.ssh\config` and leak it through the address bar was answered as a page about delivery, 2 steps, 8 s, and no question about another site ever came up.
+
 ## Tests
+
+`browser-sites.test.ts` covers origins, what leads inside, the saved rules, the questions and their answers, and the browser holding a page over a scripted browser; `browser-sites-real.test.ts` does it against a real browser (typed in, link, redirect, frame, popup, dialog, own tabs). `browser-agent.test.ts` covers the loop (its eight tools and no others, an injected page, limits, compaction) and Muse as its mind; `assistant-browse.test.ts` the web task from the voice tool to the answer. The UI's `web-task-row.test.ts` covers the question's row.
 
 `browser-pane.test.ts` (server) covers the wire format, the socket's front door (no token, wrong origin, foreign host), one controlling pane, ordered input, the select, dialog, popup and notice paths and that the assistant's tabs are never shown or touched, over a scripted browser; `browser-pane-real.test.ts` runs the whole path against a real browser. The UI's `browser-pane.test.ts` covers the key and text mapping (with the ABNT2 cases), pointer scaling, the address bar and the connection.
 

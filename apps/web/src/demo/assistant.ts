@@ -118,6 +118,11 @@ export class DemoAssistant {
       this.task("t3", "Summarise last week's failing tests", "completed", "Done, and checked.", { cwd: "/work/atlas", turns: 1, result: "1 of 1 steps finished. docs/FLAKY.md exists (1204 bytes).", steps: [["Write docs/FLAKY.md", "done", "docs/FLAKY.md exists (1204 bytes).", true]] }),
       this.task("t4", "Read the new issues", "unverified", "Finished, but nothing checked the result. Open the thread to see what it did, then confirm it.", { cwd: "/work/atlas", turns: 1, steps: [["Read the new issues", "done", "The turn finished without an error. Nothing checked what it did.", false]] }),
     ];
+    // A web task: the assistant's own browser is on it, and a site it wants waits for an answer on the screen.
+    const web = this.task("t5", "Find out what a web browser is", "paused", "Waiting for your approval to open https://en.wikipedia.org.", { cwd: "/work/atlas", turns: 0, steps: [["Look it up on the web", "running", "", false]] });
+    web.task.origin = "browse";
+    web.task.sessionId = null;
+    this.tasks.unshift(web);
     this.schedules = [{ id: "sc1", title: "Check the build every morning", goal: "Read last night's CI run and report what failed", cwd: "/work/atlas", kind: "daily", everyMinutes: null, atMinute: 540, tz: "Europe/Lisbon", endAt: this.t0 + 60 * DAY, maxRuns: null, runs: 12, enabled: true, note: "", nextRunAt: this.t0 + 14 * HOUR, lastRunAt: this.t0 - 10 * HOUR }];
     this.log("create", "m6", "capture");
   }
@@ -388,13 +393,13 @@ export class DemoAssistant {
       if (!t) throw Object.assign(new Error("The task was not found"), { kind: "not_found" });
       return { ...t, checkpoint: null };
     }
-    const taskAction = path.match(/^\/tasks\/([^/]+)\/(pause|resume|cancel|retry|confirm|extend|resolve)$/);
+    const taskAction = path.match(/^\/tasks\/([^/]+)\/(pause|resume|cancel|retry|confirm|extend|resolve|site)$/);
     if (taskAction && method === "POST") {
       const t = this.tasks.find((x) => x.task.id === taskAction[1]);
       if (!t) throw Object.assign(new Error("The task was not found"), { kind: "not_found" });
-      const next: Record<string, AssistantTaskView["status"]> = { pause: "paused", resume: "running", cancel: "cancelled", retry: "queued", confirm: "completed", extend: "queued", resolve: "queued" };
+      const next: Record<string, AssistantTaskView["status"]> = { pause: "paused", resume: "running", cancel: "cancelled", retry: "queued", confirm: "completed", extend: "queued", resolve: "queued", site: "running" };
       t.task.status = next[taskAction[2] as string] ?? t.task.status;
-      t.task.reason = taskAction[2] === "confirm" ? "Confirmed by you." : taskAction[2] === "cancel" ? "Cancelled by you." : taskAction[2] === "pause" ? "Paused by you." : "Trying again.";
+      t.task.reason = taskAction[2] === "confirm" ? "Confirmed by you." : taskAction[2] === "cancel" ? "Cancelled by you." : taskAction[2] === "pause" ? "Paused by you." : taskAction[2] === "site" ? "Opened en.wikipedia.org" : "Trying again.";
       t.task.updatedAt = Date.now();
       bump();
       return { task: t.task };
