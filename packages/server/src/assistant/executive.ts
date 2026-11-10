@@ -26,7 +26,7 @@ export interface BrowseRunnerPort {
   /** The person's answer to the site the task is waiting on ("task", "always", "not-now" or "block"); throws when none is waiting. */
   answer(taskId: string, answer: string): void;
   /** The person's answer to the action the task is waiting on ("do" or "dont"); throws when none is waiting. */
-  answerAction(taskId: string, answer: string): void;
+  answerAction(taskId: string, answer: string, folder?: string): void;
   /** What the task is asking the person now (a site or an action, without ids), or null. */
   question(taskId: string): QuestionView | null;
   /** Whether a browser and a model are there for a web task, and if not, why. */
@@ -253,11 +253,11 @@ export class Executive {
   }
 
   /** The person's answer, on the screen, to the action a web task is waiting on: "do" or "dont". */
-  answerAction(taskId: string, answer: string): Task {
+  answerAction(taskId: string, answer: string, folder?: string): Task {
     const task = this.tasks.require(taskId);
     if (task.origin !== "browse" || TERMINAL_TASK.has(task.status)) throw new ConflictError("This task is not waiting on an action.");
     if (!this.opts.browse) throw new ConflictError("Browsing is not available here.");
-    this.opts.browse.answerAction(taskId, answer);
+    this.opts.browse.answerAction(taskId, answer, folder);
     return this.tasks.require(taskId);
   }
 

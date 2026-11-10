@@ -205,6 +205,7 @@ class PaneSession {
     await this.init();
     if (this.stopped) return;
     this.send({ type: "ready", v: BROWSER_PROTOCOL_VERSION, tabs: [...this.tabs.values()], active: this.active });
+    for (const download of this.service.pendingDownloads()) if (download.tabId === null || this.own(download.tabId)) this.send({ type: "download", download });
   }
 
   /** Reads the person's tabs, opening a blank one when there are none. */
@@ -272,6 +273,12 @@ class PaneSession {
         return;
       case "dialog":
         if (this.own(event.dialog.tabId)) this.send({ type: "dialog", dialog: event.dialog });
+        return;
+      case "download":
+        if (event.download.tabId === null || this.own(event.download.tabId)) this.send({ type: "download", download: event.download });
+        return;
+      case "download-closed":
+        if (event.tabId === null || this.own(event.tabId)) this.send({ type: "download-closed", id: event.id });
         return;
       case "dialog-closed":
         if (this.own(event.tabId)) this.send({ type: "dialog-closed", tabId: event.tabId });
@@ -409,6 +416,13 @@ class PaneSession {
       // A click that opens a dialog does not finish until the dialog is answered, so the answer cannot wait behind it.
       case "dialog":
         if (this.own(message.id)) void this.service.answerDialog(message.id, message.accept, message.promptText).catch((error) => this.fail(error));
+        return;
+      case "save":
+        try {
+          this.service.answerDownload(message.id, message.accept, message.folder);
+        } catch (error) {
+          this.fail(error);
+        }
         return;
       case "mouse":
         if (message.input.type === "mouseMoved") {

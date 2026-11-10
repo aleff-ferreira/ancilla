@@ -129,13 +129,14 @@ test("a refused scheme never reaches the browser: not even a browser is started"
 
 // ------------------------------------------------------------------ tabs, contexts, defaults
 
-test("start: lazy, deny downloads and every permission, adopt the blank page as the first tab of `you`, size by Emulation", async () => {
+test("start: lazy, stage downloads (never saved unasked), deny every permission, adopt the blank page as the first tab of `you`, size by Emulation", async () => {
   const fake = fakeBrowser(healthy());
   const svc = service(fake);
   assert.equal(fake.calls.length, 0, "nothing runs at construction");
   assert.deepEqual(await svc.listTabs(), []);
   const tab = await svc.openTab("you");
-  assert.equal(sent(fake, "Browser.setDownloadBehavior")[0]!.params["behavior"], "deny");
+  assert.equal(sent(fake, "Browser.setDownloadBehavior")[0]!.params["behavior"], "allowAndName");
+  assert.equal(sent(fake, "Browser.setDownloadBehavior")[0]!.params["downloadPath"], svc.downloads.dir);
   const denied = sent(fake, "Browser.setPermission").map((c) => c.params["permission"].name);
   for (const name of ["geolocation", "notifications", "audioCapture", "videoCapture"]) assert.ok(denied.includes(name), name);
   assert.ok(sent(fake, "Browser.setPermission").every((c) => c.params["setting"] === "denied"));
@@ -150,13 +151,13 @@ test("start: lazy, deny downloads and every permission, adopt the blank page as 
   await svc.dispose();
 });
 
-test("the assistant gets its own browser context, with downloads and permissions denied in it too; reset disposes it", async () => {
+test("the assistant gets its own browser context, with downloads staged and permissions denied in it too; reset disposes it", async () => {
   const fake = fakeBrowser(healthy());
   const svc = service(fake);
   const tab = await svc.openTab("assistant");
   assert.equal(sent(fake, "Target.createBrowserContext").length, 1);
   assert.equal(sent(fake, "Target.createTarget")[0]!.params["browserContextId"], "CTX-A");
-  assert.ok(sent(fake, "Browser.setDownloadBehavior").some((c) => c.params["browserContextId"] === "CTX-A" && c.params["behavior"] === "deny"));
+  assert.ok(sent(fake, "Browser.setDownloadBehavior").some((c) => c.params["browserContextId"] === "CTX-A" && c.params["behavior"] === "allowAndName" && c.params["downloadPath"] === svc.downloads.dir));
   assert.ok(sent(fake, "Browser.setPermission").some((c) => c.params["browserContextId"] === "CTX-A"));
   await svc.openTab("assistant");
   assert.equal(sent(fake, "Target.createBrowserContext").length, 1, "one context for all assistant tabs");

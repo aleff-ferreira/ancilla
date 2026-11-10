@@ -304,7 +304,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           ) : null}
           {open && !web ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
           {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
-          {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer) => void act("action", { answer })} /> : null}
+          {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })} /> : null}
           {asking && action && !(question && isActionQuestion(question)) ? (
             <>
               <Button size="xs" variant="accent" onClick={() => void act("action", { answer: "do" })}>Do it</Button>

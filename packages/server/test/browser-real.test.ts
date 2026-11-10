@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
 import { findBrowser } from "../src/browser/find.js";
-import { BrowserError, BrowserService, type ScreencastFrame } from "../src/browser/service.js";
+import { BrowserError, BrowserService, type BrowserEvent, type ScreencastFrame } from "../src/browser/service.js";
 
 /**
  * The service against a real browser, whichever Edge, Chrome, Chromium or Brave this machine has. Without one the
@@ -15,12 +15,15 @@ import { BrowserError, BrowserService, type ScreencastFrame } from "../src/brows
 
 const found = findBrowser();
 const SKIP: string | false = found.browser ? false : `no browser to drive: ${found.reason}`;
+const DOWNLOAD_BODY = "the bytes of the file";
 const DOWNLOAD_NAME = `ancilla-test-${process.pid}-${Date.now()}.bin`;
 
 let server: Server;
 let base = "";
 let dataDir = "";
 let svc: BrowserService;
+/** What the assistant's download question answers: the folder the person chose, or null for a no. */
+let gateFolder: string | null = null;
 const cookiesSeen: Array<string | undefined> = [];
 let downloadRequests = 0;
 let startedMs = 0;
@@ -57,7 +60,7 @@ before(async () => {
     if (path === "/file.bin") {
       downloadRequests += 1;
       res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": `attachment; filename="${DOWNLOAD_NAME}"` });
-      return void res.end("not for the disk");
+      return void res.end(DOWNLOAD_BODY);
     }
     if (path === "/anim") {
       return html("<!doctype html><body><script>let i=0;(function f(){document.body.style.background='hsl('+((i++*7)%360)+',80%,50%)';requestAnimationFrame(f)})()</script>");
@@ -69,7 +72,7 @@ before(async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  svc = new BrowserService({ dataDir });
+  svc = new BrowserService({ dataDir, downloadGate: async () => gateFolder });
 });
 
 after(async () => {
@@ -209,19 +212,63 @@ real("the two contexts do not share cookies", async () => {
   tabId = again.id;
 });
 
-real("a download is denied: nothing is written and the tab stays put", async () => {
-  await svc.navigate(tabId, `${base}/`);
-  const names = () => [join(homedir(), "Downloads"), join(dataDir)].flatMap((d) => (existsSync(d) ? readdirSync(d) : []));
-  const snap = await svc.snapshot(tabId);
-  const line = snap.text.split("\n").find((l) => /link "Download"/.test(l))!;
-  await svc.click(tabId, { ref: /\[ref=(e\d+)\]/.exec(line)![1]! });
-  await new Promise((r) => setTimeout(r, 800));
-  assert.ok(!names().includes(DOWNLOAD_NAME), "the file must not be on disk");
+real("downloads: staged, asked, saved only where the person says; a no deletes; the assistant's asks through its gate", async () => {
+  const where = () => [join(homedir(), "Downloads"), dataDir].flatMap((d) => (existsSync(d) ? readdirSync(d) : []));
   const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : [e.name]));
-  assert.ok(!walk(dataDir).includes(DOWNLOAD_NAME), "nor in the profile");
-  assert.ok((await svc.listTabs()).find((t) => t.id === tabId)!.url.endsWith("/"), "the tab did not navigate to the file");
-  assert.ok(downloadRequests <= 1);
+  const events: BrowserEvent[] = [];
+  const off = svc.on((e) => events.push(e));
+  const clickDownload = async (id: string) => {
+    await svc.navigate(id, `${base}/`);
+    const snap = await svc.snapshot(id);
+    const line = snap.text.split("\n").find((l) => /link "Download"/.test(l))!;
+    await svc.click(id, { ref: /\[ref=(e\d+)\]/.exec(line)![1]! });
+  };
+  const until = async (test: () => boolean, what: string) => {
+    for (let i = 0; i < 100 && !test(); i += 1) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(test(), what);
+  };
+  // The person's own tab: asked, nothing written before the answer, then saved where they said.
+  const mine = await svc.openTab("you");
+  await clickDownload(mine.id);
+  await until(() => svc.pendingDownloads().length === 1, "the question");
+  assert.equal(svc.pendingDownloads()[0]!.name, DOWNLOAD_NAME);
+  assert.equal(svc.pendingDownloads()[0]!.size, DOWNLOAD_BODY.length);
+  assert.ok(!where().includes(DOWNLOAD_NAME) && !walk(join(dataDir, "browser", "profile")).includes(DOWNLOAD_NAME), "nothing is written before an answer");
+  assert.equal(readdirSync(svc.downloads.dir).length, 1, "it waits in staging");
+  const folder = mkdtempSync(join(tmpdir(), "ancilla-real-dl-"));
+  svc.answerDownload(svc.pendingDownloads()[0]!.id, true, folder);
+  await until(() => existsSync(join(folder, DOWNLOAD_NAME)), "the file in the chosen folder");
+  assert.equal(readFileSync(join(folder, DOWNLOAD_NAME), "utf8"), DOWNLOAD_BODY);
+  await until(() => readdirSync(svc.downloads.dir).length === 0, "staging emptied");
+  // The same file again never replaces the first.
+  await clickDownload(mine.id);
+  await until(() => svc.pendingDownloads().length === 1, "the second question");
+  svc.answerDownload(svc.pendingDownloads()[0]!.id, true, folder);
+  await until(() => readdirSync(folder).length === 2, "a second copy with its own name");
+  assert.ok(readdirSync(folder).some((n) => / \(1\)\./.test(n)), "' (1)' added");
+  // Don't save: gone, nothing anywhere.
+  await clickDownload(mine.id);
+  await until(() => svc.pendingDownloads().length === 1, "the third question");
+  svc.answerDownload(svc.pendingDownloads()[0]!.id, false);
+  await until(() => readdirSync(svc.downloads.dir).length === 0, "deleted");
+  assert.equal(readdirSync(folder).length, 2);
+  assert.ok(!where().includes(DOWNLOAD_NAME));
+  // The assistant's tab: its gate decides, with the person's folder; a no (or no gate answer) saves nothing.
+  const theirs = await svc.openTab("assistant");
+  const asked = events.filter((e) => e.type === "download").length;
+  gateFolder = null;
+  await clickDownload(theirs.id);
+  await until(() => events.some((e) => e.type === "notice" && /was not saved/.test(e.text) && e.tabId === theirs.id), "the assistant's no");
+  assert.equal(readdirSync(folder).length, 2);
+  gateFolder = folder;
+  await clickDownload(theirs.id);
+  await until(() => readdirSync(folder).length === 3, "the assistant's file, after a yes");
+  assert.equal(events.filter((e) => e.type === "download").length, asked, "the pane was not asked about the assistant's file");
+  assert.ok(downloadRequests >= 1);
+  off();
+  await svc.closeTab(mine.id).catch(() => undefined);
 });
+
 
 real("a refused scheme is refused, and the tab is unchanged", async () => {
   const before = (await svc.listTabs()).find((t) => t.id === tabId)!.url;

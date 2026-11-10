@@ -23,6 +23,18 @@ export interface PaneDialog {
   url: string;
 }
 
+/** A finished download waiting for the person to say where it goes (it is staged on the server, not saved). */
+export interface PaneDownload {
+  id: string;
+  tabId: string | null;
+  name: string;
+  size: number | null;
+  origin: string;
+  page: string;
+  folder: string;
+  warning: string | null;
+}
+
 export interface SelectOption {
   index: number;
   label: string;
@@ -68,6 +80,7 @@ export type ClientMessage =
   | { type: "key"; id: string; input: KeyWire }
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
+  | { type: "save"; id: string; accept: boolean; folder?: string }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
 
@@ -76,6 +89,8 @@ export type ServerMessage =
   | { type: "tabs"; tabs: PaneTab[]; active: string | null }
   | { type: "dialog"; dialog: PaneDialog }
   | { type: "dialog-closed"; tabId: string }
+  | { type: "download"; download: PaneDownload }
+  | { type: "download-closed"; id: string }
   | { type: "notice"; kind: "download" | "file"; text: string }
   | { type: "select"; tabId: string; probe: SelectProbe }
   | { type: "selection"; text: string }
@@ -115,6 +130,8 @@ export interface ActionQuestionView {
   page: string;
   what: string;
   fields: Array<{ name: string; value: string }>;
+  /** A download to save: the file, and where it goes unless the person picks another folder. */
+  download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
 }
 
 export type WatchQuestion = SiteQuestionView | ActionQuestionView;
@@ -135,7 +152,11 @@ export function parseQuestion(raw: unknown): WatchQuestion | null {
       .filter((f): f is Record<string, unknown> => f !== null && typeof f["name"] === "string" && typeof f["value"] === "string")
       .slice(0, 20)
       .map((f) => ({ name: f["name"] as string, value: f["value"] as string }));
-    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields };
+    const d = q["download"] as Record<string, unknown> | null | undefined;
+    const download = d && typeof d === "object" && typeof d["name"] === "string" && typeof d["folder"] === "string"
+      ? { id: typeof d["id"] === "string" ? d["id"] : "", name: d["name"], size: typeof d["size"] === "number" ? d["size"] : null, folder: d["folder"], warning: typeof d["warning"] === "string" ? d["warning"] : null }
+      : undefined;
+    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields, ...(download ? { download } : {}) };
   }
   return { origin: q["origin"], kind };
 }

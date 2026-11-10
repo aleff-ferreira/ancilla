@@ -1142,6 +1142,8 @@ export class AncillaServer {
       siteGate: (request) => this.browseGate().decide(request),
       // A form is sent only when the person says so on the screen, every time.
       commitGate: (request) => this.browseGate().decideCommit(request),
+      // A download of the assistant's browser is saved only into a folder the person chooses on the screen.
+      downloadGate: (request) => this.browseGate().decideDownload(request),
     });
     return this.browserService;
   }

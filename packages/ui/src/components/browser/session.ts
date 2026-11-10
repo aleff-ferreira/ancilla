@@ -1,4 +1,4 @@
-import { BROWSER_PROTOCOL_VERSION, decodeFrame, parseServerMessage, type ClientMessage, type Frame, type PaneDialog, type PaneTab, type SelectProbe } from "./protocol.js";
+import { BROWSER_PROTOCOL_VERSION, decodeFrame, parseServerMessage, type ClientMessage, type Frame, type PaneDialog, type PaneDownload, type PaneTab, type SelectProbe } from "./protocol.js";
 
 /**
  * The Browser pane's connection: a WebSocket to the server's browser, the tabs and notices it reports, and the pictures
@@ -27,10 +27,12 @@ export interface SessionView {
   /** A download or file chooser the browser refused. */
   notice: string | null;
   dialog: PaneDialog | null;
+  /** Finished downloads of the person's tabs waiting for a folder; the first is the one asked. */
+  downloads: PaneDownload[];
   select: { tabId: string; probe: SelectProbe } | null;
 }
 
-export const EMPTY_VIEW: SessionView = { status: "idle", tabs: [], active: null, message: null, notice: null, dialog: null, select: null };
+export const EMPTY_VIEW: SessionView = { status: "idle", tabs: [], active: null, message: null, notice: null, dialog: null, downloads: [], select: null };
 
 export interface SessionStats {
   frames: number;
@@ -145,13 +147,19 @@ export class BrowserSession {
     if (!message) return;
     switch (message.type) {
       case "ready":
-        this.set({ status: "open", tabs: message.tabs, active: message.active, message: null });
+        this.set({ status: "open", tabs: message.tabs, active: message.active, message: null, downloads: [] });
         return;
       case "tabs":
         this.set({ tabs: message.tabs, active: message.active });
         return;
       case "dialog":
         this.set({ dialog: message.dialog });
+        return;
+      case "download":
+        this.set({ downloads: [...this.view.downloads.filter((d) => d.id !== message.download.id), message.download] });
+        return;
+      case "download-closed":
+        this.set({ downloads: this.view.downloads.filter((d) => d.id !== message.id) });
         return;
       case "dialog-closed":
         if (this.view.dialog?.tabId === message.tabId) this.set({ dialog: null });

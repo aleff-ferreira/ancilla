@@ -30,6 +30,8 @@ export interface ActionAsk {
   /** The action in words: "Click “Place order”", "Send a form to https://shop.example/buy". */
   what: string;
   fields: ShownField[];
+  /** Set when the action is saving a download: the person also picks the folder, and the answer carries it. */
+  download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
 }
 
 export const VALUE_MAX = 200;

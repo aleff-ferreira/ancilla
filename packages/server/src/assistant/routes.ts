@@ -196,7 +196,7 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     } else if (action === "action") {
       // The person's answer to the action a web task is waiting on: do it, or not. Every action asks; nothing is remembered.
       if (typeof body["answer"] !== "string") bad("answer is required", "answer");
-      task = exec.answerAction(id, body["answer"]);
+      task = exec.answerAction(id, body["answer"], typeof body["folder"] === "string" ? body["folder"] : undefined);
     } else if (action === "cancel") task = await exec.cancel(id);
     else if (action === "extend") {
       const turns = typeof body["turns"] === "number" ? body["turns"] : 0;

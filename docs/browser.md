@@ -37,11 +37,23 @@ Cookies and storage are never shared between them. At most 8 tabs are open at on
 opener's context, or is closed over the limit (a popup of an assistant tab is always closed). The assistant's context is
 thrown away at the end of every web task.
 
+## Downloads
+
+A download is saved normally, after the person is asked which folder it goes in. Nothing is written to a folder they did not choose.
+
+1. **Stage.** Both contexts use `Browser.setDownloadBehavior` `allowAndName` into the staging folder, with events on. The browser names each file by its id; nothing else is written anywhere.
+2. **Ask.** When a download has finished the person is asked: in their own tab, a small *Save this file?* dialog in the panel (file name, size, site, the folder with **Change**, **Save**, **Don't save**); for a web task, the same form inside the question under Assistant, Tasks and in the panel's assistant bar, worded as the assistant's file, and the call counts it as waiting on the person. The assistant never picks the folder or the name and has no tool that opens a downloaded file.
+3. **Move.** **Save** moves the file into the chosen folder under a cleaned name (no separators or control characters, no reserved Windows names, at most 120 characters, extension kept) and never over a file that is there: `name (1).ext`. **Don't save**, ten minutes without an answer, a closed browser, a stopped task or a restart delete the staged file. A folder that does not exist, is not a folder or cannot be written is refused with a plain message and the question stays.
+4. **Folder.** The default is the last folder used (kept in `<data dir>/browser/download-folder.json`), else the system Downloads folder, else home. **Change** opens a folder browser over the server's `/api/fs/list` (the one the add-project picker uses). The folder is on the computer that runs Ancilla, and the dialog says so: reached from another device, it is that computer's folders.
+5. **Limits.** One file may not be bigger than 1 GB (the browser is told to cancel and a notice says so) and at most 2 GB sits in staging. Files that run programs (`.exe .msi .bat .cmd .ps1 .sh .jar .scr .lnk .dmg .app` and similar) show a plain warning and can still be saved: it is the person's file.
+
+Not covered: a download started from a frame the browser cannot place counts as the person's own tab and asks in the panel; uploads (a file chooser is still refused) are separate work.
+
 ## Security defaults
 
 - Only `http:`, `https:` and `about:blank` can be navigated to. `file:`, `chrome:`, `edge:`, `devtools:`,
   `view-source:`, `javascript:`, `data:` and everything else is refused before the browser hears of it.
-- Downloads are denied (`Browser.setDownloadBehavior`), in both contexts. Every permission prompt (camera, microphone,
+- A download is never saved unasked: the browser writes it into a staging folder (`<data dir>/browser/downloads`, emptied at every start) and only the person's answer moves it out (see Downloads below). Every permission prompt (camera, microphone,
   location, notifications, clipboard, sensors, ...) is denied.
 - JavaScript dialogs in your tabs are surfaced as events and are never accepted automatically; whoever drives answers them. (The assistant's tabs have nobody to answer: the browser dismisses them.)
 - The browser has its own profile (`<data dir>/browser/profile`), never the user's everyday one, with background
@@ -75,8 +87,8 @@ The Browser panel (`packages/ui/src/components/browser/`) sits beside the thread
 - **One pane at a time.** The first connection controls the browser; a second is told it is open in another window and can take it over ("Use it here"). The pane sees only the `you` context (your tabs and saved sign-ins), never the assistant's: every tab id it names must be one of its own.
 - **Pictures** are binary frames (tag, sequence, size in CSS pixels, tab id, JPEG). Only one is in flight until the pane has acknowledged it (on arrival; the pane then decodes only the newest picture it holds); a newer picture on the server replaces one that is waiting, and the socket's backlog holds the next one back (the screencast is capped at 40 fps, 30 is what a page gets in practice). The panel is the viewport: its size (debounced) is sent and the page is drawn at density 1. Measured on Edge 157, the screencast never gives more pixels than the page's CSS size, even with a device scale factor of 2 on the viewport or a larger size asked for, so a high-DPI display sees the page slightly soft. Crisper would take screenshots instead of the screencast; that is for later, if wanted.
 - **Input** goes in order through one queue: mouse (move, press, release, wheel), keys, text, dialog answers (these skip the queue: a click that opened a dialog does not finish until it is answered). A hidden text field holds the focus. Keys that are not text (Enter, Backspace, Tab, Escape, arrows, F-keys, Ctrl/Cmd shortcuts such as select all, undo and redo) are key events; text, dead keys, composed letters, AltGr characters and a paste are inserted as text (`beforeinput`, `compositionend`, `paste`), so a Brazilian ABNT2 keyboard works. Copy asks the server for the page's selection and writes the system clipboard.
-- **What a screenshot of a page does not show.** A click on a `<select>` is answered by the pane's own list (the server reads the options, swallows the click, and sets the value with `input` and `change`); a script's dialog (alert, confirm, prompt, before-unload) is a small dialog in the pane; `window.open` and `target=_blank` open a new tab in front; a file chooser is intercepted and refused with a plain message; downloads stay denied, with a notice.
-- **Not there yet:** uploads and downloads, signed-in grants, the assistant acting on a page with confirmation (B4).
+- **What a screenshot of a page does not show.** A click on a `<select>` is answered by the pane's own list (the server reads the options, swallows the click, and sets the value with `input` and `change`); a script's dialog (alert, confirm, prompt, before-unload) is a small dialog in the pane; `window.open` and `target=_blank` open a new tab in front; a file chooser is intercepted and refused with a plain message; a download opens the Save dialog described under Downloads.
+- **Not there yet:** uploads, signed-in grants, the assistant acting on a page with confirmation (B4).
 
 ## The assistant browsing (web tasks)
 
@@ -114,5 +126,5 @@ Through the whole loop on this machine (Edge 157 behind the gate, `muse exec` as
 `packages/server/test/browser-service.test.ts` uses a fake CDP transport and a fake child (framing, tabs, snapshot
 rules, scheme refusal, lifecycle). `browser-real.test.ts` drives whatever real browser exists (and is skipped, with the
 reason, where there is none): snapshot, typing, a click that navigates, screencast, screenshot, context isolation, a
-denied download, refused schemes and no process left after dispose. On Ubuntu 24.04 CI the runner's restriction on
+download that is staged, asked about and saved only into a folder the person chose (also for the assistant's tab, through its gate), refused schemes and no process left after dispose. On Ubuntu 24.04 CI the runner's restriction on
 unprivileged user namespaces is lifted first, so the browser can start with its sandbox on.

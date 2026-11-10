@@ -7,6 +7,7 @@ import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
 import { bodyText } from "./commit.js";
 import { originOf } from "./sites.js";
+import { DownloadDesk, DownloadError, checkDownloadFolder, MAX_DOWNLOAD_BYTES, MAX_STAGED_BYTES, ASK_MS, riskWarning, sanitizeFileName, type DownloadInfo } from "./downloads.js";
 import { buildSnapshot, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
 /**
@@ -54,7 +55,27 @@ export type BrowserEvent =
   | { type: "dialog"; dialog: DialogInfo }
   | { type: "dialog-closed"; tabId: string }
   | { type: "notice"; kind: "download" | "file" | "popup"; tabId?: string; text: string }
+  | { type: "download"; download: DownloadInfo }
+  | { type: "download-closed"; id: string; tabId: string | null }
   | { type: "stopped" };
+
+/** One download, from the browser's first word of it to the person's answer. */
+interface Flight {
+  guid: string;
+  context: BrowserContextName;
+  tabId: string | null;
+  name: string;
+  url: string;
+  origin: string;
+  page: string;
+  size: number | null;
+  finishing: boolean;
+  /** Set while the person's own pane is being asked. */
+  ask: { info: DownloadInfo; resolve: (folder: string | null) => void; timer: NodeJS.Timeout } | null;
+}
+
+/** What the assistant's download question needs: the file, the page and the site it came from, and where it would go by default. */
+export type DownloadRequest = Omit<DownloadInfo, "id" | "tabId">;
 
 export interface BrowserStatus {
   available: boolean;
@@ -128,6 +149,13 @@ export interface BrowserServiceOptions {
    * `siteGate` is set: nothing but a GET leaves the assistant's browser.
    */
   commitGate?: (request: CommitRequest) => Promise<boolean>;
+  /**
+   * Asked when a download of the assistant's browser has finished (it is staged, not saved): resolves the folder the PERSON chose
+   * for it, or null for "don't save". Absent: the assistant's downloads are deleted.
+   */
+  downloadGate?: (request: DownloadRequest) => Promise<string | null>;
+  /** How long the person's own pane may take to answer a download question (default 10 minutes). */
+  downloadAskMs?: number;
 }
 
 /** A form the assistant's page is about to send. */
@@ -305,11 +333,15 @@ export class BrowserService {
   private readonly profileDir: string;
   private versionCache: { path: string; version: string | null } | null = null;
   private readonly options: BrowserServiceOptions;
+  readonly downloads: DownloadDesk;
+  /** Downloads in flight or waiting for an answer, by the browser's guid. */
+  private readonly flights = new Map<string, Flight>();
 
   constructor(options: BrowserServiceOptions = {}) {
     this.options = options;
     const base = options.dataDir && options.dataDir !== ":memory:" ? options.dataDir : mkdtempSync(join(tmpdir(), "ancilla-browser-"));
     this.profileDir = join(base, "browser", "profile");
+    this.downloads = new DownloadDesk(join(base, "browser", "downloads"), join(base, "browser", "download-folder.json"));
   }
 
   // ---------------------------------------------------------------- status and events
@@ -417,7 +449,9 @@ export class BrowserService {
       conn.onClose(teardown);
       void proc.exited.then(teardown);
       await conn.send("Target.setDiscoverTargets", { discover: true });
-      await conn.send("Browser.setDownloadBehavior", { behavior: "deny", eventsEnabled: true }).catch(() => undefined);
+      this.downloads.reset();
+      this.flights.clear();
+      await conn.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: this.downloads.dir, eventsEnabled: true }).catch(() => undefined);
       await this.denyPermissions(rt, undefined);
       // The blank page the browser opens with becomes the first tab of `you`.
       const targets = await conn.send<{ targetInfos: Array<{ targetId: string; type: string; url: string; title: string }> }>("Target.getTargets");
@@ -444,7 +478,121 @@ export class BrowserService {
   }
 
   /** Called once when the browser is gone, however it went. */
+  // ---------------------------------------------------------------- downloads
+
+  private downloadBegan(rt: Runtime, params: Record<string, any>): void {
+    const guid = String(params["guid"] ?? "");
+    try {
+      this.downloads.stagedPath(guid);
+    } catch {
+      return;
+    }
+    const tab = rt.tabs.get(String(params["frameId"] ?? ""));
+    const url = String(params["url"] ?? "");
+    let fallback = "";
+    try {
+      fallback = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "");
+    } catch {
+      // no usable name in the address
+    }
+    const name = sanitizeFileName(String(params["suggestedFilename"] || fallback));
+    // A frame we do not know (a frame inside a page) counts as the person's own tab: the question goes to the pane, never to a task.
+    const flight: Flight = { guid, context: tab?.context ?? "you", tabId: tab?.id ?? null, name, url, origin: originOf(tab?.url ?? "") ?? originOf(url) ?? "", page: tab?.title ?? "", size: null, finishing: false, ask: null };
+    this.flights.set(guid, flight);
+    if (this.downloads.stagedBytes() >= MAX_STAGED_BYTES) this.cancelDownload(rt, flight, `${name} was not downloaded: too many downloads are waiting for an answer.`);
+  }
+
+  private downloadProgress(rt: Runtime, params: Record<string, any>): void {
+    const flight = this.flights.get(String(params["guid"] ?? ""));
+    if (!flight || flight.ask) return;
+    const total = Number(params["totalBytes"]);
+    const received = Number(params["receivedBytes"]);
+    if (total > 0) flight.size = total;
+    if (total > MAX_DOWNLOAD_BYTES || received > MAX_DOWNLOAD_BYTES) {
+      this.cancelDownload(rt, flight, `${flight.name} was not downloaded: it is bigger than ${MAX_DOWNLOAD_BYTES / 1024 ** 3} GB.`);
+      return;
+    }
+    if (params["state"] === "canceled") {
+      this.flights.delete(flight.guid);
+      this.downloads.discard(flight.guid);
+    } else if (params["state"] === "completed" && !flight.finishing) {
+      flight.finishing = true;
+      if (flight.size === null && received > 0) flight.size = received;
+      void this.finishDownload(flight);
+    }
+  }
+
+  private cancelDownload(rt: Runtime, flight: Flight, why: string): void {
+    this.flights.delete(flight.guid);
+    void rt.conn.send("Browser.cancelDownload", { guid: flight.guid }).catch(() => undefined);
+    setTimeout(() => this.downloads.discard(flight.guid), 200).unref?.();
+    this.emit({ type: "notice", kind: "download", ...(flight.tabId ? { tabId: flight.tabId } : {}), text: why });
+  }
+
+  /** The file is complete and staged: ask where to put it, then move it (or delete it). */
+  private async finishDownload(flight: Flight): Promise<void> {
+    const request: DownloadRequest = { name: flight.name, size: flight.size, origin: flight.origin, page: flight.page, folder: this.downloads.defaultFolder(), warning: riskWarning(flight.name) };
+    let folder: string | null = null;
+    try {
+      folder = flight.context === "assistant" ? (this.options.downloadGate ? await this.options.downloadGate(request) : null) : await this.askPane(flight, request);
+      if (folder === null) {
+        this.say(flight, `${flight.name} was not saved.`);
+      } else {
+        const saved = this.downloads.save(flight.guid, flight.name, folder);
+        this.say(flight, `Saved ${flight.name} to ${dirname(saved)}.`);
+      }
+    } catch (error) {
+      this.say(flight, error instanceof DownloadError ? error.message : `${flight.name} could not be saved.`);
+    } finally {
+      this.flights.delete(flight.guid);
+      this.downloads.discard(flight.guid);
+    }
+  }
+
+  private say(flight: Flight, text: string): void {
+    this.emit({ type: "notice", kind: "download", ...(flight.tabId ? { tabId: flight.tabId } : {}), text });
+  }
+
+  private askPane(flight: Flight, request: DownloadRequest): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      const info: DownloadInfo = { ...request, id: flight.guid, tabId: flight.tabId };
+      const done = (folder: string | null): void => {
+        if (!flight.ask) return;
+        clearTimeout(flight.ask.timer);
+        flight.ask = null;
+        this.emit({ type: "download-closed", id: flight.guid, tabId: flight.tabId });
+        resolve(folder);
+      };
+      const timer = setTimeout(() => done(null), this.options.downloadAskMs ?? ASK_MS);
+      timer.unref?.();
+      flight.ask = { info, resolve: done, timer };
+      this.emit({ type: "download", download: info });
+    });
+  }
+
+  /** The pane's answer: a folder saves the file there, null deletes it. A folder that cannot be used throws and the question stays. */
+  answerDownload(id: string, accept: boolean, folder?: string): void {
+    const flight = this.flights.get(id);
+    if (!flight?.ask) throw new BrowserError("invalid", "That download is not waiting any more.");
+    if (!accept) return flight.ask.resolve(null);
+    try {
+      flight.ask.resolve(checkDownloadFolder(folder ?? flight.ask.info.folder));
+    } catch (error) {
+      throw new BrowserError("invalid", error instanceof DownloadError ? error.message : "That folder cannot be used.");
+    }
+  }
+
+  /** The questions the pane has not answered yet (a pane that connects late is told of them). */
+  pendingDownloads(): DownloadInfo[] {
+    return [...this.flights.values()].flatMap((f) => (f.ask ? [f.ask.info] : []));
+  }
+
   private teardown(rt: Runtime): void {
+    for (const flight of [...this.flights.values()]) {
+      flight.ask?.resolve(null);
+      this.flights.delete(flight.guid);
+      this.downloads.discard(flight.guid);
+    }
     if (this.runtime === rt) this.runtime = null;
     if (rt.stopping && rt.tabs.size === 0) return;
     for (const tab of rt.tabs.values()) this.endScreencast(tab);
@@ -562,7 +710,7 @@ export class BrowserService {
       if (!rt.assistantContextId) {
         const made = await rt.conn.send<{ browserContextId: string }>("Target.createBrowserContext", { disposeOnDetach: false });
         rt.assistantContextId = made.browserContextId;
-        await rt.conn.send("Browser.setDownloadBehavior", { behavior: "deny", browserContextId: made.browserContextId }).catch(() => undefined);
+        await rt.conn.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: this.downloads.dir, eventsEnabled: true, browserContextId: made.browserContextId }).catch(() => undefined);
         await this.denyPermissions(rt, made.browserContextId);
       }
       browserContextId = rt.assistantContextId;
@@ -1053,8 +1201,11 @@ export class BrowserService {
 
   private onCdp(rt: Runtime, method: string, params: Record<string, any>, sessionId: string | undefined): void {
     if (method === "Browser.downloadWillBegin") {
-      const name = String(params["suggestedFilename"] ?? "").slice(0, 80);
-      this.emit({ type: "notice", kind: "download", text: `Downloads are not allowed yet${name ? `, so ${name} was not saved` : ""}.` });
+      this.downloadBegan(rt, params);
+      return;
+    }
+    if (method === "Browser.downloadProgress") {
+      this.downloadProgress(rt, params);
       return;
     }
     if (method === "Target.targetInfoChanged") {

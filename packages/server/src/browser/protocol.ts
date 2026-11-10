@@ -1,3 +1,4 @@
+import type { DownloadInfo } from "./downloads.js";
 import type { DialogInfo, KeyInput, MouseInput, SelectProbe } from "./service.js";
 
 /**
@@ -37,6 +38,7 @@ export type ClientMessage =
   | { type: "key"; id: string; input: KeyInput }
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
+  | { type: "save"; id: string; accept: boolean; folder?: string }
   | { type: "selection"; id: string }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
@@ -46,6 +48,8 @@ export type ServerMessage =
   | { type: "tabs"; tabs: PaneTab[]; active: string | null }
   | { type: "dialog"; dialog: DialogInfo }
   | { type: "dialog-closed"; tabId: string }
+  | { type: "download"; download: DownloadInfo }
+  | { type: "download-closed"; id: string }
   | { type: "notice"; kind: "download" | "file"; text: string }
   | { type: "select"; tabId: string; probe: SelectProbe }
   | { type: "selection"; text: string }
@@ -170,6 +174,12 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       if (tab === null || typeof value["accept"] !== "boolean") return null;
       const promptText = str(value["promptText"], 10_000);
       return { type: "dialog", id: tab, accept: value["accept"], ...(promptText !== null ? { promptText } : {}) };
+    }
+    case "save": {
+      const download = id(value["id"]) ?? (typeof value["id"] === "string" && /^[A-Za-z0-9-]{8,64}$/.test(value["id"]) ? value["id"] : null);
+      if (download === null || typeof value["accept"] !== "boolean") return null;
+      const folder = str(value["folder"], 1024);
+      return { type: "save", id: download, accept: value["accept"], ...(folder !== null && folder !== "" ? { folder } : {}) };
     }
     case "choose": {
       const tab = id(value["id"]);

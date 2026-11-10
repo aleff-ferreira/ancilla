@@ -36,7 +36,7 @@ export interface AssistantBarViewProps {
   onAsk(): void;
   onStop(): void;
   onAnswer(answer: SiteAnswer): void;
-  onAction(answer: ActionAnswer): void;
+  onAction(answer: ActionAnswer, folder?: string): void;
   onToggleSites(): void;
   onRemove(origin: string): void;
 }
@@ -252,7 +252,7 @@ export function AssistantBar() {
       }
       onStop={() => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/cancel`, {}))))}
       onAnswer={(answer) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/site`, { answer }))))}
-      onAction={(answer) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/action`, { answer }))))}
+      onAction={(answer, folder) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/action`, folder ? { answer, folder } : { answer }))))}
       onToggleSites={() => {
         const next = !sitesOpen;
         setSitesOpen(next);

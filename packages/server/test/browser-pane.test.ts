@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, describe, it } from "node:test";
@@ -251,6 +254,33 @@ describe("the pane's socket", () => {
     pane.ws.close();
   });
 
+  it("asks where to save a download of its own tab (and a late pane is told), saves on `save`, and never hears of the assistant's", async () => {
+    const { fake, service, url } = await rig();
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    const guid = "abcd1234-0000-1111-2222-333344445555";
+    writeFileSync(join(service.downloads.dir, guid), "bytes");
+    fake.emit("Browser.downloadWillBegin", { frameId: "T0", guid, url: "https://x.example/x.zip", suggestedFilename: "x.zip" });
+    fake.emit("Browser.downloadProgress", { guid, totalBytes: 5, receivedBytes: 5, state: "completed" });
+    const ask = await pane.waitFor((m) => m.type === "download", "the question");
+    assert.equal(ask.download.name, "x.zip");
+    const folder = mkdtempSync(join(tmpdir(), "ancilla-pane-dl-"));
+    pane.send({ type: "save", id: guid, accept: true, folder: join(folder, "missing") });
+    await pane.waitFor((m) => m.type === "error" && /does not exist/.test(m.message), "a plain refusal");
+    assert.deepEqual(readdirSync(folder), [], "nothing written for a folder that is not there");
+    pane.send({ type: "save", id: guid, accept: true, folder });
+    await pane.waitFor((m) => m.type === "download-closed" && m.id === guid, "the question closed");
+    await waitFor(() => readdirSync(folder).includes("x.zip"), "the file");
+    const theirs = await service.openTab("assistant");
+    writeFileSync(join(service.downloads.dir, "feed1234-0000-1111-2222-333344445555"), "z");
+    fake.emit("Browser.downloadWillBegin", { frameId: theirs.id, guid: "feed1234-0000-1111-2222-333344445555", url: "https://x.example/y.zip", suggestedFilename: "y.zip" });
+    fake.emit("Browser.downloadProgress", { guid: "feed1234-0000-1111-2222-333344445555", totalBytes: 1, receivedBytes: 1, state: "completed" });
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(pane.texts.filter((m) => m.type === "download").length, 1, "only its own file was asked about");
+    pane.ws.close();
+  });
+
   it("answers a click on a select with the pane's own dropdown instead of a click, and applies the choice", async () => {
     const probe = { rect: { x: 1, y: 2, width: 100, height: 20 }, multiple: false, options: [{ index: 0, label: "Um", disabled: false, selected: true }, { index: 1, label: "Dois", disabled: false, selected: false }] };
     const { fake, url } = await rig((method, params) => {
@@ -290,8 +320,6 @@ describe("the pane's socket", () => {
     assert.equal(tabs.tabs.length, 2);
     fake.emit("Page.fileChooserOpened", { mode: "selectSingle" }, "S-P1");
     assert.match((await pane.waitFor((m) => m.type === "notice" && m.kind === "file", "file notice")).text, /not available/);
-    fake.emit("Browser.downloadWillBegin", { suggestedFilename: "x.zip" });
-    assert.match((await pane.waitFor((m) => m.type === "notice" && m.kind === "download", "download notice")).text, /x\.zip/);
     pane.send({ type: "selection", id: "P1" });
     assert.equal((await pane.waitFor((m) => m.type === "selection", "selection")).text, "texto copiado");
     pane.ws.close();

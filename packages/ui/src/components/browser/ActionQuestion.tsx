@@ -1,4 +1,5 @@
 import { Button } from "../ui/primitives.js";
+import { DownloadForm } from "./DownloadForm.js";
 import type { ActionQuestionView } from "./protocol.js";
 
 /**
@@ -11,8 +12,16 @@ export type ActionAnswer = "do" | "dont";
 /** The reason a web task shows while it waits for this: the Tasks row knows an action is waiting before the details have loaded. */
 export const ACTION_REASON = /^Waiting for your approval: /;
 
-export function ActionQuestionCard(props: { question: ActionQuestionView; busy?: boolean; onAnswer(answer: ActionAnswer): void }) {
+export function ActionQuestionCard(props: { question: ActionQuestionView; busy?: boolean; onAnswer(answer: ActionAnswer, folder?: string): void }) {
   const { question } = props;
+  if (question.download) {
+    const d = question.download;
+    return (
+      <div aria-label="A download the assistant started" className="w-full space-y-1.5 rounded border border-line bg-bg p-2">
+        <DownloadForm name={d.name} size={d.size} origin={question.origin} page={question.page} folder={d.folder} warning={d.warning} fromAssistant busy={props.busy} onSave={(folder) => props.onAnswer("do", folder)} onDont={() => props.onAnswer("dont")} />
+      </div>
+    );
+  }
   return (
     <div role="group" aria-label="An action the assistant wants to take" className="w-full space-y-1.5 rounded border border-line bg-bg p-2">
       <p className="text-xs text-muted">The assistant wants to</p>

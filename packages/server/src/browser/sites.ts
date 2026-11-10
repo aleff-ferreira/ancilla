@@ -48,11 +48,11 @@ export type ActionAnswer = "do" | "dont";
 export const ACTION_ANSWERS: readonly ActionAnswer[] = ["do", "dont"];
 
 /** A question as a screen is shown it: no ids, only what the person needs to decide. */
-export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[] };
+export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[]; download?: NonNullable<ActionAsk["download"]> };
 
 export function questionView(question: GateQuestion): QuestionView {
   return question.type === "action"
-    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields }
+    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields, ...(question.download ? { download: { ...question.download } } : {}) }
     : { type: "site", origin: question.origin, kind: question.kind };
 }
 
@@ -412,6 +412,18 @@ export class BrowseSites {
     }
     if (taskId === null) return false;
     return this.gate.request(taskId, request.url);
+  }
+
+  /**
+   * A download the assistant's page started has finished and is staged. The person is asked, and the answer carries the folder
+   * THEY chose (the assistant never names one). Resolves the folder, or null for "don't save" or no task browsing.
+   */
+  async decideDownload(request: { name: string; size: number | null; origin: string; page: string; folder: string; warning: string | null }): Promise<string | null> {
+    const taskId = this.source().taskId();
+    if (taskId === null) return null;
+    const download = { id: `dl_${randomBytes(4).toString("hex")}`, name: request.name, size: request.size, folder: request.folder, warning: request.warning };
+    const ok = await this.gate.ask(taskId, { origin: request.origin, page: request.page, what: `Save the file “${request.name}”`, fields: [], download });
+    return ok ? download.folder : null;
   }
 
   /**
