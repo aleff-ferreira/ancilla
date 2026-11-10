@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   FIELDS_MAX,
   MASK,
+  VALUES_HIDDEN,
   VALUE_MAX,
   actionReason,
   bodyText,
@@ -88,7 +89,7 @@ test("shownFields: a file is shown by name only, and a long form is cut", () => 
 });
 
 test("describeBody: a urlencoded form, a multipart form with a file, JSON, and what cannot be read", () => {
-  const form = describeBody("application/x-www-form-urlencoded", "item=Blue+Widget&qty=2&password=hunter2&card=4111111111111111");
+  const form = describeBody("application/x-www-form-urlencoded", "item=Blue+Widget&qty=2&password=hunter2&card=4111111111111111", []);
   assert.deepEqual(describeBody("application/x-www-form-urlencoded", "login=ana&code=letmein", ["code"]).fields, [{ name: "login", value: "ana" }, { name: "code", value: MASK }], "a field the page says is a password input is masked whatever it is called");
   assert.deepEqual(form.fields, [
     { name: "item", value: "Blue Widget" },
@@ -98,21 +99,45 @@ test("describeBody: a urlencoded form, a multipart form with a file, JSON, and w
   ]);
   const boundary = "----b123";
   const multipart = `--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nHello\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="passport.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-secret-bytes\r\n--${boundary}--\r\n`;
-  const parts = describeBody(`multipart/form-data; boundary=${boundary}`, multipart);
+  const parts = describeBody(`multipart/form-data; boundary=${boundary}`, multipart, []);
   assert.deepEqual(parts.fields, [
     { name: "title", value: "Hello" },
     { name: "file", value: "(file) passport.pdf" },
   ]);
   assert.ok(!JSON.stringify(parts).includes("secret-bytes"), "the bytes of a file are never shown");
-  assert.deepEqual(describeBody("application/json", '{"to":"a@b.example","body":"hi","n":3}').fields, [
+  assert.deepEqual(describeBody("application/json", '{"to":"a@b.example","body":"hi","n":3}', []).fields, [
     { name: "to", value: "a@b.example" },
     { name: "body", value: "hi" },
     { name: "n", value: "3" },
   ]);
-  assert.match(describeBody("application/json", "[1,2]").note, /request of 5 characters/);
-  assert.match(describeBody("text/plain", "hello").note, /request of 5 characters \(text\/plain\)/);
-  assert.match(describeBody("application/x-www-form-urlencoded", undefined).note, /could not be read/);
-  assert.match(describeBody("multipart/form-data", "x").note, /could not be read/);
+  assert.match(describeBody("application/json", "[1,2]", []).note, /request of 5 characters/);
+  assert.match(describeBody("text/plain", "hello", []).note, /request of 5 characters \(text\/plain\)/);
+  assert.match(describeBody("application/x-www-form-urlencoded", undefined, []).note, /could not be read/);
+  assert.match(describeBody("multipart/form-data", "x", []).note, /could not be read/);
+});
+
+test("a page that did not say which inputs are passwords: every value is hidden and the card says so; one that did keeps its values", () => {
+  const ask = (body: string, secrets: string[] | null, contentType = "application/x-www-form-urlencoded") => describeRequest({ url: "https://shop.example/buy", method: "POST", title: "Cart", contentType, body, secrets });
+  const unknown = ask("item=Blue+Widget&zz=hunter-two&note=", null);
+  assert.deepEqual(unknown.fields, [{ name: "item", value: MASK }, { name: "zz", value: MASK }, { name: "note", value: "" }], "an empty value stays empty: nothing to hide");
+  assert.equal(unknown.note, VALUES_HIDDEN);
+  assert.match(VALUES_HIDDEN, /did not say which fields are passwords/);
+  const known = ask("item=Blue+Widget&zz=hunter-two&note=", ["zz"]);
+  assert.deepEqual(known.fields, [{ name: "item", value: "Blue Widget" }, { name: "zz", value: MASK }, { name: "note", value: "" }]);
+  assert.equal("note" in known, false, "no words when nothing is hidden for that reason");
+  assert.equal("note" in ask("a=&b=", null), false, "nothing to hide, nothing said");
+  assert.equal("note" in ask("", null), false);
+
+  const boundary = "----b9";
+  const multipart = `--${boundary}\r\nContent-Disposition: form-data; name="title"\r\n\r\nHello\r\n--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="a.pdf"\r\n\r\nbytes\r\n--${boundary}--\r\n`;
+  const parts = ask(multipart, null, `multipart/form-data; boundary=${boundary}`);
+  assert.deepEqual(parts.fields, [{ name: "title", value: MASK }, { name: "file", value: "(file) a.pdf" }], "a file is still shown by its name");
+  assert.equal(parts.note, VALUES_HIDDEN);
+  assert.deepEqual(ask('{"to":"a@b.example"}', null, "application/json").fields, [{ name: "to", value: MASK }]);
+
+  // A field read with its own type (a click) is judged by that type; `null` is for what a request cannot say.
+  assert.deepEqual(shownFields([{ name: "x", value: "v", type: "password" }, { name: "y", value: "v" }]), [{ name: "x", value: MASK }, { name: "y", value: "v" }]);
+  assert.deepEqual(shownFields([{ name: "y", value: "v" }, { name: "photo", value: "a.png", file: true }], null), [{ name: "y", value: MASK }, { name: "photo", value: "(file) a.png" }]);
 });
 
 test("bodyText: the post data, or the entries newer browsers give instead", () => {
@@ -122,10 +147,10 @@ test("bodyText: the post data, or the entries newer browsers give instead", () =
 });
 
 test("describeRequest and describeClick: the site, the page, what happens and what is sent", () => {
-  const post = describeRequest({ url: "https://shop.example/buy?utm=1#x", method: "POST", title: "Checkout", contentType: "application/x-www-form-urlencoded", body: "item=Widget&cvv=123" });
+  const post = describeRequest({ url: "https://shop.example/buy?utm=1#x", method: "POST", title: "Checkout", contentType: "application/x-www-form-urlencoded", body: "item=Widget&cvv=123", secrets: [] });
   assert.deepEqual(post, { origin: "https://shop.example", page: "Checkout", what: "Send a form to https://shop.example/buy", fields: [{ name: "item", value: "Widget" }, { name: "cvv", value: MASK }] });
-  assert.equal(describeRequest({ url: "https://a.example/x", method: "PUT", title: "", contentType: "", body: undefined }).what, "Send a PUT request to https://a.example/x");
-  assert.deepEqual(describeRequest({ url: "https://a.example/x", method: "POST", title: "", contentType: "text/plain", body: "hello" }).fields, [{ name: "contents", value: "A request of 5 characters (text/plain)." }]);
+  assert.equal(describeRequest({ url: "https://a.example/x", method: "PUT", title: "", contentType: "", body: undefined, secrets: [] }).what, "Send a PUT request to https://a.example/x");
+  assert.deepEqual(describeRequest({ url: "https://a.example/x", method: "POST", title: "", contentType: "text/plain", body: "hello", secrets: [] }).fields, [{ name: "contents", value: "A request of 5 characters (text/plain)." }]);
 
   const click = describeClick({ origin: "https://shop.example", page: "Cart", verb: "Click", label: "Place order", form: { action: "https://shop.example/order?x=1", fields: [{ name: "address", value: "Rua A, 1" }, { name: "password", value: "p", type: "password" }, { name: "id", value: "my.pdf", type: "file" }] } });
   assert.equal(click.what, "Click “Place order”, which sends a form to https://shop.example/order");

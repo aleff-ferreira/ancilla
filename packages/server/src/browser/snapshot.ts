@@ -66,10 +66,43 @@ function clean(value: unknown, max: number): string {
 /** The part of `DOMSnapshot.captureSnapshot` (computedStyles: opacity, visibility, font-size) this reads. */
 export interface DomSnapshotLike {
   documents?: Array<{
-    nodes?: { parentIndex?: number[]; backendNodeId?: number[] };
+    nodes?: { parentIndex?: number[]; backendNodeId?: number[]; nodeName?: number[]; attributes?: number[][] };
     layout?: { nodeIndex?: number[]; bounds?: number[][]; styles?: number[][] };
   }>;
   strings?: string[];
+}
+
+/** More password inputs than this on one page and the names are not trusted to be the whole list (the page is treated as unread). */
+const SECRET_NAMES_MAX = 200;
+
+/**
+ * The names of the page's password inputs, read from the DOM snapshot the page's text is built from: every `input` whose `type` is
+ * password (in any case) under its `name` and its `id`, in the page, its frames and its shadow roots. No page script runs, so the
+ * page can neither answer slowly nor wrongly. Null when the snapshot says nothing about the nodes: it did not read the page.
+ */
+export function passwordInputNames(snapshot: DomSnapshotLike): string[] | null {
+  const strings = snapshot.strings;
+  if (!Array.isArray(strings)) return null;
+  const names = new Set<string>();
+  let read = false;
+  for (const doc of snapshot.documents ?? []) {
+    const nodeName = doc.nodes?.nodeName;
+    const attributes = doc.nodes?.attributes;
+    if (!Array.isArray(nodeName) || !Array.isArray(attributes)) continue;
+    read = true;
+    for (let n = 0; n < nodeName.length; n++) {
+      if ((strings[nodeName[n] ?? -1] ?? "").toLowerCase() !== "input") continue;
+      const pairs = attributes[n] ?? [];
+      const attr = new Map<string, string>();
+      for (let i = 0; i + 1 < pairs.length; i += 2) attr.set((strings[pairs[i] ?? -1] ?? "").toLowerCase(), strings[pairs[i + 1] ?? -1] ?? "");
+      if ((attr.get("type") ?? "").trim().toLowerCase() !== "password") continue;
+      for (const key of ["name", "id"]) {
+        const value = attr.get(key);
+        if (value) names.add(value);
+      }
+    }
+  }
+  return read && names.size <= SECRET_NAMES_MAX ? [...names] : null;
 }
 
 /** Backend node ids of everything a person can see. Anything absent from the set is treated as hidden. */

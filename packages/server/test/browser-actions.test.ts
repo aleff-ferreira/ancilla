@@ -102,7 +102,7 @@ test("gate: the click that was approved covers the form it sends, once, for a sh
 test("decideCommit: asks about a form with what it sends; with no task nothing is sent; the form of an approved click is not asked twice", async () => {
   let task: string | null = null;
   const sites = new BrowseSites(null, () => ({ taskId: () => task, gateChanged: () => undefined }));
-  const request = { url: "https://shop.example/buy", method: "POST", title: "Cart", contentType: "application/x-www-form-urlencoded", body: "item=Widget&password=hunter2" };
+  const request = { url: "https://shop.example/buy", method: "POST", title: "Cart", contentType: "application/x-www-form-urlencoded", body: "item=Widget&password=hunter2", secrets: [] as string[] };
   assert.equal(await sites.decideCommit(request), false, "nobody is browsing");
   task = "t1";
   const decided = sites.decideCommit(request);
@@ -150,7 +150,7 @@ test("service: a form waits for the person; yes sends it, no aborts it and the a
   answers.push(new Promise<boolean>((resolve) => (answer = resolve)));
   paused(fake, session, "R1", tab.id, { url: "https://shop.example/buy", method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, postData: "item=Widget" });
   await tick();
-  assert.deepEqual(asked[0], { url: "https://shop.example/buy", method: "POST", title: "", contentType: "application/x-www-form-urlencoded", body: "item=Widget", secrets: [] });
+  assert.deepEqual(asked[0], { url: "https://shop.example/buy", method: "POST", title: "", contentType: "application/x-www-form-urlencoded", body: "item=Widget", secrets: null }, "this page was never looked at: its password inputs are not known");
   assert.equal(sent(fake, "Fetch.continueRequest").some((c) => c.params["requestId"] === "R1"), false, "nothing is sent while the person decides");
   assert.equal(sent(fake, "Fetch.failRequest").length, 0);
   answer(true);
@@ -208,6 +208,190 @@ test("service: any frame's form asks; a failing gate, or none at all, sends noth
   assert.deepEqual(sent(bare, "Fetch.failRequest").map((c) => c.params["requestId"]), ["N1"], "with nobody to ask a form is not sent");
   assert.deepEqual(sent(bare, "Fetch.continueRequest").map((c) => c.params["requestId"]), ["N2"]);
   await nogate.dispose();
+});
+
+// ------------------------------------------------------------------ which inputs are passwords
+
+const AX = { nodes: [{ nodeId: "1", role: { value: "RootWebArea" }, childIds: [], backendDOMNodeId: 1 }] };
+const POST = { url: "https://shop.example/buy", method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, postData: "item=Widget&zz=hunter-two" };
+
+/** A DOM snapshot of one document holding inputs with these attributes (`strings` is the table the browser's indexes point into). */
+function domWith(inputs: Array<Record<string, string>>): Record<string, unknown> {
+  const strings: string[] = [];
+  const at = (text: string): number => {
+    const found = strings.indexOf(text);
+    return found >= 0 ? found : strings.push(text) - 1;
+  };
+  return {
+    strings,
+    documents: [{ nodes: { nodeName: ["HTML", ...inputs.map(() => "INPUT")].map(at), attributes: [[], ...inputs.map((input) => Object.entries(input).flatMap(([key, value]) => [at(key), at(value)]))] } }],
+  };
+}
+
+test("service: the password inputs come from the DOM snapshot with no page script, are read again before a click, and a new page forgets them", async () => {
+  let dom = domWith([{ type: "password", name: "zz" }, { type: "text", name: "item" }]);
+  const fake = fakeBrowser(healthy((m) => (m === "Accessibility.getFullAXTree" ? AX : m === "DOMSnapshot.captureSnapshot" ? dom : undefined)));
+  const asked: CommitRequest[] = [];
+  const svc = holding(fake, async (r) => (asked.push(r), true));
+  const tab = await svc.openTab("assistant");
+  const session = `S-${tab.id}`;
+  await svc.snapshot(tab.id);
+  assert.equal(sent(fake, "Runtime.evaluate").length, 0, "a DOM snapshot that read the page needs no script of the page's");
+  paused(fake, session, "A1", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz"]);
+
+  // An input that appeared after the snapshot is seen when the assistant next clicks (a held form cannot be asked about).
+  dom = domWith([{ type: "password", name: "zz" }, { type: "PASSWORD", id: "late" }]);
+  await svc.click(tab.id, { x: 5, y: 5 });
+  paused(fake, session, "A2", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz", "late"]);
+
+  // A frame loading something else changes nothing; a new page replaces the one that was read, and a form in a frame is never known.
+  fake.emit("Page.frameNavigated", { frame: { id: "child", parentId: tab.id, url: "https://ads.example/" } }, session);
+  await tick();
+  paused(fake, session, "A3", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz", "late"]);
+  paused(fake, session, "A4", "child", POST);
+  await tick();
+  assert.equal(asked.at(-1)?.secrets, null, "a frame's form: its page was not read");
+  fake.emit("Page.frameNavigated", { frame: { id: tab.id, url: "https://shop.example/next" } }, session);
+  await tick();
+  paused(fake, session, "A5", tab.id, POST);
+  await tick();
+  assert.equal(asked.at(-1)?.secrets, null, "a new page: nothing is known until it is read");
+  await svc.snapshot(tab.id);
+  paused(fake, session, "A6", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz", "late"]);
+
+  // Enter and Space can send a form, so they look first (a key in a field that sends it goes by Enter); a key that cannot, does not.
+  dom = domWith([{ type: "password", name: "zz" }, { type: "PASSWORD", id: "late" }, { type: "password", name: "third" }]);
+  await svc.press(tab.id, "Tab");
+  paused(fake, session, "A7", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz", "late"], "Tab cannot send a form: no new look");
+  await svc.press(tab.id, "Enter");
+  paused(fake, session, "A8", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz", "late", "third"]);
+  dom = domWith([{ type: "password", name: "fourth" }]);
+  await svc.press(tab.id, "Space");
+  paused(fake, session, "A9", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["fourth"], "what the page holds now: the look replaces the names of the same page");
+  await svc.dispose();
+});
+
+test("service: the page itself is a second source only when the DOM snapshot did not read it", async () => {
+  let domAnswers = false;
+  const fake = fakeBrowser(
+    healthy((m) => {
+      if (m === "Accessibility.getFullAXTree") return AX;
+      if (m === "DOMSnapshot.captureSnapshot") {
+        if (!domAnswers) throw new Error("no snapshot");
+        return domWith([{ type: "password", name: "zz" }]);
+      }
+      if (m === "Runtime.evaluate") return { result: { value: ["from-the-page"] } };
+      return undefined;
+    }),
+  );
+  const asked: CommitRequest[] = [];
+  const svc = holding(fake, async (r) => (asked.push(r), true));
+  const tab = await svc.openTab("assistant");
+  await svc.snapshot(tab.id);
+  paused(fake, `S-${tab.id}`, "S1", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["from-the-page"], "the snapshot failed, so the page was asked");
+  domAnswers = true;
+  const before = sent(fake, "Runtime.evaluate").length;
+  await svc.snapshot(tab.id);
+  assert.equal(sent(fake, "Runtime.evaluate").length, before, "and not asked again once the snapshot reads the page");
+  paused(fake, `S-${tab.id}`, "S2", tab.id, POST);
+  await tick();
+  assert.deepEqual(asked.at(-1)?.secrets, ["zz"]);
+  await svc.dispose();
+});
+
+test("service: a page that cannot answer leaves the password inputs unknown: the card hides every value and says why, and a good read afterwards restores them", async () => {
+  let answers = false;
+  let evaluates = 0;
+  const fake = fakeBrowser(
+    healthy((m) => {
+      if (m === "Accessibility.getFullAXTree") return AX;
+      if (m === "DOMSnapshot.captureSnapshot" || m === "Runtime.evaluate") {
+        if (!answers) {
+          if (m === "Runtime.evaluate" && evaluates++ === 0) return { result: {} }; // an answer that is not a list is no answer
+          throw new Error("the page does not answer");
+        }
+        return m === "Runtime.evaluate" ? { result: { value: [] } } : domWith([{ type: "password", name: "zz" }]);
+      }
+      return undefined;
+    }),
+  );
+  const sites = new BrowseSites(null, () => ({ taskId: () => "t1", gateChanged: () => undefined }));
+  const svc = holding(fake, (r) => sites.decideCommit(r));
+  const tab = await svc.openTab("assistant");
+  const session = `S-${tab.id}`;
+  await svc.snapshot(tab.id);
+  paused(fake, session, "B1", tab.id, POST);
+  await tick();
+  const first = sites.gate.pending();
+  assert.deepEqual(first && questionView(first), {
+    type: "action",
+    origin: "https://shop.example",
+    kind: "public",
+    page: "",
+    what: "Send a form to https://shop.example/buy",
+    fields: [{ name: "item", value: "••••••••" }, { name: "zz", value: "••••••••" }],
+    note: "Values hidden: the page did not say which fields are passwords.",
+  });
+  sites.gate.answer(first?.id ?? "", "dont");
+  await tick();
+
+  // A read that works shows the values the page does not hold secret; one that fails again hides them again, even after a good one.
+  answers = true;
+  await svc.snapshot(tab.id);
+  paused(fake, session, "B2", tab.id, POST);
+  await tick();
+  const second = sites.gate.pending();
+  assert.deepEqual(second?.type === "action" ? second.fields : null, [{ name: "item", value: "Widget" }, { name: "zz", value: "••••••••" }]);
+  assert.equal(second?.type === "action" ? second.note : "?", undefined);
+  sites.gate.answer(second?.id ?? "", "dont");
+  await tick();
+  answers = false;
+  await svc.click(tab.id, { x: 5, y: 5 });
+  paused(fake, session, "B3", tab.id, POST);
+  await tick();
+  const third = sites.gate.pending();
+  assert.equal(third?.type === "action" ? third.note : "?", "Values hidden: the page did not say which fields are passwords.", "a look that fails leaves them unknown, not as they were");
+  sites.gate.answer(third?.id ?? "", "dont");
+  await tick();
+
+  // The same for a snapshot that fails after a good one.
+  answers = true;
+  await svc.snapshot(tab.id);
+  answers = false;
+  await svc.snapshot(tab.id);
+  paused(fake, session, "B4", tab.id, POST);
+  await tick();
+  const fourth = sites.gate.pending();
+  assert.equal(fourth?.type === "action" ? fourth.note : "?", "Values hidden: the page did not say which fields are passwords.");
+  sites.gate.answer(fourth?.id ?? "", "dont");
+  await svc.dispose();
+});
+
+test("service: the person's own tab is never looked at for passwords: nothing is held there, so nothing is read", async () => {
+  const fake = fakeBrowser(healthy());
+  const svc = holding(fake, async () => true);
+  const tab = await svc.openTab("you");
+  await svc.click(tab.id, { x: 5, y: 5 });
+  await svc.press(tab.id, "Enter");
+  assert.equal(sent(fake, "DOMSnapshot.captureSnapshot").length, 0);
+  assert.equal(sent(fake, "Runtime.evaluate").length, 0);
+  await svc.dispose();
 });
 
 // ------------------------------------------------------------------ the surface

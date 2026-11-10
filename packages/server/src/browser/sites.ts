@@ -48,11 +48,11 @@ export type ActionAnswer = "do" | "dont";
 export const ACTION_ANSWERS: readonly ActionAnswer[] = ["do", "dont"];
 
 /** A question as a screen is shown it: no ids, only what the person needs to decide. */
-export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[]; download?: NonNullable<ActionAsk["download"]> };
+export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[]; note?: string; download?: NonNullable<ActionAsk["download"]> };
 
 export function questionView(question: GateQuestion): QuestionView {
   return question.type === "action"
-    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields, ...(question.download ? { download: { ...question.download } } : {}) }
+    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields, ...(question.note ? { note: question.note } : {}), ...(question.download ? { download: { ...question.download } } : {}) }
     : { type: "site", origin: question.origin, kind: question.kind };
 }
 
@@ -431,7 +431,7 @@ export class BrowseSites {
    * rule settles it. The one exception is the form of a click they have just approved, which they were shown. With no task
    * browsing, nothing is sent.
    */
-  async decideCommit(request: { url: string; method: string; title: string; contentType: string; body: string | undefined; secrets?: readonly string[] }): Promise<boolean> {
+  async decideCommit(request: { url: string; method: string; title: string; contentType: string; body: string | undefined; secrets: readonly string[] | null }): Promise<boolean> {
     const taskId = this.source().taskId();
     if (taskId === null) return false;
     if (this.gate.takeApproval(taskId)) return true;

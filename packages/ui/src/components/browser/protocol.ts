@@ -130,6 +130,8 @@ export interface ActionQuestionView {
   page: string;
   what: string;
   fields: Array<{ name: string; value: string }>;
+  /** Said in words when something about the fields needs saying (all values hidden, because the page did not say which are passwords). */
+  note?: string;
   /** A download to save: the file, and where it goes unless the person picks another folder. */
   download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
 }
@@ -156,7 +158,8 @@ export function parseQuestion(raw: unknown): WatchQuestion | null {
     const download = d && typeof d === "object" && typeof d["name"] === "string" && typeof d["folder"] === "string"
       ? { id: typeof d["id"] === "string" ? d["id"] : "", name: d["name"], size: typeof d["size"] === "number" ? d["size"] : null, folder: d["folder"], warning: typeof d["warning"] === "string" ? d["warning"] : null }
       : undefined;
-    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields, ...(download ? { download } : {}) };
+    const note = typeof q["note"] === "string" && q["note"] !== "" ? q["note"].slice(0, 300) : undefined;
+    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields, ...(note ? { note } : {}), ...(download ? { download } : {}) };
   }
   return { origin: q["origin"], kind };
 }

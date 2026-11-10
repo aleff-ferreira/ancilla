@@ -8,7 +8,7 @@ import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch
 import { bodyText } from "./commit.js";
 import { originOf } from "./sites.js";
 import { DownloadDesk, DownloadError, checkDownloadFolder, MAX_DOWNLOAD_BYTES, MAX_STAGED_BYTES, ASK_MS, riskWarning, sanitizeFileName, type DownloadInfo } from "./downloads.js";
-import { buildSnapshot, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
+import { buildSnapshot, passwordInputNames, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
 /**
  * The browser the server owns: a Chromium-family browser started lazily, headless, driven over a private CDP pipe.
@@ -167,8 +167,12 @@ export interface CommitRequest {
   contentType: string;
   /** What is sent, when the browser lets it be read. */
   body: string | undefined;
-  /** Names of the password inputs of the page the form is on: a request carries no input types, so the page says which fields are secret. */
-  secrets: string[];
+  /**
+   * Names of the password inputs of the page the form is on: a request carries no input types, so the page says which fields are
+   * secret. Null when the page did not say (nothing could read it, it was never looked at, it has changed, or the form is in a
+   * frame): the form is then shown with every value hidden.
+   */
+  secrets: string[] | null;
 }
 
 /** What the page says about an element, read for deciding whether acting on it commits something. Everything in it is page-controlled. */
@@ -212,6 +216,8 @@ const FACTS_FN = `function(el){
 const DEFAULT_IDLE_MS = 10 * 60_000;
 const DEFAULT_SIZE = { width: 1280, height: 800 };
 const SETTLE_MS = 150;
+/** How long the look at a page's password inputs before an action may take (a page that does not answer leaves them unknown). */
+const LOOK_MS = 8000;
 const NAVIGATION_WAIT_MS = 15_000;
 /** How long `Page.navigate` may wait in the assistant's browser, where a question to the person can hold it. */
 const GATED_NAVIGATION_MS = 15 * 60_000;
@@ -263,8 +269,11 @@ interface Tab {
   openerId?: string;
   refs: Map<string, number>;
   refInfo: Map<string, { role: string; name: string }>;
-  /** Names of the password inputs seen at the last snapshot (the page cannot be asked while a form is held: it does not answer). */
-  secretNames: string[];
+  /**
+   * Names of the password inputs of this page as last read (the page is not asked while a form is held: it may not answer), or
+   * null while it has not been read, the read failed, or a new page replaced the one that was read: nothing is then known about them.
+   */
+  secretNames: string[] | null;
   dialog: DialogInfo | null;
   loadWaiters: Array<() => void>;
   screencast: ScreencastState | null;
@@ -673,7 +682,7 @@ export class BrowserService {
       ...(openerId ? { openerId } : {}),
       refs: new Map(),
       refInfo: new Map(),
-      secretNames: [],
+      secretNames: null,
       dialog: null,
       loadWaiters: [],
       screencast: null,
@@ -873,14 +882,13 @@ export class BrowserService {
       await rt.conn.send("Accessibility.enable", {}, tab.sessionId);
       tab.axEnabled = true;
     }
-    const [tree, dom, secrets] = await Promise.all([
+    const [tree, dom] = await Promise.all([
       rt.conn.send<{ nodes: AxNode[] }>("Accessibility.getFullAXTree", {}, tab.sessionId),
       rt.conn
         .send<DomSnapshotLike>("DOMSnapshot.captureSnapshot", { computedStyles: ["opacity", "visibility", "font-size"] }, tab.sessionId)
         .catch(() => null),
-      tab.context === "assistant" ? this.passwordNames(rt, tab) : Promise.resolve([] as string[]),
     ]);
-    tab.secretNames = secrets;
+    if (tab.context === "assistant") tab.secretNames = await this.readSecretNames(rt, tab, dom);
     const result = buildSnapshot(tree.nodes ?? [], { url: tab.url, title: tab.title, visible: dom ? visibleBackendIds(dom) : null, ...(options.maxChars ? { maxChars: options.maxChars } : {}) });
     tab.refs = result.refs;
     tab.refInfo = result.info;
@@ -953,6 +961,7 @@ export class BrowserService {
     const point = "ref" in target ? await this.centerOf(rt, tab, target.ref) : target;
     const { x, y } = point;
     if (!Number.isFinite(x) || !Number.isFinite(y)) throw new BrowserError("invalid", "x and y must be numbers.");
+    await this.lookAtSecrets(rt, tab);
     await this.mouse(rt, tab, { type: "mouseMoved", x, y });
     await this.mouse(rt, tab, { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
     await this.mouse(rt, tab, { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
@@ -990,6 +999,7 @@ export class BrowserService {
       ? { key, code: def.code, windowsVirtualKeyCode: def.vk }
       : { key, code: /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : "", windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0) };
     const text = def ? def.text : key;
+    if (key === "Enter" || key === "Space" || key === " ") await this.lookAtSecrets(rt, tab);
     await rt.conn.send("Input.dispatchKeyEvent", { type: text ? "keyDown" : "rawKeyDown", ...base, ...(text ? { text } : {}) }, tab.sessionId);
     await rt.conn.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, tab.sessionId);
     await this.settle(tab);
@@ -1246,6 +1256,10 @@ export class BrowserService {
           this.emit({ type: "tab", tab: this.info(rt, tab) });
         }
         break;
+      case "Page.frameNavigated":
+        // A new page replaced the one whose password inputs were read: nothing is known about the new one until it is read.
+        if (!params["frame"]?.parentId) tab.secretNames = null;
+        break;
       case "Page.frameStoppedLoading":
         if (tab.loading) {
           tab.loading = false;
@@ -1320,7 +1334,7 @@ export class BrowserService {
       const typeKey = Object.keys(headers).find((key) => key.toLowerCase() === "content-type");
       try {
         allowed = this.options.commitGate
-          ? await this.options.commitGate({ url, method, title: tab.title, contentType: typeKey ? String(headers[typeKey]) : "", body: bodyText(params["request"] ?? {}), secrets: mainFrame ? tab.secretNames : [] })
+          ? await this.options.commitGate({ url, method, title: tab.title, contentType: typeKey ? String(headers[typeKey]) : "", body: bodyText(params["request"] ?? {}), secrets: mainFrame ? tab.secretNames : null })
           : false;
       } catch {
         allowed = false;
@@ -1342,20 +1356,41 @@ export class BrowserService {
       .catch(() => undefined);
   }
 
-  /** The names of the password inputs on the tab's page (a form being sent may hold one under any name). Best effort: none when the page does not answer. */
-  private async passwordNames(rt: Runtime, tab: Tab): Promise<string[]> {
+  /**
+   * The names of the password inputs of the tab's page (a form being sent may hold one under any name), or null when nothing could
+   * say. From the DOM snapshot, which runs no page script, so it cannot time out or be answered wrongly by the page; only when that
+   * did not read the page, from the page itself (a second source, with a time limit). A form is then shown with every value
+   * hidden, never with the values of a page nobody could read.
+   */
+  private async readSecretNames(rt: Runtime, tab: Tab, dom: DomSnapshotLike | null): Promise<string[] | null> {
+    return (dom ? passwordInputNames(dom) : null) ?? (await this.passwordNamesFromPage(rt, tab));
+  }
+
+  private async passwordNamesFromPage(rt: Runtime, tab: Tab): Promise<string[] | null> {
     try {
       const result = await rt.conn.send<{ result?: { value?: unknown } }>(
         "Runtime.evaluate",
-        { expression: "Array.from(document.querySelectorAll('input[type=password]')).map(function(e){return e.name||e.id||''}).filter(Boolean).slice(0,20)", returnByValue: true },
+        { expression: "Array.from(document.querySelectorAll('input[type=password]')).map(function(e){return e.name||e.id||''}).filter(Boolean).slice(0,200)", returnByValue: true },
         tab.sessionId,
         1500,
       );
       const value = result.result?.value;
-      return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+      return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : null;
     } catch {
-      return [];
+      return null;
     }
+  }
+
+  /**
+   * Reads the password inputs again just before the assistant clicks or presses Enter or Space: an input may have appeared since the
+   * last snapshot, and the form that act sends is held in the browser, where the page may not answer (a probe found it did on Edge
+   * 157, earlier measurements found it did not), so nothing asks it then. A read that fails leaves the names unknown, which hides
+   * every value.
+   */
+  private async lookAtSecrets(rt: Runtime, tab: Tab): Promise<void> {
+    if (tab.context !== "assistant") return;
+    const dom = await rt.conn.send<DomSnapshotLike>("DOMSnapshot.captureSnapshot", { computedStyles: [] }, tab.sessionId, LOOK_MS).catch(() => null);
+    tab.secretNames = await this.readSecretNames(rt, tab, dom);
   }
 
   private async refreshInfo(rt: Runtime, tab: Tab): Promise<void> {

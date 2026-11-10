@@ -30,6 +30,8 @@ export interface ActionAsk {
   /** The action in words: "Click “Place order”", "Send a form to https://shop.example/buy". */
   what: string;
   fields: ShownField[];
+  /** Something the person should know about what is shown, in words (the values are hidden because the page did not say which are passwords). */
+  note?: string;
   /** Set when the action is saving a download: the person also picks the folder, and the answer carries it. */
   download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
 }
@@ -37,6 +39,8 @@ export interface ActionAsk {
 export const VALUE_MAX = 200;
 export const FIELDS_MAX = 12;
 export const MASK = "••••••••";
+/** Said on a card whose values are all hidden: the browser could not read which inputs of the page are passwords. */
+export const VALUES_HIDDEN = "Values hidden: the page did not say which fields are passwords.";
 
 // ---------------------------------------------------------------- names that commit
 
@@ -101,13 +105,17 @@ export function shownValue(name: string, value: string, type = ""): string {
   return text.length > VALUE_MAX ? `${text.slice(0, VALUE_MAX - 1)}…` : text;
 }
 
-/** `secrets`: names of the page's password inputs (a request carries no input types, so the page says which they are). */
-export function shownFields(fields: Array<{ name: string; value: string; type?: string; file?: boolean }>, secrets: readonly string[] = []): ShownField[] {
+/**
+ * `secrets`: names of the page's password inputs (a request carries no input types, so the page says which they are). `null`: the
+ * page did not say, so every value is hidden (a field with a type of its own, as a click reads it, never needs this).
+ */
+export function shownFields(fields: Array<{ name: string; value: string; type?: string; file?: boolean }>, secrets: readonly string[] | null = []): ShownField[] {
   const out: ShownField[] = [];
   for (const field of fields.slice(0, FIELDS_MAX)) {
     const name = field.name.replace(CONTROL, " ").trim().slice(0, 60);
     if (name === "") continue;
-    out.push({ name, value: field.file ? (field.value === "" ? "(no file)" : `(file) ${field.value.slice(0, 80)}`) : shownValue(name, field.value, secrets.includes(field.name) ? "password" : (field.type ?? "")) });
+    const secret = secrets === null || secrets.includes(field.name);
+    out.push({ name, value: field.file ? (field.value === "" ? "(no file)" : `(file) ${field.value.slice(0, 80)}`) : shownValue(name, field.value, secret ? "password" : (field.type ?? "")) });
   }
   if (fields.length > FIELDS_MAX) out.push({ name: "…", value: `${fields.length - FIELDS_MAX} more fields` });
   return out;
@@ -129,6 +137,13 @@ export interface RequestBody {
   fields: ShownField[];
   /** Said when the fields could not be listed. */
   note: string;
+  /** Set when values were hidden because the page did not say which of its inputs are passwords. */
+  hidden?: boolean;
+}
+
+function listed(fields: Array<{ name: string; value: string; file?: boolean }>, secrets: readonly string[] | null): RequestBody {
+  const hidden = secrets === null && fields.some((f) => !f.file && f.value !== "");
+  return { fields: shownFields(fields, secrets), note: "", ...(hidden ? { hidden } : {}) };
 }
 
 function decodeEntries(entries: unknown): string | undefined {
@@ -146,7 +161,8 @@ export function bodyText(request: { postData?: unknown; postDataEntries?: unknow
   return typeof request.postData === "string" ? request.postData : decodeEntries(request.postDataEntries);
 }
 
-export function describeBody(contentType: string, body: string | undefined, secrets: readonly string[] = []): RequestBody {
+/** `secrets`: the page's password input names, or null when the page did not say (then every value is hidden). Required: no default fails open. */
+export function describeBody(contentType: string, body: string | undefined, secrets: readonly string[] | null): RequestBody {
   if (body === undefined) return { fields: [], note: "What the form sends could not be read." };
   const type = contentType.toLowerCase();
   if (type.includes("multipart/form-data")) {
@@ -162,13 +178,13 @@ export function describeBody(contentType: string, body: string | undefined, secr
       const file = /filename="([^"]*)"/i.exec(head)?.[1];
       fields.push(file !== undefined ? { name, value: file, file: true } : { name, value: part.slice(split + 4).replace(/\r\n$/, "") });
     }
-    return { fields: shownFields(fields, secrets), note: "" };
+    return listed(fields, secrets);
   }
   if (type.includes("json")) {
     try {
       const parsed = JSON.parse(body) as unknown;
       if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        return { fields: shownFields(Object.entries(parsed).map(([name, value]) => ({ name, value: typeof value === "string" ? value : JSON.stringify(value) ?? "" })), secrets), note: "" };
+        return listed(Object.entries(parsed).map(([name, value]) => ({ name, value: typeof value === "string" ? value : JSON.stringify(value) ?? "" })), secrets);
       }
     } catch {
       // not JSON after all
@@ -176,7 +192,7 @@ export function describeBody(contentType: string, body: string | undefined, secr
     return { fields: [], note: `A request of ${body.length} characters.` };
   }
   if (type === "" || type.includes("x-www-form-urlencoded")) {
-    return { fields: shownFields([...new URLSearchParams(body).entries()].map(([name, value]) => ({ name, value })), secrets), note: "" };
+    return listed([...new URLSearchParams(body).entries()].map(([name, value]) => ({ name, value })), secrets);
   }
   return { fields: [], note: `A request of ${body.length} characters (${type.split(";")[0]}).` };
 }
@@ -191,11 +207,11 @@ function address(url: string): string {
 }
 
 /** A form (or another request) the page is about to send, as the person is asked about it. */
-export function describeRequest(request: { url: string; method: string; title: string; contentType: string; body: string | undefined; secrets?: readonly string[] }): ActionAsk {
-  const sent = describeBody(request.contentType, request.body, request.secrets ?? []);
+export function describeRequest(request: { url: string; method: string; title: string; contentType: string; body: string | undefined; secrets: readonly string[] | null }): ActionAsk {
+  const sent = describeBody(request.contentType, request.body, request.secrets);
   const fields = sent.fields.length > 0 || sent.note === "" ? sent.fields : [{ name: "contents", value: sent.note }];
   const verb = request.method.toUpperCase() === "POST" ? "Send a form to" : `Send a ${request.method.toUpperCase()} request to`;
-  return { origin: originOf(request.url) ?? request.url.slice(0, 80), page: request.title.replace(CONTROL, " ").trim().slice(0, 120), what: `${verb} ${address(request.url)}`, fields };
+  return { origin: originOf(request.url) ?? request.url.slice(0, 80), page: request.title.replace(CONTROL, " ").trim().slice(0, 120), what: `${verb} ${address(request.url)}`, fields, ...(sent.hidden ? { note: VALUES_HIDDEN } : {}) };
 }
 
 /** An element the assistant is about to click or press, as the person is asked about it. */

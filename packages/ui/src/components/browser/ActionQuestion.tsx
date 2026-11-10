@@ -41,6 +41,7 @@ export function ActionQuestionCard(props: { question: ActionQuestionView; busy?:
           ))}
         </dl>
       ) : null}
+      {question.note ? <p className="text-xs font-medium text-fg [overflow-wrap:anywhere]">{question.note}</p> : null}
       <p className="text-xs text-subtle">Nothing is done until you say so, and it asks again next time.</p>
       <div className="flex flex-wrap gap-1.5">
         <Button size="xs" variant="accent" disabled={props.busy} onClick={() => props.onAnswer("do")}>
