@@ -42,5 +42,20 @@ export async function handleBrowser(service: BrowserService, req: AssistantReque
     const initial = typeof body["folder"] === "string" && body["folder"].trim() !== "" ? body["folder"] : undefined;
     return { status: 200, body: await service.pickDownloadFolder(initial) };
   }
+  if (req.method === "POST" && sub === "/uploads/pick-files") {
+    const body = await req.body();
+    const initial = typeof body["folder"] === "string" && body["folder"].trim() !== "" ? body["folder"] : undefined;
+    const multiple = body["multiple"] === true;
+    return { status: 200, body: await service.pickUploadFiles(initial, multiple) };
+  }
+  if (req.method === "GET" && sub === "/uploads/list") {
+    const folder = req.query.get("folder") ?? undefined;
+    try {
+      return { status: 200, body: service.listUploadFolder(folder && folder.trim() !== "" ? folder : undefined) };
+    } catch (error) {
+      if (error instanceof DownloadError) return { status: 400, body: { error: error.message, kind: "invalid" } };
+      throw error;
+    }
+  }
   return { status: 404, body: { error: "not found", kind: "not_found" } };
 }

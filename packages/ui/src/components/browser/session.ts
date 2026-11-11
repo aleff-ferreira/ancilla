@@ -1,4 +1,4 @@
-import { BROWSER_PROTOCOL_VERSION, decodeFrame, parseServerMessage, type ClientMessage, type Frame, type PaneDialog, type PaneDownload, type PaneTab, type SelectProbe } from "./protocol.js";
+import { BROWSER_PROTOCOL_VERSION, decodeFrame, parseServerMessage, type ClientMessage, type Frame, type PaneDialog, type PaneDownload, type PaneTab, type PaneUpload, type SelectProbe } from "./protocol.js";
 
 /**
  * The Browser pane's connection: a WebSocket to the server's browser, the tabs and notices it reports, and the pictures
@@ -29,10 +29,12 @@ export interface SessionView {
   dialog: PaneDialog | null;
   /** Finished downloads of the person's tabs waiting for a folder; the first is the one asked. */
   downloads: PaneDownload[];
+  /** Intercepted file choosers of the person's tabs waiting for file(s); the first is the one asked. */
+  uploads: PaneUpload[];
   select: { tabId: string; probe: SelectProbe } | null;
 }
 
-export const EMPTY_VIEW: SessionView = { status: "idle", tabs: [], active: null, message: null, notice: null, dialog: null, downloads: [], select: null };
+export const EMPTY_VIEW: SessionView = { status: "idle", tabs: [], active: null, message: null, notice: null, dialog: null, downloads: [], uploads: [], select: null };
 
 export interface SessionStats {
   frames: number;
@@ -147,7 +149,7 @@ export class BrowserSession {
     if (!message) return;
     switch (message.type) {
       case "ready":
-        this.set({ status: "open", tabs: message.tabs, active: message.active, message: null, downloads: [] });
+        this.set({ status: "open", tabs: message.tabs, active: message.active, message: null, downloads: [], uploads: [] });
         return;
       case "tabs":
         this.set({ tabs: message.tabs, active: message.active });
@@ -160,6 +162,12 @@ export class BrowserSession {
         return;
       case "download-closed":
         this.set({ downloads: this.view.downloads.filter((d) => d.id !== message.id) });
+        return;
+      case "upload":
+        this.set({ uploads: [...this.view.uploads.filter((u) => u.id !== message.upload.id), message.upload] });
+        return;
+      case "upload-closed":
+        this.set({ uploads: this.view.uploads.filter((u) => u.id !== message.id) });
         return;
       case "dialog-closed":
         if (this.view.dialog?.tabId === message.tabId) this.set({ dialog: null });

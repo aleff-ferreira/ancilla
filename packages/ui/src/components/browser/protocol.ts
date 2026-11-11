@@ -36,6 +36,16 @@ export interface PaneDownload {
   warning: string | null;
 }
 
+/** An `<input type="file">` chooser opened by a page, waiting for the person to choose local file(s). */
+export interface PaneUpload {
+  id: string;
+  tabId: string;
+  multiple: boolean;
+  origin: string;
+  page: string;
+  folder: string;
+}
+
 export interface SelectOption {
   index: number;
   label: string;
@@ -82,6 +92,7 @@ export type ClientMessage =
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
   | { type: "save"; id: string; accept: boolean; folder?: string; remember?: boolean }
+  | { type: "upload"; id: string; accept: boolean; files?: string[] }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
 
@@ -92,6 +103,8 @@ export type ServerMessage =
   | { type: "dialog-closed"; tabId: string }
   | { type: "download"; download: PaneDownload }
   | { type: "download-closed"; id: string }
+  | { type: "upload"; upload: PaneUpload }
+  | { type: "upload-closed"; id: string }
   | { type: "notice"; kind: "download" | "file"; text: string }
   | { type: "select"; tabId: string; probe: SelectProbe }
   | { type: "selection"; text: string }
@@ -135,6 +148,8 @@ export interface ActionQuestionView {
   note?: string;
   /** A download to save: the file, and where it goes unless the person picks another folder. */
   download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
+  /** A file chooser opened on the page: the person selects local file(s) to upload. */
+  upload?: { id: string; multiple: boolean; folder: string };
 }
 
 export type WatchQuestion = SiteQuestionView | ActionQuestionView;
@@ -159,8 +174,22 @@ export function parseQuestion(raw: unknown): WatchQuestion | null {
     const download = d && typeof d === "object" && typeof d["name"] === "string" && typeof d["folder"] === "string"
       ? { id: typeof d["id"] === "string" ? d["id"] : "", name: d["name"], size: typeof d["size"] === "number" ? d["size"] : null, folder: d["folder"], warning: typeof d["warning"] === "string" ? d["warning"] : null }
       : undefined;
+    const u = q["upload"] as Record<string, unknown> | null | undefined;
+    const upload = u && typeof u === "object" && typeof u["folder"] === "string"
+      ? { id: typeof u["id"] === "string" ? u["id"] : "", multiple: u["multiple"] === true, folder: u["folder"] }
+      : undefined;
     const note = typeof q["note"] === "string" && q["note"] !== "" ? q["note"].slice(0, 300) : undefined;
-    return { type: "action", origin: q["origin"], kind, page: typeof q["page"] === "string" ? q["page"] : "", what: q["what"], fields, ...(note ? { note } : {}), ...(download ? { download } : {}) };
+    return {
+      type: "action",
+      origin: q["origin"],
+      kind,
+      page: typeof q["page"] === "string" ? q["page"] : "",
+      what: q["what"],
+      fields,
+      ...(note ? { note } : {}),
+      ...(download ? { download } : {}),
+      ...(upload ? { upload } : {}),
+    };
   }
   return { origin: q["origin"], kind };
 }

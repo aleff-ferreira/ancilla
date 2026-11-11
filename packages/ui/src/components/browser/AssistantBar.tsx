@@ -38,11 +38,12 @@ export interface AssistantBarViewProps {
   onAsk(): void;
   onStop(): void;
   onAnswer(answer: SiteAnswer): void;
-  onAction(answer: ActionAnswer, folder?: string): void;
+  onAction(answer: ActionAnswer, folder?: string, files?: string[]): void;
   onToggleSites(): void;
   onRemove(origin: string): void;
   onToggleSignIn?(origin: string, useSignIn: boolean): void;
   onPickNative?(currentFolder: string): Promise<{ supported: boolean; folder: string | null }>;
+  onPickNativeFiles?(currentFolder: string, multiple: boolean): Promise<{ supported: boolean; files: string[] | null }>;
 }
 
 export function AssistantBarView(props: AssistantBarViewProps) {
@@ -79,7 +80,7 @@ export function AssistantBarView(props: AssistantBarViewProps) {
               ))}
             </ol>
           ) : null}
-          {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onPickNative={props.onPickNative} onAnswer={props.onAction} /> : null}
+          {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onPickNative={props.onPickNative} onPickNativeFiles={props.onPickNativeFiles} onAnswer={props.onAction} /> : null}
           {job.question && !isActionQuestion(job.question) ? (
             <div role="group" aria-label="A site the assistant wants to open" className="space-y-1.5 rounded border border-line bg-bg p-2">
               <p className="text-xs text-fg [overflow-wrap:anywhere]">
@@ -272,7 +273,11 @@ export function AssistantBar() {
       }
       onStop={() => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/cancel`, {}))))}
       onAnswer={(answer) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/site`, { answer }))))}
-      onAction={(answer, folder) => void run(async () => void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/action`, folder ? { answer, folder } : { answer }))))}
+      onAction={(answer, folder, files) =>
+        void run(async () =>
+          void (job && (await call("POST", `/tasks/${encodeURIComponent(job.taskId)}/action`, { answer, ...(folder ? { folder } : {}), ...(files ? { files } : {}) }))),
+        )
+      }
       onToggleSites={() => {
         const next = !sitesOpen;
         setSitesOpen(next);
@@ -283,6 +288,11 @@ export function AssistantBar() {
       onPickNative={
         isLocalBrowserHost() && controller.hasBrowserHttp
           ? (current) => controller.browser<{ supported: boolean; folder: string | null }>("POST", "/downloads/pick-folder", { folder: current })
+          : undefined
+      }
+      onPickNativeFiles={
+        isLocalBrowserHost() && controller.hasBrowserHttp
+          ? (current, multiple) => controller.browser<{ supported: boolean; files: string[] | null }>("POST", "/uploads/pick-files", { folder: current, multiple })
           : undefined
       }
     />

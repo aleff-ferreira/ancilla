@@ -50,11 +50,33 @@ export type ActionAnswer = "do" | "dont";
 export const ACTION_ANSWERS: readonly ActionAnswer[] = ["do", "dont"];
 
 /** A question as a screen is shown it: no ids, only what the person needs to decide. */
-export type QuestionView = { type: "site"; origin: string; kind: SiteKind } | { type: "action"; origin: string; kind: SiteKind; page: string; what: string; fields: ShownField[]; note?: string; download?: NonNullable<ActionAsk["download"]> };
+export type QuestionView =
+  | { type: "site"; origin: string; kind: SiteKind }
+  | {
+      type: "action";
+      origin: string;
+      kind: SiteKind;
+      page: string;
+      what: string;
+      fields: ShownField[];
+      note?: string;
+      download?: NonNullable<ActionAsk["download"]>;
+      upload?: { id: string; multiple: boolean; folder: string };
+    };
 
 export function questionView(question: GateQuestion): QuestionView {
   return question.type === "action"
-    ? { type: "action", origin: question.origin, kind: question.kind, page: question.page, what: question.what, fields: question.fields, ...(question.note ? { note: question.note } : {}), ...(question.download ? { download: { ...question.download } } : {}) }
+    ? {
+        type: "action",
+        origin: question.origin,
+        kind: question.kind,
+        page: question.page,
+        what: question.what,
+        fields: question.fields,
+        ...(question.note ? { note: question.note } : {}),
+        ...(question.download ? { download: { ...question.download } } : {}),
+        ...(question.upload ? { upload: { id: question.upload.id, multiple: question.upload.multiple, folder: question.upload.folder } } : {}),
+      }
     : { type: "site", origin: question.origin, kind: question.kind };
 }
 
@@ -473,6 +495,23 @@ export class BrowseSites {
     const download = { id: `dl_${randomBytes(4).toString("hex")}`, name: request.name, size: request.size, folder: request.folder, warning: request.warning };
     const ok = await this.gate.ask(taskId, { origin: request.origin, page: request.page, what: `Save the file “${request.name}”`, fields: [], download });
     return ok ? download.folder : null;
+  }
+
+  /**
+   * A page in the assistant's browser opened a file chooser (`<input type="file">`). The assistant never names local paths;
+   * the person chooses the file(s) on the screen (or declines). Resolves the chosen paths, or null when cancelled or no task runs.
+   */
+  async decideUpload(request: { multiple: boolean; origin: string; page: string; folder: string }): Promise<string[] | null> {
+    const taskId = this.source().taskId();
+    if (taskId === null) return null;
+    const upload: NonNullable<ActionAsk["upload"]> = {
+      id: `up_${randomBytes(4).toString("hex")}`,
+      multiple: request.multiple,
+      folder: request.folder,
+    };
+    const what = request.multiple ? "Choose files to upload to this page" : "Choose a file to upload to this page";
+    const ok = await this.gate.ask(taskId, { origin: request.origin, page: request.page, what, fields: [], upload });
+    return ok && Array.isArray(upload.files) && upload.files.length > 0 ? upload.files : null;
   }
 
   /**

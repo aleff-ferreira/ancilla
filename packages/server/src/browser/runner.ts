@@ -5,7 +5,7 @@ import type { BrainProvider } from "../voice/brain.js";
 import { BrowseAgent, type BrowseOutcome } from "./agent.js";
 import type { BrowserService } from "./service.js";
 import { actionReason } from "./commit.js";
-import { checkDownloadFolder } from "./downloads.js";
+import { checkDownloadFolder, checkUploadFiles } from "./downloads.js";
 import { ACTION_ANSWERS, SITE_ANSWERS, originOf, questionView, type ActionAnswer, type GateQuestion, type QuestionView, type SiteAnswer, type SiteGate, type SiteRule } from "./sites.js";
 import { ServiceSurface, type BrowseSurface, type SurfaceGate } from "./surface.js";
 
@@ -152,7 +152,7 @@ export class BrowseRunner implements BrowseRunnerPort {
   }
 
   /** The person's answer to the action shown for this task: "do" or "dont". */
-  answerAction(taskId: string, answer: string, folder?: string): void {
+  answerAction(taskId: string, answer: string, folder?: string, files?: string[]): void {
     if (!(ACTION_ANSWERS as readonly string[]).includes(answer)) throw new ValidationError("answer", "answer must be do or dont");
     const question = this.deps.gate.pending();
     if (!question || question.taskId !== taskId) throw new ConflictError("No action is waiting for an answer on this task.");
@@ -162,6 +162,13 @@ export class BrowseRunner implements BrowseRunnerPort {
         question.download.folder = checkDownloadFolder(folder ?? question.download.folder);
       } catch (error) {
         throw new ValidationError("folder", (error as Error).message);
+      }
+    }
+    if (question.upload && answer === "do") {
+      try {
+        question.upload.files = checkUploadFiles(files ?? [], question.upload.multiple);
+      } catch (error) {
+        throw new ValidationError("files", (error as Error).message);
       }
     }
     this.deps.gate.answer(question.id, answer as ActionAnswer);

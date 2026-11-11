@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
-import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 
 /**
  * Downloads of the internal browser. The browser writes into a staging folder inside the data dir and nowhere else; when a
@@ -13,6 +13,9 @@ import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 export const MAX_DOWNLOAD_BYTES = 1024 ** 3;
 /** What may sit in staging at once (waiting for an answer or still downloading). */
 export const MAX_STAGED_BYTES = 2 * 1024 ** 3;
+/** One uploaded file may not exceed 256 MB, and at most 10 files may be chosen at once. */
+export const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
+export const MAX_UPLOAD_FILES = 10;
 /** A question nobody answers in this long deletes the file. */
 export const ASK_MS = 10 * 60_000;
 
@@ -105,6 +108,112 @@ export interface NativeFolderPickResult {
   supported: boolean;
   /** Chosen folder path, or null when cancelled or unsupported. */
   folder: string | null;
+}
+
+export interface UploadInfo {
+  id: string;
+  tabId: string;
+  multiple: boolean;
+  origin: string;
+  page: string;
+  /** Initial folder shown when choosing files to upload. */
+  folder: string;
+}
+
+export interface NativeFilePickResult {
+  /** False when this machine/session has no native GUI file dialog (the UI falls back to `FilePicker`). */
+  supported: boolean;
+  /** Chosen validated file paths, or null when cancelled or unsupported. */
+  files: string[] | null;
+}
+
+export interface UploadDirectoryListing {
+  directory: string;
+  parent: string | null;
+  separator: "/" | "\\";
+  exists: boolean;
+  folders: string[];
+  files: Array<{ name: string; size: number }>;
+}
+
+/** Validates one or more regular, readable local files for browser upload (refusing folders, symlinks, devices, or files > 256 MB). */
+export function checkUploadFiles(inputs: readonly string[], multiple: boolean): string[] {
+  if (!Array.isArray(inputs) || inputs.length === 0) throw new DownloadError("Choose at least one file to upload.");
+  const limit = multiple ? MAX_UPLOAD_FILES : 1;
+  if (inputs.length > limit) {
+    throw new DownloadError(multiple ? `Choose at most ${MAX_UPLOAD_FILES} files at once.` : "This field accepts only one file.");
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of inputs) {
+    let value = String(raw ?? "").trim();
+    if (value === "~" || value.startsWith("~/") || value.startsWith("~\\")) value = join(homedir(), value.slice(1));
+    if (value === "" || value.includes("\0") || !isAbsolute(value)) throw new DownloadError("Choose a full file path.");
+    const file = resolve(value);
+    let stat;
+    try {
+      stat = lstatSync(file);
+    } catch {
+      throw new DownloadError("That file does not exist.");
+    }
+    if (stat.isSymbolicLink()) throw new DownloadError("Symbolic links cannot be uploaded; choose the file itself.");
+    if (!stat.isFile()) throw new DownloadError("Only regular files can be uploaded.");
+    if (stat.size > MAX_UPLOAD_BYTES) throw new DownloadError("That file is bigger than 256 MB.");
+    try {
+      accessSync(file, constants.R_OK);
+    } catch {
+      throw new DownloadError("Ancilla cannot read that file.");
+    }
+    if (!seen.has(file)) {
+      seen.add(file);
+      out.push(file);
+    }
+  }
+  return out;
+}
+
+/** Lists folders and regular readable files inside `folderInput` for the inline upload picker when no OS GUI dialog is available. */
+export function listUploadDirectory(folderInput?: string, fallbackHome: string = homedir()): UploadDirectoryListing {
+  let target = String(folderInput ?? "").trim();
+  if (target === "" || target === "~") target = fallbackHome;
+  else if (target.startsWith("~/") || target.startsWith("~\\")) target = join(fallbackHome, target.slice(1));
+  if (target.includes("\0") || !isAbsolute(target)) throw new DownloadError("Choose a full folder path.");
+  const directory = resolve(target);
+  const parentDir = dirname(directory);
+  const separator: "/" | "\\" = sep === "\\" ? "\\" : "/";
+  const base = { directory, parent: parentDir === directory ? null : parentDir, separator };
+  let info;
+  try {
+    info = statSync(directory);
+  } catch {
+    return { ...base, exists: false, folders: [], files: [] };
+  }
+  if (!info.isDirectory()) return { ...base, exists: false, folders: [], files: [] };
+  try {
+    const entries = readdirSync(directory, { withFileTypes: true });
+    const folders: string[] = [];
+    const files: Array<{ name: string; size: number }> = [];
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        folders.push(entry.name);
+      } else if (entry.isFile()) {
+        try {
+          const st = lstatSync(join(directory, entry.name));
+          if (!st.isSymbolicLink() && st.isFile() && st.size <= MAX_UPLOAD_BYTES) {
+            files.push({ name: entry.name, size: st.size });
+          }
+        } catch {
+          // unreadable entry skipped
+        }
+      }
+    }
+    folders.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base", numeric: true }));
+    files.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+    return { ...base, exists: true, folders: folders.slice(0, 200), files: files.slice(0, 300) };
+  } catch {
+    return { ...base, exists: true, folders: [], files: [] };
+  }
 }
 
 export type NativePickerExec = (
@@ -217,6 +326,123 @@ export async function pickNativeFolder(
   }
 
   return { supported: false, folder: null };
+}
+
+/**
+ * Opens a native OS file-picker dialog on the host running Ancilla (Windows OpenFileDialog, macOS `osascript` `choose file`,
+ * or Linux `zenity`/`kdialog` when a GUI display is active). Initial directory is passed via `ANCILLA_START_DIR` in `env`.
+ */
+export async function pickNativeFiles(
+  initialFolder?: string,
+  multiple = false,
+  options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exec?: NativePickerExec; timeoutMs?: number } = {},
+): Promise<NativeFilePickResult> {
+  const platform = options.platform ?? process.platform;
+  const baseEnv = options.env ?? process.env;
+  const run = options.exec ?? defaultPickerExec;
+  const timeoutMs = options.timeoutMs ?? PICKER_TIMEOUT_MS;
+  let startDir = "";
+  if (initialFolder) {
+    try {
+      startDir = checkDownloadFolder(initialFolder);
+    } catch {
+      try {
+        const resolved = resolve(initialFolder);
+        if (statSync(resolved).isDirectory()) startDir = resolved;
+      } catch {
+        startDir = "";
+      }
+    }
+  }
+  const env: NodeJS.ProcessEnv = { ...baseEnv, ANCILLA_START_DIR: startDir };
+
+  const acceptPicked = (raw: string): NativeFilePickResult => {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return { supported: true, files: null };
+    try {
+      return { supported: true, files: checkUploadFiles(lines, multiple) };
+    } catch {
+      return { supported: true, files: null };
+    }
+  };
+
+  if (platform === "win32") {
+    const script = [
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$d = New-Object System.Windows.Forms.OpenFileDialog;",
+      `$d.Title = '${multiple ? "Choose files to upload" : "Choose a file to upload"}';`,
+      `$d.Multiselect = $${multiple ? "true" : "false"};`,
+      "$d.DereferenceLinks = $false;",
+      "if ($env:ANCILLA_START_DIR -and (Test-Path -LiteralPath $env:ANCILLA_START_DIR)) { $d.InitialDirectory = $env:ANCILLA_START_DIR };",
+      "$r = $d.ShowDialog();",
+      "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { foreach ($f in $d.FileNames) { [Console]::Out.WriteLine($f) }; exit 0 } else { exit 2 }",
+    ].join(" ");
+    const res = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-STA", "-Command", script], env, timeoutMs);
+    if (res.missing) return { supported: false, files: null };
+    if (res.code === 0) return acceptPicked(res.stdout);
+    if (res.code === 2) return { supported: true, files: null };
+    return { supported: false, files: null };
+  }
+
+  if (platform === "darwin") {
+    const multiClause = multiple ? " with multiple selections allowed" : "";
+    const prompt = multiple ? "Choose files to upload" : "Choose a file to upload";
+    const formatExpr = multiple
+      ? [
+          "set out to \"\"",
+          "repeat with f in chosen",
+          "set out to out & (POSIX path of f) & linefeed",
+          "end repeat",
+          "return out",
+        ]
+      : ["return POSIX path of chosen"];
+    const args = [
+      "-e", 'set startDir to system attribute "ANCILLA_START_DIR"',
+      "-e", "set chosen to missing value",
+      "-e", 'if startDir is not "" then',
+      "-e", "try",
+      "-e", `set chosen to (choose file with prompt "${prompt}" default location (POSIX file startDir)${multiClause})`,
+      "-e", "end try",
+      "-e", "end if",
+      "-e", "if chosen is missing value then",
+      "-e", `set chosen to (choose file with prompt "${prompt}"${multiClause})`,
+      "-e", "end if",
+      ...formatExpr.flatMap((line) => ["-e", line]),
+    ];
+    const res = await run("osascript", args, env, timeoutMs);
+    if (res.missing) return { supported: false, files: null };
+    if (res.code === 0) return acceptPicked(res.stdout);
+    if (/user canceled|-128/i.test(res.stderr)) return { supported: true, files: null };
+    return { supported: false, files: null };
+  }
+
+  if (platform === "linux") {
+    if (!baseEnv["DISPLAY"] && !baseEnv["WAYLAND_DISPLAY"]) {
+      return { supported: false, files: null };
+    }
+    const zenityArgs = ["--file-selection", `--title=${multiple ? "Choose files to upload" : "Choose a file to upload"}`];
+    if (multiple) zenityArgs.push("--multiple", "--separator=\n");
+    if (startDir) zenityArgs.push(`--filename=${startDir.endsWith("/") ? startDir : `${startDir}/`}`);
+    const zen = await run("zenity", zenityArgs, env, timeoutMs);
+    if (!zen.missing) {
+      if (zen.code === 0) return acceptPicked(zen.stdout);
+      if (zen.code === 1 && !/cannot open display/i.test(zen.stderr)) return { supported: true, files: null };
+      return { supported: false, files: null };
+    }
+    const kdArgs = ["--getopenfilename", startDir || homedir(), "--title", multiple ? "Choose files to upload" : "Choose a file to upload"];
+    if (multiple) kdArgs.push("--multiple", "--separate-output");
+    const kd = await run("kdialog", kdArgs, env, timeoutMs);
+    if (!kd.missing) {
+      if (kd.code === 0) return acceptPicked(kd.stdout);
+      if (kd.code === 1 && !/cannot connect to X server/i.test(kd.stderr)) return { supported: true, files: null };
+    }
+    return { supported: false, files: null };
+  }
+
+  return { supported: false, files: null };
 }
 
 export class DownloadDesk {
@@ -353,6 +579,15 @@ export class DownloadDesk {
       return target;
     }
     throw new DownloadError("Could not find a free name in that folder.");
+  }
+
+  /** Notes a folder used during an upload if it is writable, without altering `rememberFolder`. */
+  noteFolder(folderInput: string): void {
+    try {
+      this.remember(checkDownloadFolder(folderInput));
+    } catch {
+      // read-only upload folders do not replace the download destination
+    }
   }
 
   private remember(folder: string): void {

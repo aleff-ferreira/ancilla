@@ -1,5 +1,5 @@
 import { Button } from "../ui/primitives.js";
-import { DownloadForm } from "./DownloadForm.js";
+import { DownloadForm, UploadForm } from "./DownloadForm.js";
 import type { ActionQuestionView } from "./protocol.js";
 
 /**
@@ -15,8 +15,9 @@ export const ACTION_REASON = /^Waiting for your approval: /;
 export function ActionQuestionCard(props: {
   question: ActionQuestionView;
   busy?: boolean;
-  onAnswer(answer: ActionAnswer, folder?: string): void;
+  onAnswer(answer: ActionAnswer, folder?: string, files?: string[]): void;
   onPickNative?(currentFolder: string): Promise<{ supported: boolean; folder: string | null }>;
+  onPickNativeFiles?(currentFolder: string, multiple: boolean): Promise<{ supported: boolean; files: string[] | null }>;
 }) {
   const { question } = props;
   if (question.download) {
@@ -35,6 +36,24 @@ export function ActionQuestionCard(props: {
           onPickNative={props.onPickNative}
           onSave={(folder) => props.onAnswer("do", folder)}
           onDont={() => props.onAnswer("dont")}
+        />
+      </div>
+    );
+  }
+  if (question.upload) {
+    const u = question.upload;
+    return (
+      <div aria-label="A file upload the assistant's page opened" className="w-full space-y-1.5 rounded border border-line bg-bg p-2">
+        <UploadForm
+          multiple={u.multiple}
+          origin={question.origin}
+          page={question.page}
+          folder={u.folder}
+          fromAssistant
+          busy={props.busy}
+          onPickNativeFiles={props.onPickNativeFiles}
+          onUpload={(files) => props.onAnswer("do", undefined, files)}
+          onCancel={() => props.onAnswer("dont")}
         />
       </div>
     );

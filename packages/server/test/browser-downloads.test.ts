@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DownloadDesk, DownloadError, MAX_DOWNLOAD_BYTES, checkDownloadFolder, freeName, pickNativeFolder, riskWarning, sanitizeFileName } from "../src/browser/downloads.js";
+import {
+  DownloadDesk,
+  DownloadError,
+  MAX_DOWNLOAD_BYTES,
+  checkDownloadFolder,
+  checkUploadFiles,
+  freeName,
+  listUploadDirectory,
+  pickNativeFiles,
+  pickNativeFolder,
+  riskWarning,
+  sanitizeFileName,
+} from "../src/browser/downloads.js";
 import { handleBrowser } from "../src/browser/routes.js";
 import { BrowseRunner } from "../src/browser/runner.js";
 import { BrowseSites } from "../src/browser/sites.js";
@@ -370,6 +382,173 @@ test("browser HTTP routes: read and update download preferences and invoke folde
   const dialog = await call("POST", "/downloads/pick-folder", { folder: picked });
   assert.equal(dialog.status, 200);
   assert.deepEqual(dialog.body, { supported: true, folder: picked });
+
+  await r.svc.dispose();
+});
+
+// ------------------------------------------------------------------ controlled file uploads
+
+test("checkUploadFiles and listUploadDirectory: accept regular files, enforce single/multi limits, and refuse folders or symlinks", () => {
+  const dir = tmp("uploads");
+  const fileA = join(dir, "alpha.txt");
+  const fileB = join(dir, "beta.csv");
+  const subDir = join(dir, "sub");
+  writeFileSync(fileA, "hello");
+  writeFileSync(fileB, "1,2,3");
+  mkdirSync(subDir);
+
+  assert.deepEqual(checkUploadFiles([fileA], false), [fileA]);
+  assert.deepEqual(checkUploadFiles([fileA, fileB, fileA], true), [fileA, fileB], "deduplicates repeated paths");
+  assert.throws(() => checkUploadFiles([], false), /Choose at least one file/);
+  assert.throws(() => checkUploadFiles([fileA, fileB], false), /only one file/);
+  assert.throws(() => checkUploadFiles([subDir], false), /regular files/);
+  assert.throws(() => checkUploadFiles(["relative/file.txt"], false), /full file path/);
+  assert.throws(() => checkUploadFiles([join(dir, "missing.txt")], false), /does not exist/);
+
+  let linked = false;
+  try {
+    symlinkSync(fileA, join(dir, "link.txt"), "file");
+    linked = true;
+  } catch {
+    // symlink creation may be restricted on non-developer Windows hosts
+  }
+  if (linked) {
+    assert.throws(() => checkUploadFiles([join(dir, "link.txt")], false), /Symbolic links/);
+  }
+
+  const listed = listUploadDirectory(dir);
+  assert.equal(listed.exists, true);
+  assert.deepEqual(listed.folders, ["sub"]);
+  assert.deepEqual(
+    listed.files.map((f) => f.name),
+    ["alpha.txt", "beta.csv"],
+    "lists regular files and omits symlinks",
+  );
+});
+
+test("pickNativeFiles: supports Windows, macOS, and Linux multi-file dialogs and passes start dir via env", async () => {
+  const dir = tmp("pick-files");
+  const f1 = join(dir, "one.pdf");
+  const f2 = join(dir, "two.png");
+  writeFileSync(f1, "pdf");
+  writeFileSync(f2, "png");
+
+  const win = await pickNativeFiles(dir, true, {
+    platform: "win32",
+    env: {},
+    exec: async (cmd, args, env) => {
+      assert.equal(cmd, "powershell.exe");
+      assert.equal(env["ANCILLA_START_DIR"], dir);
+      assert.ok(!args.join(" ").includes(dir));
+      return { code: 0, stdout: `${f1}\r\n${f2}\r\n`, stderr: "" };
+    },
+  });
+  assert.deepEqual(win, { supported: true, files: [f1, f2] });
+
+  const mac = await pickNativeFiles(dir, false, {
+    platform: "darwin",
+    env: {},
+    exec: async (cmd) => {
+      assert.equal(cmd, "osascript");
+      return { code: 0, stdout: `${f1}\n`, stderr: "" };
+    },
+  });
+  assert.deepEqual(mac, { supported: true, files: [f1] });
+
+  const linux = await pickNativeFiles(dir, true, {
+    platform: "linux",
+    env: { WAYLAND_DISPLAY: "wayland-0" },
+    exec: async (cmd) => {
+      assert.equal(cmd, "zenity");
+      return { code: 0, stdout: `${f1}\n${f2}\n`, stderr: "" };
+    },
+  });
+  assert.deepEqual(linux, { supported: true, files: [f1, f2] });
+});
+
+test("file uploads in BrowserService: user tabs attach via upload chooser, assistant tabs require uploadGate approval, and HTTP routes work", async () => {
+  const dir = tmp("svc-upload");
+  const doc = join(dir, "resume.pdf");
+  const cover = join(dir, "cover.txt");
+  writeFileSync(doc, "resume-bytes");
+  writeFileSync(cover, "cover-bytes");
+
+  let runner!: BrowseRunner;
+  const sites = new BrowseSites(null, () => ({ taskId: () => "t-up", gateChanged: () => undefined }));
+  runner = new BrowseRunner({
+    service: () => r.svc,
+    brain: () => ({ brain: null as never, problem: "unused" }),
+    gate: sites.gate,
+    log: () => undefined,
+  });
+
+  const r = rig({
+    uploadGate: (req) => sites.decideUpload(req),
+    pickFiles: async (_start, multiple) => ({ supported: true, files: multiple ? [doc, cover] : [doc] }),
+  });
+
+  const youTab = await r.svc.openTab("you");
+  const aiTab = await r.svc.openTab("assistant");
+  r.fake.emit("Target.targetInfoChanged", { targetInfo: { targetId: youTab.id, type: "page", url: "https://jobs.example/apply", title: "Apply" } });
+  r.fake.emit("Target.targetInfoChanged", { targetInfo: { targetId: aiTab.id, type: "page", url: "https://jobs.example/apply", title: "Apply" } });
+  await waitFor(() => r.svc.pendingUploads().length === 0, "target info processed");
+
+  // 1. User's own tab opens `<input type="file">`: emits `upload`, validates path, calls `DOM.setFileInputFiles`
+  r.fake.emit("Page.fileChooserOpened", { mode: "selectSingle", backendNodeId: 42 }, `S-${youTab.id}`);
+  await waitFor(() => r.svc.pendingUploads().length === 1, "user upload chooser open");
+  const chooser = r.svc.pendingUploads()[0]!;
+  assert.equal(chooser.multiple, false);
+  assert.equal(chooser.origin, "https://jobs.example");
+  assert.throws(() => r.svc.answerUpload(chooser.id, true, [join(dir, "nope.pdf")]), /does not exist/, "invalid file keeps chooser open");
+  assert.equal(r.svc.pendingUploads().length, 1);
+
+  r.svc.answerUpload(chooser.id, true, [doc]);
+  await waitFor(() => sent(r.fake, "DOM.setFileInputFiles").length === 1, "DOM.setFileInputFiles sent for user tab");
+  assert.deepEqual(sent(r.fake, "DOM.setFileInputFiles")[0]?.params, { files: [doc], backendNodeId: 42 });
+  assert.equal(r.svc.pendingUploads().length, 0);
+
+  // 2. Assistant tab opens `<input type="file" multiple>`: waits on task action approval (`decideUpload`), attaches only user-chosen files
+  r.fake.emit("Page.fileChooserOpened", { mode: "selectMultiple", backendNodeId: 77 }, `S-${aiTab.id}`);
+  await waitFor(() => sites.gate.pending() !== null, "assistant upload question queued");
+  const q = sites.gate.pending()!;
+  assert.equal(q.type, "action");
+  if (q.type === "action") assert.equal(q.upload?.multiple, true);
+
+  runner.answerAction("t-up", "do", undefined, [doc, cover]);
+  await r.svc.waitLoaded(aiTab.id, 2000);
+  assert.equal(sent(r.fake, "DOM.setFileInputFiles").length, 2);
+  assert.deepEqual(sent(r.fake, "DOM.setFileInputFiles")[1]?.params, { files: [doc, cover], backendNodeId: 77 });
+  assert.match(r.svc.takeNotes(aiTab.id).join(" "), /Attached resume\.pdf, cover\.txt/);
+
+  // 3. Assistant upload declined by user: DOM.setFileInputFiles is NOT called again, note records cancellation
+  r.fake.emit("Page.fileChooserOpened", { mode: "selectSingle", backendNodeId: 88 }, `S-${aiTab.id}`);
+  await waitFor(() => sites.gate.pending() !== null, "second assistant upload question queued");
+  runner.answerAction("t-up", "dont");
+  await r.svc.waitLoaded(aiTab.id, 2000);
+  assert.equal(sent(r.fake, "DOM.setFileInputFiles").length, 2, "declined upload never touches DOM.setFileInputFiles");
+  assert.match(r.svc.takeNotes(aiTab.id).join(" "), /cancelled the file upload/);
+
+  // 4. HTTP upload endpoints
+  const pickReply = await handleBrowser(r.svc, {
+    method: "POST",
+    path: "/api/browser/uploads/pick-files",
+    query: new URLSearchParams(),
+    body: async () => ({ folder: dir, multiple: true }),
+  });
+  assert.equal(pickReply.status, 200);
+  assert.deepEqual(pickReply.body, { supported: true, files: [doc, cover] });
+
+  const listReply = await handleBrowser(r.svc, {
+    method: "GET",
+    path: "/api/browser/uploads/list",
+    query: new URLSearchParams({ folder: dir }),
+    body: async () => ({}),
+  });
+  assert.equal(listReply.status, 200);
+  assert.deepEqual(
+    (listReply.body as { files: Array<{ name: string }> }).files.map((f) => f.name),
+    ["cover.txt", "resume.pdf"],
+  );
 
   await r.svc.dispose();
 });

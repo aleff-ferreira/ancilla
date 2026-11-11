@@ -351,7 +351,14 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
                   ? (current) => controller.browser<{ supported: boolean; folder: string | null }>("POST", "/downloads/pick-folder", { folder: current })
                   : undefined
               }
-              onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })}
+              onPickNativeFiles={
+                isLocalBrowserHost() && Boolean(controller.hasBrowserHttp)
+                  ? (current, multiple) => controller.browser<{ supported: boolean; files: string[] | null }>("POST", "/uploads/pick-files", { folder: current, multiple })
+                  : undefined
+              }
+              onAnswer={(answer, folder, files) =>
+                void act("action", { answer, ...(folder ? { folder } : {}), ...(files ? { files } : {}) })
+              }
             />
           ) : null}
           {asking && action && !(question && isActionQuestion(question)) ? (

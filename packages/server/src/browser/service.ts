@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +8,25 @@ import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
 import { bodyText } from "./commit.js";
 import { originOf } from "./sites.js";
-import { DownloadDesk, DownloadError, checkDownloadFolder, MAX_DOWNLOAD_BYTES, MAX_STAGED_BYTES, ASK_MS, pickNativeFolder, riskWarning, sanitizeFileName, type DownloadInfo, type NativeFolderPickResult } from "./downloads.js";
+import {
+  DownloadDesk,
+  DownloadError,
+  checkDownloadFolder,
+  checkUploadFiles,
+  listUploadDirectory,
+  MAX_DOWNLOAD_BYTES,
+  MAX_STAGED_BYTES,
+  ASK_MS,
+  pickNativeFiles,
+  pickNativeFolder,
+  riskWarning,
+  sanitizeFileName,
+  type DownloadInfo,
+  type NativeFilePickResult,
+  type NativeFolderPickResult,
+  type UploadDirectoryListing,
+  type UploadInfo,
+} from "./downloads.js";
 import { buildSnapshot, passwordInputNames, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
 /**
@@ -57,6 +76,8 @@ export type BrowserEvent =
   | { type: "notice"; kind: "download" | "file" | "popup"; tabId?: string; text: string }
   | { type: "download"; download: DownloadInfo }
   | { type: "download-closed"; id: string; tabId: string | null }
+  | { type: "upload"; upload: UploadInfo }
+  | { type: "upload-closed"; id: string; tabId: string }
   | { type: "stopped" };
 
 /** One download, from the browser's first word of it to the person's answer. */
@@ -74,8 +95,20 @@ interface Flight {
   ask: { info: DownloadInfo; resolve: (folder: string | null) => void; timer: NodeJS.Timeout } | null;
 }
 
+/** One intercepted `<input type="file">` chooser waiting for the person's own pane to supply file path(s). */
+interface PendingUpload {
+  id: string;
+  tabId: string;
+  info: UploadInfo;
+  resolve: (files: string[] | null) => void;
+  timer: NodeJS.Timeout;
+}
+
 /** What the assistant's download question needs: the file, the page and the site it came from, and where it would go by default. */
 export type DownloadRequest = Omit<DownloadInfo, "id" | "tabId">;
+
+/** What the assistant's file-upload question needs: whether multiple files are accepted, the site/page, and the initial folder. */
+export type UploadRequest = Omit<UploadInfo, "id" | "tabId">;
 
 export interface BrowserStatus {
   available: boolean;
@@ -159,8 +192,15 @@ export interface BrowserServiceOptions {
    * copied into the assistant's browser context before the request is sent. Unapproved origins never receive cookies.
    */
   signInGate?: (request: { url: string; origin: string; tabId: string; mainFrame: boolean }) => boolean | Promise<boolean>;
+  /**
+   * Asked when a page in the assistant's browser opens a file chooser (`<input type="file">`): resolves the local file path(s)
+   * chosen by the PERSON, or null when cancelled. Absent: file uploads in the assistant's browser are cancelled.
+   */
+  uploadGate?: (request: UploadRequest) => Promise<string[] | null>;
   /** Native OS folder picker override (for tests or embedded hosts). */
   pickFolder?: (initialFolder?: string) => Promise<NativeFolderPickResult>;
+  /** Native OS file picker override (for tests or embedded hosts). */
+  pickFiles?: (initialFolder?: string, multiple?: boolean) => Promise<NativeFilePickResult>;
   /** How long the person's own pane may take to answer a download question (default 10 minutes). */
   downloadAskMs?: number;
 }
@@ -346,6 +386,8 @@ interface Tab {
   notes: string[];
   /** A page of this tab was refused by the gate since its last navigation began: an aborted load is then a refusal, not a broken page. */
   blocked: boolean;
+  /** Set while an intercepted file chooser is waiting on the person or applying `DOM.setFileInputFiles`. */
+  uploading: Promise<void> | null;
 }
 
 interface ScreencastState {
@@ -410,6 +452,8 @@ export class BrowserService {
   readonly downloads: DownloadDesk;
   /** Downloads in flight or waiting for an answer, by the browser's guid. */
   private readonly flights = new Map<string, Flight>();
+  /** File upload choosers waiting for an answer in the person's own pane, by chooser id. */
+  private readonly uploads = new Map<string, PendingUpload>();
 
   constructor(options: BrowserServiceOptions = {}) {
     this.options = options;
@@ -469,8 +513,8 @@ export class BrowserService {
       this.idleTimer = null;
       const rt = this.runtime;
       if (!rt) return;
-      // Someone watching (a screencast) or a dialog waiting keeps it open; the next idle period asks again.
-      if ([...rt.tabs.values()].some((t) => t.screencast || t.dialog)) {
+      // Someone watching (a screencast) or a dialog/upload waiting keeps it open; the next idle period asks again.
+      if (this.uploads.size > 0 || [...rt.tabs.values()].some((t) => t.screencast || t.dialog || t.uploading)) {
         this.touch();
         return;
       }
@@ -675,12 +719,115 @@ export class BrowserService {
     return this.options.pickFolder ? this.options.pickFolder(start) : pickNativeFolder(start);
   }
 
+  /** Opens a native OS file picker for browser uploads on this host, or reports `{ supported: false }` when unavailable. */
+  async pickUploadFiles(initialFolder?: string, multiple = false): Promise<NativeFilePickResult> {
+    const start = initialFolder ?? this.downloads.defaultFolder();
+    return this.options.pickFiles ? this.options.pickFiles(start, multiple) : pickNativeFiles(start, multiple);
+  }
+
+  /** Lists folders and regular readable files inside `folderInput` for the inline upload picker. */
+  listUploadFolder(folderInput?: string): UploadDirectoryListing {
+    return listUploadDirectory(folderInput ?? this.downloads.defaultFolder());
+  }
+
   /** The questions the pane has not answered yet (a pane that connects late is told of them). */
   pendingDownloads(): DownloadInfo[] {
     return [...this.flights.values()].flatMap((f) => (f.ask ? [f.ask.info] : []));
   }
 
+  /** File upload choosers the pane has not answered yet. */
+  pendingUploads(): UploadInfo[] {
+    return [...this.uploads.values()].map((u) => u.info);
+  }
+
+  private askPaneUpload(tabId: string, request: UploadRequest): Promise<string[] | null> {
+    // Supersede any older open chooser on the same tab so two modal choosers never stack on one page.
+    for (const [oldId, old] of [...this.uploads.entries()]) {
+      if (old.tabId === tabId) {
+        this.uploads.delete(oldId);
+        old.resolve(null);
+      }
+    }
+    return new Promise<string[] | null>((resolve) => {
+      const id = `up_${randomBytes(6).toString("hex")}`;
+      const info: UploadInfo = { ...request, id, tabId };
+      const done = (files: string[] | null): void => {
+        const entry = this.uploads.get(id);
+        if (!entry) return;
+        clearTimeout(entry.timer);
+        this.uploads.delete(id);
+        this.emit({ type: "upload-closed", id, tabId });
+        resolve(files);
+      };
+      const timer = setTimeout(() => done(null), this.options.downloadAskMs ?? ASK_MS);
+      timer.unref?.();
+      this.uploads.set(id, { id, tabId, info, resolve: done, timer });
+      this.emit({ type: "upload", upload: info });
+    });
+  }
+
+  /** The pane's answer to an open file chooser: validated file paths attach to the input; `accept: false` cancels cleanly. */
+  answerUpload(id: string, accept: boolean, files?: string[]): void {
+    const pending = this.uploads.get(id);
+    if (!pending) throw new BrowserError("invalid", "That file chooser is not waiting any more.");
+    if (!accept) {
+      pending.resolve(null);
+      return;
+    }
+    try {
+      const checked = checkUploadFiles(files ?? [], pending.info.multiple);
+      pending.resolve(checked);
+    } catch (error) {
+      throw new BrowserError("invalid", error instanceof DownloadError ? error.message : "Those files cannot be uploaded.");
+    }
+  }
+
+  private async handleFileChooser(rt: Runtime, tab: Tab, backendNodeId: number, multiple: boolean): Promise<void> {
+    const request: UploadRequest = {
+      multiple,
+      origin: originOf(tab.url) ?? "",
+      page: tab.title ?? "",
+      folder: this.downloads.defaultFolder(),
+    };
+    let files: string[] | null = null;
+    try {
+      files =
+        tab.context === "assistant"
+          ? this.options.uploadGate
+            ? await this.options.uploadGate(request)
+            : null
+          : await this.askPaneUpload(tab.id, request);
+      if (rt.conn.isClosed || rt.tabs.get(tab.id) !== tab) return;
+      if (!files || files.length === 0) {
+        if (tab.context === "assistant") {
+          this.note(tab, "No file was chosen: the person cancelled the file upload.");
+        } else {
+          this.emit({ type: "notice", kind: "file", tabId: tab.id, text: "File upload cancelled." });
+        }
+        return;
+      }
+      const checked = checkUploadFiles(files, multiple);
+      await rt.conn.send("DOM.setFileInputFiles", { files: checked, backendNodeId }, tab.sessionId);
+      this.downloads.noteFolder(dirname(checked[0]!));
+      const names = checked.map((f) => f.split(/[\\/]/).pop() ?? f).join(", ");
+      if (tab.context === "assistant") {
+        this.note(tab, `Attached ${names} to the file input.`);
+      } else {
+        this.emit({ type: "notice", kind: "file", tabId: tab.id, text: `Attached ${names}.` });
+      }
+    } catch (error) {
+      const msg = error instanceof DownloadError ? error.message : "Could not attach the chosen file.";
+      if (tab.context === "assistant") this.note(tab, msg);
+      else this.emit({ type: "notice", kind: "file", tabId: tab.id, text: msg });
+    }
+  }
+
   private teardown(rt: Runtime): void {
+    for (const pending of [...this.uploads.values()]) {
+      clearTimeout(pending.timer);
+      this.uploads.delete(pending.id);
+      pending.resolve(null);
+    }
     for (const flight of [...this.flights.values()]) {
       flight.ask?.resolve(null);
       this.flights.delete(flight.guid);
@@ -773,11 +920,12 @@ export class BrowserService {
       axEnabled: false,
       notes: [],
       blocked: false,
+      uploading: null,
     };
     rt.tabs.set(targetId, tab);
     rt.bySession.set(tab.sessionId, tab);
     await rt.conn.send("Page.enable", {}, tab.sessionId);
-    // A file chooser would open a native dialog nobody can see; it is intercepted so the pane can say uploads are not available yet.
+    // A file chooser would open a native dialog on the headless browser process; intercepting routes it through the pane or task gate.
     await rt.conn.send("Page.setInterceptFileChooserDialog", { enabled: true }, tab.sessionId).catch(() => undefined);
     // The assistant's pages are asked about before they load: every document request (a page, a redirect, a frame) pauses until the gate answers.
     if (context === "assistant" && this.options.siteGate) {
@@ -877,6 +1025,12 @@ export class BrowserService {
   private removeTab(rt: Runtime, id: string): void {
     const tab = rt.tabs.get(id);
     if (!tab) return;
+    for (const [upId, pending] of [...this.uploads.entries()]) {
+      if (pending.tabId === id) {
+        this.uploads.delete(upId);
+        pending.resolve(null);
+      }
+    }
     this.endScreencast(tab);
     rt.tabs.delete(id);
     rt.bySession.delete(tab.sessionId);
@@ -939,9 +1093,10 @@ export class BrowserService {
     if (tab.loading) await this.waitLoad(tab, 5000).promise;
   }
 
-  /** Waits, bounded, for a tab that is still loading: a page the person was asked about may only now be arriving. */
+  /** Waits, bounded, for a tab that is still loading or finishing an approved file upload. */
   async waitLoaded(id: string, ms: number): Promise<void> {
     const tab = this.runtime?.tabs.get(id);
+    if (tab?.uploading) await within(tab.uploading, ms);
     if (tab?.loading) await this.waitLoad(tab, ms).promise;
   }
 
@@ -1487,9 +1642,23 @@ export class BrowserService {
         tab.dialog = null;
         this.emit({ type: "dialog-closed", tabId: tab.id });
         break;
-      case "Page.fileChooserOpened":
-        this.emit({ type: "notice", kind: "file", tabId: tab.id, text: "Choosing a file to upload is not available yet." });
+      case "Page.fileChooserOpened": {
+        const backendNodeId = params["backendNodeId"];
+        if (typeof backendNodeId !== "number") {
+          if (tab.context === "assistant") {
+            this.note(tab, "A page opened a file picker that could not be attached to a file input.");
+          } else {
+            this.emit({ type: "notice", kind: "file", tabId: tab.id, text: "Choosing a file to upload is not available yet." });
+          }
+          break;
+        }
+        const multiple = params["mode"] === "selectMultiple";
+        const job = this.handleFileChooser(rt, tab, backendNodeId, multiple).finally(() => {
+          if (tab.uploading === job) tab.uploading = null;
+        });
+        tab.uploading = job;
         break;
+      }
       case "Page.screencastFrame":
         this.onScreencastFrame(rt, tab, params);
         break;

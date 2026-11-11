@@ -218,3 +218,261 @@ export function DownloadBox(props: {
     </div>
   );
 }
+
+export interface UploadDirectoryView {
+  directory: string;
+  parent: string | null;
+  separator: "/" | "\\";
+  exists: boolean;
+  folders: string[];
+  files: Array<{ name: string; size: number }>;
+}
+
+export interface UploadFormProps {
+  multiple: boolean;
+  origin: string;
+  page?: string;
+  folder: string;
+  fromAssistant?: boolean;
+  busy?: boolean;
+  onUpload(files: string[]): void;
+  onCancel(): void;
+  onPickNativeFiles?(currentFolder: string, multiple: boolean): Promise<{ supported: boolean; files: string[] | null }>;
+}
+
+export function UploadForm(props: UploadFormProps) {
+  const [folder, setFolder] = useState(props.folder);
+  const [files, setFiles] = useState<string[]>([]);
+  const [browsing, setBrowsing] = useState(false);
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const [nativeUnsupported, setNativeUnsupported] = useState(false);
+
+  const chooseNative = async () => {
+    if (!props.onPickNativeFiles || nativeBusy) return;
+    setNativeBusy(true);
+    try {
+      const picked = await props.onPickNativeFiles(folder, props.multiple);
+      if (!picked.supported) {
+        setNativeUnsupported(true);
+        setBrowsing(true);
+      } else if (picked.files && picked.files.length > 0) {
+        setFiles(props.multiple ? picked.files : [picked.files[0]!]);
+        const first = picked.files[0]!;
+        const sepIdx = Math.max(first.lastIndexOf("/"), first.lastIndexOf("\\"));
+        if (sepIdx > 0) setFolder(first.slice(0, sepIdx));
+        setBrowsing(false);
+      }
+    } catch {
+      setBrowsing(true);
+    } finally {
+      setNativeBusy(false);
+    }
+  };
+
+  const toggleFile = (filePath: string) => {
+    if (!props.multiple) {
+      setFiles([filePath]);
+      setBrowsing(false);
+      return;
+    }
+    setFiles((prev) => (prev.includes(filePath) ? prev.filter((f) => f !== filePath) : [...prev, filePath]));
+  };
+
+  return (
+    <div role="group" aria-label="Choose files to upload" className="w-full space-y-1.5 text-xs">
+      <p className="font-medium text-fg [overflow-wrap:anywhere]">
+        {props.multiple ? "Choose files to upload" : "Choose a file to upload"}
+      </p>
+      <p className="text-muted [overflow-wrap:anywhere]">
+        {props.origin ? `To ${props.origin}` : "To this page"}
+        {props.page ? ` (“${props.page}”)` : ""}
+        {props.fromAssistant ? ", opened by the assistant" : ""}
+      </p>
+      <div className="flex items-center gap-1.5">
+        <span
+          title={files.length > 0 ? files.join(", ") : "No file chosen"}
+          className="min-w-0 flex-1 truncate rounded bg-sunken px-2 py-1 text-fg"
+        >
+          {files.length === 0 ? "No file chosen" : files.map((f) => f.split(/[\\/]/).pop() ?? f).join(", ")}
+        </span>
+        {props.onPickNativeFiles && !nativeUnsupported ? (
+          <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={() => void chooseNative()}>
+            {props.multiple ? "Choose files…" : "Choose file…"}
+          </Button>
+        ) : null}
+        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={() => setBrowsing((v) => !v)}>
+          Browse
+        </Button>
+      </div>
+      {browsing ? (
+        <FilePicker
+          start={folder}
+          multiple={props.multiple}
+          selected={files}
+          onFolderChange={setFolder}
+          onToggleFile={toggleFile}
+          onDone={() => setBrowsing(false)}
+        />
+      ) : null}
+      <p className="text-subtle">Nothing leaves your computer until you press Upload.</p>
+      <div className="flex flex-wrap gap-1.5">
+        <Button size="xs" variant="accent" disabled={props.busy || nativeBusy || files.length === 0} onClick={() => props.onUpload(files)}>
+          Upload
+        </Button>
+        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onCancel}>
+          {props.fromAssistant ? "Don't" : "Cancel"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function FilePicker(props: {
+  start: string;
+  multiple: boolean;
+  selected: string[];
+  onFolderChange(folder: string): void;
+  onToggleFile(filePath: string): void;
+  onDone(): void;
+}) {
+  const controller = useController();
+  const [path, setPath] = useState(props.start);
+  const [manual, setManual] = useState("");
+  const [listing, setListing] = useState<UploadDirectoryView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!controller.hasBrowserHttp) return;
+    let live = true;
+    controller
+      .browser<UploadDirectoryView>("GET", `/uploads/list?folder=${encodeURIComponent(path)}`)
+      .then((next) => {
+        if (live) {
+          setListing(next);
+          setError(null);
+          if (next.exists) props.onFolderChange(next.directory);
+        }
+      })
+      .catch((e: unknown) => {
+        if (live) setError(e instanceof Error ? e.message : "That folder cannot be listed.");
+      });
+    return () => {
+      live = false;
+    };
+  }, [controller, path]);
+
+  const here = listing?.directory ?? path;
+  const sep = listing?.separator ?? (here.includes("\\") ? "\\" : "/");
+
+  return (
+    <div role="group" aria-label="Browse files" className="space-y-1.5 rounded border border-line bg-bg p-1.5">
+      {controller.hasBrowserHttp ? (
+        <>
+          <div className="flex items-center gap-1">
+            <Button size="xs" variant="ghost" disabled={!listing?.parent} aria-label="Up one folder" onClick={() => listing?.parent && setPath(listing.parent)}>
+              <ArrowElbowLeftUpIcon size={14} />
+            </Button>
+            <span title={here} className="min-w-0 flex-1 truncate text-muted">
+              {here}
+            </span>
+          </div>
+          {error ? <p className="text-muted">{error}</p> : null}
+          {listing && !listing.exists ? <p className="text-muted">That folder does not exist.</p> : null}
+          <ul className="max-h-36 overflow-y-auto">
+            {(listing?.folders ?? []).map((folderName) => (
+              <li key={`dir-${folderName}`}>
+                <button
+                  type="button"
+                  onClick={() => setPath(withTrailingSeparator(here, sep) + folderName)}
+                  className="flex w-full items-center gap-1.5 rounded px-1.5 py-0.5 text-left hover:bg-hover"
+                >
+                  <FolderIcon size={13} />
+                  <span className="min-w-0 truncate">{folderName}</span>
+                </button>
+              </li>
+            ))}
+            {(listing?.files ?? []).map((file) => {
+              const full = withTrailingSeparator(here, sep) + file.name;
+              const chosen = props.selected.includes(full);
+              return (
+                <li key={`file-${file.name}`}>
+                  <button
+                    type="button"
+                    aria-pressed={chosen}
+                    onClick={() => props.onToggleFile(full)}
+                    className={`flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left hover:bg-hover ${chosen ? "bg-active font-medium" : ""}`}
+                  >
+                    <span className="min-w-0 truncate">{file.name}</span>
+                    <span className="shrink-0 text-subtle">{formatSize(file.size)}</span>
+                  </button>
+                </li>
+              );
+            })}
+            {listing && listing.exists && listing.folders.length === 0 && listing.files.length === 0 ? (
+              <li className="px-1.5 text-subtle">No files in this folder.</li>
+            ) : null}
+          </ul>
+        </>
+      ) : null}
+      <div className="flex items-center gap-1">
+        <input
+          aria-label="File path"
+          placeholder="Or enter a full file path…"
+          value={manual}
+          onChange={(e) => setManual(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && manual.trim()) {
+              e.preventDefault();
+              props.onToggleFile(manual.trim());
+              setManual("");
+            }
+          }}
+          className="h-7 min-w-0 flex-1 rounded border border-line bg-sunken px-2 text-xs text-fg outline-none focus:border-focus"
+        />
+        <Button
+          size="xs"
+          variant="secondary"
+          disabled={!manual.trim()}
+          onClick={() => {
+            props.onToggleFile(manual.trim());
+            setManual("");
+          }}
+        >
+          Add
+        </Button>
+      </div>
+      {props.multiple ? (
+        <div className="flex justify-end">
+          <Button size="xs" variant="ghost" onClick={props.onDone}>
+            Done
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function UploadBox(props: {
+  upload: { id: string; tabId: string; multiple: boolean; origin: string; page: string; folder: string };
+  onAnswer(accept: boolean, files?: string[]): void;
+  onPickNativeFiles?(currentFolder: string, multiple: boolean): Promise<{ supported: boolean; files: string[] | null }>;
+}) {
+  const { upload } = props;
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Upload a file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/60 p-4">
+      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border border-line bg-raised p-4 shadow-pop">
+        <h2 className="mb-2 text-xs font-semibold text-muted">{upload.multiple ? "Upload files?" : "Upload a file?"}</h2>
+        <UploadForm
+          key={upload.id}
+          multiple={upload.multiple}
+          origin={upload.origin}
+          page={upload.page}
+          folder={upload.folder}
+          onPickNativeFiles={props.onPickNativeFiles}
+          onUpload={(files) => props.onAnswer(true, files)}
+          onCancel={() => props.onAnswer(false)}
+        />
+      </div>
+    </div>
+  );
+}

@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ActionQuestionCard } from "../src/components/browser/ActionQuestion.js";
-import { DownloadBox, formatSize } from "../src/components/browser/DownloadForm.js";
+import { DownloadBox, UploadBox, formatSize } from "../src/components/browser/DownloadForm.js";
 import { parseQuestion } from "../src/components/browser/protocol.js";
 import { BrowserSession, type SocketLike } from "../src/components/browser/session.js";
 
@@ -128,5 +128,49 @@ describe("the pane's connection and downloads", () => {
     assert.deepEqual(JSON.parse(socket.sent.at(-1) as string), { type: "save", id: "second-0000", accept: true, folder: "/x" });
     socket.say({ type: "ready", v: 1, tabs: [], active: null });
     assert.deepEqual(session.current.downloads, [], "the server tells again what is still waiting");
+  });
+
+  it("renders the Upload dialog, parses upload action questions, and tracks upload chooser events on the socket", () => {
+    const upload = { id: "up_1234", tabId: "T1", multiple: true, origin: "https://jobs.example", page: "Apply", folder: "/home/me" };
+    const boxHtml = html(
+      createElement(UploadBox, {
+        upload,
+        onPickNativeFiles: async () => ({ supported: true, files: null }),
+        onAnswer: () => undefined,
+      }),
+    );
+    assert.match(boxHtml, /Upload files\?/);
+    assert.match(boxHtml, /Choose files…/);
+    assert.match(boxHtml, /To https:\/\/jobs\.example/);
+    assert.match(boxHtml, />Upload</);
+    assert.match(boxHtml, />Cancel</);
+
+    const askRaw = {
+      type: "action" as const,
+      origin: "https://jobs.example",
+      kind: "public" as const,
+      page: "Apply",
+      what: "Choose a file to upload to this page",
+      fields: [],
+      upload: { id: "up_9", multiple: false, folder: "/home/me" },
+    };
+    const parsed = parseQuestion(askRaw);
+    assert.deepEqual(parsed && "upload" in parsed ? parsed.upload : null, askRaw.upload);
+    const cardHtml = html(createElement(ActionQuestionCard, { question: parsed as never, onAnswer: () => undefined }));
+    assert.match(cardHtml, /opened by the assistant/);
+    assert.match(cardHtml, />Upload</);
+    assert.match(cardHtml, /Don&#x27;t|Don't/);
+
+    const socket = new FakeSocket();
+    const session = new BrowserSession({ url: () => "ws://x/api/browser/ws", open: () => socket as never, onChange: () => undefined, onFrame: () => undefined, onSelection: () => undefined, now: () => 1 });
+    session.connect();
+    socket.onopen?.();
+    socket.say({ type: "ready", v: 1, tabs: [], active: null });
+    socket.say({ type: "upload", upload });
+    assert.equal(session.current.uploads.length, 1);
+    session.send({ type: "upload", id: "up_1234", accept: true, files: ["/home/me/cv.pdf"] });
+    assert.deepEqual(JSON.parse(socket.sent.at(-1) as string), { type: "upload", id: "up_1234", accept: true, files: ["/home/me/cv.pdf"] });
+    socket.say({ type: "upload-closed", id: "up_1234" });
+    assert.deepEqual(session.current.uploads, []);
   });
 });

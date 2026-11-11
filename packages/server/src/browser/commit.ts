@@ -34,6 +34,8 @@ export interface ActionAsk {
   note?: string;
   /** Set when the action is saving a download: the person also picks the folder, and the answer carries it. */
   download?: { id: string; name: string; size: number | null; folder: string; warning: string | null };
+  /** Set when a page opened a file chooser: the person picks local file(s) to upload, and the answer carries them. */
+  upload?: { id: string; multiple: boolean; folder: string; files?: string[] };
 }
 
 export const VALUE_MAX = 200;

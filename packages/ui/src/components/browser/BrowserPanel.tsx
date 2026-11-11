@@ -6,7 +6,7 @@ import { IconButton, MOD, cn } from "../ui/primitives.js";
 import { DOCK_MIN_THREAD, useWindowWidth } from "../crew/CrewPanel.js";
 import { PanelResize } from "../crew/PanelResize.js";
 import { AssistantBar } from "./AssistantBar.js";
-import { DownloadBox, isLocalBrowserHost } from "./DownloadForm.js";
+import { DownloadBox, UploadBox, isLocalBrowserHost } from "./DownloadForm.js";
 import { type Frame, type PaneDialog, type PaneTab, type SelectProbe } from "./protocol.js";
 import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, TextGate, planKeyDown, planKeyUp, resolveAddress, toPagePoint, toScreenRect } from "./input.js";
 import { BrowserSession, EMPTY_VIEW, type SessionView, type SocketLike } from "./session.js";
@@ -333,6 +333,24 @@ export function BrowserPanel() {
               accept,
               ...(folder !== undefined ? { folder } : {}),
               ...(remember !== undefined ? { remember } : {}),
+            })
+          }
+        />
+      ) : null}
+      {view.uploads[0] ? (
+        <UploadBox
+          upload={view.uploads[0]}
+          onPickNativeFiles={
+            isLocalBrowserHost() && controller.hasBrowserHttp
+              ? (current, multiple) => controller.browser<{ supported: boolean; files: string[] | null }>("POST", "/uploads/pick-files", { folder: current, multiple })
+              : undefined
+          }
+          onAnswer={(accept, files) =>
+            session.send({
+              type: "upload",
+              id: view.uploads[0]!.id,
+              accept,
+              ...(files !== undefined ? { files } : {}),
             })
           }
         />

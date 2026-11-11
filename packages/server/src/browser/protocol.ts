@@ -1,4 +1,4 @@
-import type { DownloadInfo } from "./downloads.js";
+import type { DownloadInfo, UploadInfo } from "./downloads.js";
 import type { DialogInfo, KeyInput, MouseInput, SelectProbe } from "./service.js";
 
 /**
@@ -39,6 +39,7 @@ export type ClientMessage =
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
   | { type: "save"; id: string; accept: boolean; folder?: string; remember?: boolean }
+  | { type: "upload"; id: string; accept: boolean; files?: string[] }
   | { type: "selection"; id: string }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
@@ -50,6 +51,8 @@ export type ServerMessage =
   | { type: "dialog-closed"; tabId: string }
   | { type: "download"; download: DownloadInfo }
   | { type: "download-closed"; id: string }
+  | { type: "upload"; upload: UploadInfo }
+  | { type: "upload-closed"; id: string }
   | { type: "notice"; kind: "download" | "file"; text: string }
   | { type: "select"; tabId: string; probe: SelectProbe }
   | { type: "selection"; text: string }
@@ -187,6 +190,19 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         ...(folder !== null && folder !== "" ? { folder } : {}),
         ...(remember !== undefined ? { remember } : {}),
       };
+    }
+    case "upload": {
+      const chooser = id(value["id"]);
+      if (chooser === null || typeof value["accept"] !== "boolean") return null;
+      if (!value["accept"]) return { type: "upload", id: chooser, accept: false };
+      if (!Array.isArray(value["files"]) || value["files"].length > 20) return null;
+      const files: string[] = [];
+      for (const item of value["files"]) {
+        const f = str(item, 1024);
+        if (f === null || f.trim() === "") return null;
+        files.push(f);
+      }
+      return { type: "upload", id: chooser, accept: true, files };
     }
     case "choose": {
       const tab = id(value["id"]);

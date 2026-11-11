@@ -1156,6 +1156,8 @@ export class AncillaServer {
       commitGate: (request) => this.browseGate().decideCommit(request),
       // A download of the assistant's browser is saved only into a folder the person chooses on the screen.
       downloadGate: (request) => this.browseGate().decideDownload(request),
+      // A file upload of the assistant's browser attaches only local files the person chooses on the screen.
+      uploadGate: (request) => this.browseGate().decideUpload(request),
     });
     return this.browserService;
   }

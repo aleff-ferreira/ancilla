@@ -242,6 +242,7 @@ class PaneSession {
     if (this.stopped) return;
     this.send({ type: "ready", v: BROWSER_PROTOCOL_VERSION, tabs: [...this.tabs.values()], active: this.active });
     for (const download of this.service.pendingDownloads()) if (download.tabId === null || this.own(download.tabId)) this.send({ type: "download", download });
+    for (const upload of this.service.pendingUploads()) if (this.own(upload.tabId)) this.send({ type: "upload", upload });
   }
 
   /** Reads the person's tabs, opening a blank one when there are none. */
@@ -326,6 +327,12 @@ class PaneSession {
         return;
       case "download-closed":
         if (event.tabId === null || this.own(event.tabId)) this.send({ type: "download-closed", id: event.id });
+        return;
+      case "upload":
+        if (this.own(event.upload.tabId)) this.send({ type: "upload", upload: event.upload });
+        return;
+      case "upload-closed":
+        if (this.own(event.tabId)) this.send({ type: "upload-closed", id: event.id });
         return;
       case "dialog-closed":
         if (this.own(event.tabId)) this.send({ type: "dialog-closed", tabId: event.tabId });
@@ -527,6 +534,13 @@ class PaneSession {
       case "save":
         try {
           this.service.answerDownload(message.id, message.accept, message.folder, message.remember);
+        } catch (error) {
+          this.fail(error);
+        }
+        return;
+      case "upload":
+        try {
+          this.service.answerUpload(message.id, message.accept, message.files);
         } catch (error) {
           this.fail(error);
         }

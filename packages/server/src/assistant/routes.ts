@@ -206,7 +206,12 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     } else if (action === "action") {
       // The person's answer to the action a web task is waiting on: do it, or not. Every action asks; nothing is remembered.
       if (typeof body["answer"] !== "string") bad("answer is required", "answer");
-      task = exec.answerAction(id, body["answer"], typeof body["folder"] === "string" ? body["folder"] : undefined);
+      let files: string[] | undefined;
+      if (body["files"] !== undefined) {
+        if (!Array.isArray(body["files"]) || body["files"].some((f) => typeof f !== "string")) bad("files must be an array of paths", "files");
+        files = body["files"] as string[];
+      }
+      task = exec.answerAction(id, body["answer"], typeof body["folder"] === "string" ? body["folder"] : undefined, files);
     } else if (action === "cancel") task = await exec.cancel(id);
     else if (action === "extend") {
       const turns = typeof body["turns"] === "number" ? body["turns"] : 0;
