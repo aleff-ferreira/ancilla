@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
-import { forgetToolModes, OpenAiCompatibleProvider, probeToolMode, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "../src/voice/brain.js";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, beforeEach, describe, it } from "node:test";
+import { runBrainReadStep } from "../src/assistant/brain-step.js";
+import { Executive, type ExecutiveHost } from "../src/assistant/executive.js";
+import { MemoryStore } from "../src/assistant/store.js";
+import { TaskStore } from "../src/assistant/tasks.js";
+import { AnthropicProvider, forgetToolModes, OpenAiCompatibleProvider, probeToolMode, ThinkTagFilter, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "../src/voice/brain.js";
+import { makeBrain, makeBrowseBrain, NO_BRAIN_CONTEXT } from "../src/voice/brains.js";
+import { applySettingsPatch, DEFAULT_VOICE_SETTINGS, VoiceSettingsStore } from "../src/voice/settings.js";
 
 /** An OpenAI-protocol server that answers as the handler says, and records what each request had in it. */
 function server(handler: (seen: { tools: boolean; system: string }) => Response) {
@@ -116,5 +125,194 @@ describe("finding out how a model takes tools", () => {
     const brain = provider(fetchImpl, "p3");
     assert.equal(await probeToolMode(brain, signal()), "none");
     assert.equal(brain.toolMode(), "native");
+  });
+});
+
+describe("stripping reasoning tags and strict OpenAI-compatible servers", () => {
+  beforeEach(() => forgetToolModes());
+
+  it("strips <think>...</think> blocks across chunk boundaries without delaying ordinary text", async () => {
+    const filter = new ThinkTagFilter();
+    assert.equal(filter.push("Hello "), "Hello ");
+    assert.equal(filter.push("a < b and <thi"), "a < b and ");
+    assert.equal(filter.push("nk>internal plan\nstep 1</th"), "");
+    assert.equal(filter.push("ink>\n\nReal answer."), "Real answer.");
+    assert.equal(filter.finish(), "");
+
+    const chunks = [
+      { choices: [{ delta: { content: "<thi" }, finish_reason: null }] },
+      { choices: [{ delta: { content: "nk>chain of thought</thi" }, finish_reason: null }] },
+      { choices: [{ delta: { content: "nk>\nSpoken reply." }, finish_reason: "stop" }] },
+    ];
+    const p = new OpenAiCompatibleProvider({ baseUrl: "http://local.test/v1", model: "qwen3:4b", local: true, fetchImpl: (async () => sse(chunks)) as unknown as typeof fetch });
+    const events = await collect(p, request(false));
+    const text = events.filter((e) => e.type === "text").map((e) => e.delta).join("");
+    assert.equal(text, "Spoken reply.");
+  });
+
+  it("retries without stream_options when a strict OpenAI-compatible server rejects stream_options", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_url: unknown, init?: { body?: unknown }) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(body);
+      if ("stream_options" in body) return refuses(400, "Unknown field: stream_options");
+      return says("Works now.");
+    }) as unknown as typeof fetch;
+
+    const p = new OpenAiCompatibleProvider({ baseUrl: "http://strict-server.test/v1", model: "llama", local: true, fetchImpl });
+    const first = await collect(p, request(false));
+    assert.equal(first.filter((e) => e.type === "text").map((e) => e.delta).join(""), "Works now.");
+    assert.equal(bodies.length, 2);
+    assert.equal("stream_options" in (bodies[0] ?? {}), true);
+    assert.equal("stream_options" in (bodies[1] ?? {}), false);
+
+    await collect(p, request(false));
+    assert.equal(bodies.length, 3, "remembered that this server rejects stream_options");
+  });
+});
+
+describe("the native Messages API provider", () => {
+  beforeEach(() => forgetToolModes());
+
+  it("sends system, alternating user/assistant messages, tool_use/tool_result blocks and streams replies and tool calls", async () => {
+    let seenUrl = "";
+    let seenHeaders: Record<string, string> = {};
+    let seenBody: Record<string, unknown> = {};
+    const anthropicSse = [
+      { type: "message_start", message: { usage: { input_tokens: 42, output_tokens: 1 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "secret reasoning" } },
+      { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "Checking now." } },
+      { type: "content_block_start", index: 2, content_block: { type: "tool_use", id: "toolu_1", name: "ping" } },
+      { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: '{"ok":' } },
+      { type: "content_block_delta", index: 2, delta: { type: "input_json_delta", partial_json: "true}" } },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 19 } },
+    ];
+    const fetchImpl = (async (url: unknown, init?: { headers?: Record<string, string>; body?: unknown }) => {
+      seenUrl = String(url);
+      seenHeaders = init?.headers ?? {};
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(anthropicSse.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join(""), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const p = new AnthropicProvider({ baseUrl: "https://api.messages.test/v1/", model: "sonnet-test", apiKey: "sk-ant-123", fetchImpl });
+    const events = await collect(p, {
+      messages: [
+        { role: "system", content: "Be concise." },
+        { role: "user", content: "Check status." },
+        { role: "assistant", content: "One moment.", toolCalls: [{ id: "t0", name: "ping", arguments: "{}" }] },
+        { role: "tool", toolCallId: "t0", name: "ping", content: "pong" },
+        { role: "user", content: "Now again." },
+      ],
+      tools: [PING],
+      signal: new AbortController().signal,
+    });
+
+    assert.equal(seenUrl, "https://api.messages.test/v1/messages");
+    assert.equal(seenHeaders["x-api-key"], "sk-ant-123");
+    assert.equal(seenHeaders["anthropic-version"], "2023-06-01");
+    assert.equal(seenBody["system"], "Be concise.");
+    const msgs = seenBody["messages"] as Array<{ role: string; content: unknown[] }>;
+    assert.deepEqual(msgs.map((m) => m.role), ["user", "assistant", "user"], "tool result and user follow-up coalesce into one user turn");
+    assert.equal(events.filter((e) => e.type === "text").map((e) => e.delta).join(""), "Checking now.", "thinking blocks are never emitted as text");
+    const toolEvt = events.find((e) => e.type === "tool");
+    assert.deepEqual(toolEvt, { type: "tool", call: { id: "toolu_1", name: "ping", arguments: '{"ok":true}' } });
+    const usageEvt = events.find((e) => e.type === "usage");
+    assert.deepEqual(usageEvt, { type: "usage", inputTokens: 42, outputTokens: 19 });
+    assert.deepEqual(events[events.length - 1], { type: "done", reason: "tool" });
+  });
+
+  it("stores keys and builds brains for the Messages API setting", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ancilla-ant-settings-"));
+    after(() => rm(dir, { recursive: true, force: true }));
+    const store = new VoiceSettingsStore(dir);
+    const patched = applySettingsPatch(DEFAULT_VOICE_SETTINGS, { brain: { kind: "anthropic", model: "sonnet-test", apiKeyEnv: "TEST_MSG_KEY" } });
+    assert.equal(patched.brain.kind, "anthropic");
+    store.update({ brain: { kind: "anthropic", baseUrl: "https://api.messages.test/v1", model: "sonnet-test", local: false }, apiKey: "msg-secret" });
+    assert.equal(store.view().hasKey, true);
+    assert.equal(store.keyFor(store.get().brain), "msg-secret");
+    assert.equal(makeBrain(store.get(), NO_BRAIN_CONTEXT, { museHost: null, keyFor: (b) => store.keyFor(b) }).problem, null);
+    assert.match(makeBrowseBrain(store.get(), { keyFor: () => null, museExec: null, log: () => undefined }).problem ?? "", /No key is set/);
+  });
+});
+
+describe("provider-independent project read steps when Muse CLI is unreachable", () => {
+  it("inspects project files with read-only tools and completes a task step without Muse", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ancilla-brain-step-"));
+    after(() => rm(dir, { recursive: true, force: true }));
+    await writeFile(join(dir, "README.md"), "# Atlas Service\nPort: 4321\n");
+
+    let round = 0;
+    const fakeBrain: BrainProvider = {
+      id: "test:local",
+      label: "Local Test",
+      capabilities: { tools: true, speculative: true, local: true },
+      async *stream() {
+        round += 1;
+        if (round === 1) {
+          yield { type: "tool", call: { id: "c1", name: "read_file", arguments: JSON.stringify({ path: "README.md" }) } };
+          yield { type: "done", reason: "tool" };
+        } else {
+          yield { type: "text", delta: "Atlas Service listens on port 4321." };
+          yield { type: "done", reason: "stop" };
+        }
+      },
+    };
+
+    const direct = await runBrainReadStep({ brain: fakeBrain, root: dir, prompt: "What port does Atlas listen on?", signal: new AbortController().signal });
+    assert.deepEqual(direct, { ok: true, answer: "Atlas Service listens on port 4321." });
+
+    // Also verify Executive fallback when Muse is unavailable:
+    const mem = MemoryStore.open(":memory:");
+    after(() => mem.close());
+    const tasks = new TaskStore(mem, () => 1000);
+    const noMuseHost: ExecutiveHost = {
+      now: () => 1000,
+      projectKey: (cwd) => cwd,
+      hostAvailable: async () => ({ ok: false, reason: "Muse is not installed" }),
+      startSession: async () => {
+        throw new Error("unreachable");
+      },
+      startTurn: async () => {
+        throw new Error("unreachable");
+      },
+      interruptTurn: async () => undefined,
+      turnState: async () => "absent",
+      readProjectFile: async () => ({ exists: true, text: "# Atlas Service\nPort: 4321\n", size: 27 }),
+      needsUser: () => false,
+      watch: () => () => undefined,
+      log: () => undefined,
+    };
+    round = 0;
+    const exec = new Executive(tasks, noMuseHost, {
+      profile: () => ({ ...mem.getProfile(), enabled: true }),
+      memory: () => null,
+      changed: () => undefined,
+      fallbackRead: {
+        available: () => ({ ok: true, label: "Local Test" }),
+        run: ({ cwd, prompt, signal }) => runBrainReadStep({ brain: fakeBrain, root: cwd, prompt, signal }),
+      },
+    });
+    const created = exec.create({
+      title: "Check port",
+      goal: "Find the Atlas port",
+      goalId: null,
+      cwd: dir,
+      project: dir,
+      account: null,
+      allowWrites: false,
+      maxTurns: 5,
+      maxMinutes: 10,
+      origin: "user",
+      scheduleId: null,
+      steps: [{ title: "Read README", prompt: "What port does Atlas listen on?", effect: "read", verifier: { type: "file_contains", path: "README.md", text: "4321" } }],
+    });
+    await exec.tick();
+    await new Promise((r) => setTimeout(r, 60));
+    const finished = tasks.require(created.id);
+    assert.equal(finished.status, "completed");
+    assert.match(finished.result, /4321/);
+    exec.close();
   });
 });

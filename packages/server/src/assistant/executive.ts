@@ -108,6 +108,12 @@ export class AmbiguousStartError extends Error {
   }
 }
 
+/** Runs a read-only project step directly on a non-Muse `BrainProvider` when Muse CLI is not installed or reachable. */
+export interface FallbackReadRunner {
+  available(): { ok: boolean; label?: string };
+  run(input: { cwd: string; prompt: string; signal: AbortSignal }): Promise<{ ok: true; answer: string } | { ok: false; error: string }>;
+}
+
 export interface ExecutiveOptions {
   profile: () => AssistantProfile;
   /** The notes that bear on a step, as the block to put in front of its prompt. Its words are never read for memories. */
@@ -120,6 +126,8 @@ export interface ExecutiveOptions {
   browse?: BrowseRunnerPort;
   /** The connected accounts, which run connector tasks; absent where there are none to use. */
   connector?: ConnectorRunnerPort;
+  /** Runs read-only project steps on the configured assistant model when Muse is not reachable. */
+  fallbackRead?: FallbackReadRunner;
 }
 
 const MIN = 60_000;
@@ -144,6 +152,7 @@ export class Executive {
   private readonly watchers = new Map<string, () => void>();
   /** Events heard before the start that caused them was recorded: kept briefly, then matched, never dropped on a race. */
   private readonly early = new Map<string, { at: number; events: { method: string; params: Record<string, unknown> }[] }>();
+  private readonly brainAborts = new Map<string, AbortController>();
 
   constructor(
     readonly tasks: TaskStore,
@@ -155,6 +164,8 @@ export class Executive {
     this.closed = true;
     for (const stop of this.watchers.values()) stop();
     this.watchers.clear();
+    for (const abort of this.brainAborts.values()) abort.abort();
+    this.brainAborts.clear();
   }
 
   private log(line: string): void {
@@ -415,7 +426,12 @@ export class Executive {
     const out = this.tasks.setStatus(taskId, "cancelled", reason, { retryAt: null });
     this.opts.changed(taskId);
     this.runnerOf(task)?.cancel(taskId, reason);
-    if (attempt?.sessionId && attempt.turnId) {
+    const brainAbort = this.brainAborts.get(taskId);
+    if (brainAbort) {
+      this.brainAborts.delete(taskId);
+      brainAbort.abort();
+    }
+    if (attempt?.sessionId && attempt.sessionId !== "brain" && attempt.turnId) {
       try {
         await this.host.interruptTurn(attempt.sessionId, attempt.turnId);
         this.tasks.event(taskId, "interrupt-sent", attempt.id, attempt.turnId);
@@ -607,6 +623,20 @@ export class Executive {
     }
     const reach = await this.host.hostAvailable(task.cwd, task.account);
     if (!reach.ok) {
+      if (step.effect === "read" && this.opts.fallbackRead?.available().ok) {
+        const current = this.tasks.get(taskId);
+        if (!current || (current.status !== "queued" && current.status !== "running")) return;
+        const attempt = this.tasks.startAttempt(taskId, step.id);
+        this.tasks.bindTurn(attempt.id, "brain", attempt.commandId);
+        this.tasks.setStatus(taskId, "running", `Step ${step.ord + 1} of ${steps.length}: ${step.title}`, { retryAt: null });
+        this.opts.changed(taskId);
+        const notes = this.opts.memory({ text: `${task.goal}\n${step.title}`, sessionId: null, project: task.project, account: task.account });
+        const prompt = stepPrompt(task, step, step.ord, steps.length);
+        const abort = new AbortController();
+        this.brainAborts.set(taskId, abort);
+        void this.runFallbackStep(task, step, attempt, notes ? `${notes}\n\n${prompt}` : prompt, abort);
+        return;
+      }
       this.wait(task, `Muse is not reachable${reach.reason ? `: ${reach.reason}` : ""}. Trying again shortly.`);
       return;
     }
@@ -647,6 +677,34 @@ export class Executive {
     }
     this.tasks.bindTurn(attempt.id, sessionId, turnId);
     this.flushEarly(sessionId, turnId);
+  }
+
+  private async runFallbackStep(task: Task, step: TaskStep, attempt: TaskAttempt, prompt: string, abort: AbortController): Promise<void> {
+    const runner = this.opts.fallbackRead;
+    if (!runner) return;
+    let outcome: { ok: true; answer: string } | { ok: false; error: string };
+    try {
+      outcome = await runner.run({ cwd: task.cwd, prompt, signal: abort.signal });
+    } catch (error) {
+      outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (this.brainAborts.get(task.id) === abort) this.brainAborts.delete(task.id);
+    }
+    if (this.closed) return;
+    const nowTask = this.tasks.get(task.id);
+    const fresh = this.tasks.attempt(attempt.id);
+    if (!nowTask || !fresh || fresh.outcome !== "running" || fresh.fence !== nowTask.fence || TERMINAL_TASK.has(nowTask.status)) return;
+    const latestStep = this.tasks.step(step.id);
+    if (!latestStep) return;
+    if (outcome.ok) {
+      this.tasks.finishAttempt(attempt.id, "succeeded", "Answered with the assistant model.");
+      const merged = nowTask.result ? `${nowTask.result}\n\n${outcome.answer}` : outcome.answer;
+      const updated = this.tasks.setStatus(task.id, nowTask.status, nowTask.reason, { result: merged });
+      await this.afterSuccess(updated, latestStep, outcome.answer);
+    } else {
+      this.tasks.finishAttempt(attempt.id, "failed", outcome.error);
+      this.afterFailure(nowTask, latestStep, outcome.error);
+    }
   }
 
   private startFailed(task: Task, step: TaskStep, attempt: TaskAttempt, error: unknown): void {
@@ -756,7 +814,7 @@ export class Executive {
     this.opts.changed(task.id);
   }
 
-  private async afterSuccess(task: Task, step: TaskStep): Promise<void> {
+  private async afterSuccess(task: Task, step: TaskStep, directEvidence?: string): Promise<void> {
     if (step.verifier) {
       const verdict = await runVerifier(step.verifier, (path) => this.host.readProjectFile(task.cwd, path));
       if (verdict.manual) {
@@ -771,7 +829,7 @@ export class Executive {
         return;
       }
     } else {
-      this.tasks.updateStep(step.id, { status: "done", evidence: "The turn finished without an error. Nothing checked what it did.", verified: false });
+      this.tasks.updateStep(step.id, { status: "done", evidence: directEvidence ? directEvidence.slice(0, 500) : "The turn finished without an error. Nothing checked what it did.", verified: false });
     }
     const now = this.tasks.require(task.id);
     this.opts.changed(task.id);
@@ -801,10 +859,13 @@ export class Executive {
     const passed = checks.filter((st) => st.verified);
     const skipped = steps.filter((st) => st.status === "skipped").length;
     const evidence = passed.map((st) => st.evidence).join(" ");
+    const baseSummary = `${steps.length - skipped} of ${steps.length} steps finished`;
     if (checks.length > 0 && passed.length === checks.length) {
-      this.tasks.setStatus(task.id, "completed", "Done, and checked.", { result: `${steps.length - skipped} of ${steps.length} steps finished. ${evidence}`.trim() });
+      const checkedResult = `${baseSummary}. ${evidence}`.trim();
+      this.tasks.setStatus(task.id, "completed", "Done, and checked.", { result: task.result ? `${task.result}\n\n${checkedResult}` : checkedResult });
     } else {
-      this.tasks.setStatus(task.id, "unverified", "Finished, but nothing checked the result. Open the thread to see what it did, then confirm it.", { result: `${steps.length - skipped} of ${steps.length} steps finished without an error. No check was set for the result.` });
+      const uncheckedResult = `${baseSummary} without an error. No check was set for the result.`;
+      this.tasks.setStatus(task.id, "unverified", !task.sessionId && task.result !== "" ? "Finished with the assistant model, and nothing checked the result. Look at the answer, then confirm it." : "Finished, but nothing checked the result. Open the thread to see what it did, then confirm it.", { result: task.result ? `${task.result}\n\n${uncheckedResult}` : uncheckedResult });
     }
     this.opts.changed(task.id);
   }
@@ -823,7 +884,12 @@ export class Executive {
         else this.tasks.updateStep(step.id, { status: "unknown", evidence: "Stopped by the time budget while it was running." });
       }
       this.block(this.tasks.require(task.id), `The time budget is used up (${task.maxMinutes} minutes), so the turn was stopped. ${step?.effect === "write" ? "Check the thread, then say whether the step ran. " : ""}Extend the budget to continue.`);
-      if (attempt.sessionId && attempt.turnId) {
+      const brainAbort = this.brainAborts.get(task.id);
+      if (brainAbort) {
+        this.brainAborts.delete(task.id);
+        brainAbort.abort();
+      }
+      if (attempt.sessionId && attempt.sessionId !== "brain" && attempt.turnId) {
         try {
           await this.host.interruptTurn(attempt.sessionId, attempt.turnId);
         } catch (error) {

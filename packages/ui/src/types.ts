@@ -1066,6 +1066,7 @@ export type VoiceBrainSetting =
   /** Through Muse; `model` is the Muse model that answers, or null for Muse's own choice. */
   | { kind: "muse"; model: string | null }
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
+  | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "none" };
 
 export interface VoiceSettingsView {

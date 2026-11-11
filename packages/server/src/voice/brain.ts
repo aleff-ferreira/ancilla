@@ -84,7 +84,75 @@ export interface OpenAiOptions {
  * that says so is taken as one: a bad key or a busy server is an error as it always was.
  */
 const TOOLS_NOT_TAKEN = /does not support tools?|support tool|tools? (param|parameter)|unsupported[^.]{0,30}tools?|--jinja|tool[_ -]?choice|tool[_ -]?use|tool[_ -]?call|function[_ -]?call/i;
+const STREAM_OPTIONS_REFUSED = /stream[_ -]?options|include[_ -]?usage/i;
 const TOOL_REFUSAL_STATUS = new Set([400, 404, 422, 500, 501]);
+const streamOptionsUnsupported = new Set<string>();
+
+/**
+ * Reasoning models (Qwen3, DeepSeek-R1, QwQ, Nemotron) often wrap internal thoughts in `<think>...</think>` inside the
+ * content stream. Speaking those thoughts aloud or showing them as answers ruins a call or a task, so this filter strips
+ * them as chunks arrive while letting ordinary text pass without waiting.
+ */
+export class ThinkTagFilter {
+  private buffer = "";
+  private thinking = false;
+  private trimLeading = false;
+
+  push(delta: string): string {
+    if (delta === "") return "";
+    this.buffer += delta;
+    let out = "";
+    for (;;) {
+      if (this.thinking) {
+        const close = this.buffer.toLowerCase().indexOf("</think>");
+        if (close < 0) {
+          // Keep only a possible partial `</think>` tail.
+          const tail = partialTagTail(this.buffer, "</think>");
+          this.buffer = tail;
+          return out;
+        }
+        this.buffer = this.buffer.slice(close + "</think>".length);
+        this.thinking = false;
+        this.trimLeading = true;
+      }
+      if (this.trimLeading) {
+        this.buffer = this.buffer.replace(/^\s+/, "");
+        if (this.buffer === "") return out;
+        this.trimLeading = false;
+      }
+      const open = this.buffer.toLowerCase().indexOf("<think>");
+      if (open < 0) {
+        const tail = partialTagTail(this.buffer, "<think>");
+        const emitLen = this.buffer.length - tail.length;
+        if (emitLen > 0) {
+          out += this.buffer.slice(0, emitLen);
+          this.buffer = tail;
+        }
+        return out;
+      }
+      if (open > 0) out += this.buffer.slice(0, open);
+      this.buffer = this.buffer.slice(open + "<think>".length);
+      this.thinking = true;
+    }
+  }
+
+  finish(): string {
+    const rest = this.thinking ? "" : this.trimLeading ? this.buffer.replace(/^\s+/, "") : this.buffer;
+    this.buffer = "";
+    this.thinking = false;
+    this.trimLeading = false;
+    return rest;
+  }
+}
+
+function partialTagTail(text: string, tag: string): string {
+  const lower = text.toLowerCase();
+  const max = Math.min(lower.length, tag.length - 1);
+  for (let len = max; len >= 1; len -= 1) {
+    if (lower.endsWith(tag.slice(0, len))) return text.slice(text.length - len);
+  }
+  return "";
+}
 
 interface WireToolCall {
   index?: number;
@@ -121,27 +189,55 @@ export class OpenAiCompatibleProvider implements BrainProvider {
   async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
     const o = this.options;
     const doFetch = o.fetchImpl ?? fetch;
-    const body: Record<string, unknown> = {
-      model: o.model,
-      messages: wireMessages(request.messages),
-      stream: true,
-      stream_options: { include_usage: true },
-      temperature: request.temperature ?? o.temperature ?? 0.7,
-    };
-    if (request.maxTokens) body["max_tokens"] = request.maxTokens;
-    if (request.tools.length > 0) body["tools"] = request.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-    let response: Response;
-    try {
-      response = await doFetch(`${o.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+    const base = o.baseUrl.replace(/\/+$/, "");
+    const send = async (withStreamOptions: boolean): Promise<Response> => {
+      const body: Record<string, unknown> = {
+        model: o.model,
+        messages: wireMessages(request.messages),
+        stream: true,
+        ...(withStreamOptions ? { stream_options: { include_usage: true } } : {}),
+        temperature: request.temperature ?? o.temperature ?? 0.7,
+      };
+      if (request.maxTokens) body["max_tokens"] = request.maxTokens;
+      if (request.tools.length > 0) body["tools"] = request.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
+      return doFetch(`${base}/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "text/event-stream", ...(o.apiKey ? { authorization: `Bearer ${o.apiKey}` } : {}), ...(o.headers ?? {}) },
         body: JSON.stringify(body),
         signal: request.signal,
       });
+    };
+    let usedStreamOptions = !streamOptionsUnsupported.has(base);
+    let response: Response;
+    try {
+      response = await send(usedStreamOptions);
     } catch (error) {
       if (request.signal.aborted) return;
       yield { type: "error", message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
       return;
+    }
+    if ((!response.ok || !response.body) && usedStreamOptions && (response.status === 400 || response.status === 422)) {
+      let detail = "";
+      try {
+        detail = (await response.text()).slice(0, 300);
+      } catch {
+        /* the body is only for the message */
+      }
+      if (STREAM_OPTIONS_REFUSED.test(detail)) {
+        streamOptionsUnsupported.add(base);
+        usedStreamOptions = false;
+        try {
+          response = await send(false);
+        } catch (error) {
+          if (request.signal.aborted) return;
+          yield { type: "error", message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
+          return;
+        }
+      } else {
+        const toolsRefused = request.tools.length > 0 && TOOL_REFUSAL_STATUS.has(response.status) && TOOLS_NOT_TAKEN.test(detail);
+        yield { type: "error", message: `The model answered ${response.status}${detail ? `: ${detail}` : ""}`, retryable: false, ...(toolsRefused ? { code: "tools-unsupported" as const } : {}) };
+        return;
+      }
     }
     if (!response.ok || !response.body) {
       let detail = "";
@@ -157,6 +253,7 @@ export class OpenAiCompatibleProvider implements BrainProvider {
     const calls = new Map<number, { id: string; name: string; args: string }>();
     let finish: string | null = null;
     let usage: { inputTokens: number; outputTokens: number } | null = null;
+    const think = new ThinkTagFilter();
     const decoder = new TextDecoder();
     let buffer = "";
     try {
@@ -179,7 +276,10 @@ export class OpenAiCompatibleProvider implements BrainProvider {
           const choice = json.choices?.[0];
           if (!choice) continue;
           const delta = choice.delta;
-          if (delta?.content) yield { type: "text", delta: delta.content };
+          if (delta?.content) {
+            const visible = think.push(delta.content);
+            if (visible !== "") yield { type: "text", delta: visible };
+          }
           for (const tc of delta?.tool_calls ?? []) {
             const i = tc.index ?? 0;
             const have = calls.get(i) ?? { id: "", name: "", args: "" };
@@ -197,11 +297,220 @@ export class OpenAiCompatibleProvider implements BrainProvider {
       return;
     }
     if (request.signal.aborted) return;
+    const tail = think.finish();
+    if (tail !== "") yield { type: "text", delta: tail };
     for (const [, c] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
       if (c.name !== "") yield { type: "tool", call: { id: c.id || `call_${Math.random().toString(36).slice(2, 10)}`, name: c.name, arguments: c.args === "" ? "{}" : c.args } };
     }
     if (usage) yield { type: "usage", ...usage };
     yield { type: "done", reason: calls.size > 0 ? "tool" : finish === "length" ? "length" : "stop" };
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Any server that speaks the Messages API (`/v1/messages` with `x-api-key` and `anthropic-version`): Anthropic itself,
+// local servers that expose `/v1/messages` (such as Ollama 0.14+), and compatible gateways.
+
+export interface AnthropicOptions {
+  baseUrl?: string;
+  model: string;
+  apiKey?: string | null;
+  label?: string;
+  local?: boolean;
+  headers?: Record<string, string>;
+  /** For tests. */
+  fetchImpl?: typeof fetch;
+  temperature?: number;
+  defaultMaxTokens?: number;
+}
+
+type AnthropicBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+  | { type: "tool_result"; tool_use_id: string; content: string };
+
+function parseObjectArgs(raw: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    /* keep an empty object when the stored JSON was malformed */
+  }
+  return {};
+}
+
+function anthropicMessages(messages: ChatMessage[]): { system: string | null; messages: Array<{ role: "user" | "assistant"; content: AnthropicBlock[] }> } {
+  const systems: string[] = [];
+  const out: Array<{ role: "user" | "assistant"; content: AnthropicBlock[] }> = [];
+  const push = (role: "user" | "assistant", blocks: AnthropicBlock[]): void => {
+    if (blocks.length === 0) return;
+    const prev = out[out.length - 1];
+    if (prev && prev.role === role) prev.content.push(...blocks);
+    else out.push({ role, content: [...blocks] });
+  };
+  for (const m of messages) {
+    if (m.role === "system") {
+      if (m.content.trim() !== "") systems.push(m.content);
+    } else if (m.role === "user") {
+      if (m.content !== "") push("user", [{ type: "text", text: m.content }]);
+    } else if (m.role === "assistant") {
+      const blocks: AnthropicBlock[] = [];
+      if (m.content !== "") blocks.push({ type: "text", text: m.content });
+      for (const tc of m.toolCalls ?? []) blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: parseObjectArgs(tc.arguments) });
+      push("assistant", blocks);
+    } else if (m.role === "tool") {
+      push("user", [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.content }]);
+    }
+  }
+  if (out.length === 0 || out[0]?.role !== "user") out.unshift({ role: "user", content: [{ type: "text", text: "Continue." }] });
+  return { system: systems.length > 0 ? systems.join("\n\n") : null, messages: out };
+}
+
+export class AnthropicProvider implements BrainProvider {
+  readonly id: string;
+  readonly label: string;
+  readonly capabilities: BrainCapabilities;
+
+  constructor(private readonly options: AnthropicOptions) {
+    this.id = `anthropic:${options.model}`;
+    this.label = options.label ?? options.model;
+    this.capabilities = { tools: true, speculative: options.local === true, local: options.local === true };
+  }
+
+  async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
+    const o = this.options;
+    const doFetch = o.fetchImpl ?? fetch;
+    const base = (o.baseUrl ?? "https://api.anthropic.com/v1").replace(/\/+$/, "");
+    const shaped = anthropicMessages(request.messages);
+    const body: Record<string, unknown> = {
+      model: o.model,
+      messages: shaped.messages,
+      max_tokens: request.maxTokens ?? o.defaultMaxTokens ?? 1024,
+      stream: true,
+      temperature: request.temperature ?? o.temperature ?? 0.7,
+    };
+    if (shaped.system) body["system"] = shaped.system;
+    if (request.tools.length > 0) body["tools"] = request.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+
+    let response: Response;
+    try {
+      response = await doFetch(`${base}/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "anthropic-version": "2023-06-01",
+          ...(o.apiKey ? { "x-api-key": o.apiKey } : {}),
+          ...(o.headers ?? {}),
+        },
+        body: JSON.stringify(body),
+        signal: request.signal,
+      });
+    } catch (error) {
+      if (request.signal.aborted) return;
+      yield { type: "error", message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
+      return;
+    }
+
+    if (!response.ok || !response.body) {
+      let detail = "";
+      try {
+        detail = (await response.text()).slice(0, 300);
+      } catch {
+        /* the body is only for the message */
+      }
+      const toolsRefused = request.tools.length > 0 && TOOL_REFUSAL_STATUS.has(response.status) && TOOLS_NOT_TAKEN.test(detail);
+      yield {
+        type: "error",
+        message: `The model answered ${response.status}${detail ? `: ${detail}` : ""}`,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
+        ...(toolsRefused ? { code: "tools-unsupported" as const } : {}),
+      };
+      return;
+    }
+
+    const calls = new Map<number, { id: string; name: string; args: string }>();
+    let stopReason: string | null = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let sawUsage = false;
+    const think = new ThinkTagFilter();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "" || data === "[DONE]") continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(data) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          const type = evt["type"];
+          if (type === "message_start") {
+            const msg = evt["message"] as { usage?: { input_tokens?: number; output_tokens?: number } } | undefined;
+            if (msg?.usage) {
+              inputTokens = msg.usage.input_tokens ?? inputTokens;
+              outputTokens = msg.usage.output_tokens ?? outputTokens;
+              sawUsage = true;
+            }
+          } else if (type === "content_block_start") {
+            const index = typeof evt["index"] === "number" ? evt["index"] : 0;
+            const block = evt["content_block"] as { type?: string; id?: string; name?: string; text?: string } | undefined;
+            if (block?.type === "tool_use") {
+              calls.set(index, { id: block.id ?? "", name: block.name ?? "", args: "" });
+            } else if (block?.type === "text" && block.text) {
+              const visible = think.push(block.text);
+              if (visible !== "") yield { type: "text", delta: visible };
+            }
+          } else if (type === "content_block_delta") {
+            const index = typeof evt["index"] === "number" ? evt["index"] : 0;
+            const delta = evt["delta"] as { type?: string; text?: string; partial_json?: string } | undefined;
+            if (delta?.type === "text_delta" && delta.text) {
+              const visible = think.push(delta.text);
+              if (visible !== "") yield { type: "text", delta: visible };
+            } else if (delta?.type === "input_json_delta" && delta.partial_json) {
+              const have = calls.get(index);
+              if (have) have.args += delta.partial_json;
+            }
+          } else if (type === "message_delta") {
+            const delta = evt["delta"] as { stop_reason?: string | null } | undefined;
+            if (delta?.stop_reason) stopReason = delta.stop_reason;
+            const u = evt["usage"] as { input_tokens?: number; output_tokens?: number } | undefined;
+            if (u) {
+              if (typeof u.input_tokens === "number") inputTokens = u.input_tokens;
+              if (typeof u.output_tokens === "number") outputTokens = u.output_tokens;
+              sawUsage = true;
+            }
+          } else if (type === "error") {
+            const err = evt["error"] as { type?: string; message?: string } | undefined;
+            yield { type: "error", message: `The model stopped answering: ${err?.message ?? "stream error"}`, retryable: err?.type === "overloaded_error" || err?.type === "rate_limit_error" };
+            return;
+          }
+        }
+      }
+    } catch (error) {
+      if (request.signal.aborted) return;
+      yield { type: "error", message: `The model stopped answering: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
+      return;
+    }
+
+    if (request.signal.aborted) return;
+    const tail = think.finish();
+    if (tail !== "") yield { type: "text", delta: tail };
+    for (const [, c] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+      if (c.name !== "") yield { type: "tool", call: { id: c.id || `toolu_${Math.random().toString(36).slice(2, 10)}`, name: c.name, arguments: c.args === "" ? "{}" : c.args } };
+    }
+    if (sawUsage) yield { type: "usage", inputTokens, outputTokens };
+    yield { type: "done", reason: calls.size > 0 || stopReason === "tool_use" ? "tool" : stopReason === "max_tokens" ? "length" : "stop" };
   }
 }
 
@@ -337,6 +646,7 @@ const learnedToolModes = new Map<string, { mode: ToolMode; at: number }>();
 /** For tests. */
 export function forgetToolModes(): void {
   learnedToolModes.clear();
+  streamOptionsUnsupported.clear();
 }
 
 /** `key` names the server and model, so what was learned about one is not applied to another. */

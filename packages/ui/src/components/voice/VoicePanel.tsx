@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useController } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
-import type { VoiceBrainSetting, VoiceConversationView, VoiceSettingsView, VoiceStatusView } from "../../types.js";
+import type { VoiceConversationView, VoiceSettingsView, VoiceStatusView } from "../../types.js";
 import { Chip, Notice } from "../assistant/parts.js";
 import { ModelPick, Pick, Row, Section } from "../settings/SettingsPage.js";
 import { Button, Toggle } from "../ui/primitives.js";
@@ -40,13 +40,16 @@ const GB = 1024 ** 3;
 const MB = 1024 ** 2;
 const size = (bytes: number): string => (bytes >= GB ? `${(bytes / GB).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / MB))} MB`);
 
-const PRESETS: { id: string; label: string; baseUrl: string; model: string; local: boolean; needsKey: boolean }[] = [
-  { id: "openai", label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", local: false, needsKey: true },
-  { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", local: false, needsKey: true },
-  { id: "groq", label: "Groq", baseUrl: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", local: false, needsKey: true },
-  { id: "ollama", label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen3:4b", local: true, needsKey: false },
-  { id: "lmstudio", label: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", local: true, needsKey: false },
-  { id: "llamacpp", label: "llama.cpp", baseUrl: "http://127.0.0.1:8080/v1", model: "local-model", local: true, needsKey: false },
+const PRESETS: { id: string; label: string; kind: "openai" | "anthropic"; baseUrl: string; model: string; local: boolean; apiKeyEnv: string | null }[] = [
+  { id: "anthropic", label: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", local: false, apiKeyEnv: "ANTHROPIC_API_KEY" },
+  { id: "openai", label: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", local: false, apiKeyEnv: "OPENAI_API_KEY" },
+  { id: "gemini", label: "Gemini", kind: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash", local: false, apiKeyEnv: "GEMINI_API_KEY" },
+  { id: "openrouter", label: "OpenRouter", kind: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4.1-mini", local: false, apiKeyEnv: "OPENROUTER_API_KEY" },
+  { id: "groq", label: "Groq", kind: "openai", baseUrl: "https://api.groq.com/openai/v1", model: "llama-3.3-70b-versatile", local: false, apiKeyEnv: "GROQ_API_KEY" },
+  { id: "ollama", label: "Ollama", kind: "openai", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen3:4b", local: true, apiKeyEnv: null },
+  { id: "lmstudio", label: "LM Studio", kind: "openai", baseUrl: "http://127.0.0.1:1234/v1", model: "local-model", local: true, apiKeyEnv: null },
+  { id: "llamacpp", label: "llama.cpp", kind: "openai", baseUrl: "http://127.0.0.1:8080/v1", model: "local-model", local: true, apiKeyEnv: null },
+  { id: "vllm", label: "vLLM", kind: "openai", baseUrl: "http://127.0.0.1:8000/v1", model: "local-model", local: true, apiKeyEnv: null },
 ];
 
 export function VoicePanel(props: { changed: () => void }) {
@@ -278,20 +281,27 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   const controller = useController();
   const { settings } = props;
   const brain = settings.brain;
-  const [draft, setDraft] = useState<{ baseUrl: string; model: string; apiKey: string; local: boolean; apiKeyEnv: string }>({
-    baseUrl: brain.kind === "openai" ? brain.baseUrl : "",
-    model: brain.kind === "openai" ? brain.model : "",
+  const isCustom = brain.kind === "openai" || brain.kind === "anthropic";
+  const [draft, setDraft] = useState<{ kind: "openai" | "anthropic"; baseUrl: string; model: string; apiKey: string; local: boolean; apiKeyEnv: string }>({
+    kind: brain.kind === "anthropic" ? "anthropic" : "openai",
+    baseUrl: isCustom ? brain.baseUrl : "",
+    model: isCustom ? brain.model : "",
     apiKey: "",
-    local: brain.kind === "openai" ? brain.local : false,
-    apiKeyEnv: brain.kind === "openai" ? (brain.apiKeyEnv ?? "") : "",
+    local: isCustom ? brain.local : false,
+    apiKeyEnv: isCustom ? (brain.apiKeyEnv ?? "") : "",
   });
+  useEffect(() => {
+    if (brain.kind === "openai" || brain.kind === "anthropic") {
+      setDraft((d) => ({ ...d, kind: brain.kind, baseUrl: brain.baseUrl, model: brain.model, local: brain.local, apiKeyEnv: brain.apiKeyEnv ?? "" }));
+    }
+  }, [brain]);
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
   // Model servers on this computer, looked for when another model is on show, and again on request. Null while looking.
   const [found, setFound] = useState<LocalServerView[] | null>(null);
   const [rescan, setRescan] = useState(0);
   useEffect(() => {
-    if (brain.kind !== "openai") return;
+    if (!isCustom) return;
     let live = true;
     setFound(null);
     controller.voice<{ servers: LocalServerView[] }>("GET", "/local-models").then(
@@ -301,7 +311,7 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     return () => {
       live = false;
     };
-  }, [controller, brain.kind, rescan]);
+  }, [controller, isCustom, rescan]);
 
   // The Muse model's choices are the list Muse sends, read when the setting is on show; a list already read is left be.
   const throughMuse = brain.kind === "muse";
@@ -309,20 +319,30 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     if (throughMuse) void controller.refreshModels({ navigation: true });
   }, [controller, throughMuse]);
 
-  const choose = (kind: VoiceBrainSetting["kind"]) => {
+  const choose = (choice: "muse" | "custom" | "none") => {
     setTest(null);
-    if (kind === "openai") {
-      const preset = PRESETS[0] as (typeof PRESETS)[number];
-      const next = { baseUrl: draft.baseUrl || preset.baseUrl, model: draft.model || preset.model, local: draft.baseUrl ? draft.local : preset.local };
+    if (choice === "custom") {
+      const preset = PRESETS.find((p) => p.id === "openai") ?? (PRESETS[0] as (typeof PRESETS)[number]);
+      const nextKind = draft.baseUrl ? draft.kind : preset.kind;
+      const next = {
+        kind: nextKind,
+        baseUrl: draft.baseUrl || preset.baseUrl,
+        model: draft.model || preset.model,
+        local: draft.baseUrl ? draft.local : preset.local,
+        apiKeyEnv: draft.baseUrl ? draft.apiKeyEnv : (preset.apiKeyEnv ?? ""),
+      };
       setDraft((d) => ({ ...d, ...next }));
-      void props.save({ brain: { kind: "openai", baseUrl: next.baseUrl, model: next.model, local: next.local, label: null, apiKeyEnv: draft.apiKeyEnv || null } });
-    } else void props.save({ brain: { kind } });
+      void props.save({ brain: { kind: next.kind, baseUrl: next.baseUrl, model: next.model, local: next.local, label: null, apiKeyEnv: next.apiKeyEnv || null } });
+    } else void props.save({ brain: { kind: choice } });
   };
   const apply = async (patch: Partial<typeof draft>) => {
     const next = { ...draft, ...patch };
     setDraft(next);
     if (!/^https?:\/\//.test(next.baseUrl) || next.model.trim() === "") return;
-    await props.save({ brain: { kind: "openai", baseUrl: next.baseUrl.trim(), model: next.model.trim(), local: next.local, label: null, apiKeyEnv: next.apiKeyEnv.trim() || null }, ...(next.apiKey !== "" ? { apiKey: next.apiKey } : {}) });
+    await props.save({
+      brain: { kind: next.kind, baseUrl: next.baseUrl.trim(), model: next.model.trim(), local: next.local, label: null, apiKeyEnv: next.apiKeyEnv.trim() || null },
+      ...(next.apiKey !== "" ? { apiKey: next.apiKey } : {}),
+    });
     if (next.apiKey !== "") setDraft((d) => ({ ...d, apiKey: "" }));
   };
   const runTest = async () => {
@@ -341,11 +361,11 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   return (
     <Section title="The model that answers">
       <Row label="Model" description="Which model thinks of what to say. The voice talks in short turns, so a fast model feels best; a slow one is covered by a short “one moment”.">
-        <Pick<VoiceBrainSetting["kind"]>
-          value={brain.kind}
+        <Pick<"muse" | "custom" | "none">
+          value={isCustom ? "custom" : brain.kind}
           options={[
             { value: "muse", label: "Muse", hint: "Your Muse subscription, through a thread. No key needed." },
-            { value: "openai", label: "Another model", hint: "Any model that speaks the OpenAI chat protocol: hosted, or running on this computer." },
+            { value: "custom", label: "Another model", hint: "Hosted providers (Anthropic, OpenAI, Gemini, Groq, OpenRouter) or a model server on this computer." },
             { value: "none", label: "None" },
           ]}
           onChange={choose}
@@ -368,12 +388,12 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
           </Row>
         </>
       ) : null}
-      {brain.kind === "openai" ? (
+      {isCustom ? (
         <>
-          <Row label="Start from" description="Fills in the address and a model name; change either.">
+          <Row label="Start from" description="Fills in the protocol, address and a model name; change any of them.">
             <div className="flex flex-wrap gap-1.5">
               {PRESETS.map((p) => (
-                <Button key={p.id} size="xs" variant="secondary" onClick={() => void apply({ baseUrl: p.baseUrl, model: p.model, local: p.local })}>
+                <Button key={p.id} size="xs" variant={draft.kind === p.kind && draft.baseUrl === p.baseUrl ? "primary" : "secondary"} onClick={() => void apply({ kind: p.kind, baseUrl: p.baseUrl, model: p.model, local: p.local, apiKeyEnv: p.apiKeyEnv ?? "" })}>
                   {p.label}
                 </Button>
               ))}
@@ -381,14 +401,14 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
           </Row>
           <Row
             label="On this computer"
-            description={found === null ? "Looking for Ollama, LM Studio, llama.cpp and vLLM…" : found.length === 0 ? "No model server answered at its usual address. Start one and press Detect, or type its address below." : "Model servers running here. Pick one of their models."}
+            description={found === null ? "Looking for Ollama, LM Studio, llama.cpp, vLLM and Jan…" : found.length === 0 ? "No model server answered at its usual address. Start one and press Detect, or type its address below." : "Model servers running here. Pick one of their models."}
           >
             <div className="flex flex-wrap items-center gap-1.5">
               {(found ?? []).flatMap((s) =>
                 s.models.length === 0
                   ? [<Chip key={s.id}>{s.label}: no model loaded</Chip>]
                   : s.models.slice(0, 8).map((m) => (
-                      <Button key={`${s.id}:${m.id}`} size="xs" variant={draft.baseUrl === s.baseUrl && draft.model === m.id ? "primary" : "secondary"} onClick={() => void apply({ baseUrl: s.baseUrl, model: m.id, local: true })}>
+                      <Button key={`${s.id}:${m.id}`} size="xs" variant={draft.kind === "openai" && draft.baseUrl === s.baseUrl && draft.model === m.id ? "primary" : "secondary"} onClick={() => void apply({ kind: "openai", baseUrl: s.baseUrl, model: m.id, local: true, apiKeyEnv: "" })}>
                         {s.label} · {m.id}
                       </Button>
                     )),
@@ -398,17 +418,30 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
               </Button>
             </div>
           </Row>
+          <Row label="Protocol" description="Most hosted and local servers speak the OpenAI chat protocol; Anthropic uses its own Messages endpoint.">
+            <Pick<"openai" | "anthropic">
+              value={draft.kind}
+              options={[
+                { value: "openai", label: "OpenAI chat" },
+                { value: "anthropic", label: "Messages API" },
+              ]}
+              onChange={(kind) => void apply({ kind })}
+            />
+          </Row>
           <Row label="Address">
-            <input value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} onBlur={() => void apply({})} aria-label="Model address" placeholder="https://api.example.com/v1" className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+            <input value={draft.baseUrl} onChange={(e) => setDraft({ ...draft, baseUrl: e.target.value })} onBlur={() => void apply({})} aria-label="Model address" placeholder={draft.kind === "anthropic" ? "https://api.anthropic.com/v1" : "https://api.example.com/v1"} className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
           </Row>
           <Row label="Model name">
-            <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} onBlur={() => void apply({})} aria-label="Model name" placeholder="gpt-4.1-mini" className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+            <input value={draft.model} onChange={(e) => setDraft({ ...draft, model: e.target.value })} onBlur={() => void apply({})} aria-label="Model name" placeholder={draft.kind === "anthropic" ? "claude-sonnet-4-5" : "gpt-4.1-mini"} className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
           </Row>
-          <Row label="Key" description={settings.hasKey ? "A key is saved, in a file only you can read. It is never shown again." : "Kept in a file only you can read, never shown again. Not needed for a model on this computer."}>
-            <div className="flex items-center gap-2">
+          <Row label="Key" description={settings.hasKey ? "A key is available (saved in a file only you can read, or read from the environment variable below). Never shown again." : "Kept in a file only you can read, never shown again. Not needed for a model on this computer."}>
+            <div className="flex flex-wrap items-center gap-2">
               <input type="password" autoComplete="off" value={draft.apiKey} onChange={(e) => setDraft({ ...draft, apiKey: e.target.value })} onBlur={() => void apply({})} aria-label="API key" placeholder={settings.hasKey ? "saved" : "sk-..."} className="h-8 w-56 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
               {settings.hasKey ? <Chip tone="ok">Set</Chip> : null}
             </div>
+          </Row>
+          <Row label="Key variable" description="Optional name of an environment variable on this computer (such as OPENAI_API_KEY) used when no key is saved above.">
+            <input value={draft.apiKeyEnv} onChange={(e) => setDraft({ ...draft, apiKeyEnv: e.target.value })} onBlur={() => void apply({})} aria-label="API key environment variable" placeholder="Optional" className="h-8 w-56 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
           </Row>
           <Row label="Runs on this computer" description="Nothing you say is sent over the internet when this is on.">
             <Toggle checked={draft.local} onChange={(on) => void apply({ local: on })} label="The model runs on this computer" />
@@ -417,7 +450,7 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
       ) : null}
       {brain.kind !== "none" ? (
         <Row label="Try it" description={props.status.brain.problem ?? (test ? test.text : brain.kind === "muse" ? "Muse is tried by starting a call." : "Sends one short message and times the answer.")}>
-          {brain.kind === "openai" ? (
+          {isCustom ? (
             <div className="flex items-center gap-2">
               {test ? <Chip tone={test.ok ? "ok" : "danger"}>{test.ok ? "Works" : "Failed"}</Chip> : null}
               <Button size="sm" variant="secondary" loading={testing} onClick={() => void runTest()}>

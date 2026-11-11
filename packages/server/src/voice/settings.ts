@@ -18,6 +18,8 @@ export type BrainSetting =
   | { kind: "muse"; model: string | null }
   /** Any server that speaks the OpenAI chat protocol: a hosted model with a key, or one running on this machine. */
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
+  /** Any server that speaks the Messages API (`/v1/messages`): Anthropic, or a compatible server. */
+  | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   /** No model: the call can be opened to be set up, and says so. */
   | { kind: "none" };
 
@@ -99,16 +101,18 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
   if (!isObject(value)) throw new ValidationError("brain", "brain must be an object");
   if (value["kind"] === "muse") return { kind: "muse", model: "model" in value ? museModel(value["model"]) : current?.kind === "muse" ? current.model : null };
   if (value["kind"] === "none") return { kind: "none" };
-  if (value["kind"] === "openai") {
-    const baseUrl = text(value["baseUrl"], "brain.baseUrl", 300).trim();
+  if (value["kind"] === "openai" || value["kind"] === "anthropic") {
+    const kind = value["kind"];
+    const rawBase = value["baseUrl"] === undefined && kind === "anthropic" ? "https://api.anthropic.com/v1" : value["baseUrl"];
+    const baseUrl = text(rawBase, "brain.baseUrl", 300).trim();
     if (!/^https?:\/\/[^\s]+$/i.test(baseUrl)) throw new ValidationError("brain.baseUrl", "brain.baseUrl must be an http or https address");
     const model = text(value["model"], "brain.model", 200).trim();
     if (model === "") throw new ValidationError("brain.model", "brain.model must name a model");
     const apiKeyEnv = optionalText(value["apiKeyEnv"], "brain.apiKeyEnv", 100);
     if (apiKeyEnv !== null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) throw new ValidationError("brain.apiKeyEnv", "brain.apiKeyEnv must be the name of an environment variable");
-    return { kind: "openai", baseUrl, model, local: value["local"] === true, label: optionalText(value["label"], "brain.label", 80), apiKeyEnv };
+    return { kind, baseUrl, model, local: value["local"] === true, label: optionalText(value["label"], "brain.label", 80), apiKeyEnv };
   }
-  throw new ValidationError("brain.kind", "brain.kind must be muse, openai or none");
+  throw new ValidationError("brain.kind", "brain.kind must be muse, openai, anthropic or none");
 }
 
 /** Reads settings from untrusted text (a file, or a patch from the page): a field that is not valid is an error, one that is missing keeps its value. */
@@ -187,12 +191,14 @@ export class VoiceSettingsStore {
 
   /** What identifies a model for its key: the same address and model name share one. */
   private keyOf(brain: BrainSetting): string | null {
-    return brain.kind === "openai" ? `${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}` : null;
+    if (brain.kind === "openai") return `${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}`;
+    if (brain.kind === "anthropic") return `anthropic:${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}`;
+    return null;
   }
 
   /** The key for the model in use: the one saved, or the one in the environment variable the settings name. */
   keyFor(brain: BrainSetting): string | null {
-    if (brain.kind !== "openai") return null;
+    if (brain.kind !== "openai" && brain.kind !== "anthropic") return null;
     const saved = this.secrets[this.keyOf(brain) as string];
     if (saved) return saved;
     if (brain.apiKeyEnv) {

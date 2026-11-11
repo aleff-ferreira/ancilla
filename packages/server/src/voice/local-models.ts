@@ -34,6 +34,7 @@ export const LOCAL_CANDIDATES: readonly Candidate[] = [
   { id: "lmstudio", label: "LM Studio", port: 1234 },
   { id: "llamacpp", label: "llama.cpp", port: 8080 },
   { id: "vllm", label: "vLLM", port: 8000 },
+  { id: "jan", label: "Jan", port: 1337 },
 ];
 
 /** Servers list every model they hold; these are not for chatting with. */

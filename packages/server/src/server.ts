@@ -110,7 +110,8 @@ import { ConnectorRegistry } from "./connectors/registry.js";
 import { handleConnectors, isConnectorPath } from "./connectors/routes.js";
 import { ConnectorRunner } from "./connectors/runner.js";
 import { FileSecretStore } from "./connectors/secrets.js";
-import { AmbiguousStartError, type ExecutiveHost } from "./assistant/executive.js";
+import { runBrainReadStep } from "./assistant/brain-step.js";
+import { AmbiguousStartError, type ExecutiveHost, type FallbackReadRunner } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
@@ -1198,6 +1199,26 @@ export class AncillaServer {
     return this.connectorRunner;
   }
 
+  /** Runs read-only project steps on the configured non-Muse assistant model when Muse CLI is not reachable. */
+  private fallbackReadFor(): FallbackReadRunner {
+    return {
+      available: () => {
+        const voice = this.voiceFor();
+        const kind = voice.settings.get().brain.kind;
+        if (kind !== "openai" && kind !== "anthropic") return { ok: false };
+        const chosen = voice.browseBrain();
+        return chosen.problem ? { ok: false } : { ok: true, label: chosen.brain.label };
+      },
+      run: async ({ cwd, prompt, signal }) => {
+        const chosen = this.voiceFor().browseBrain();
+        if (chosen.problem) return { ok: false, error: chosen.problem };
+        const norm = normalizeCwd(cwd);
+        const root = await this.workspaceRootFor(norm);
+        return runBrainReadStep({ brain: chosen.brain, root, displayRoot: norm, prompt, signal });
+      },
+    };
+  }
+
   /** The voice, made on first use. */
   private voiceFor(): VoiceService {
     if (!this.voiceService) {
@@ -1385,6 +1406,7 @@ export class AncillaServer {
         host: this.assistantHost(),
         browse: this.browseRunnerFor(),
         connector: this.connectorRunnerFor(),
+        fallbackRead: this.fallbackReadFor(),
       });
       this.assistantUnavailable = null;
       // Settles what a restart left in the air and starts looking for work; it never fails the request that opened it.
