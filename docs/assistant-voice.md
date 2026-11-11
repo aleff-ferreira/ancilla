@@ -14,9 +14,13 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
 ## Setting it up
 
 1. Open the Assistant page, then the **Voice** tab.
-2. **Voice engines.** Press *Install the voice* after reading the licences. It downloads the speech engine for your
-   platform, a speech detector, a speech recogniser and the voice, and checks each file against a fixed checksum before
-   it is used. About 0.6 GB; an optional *accuracy booster* adds half a gigabyte and is described below.
+2. **Voice engines.** Either:
+   - *Local pack*: press *Install the voice* after reading the licences. It downloads the speech engine for your
+     platform, a speech detector, a speech recogniser and the voice, and checks each file against a fixed checksum before
+     it is used. About 0.6 GB; an optional *accuracy booster* adds half a gigabyte and is described below.
+   - *Speech server (zero download)*: point the call at any local or cloud HTTP speech server speaking `/audio/transcriptions`
+     and `/audio/speech` (such as `faster-whisper-server`, `whisper.cpp`, Kokoro-FastAPI, Groq, or OpenAI). In this mode
+     `AdaptiveEnergyVad` runs speech detection in pure JavaScript on CPU, requiring no native binary download.
 3. **The model that answers.** Choose one:
    - *Muse*: your Muse plan, one thread per conversation (it shows in the sidebar like any thread). No key. Each answer
      takes as long as a Muse turn, so a short phrase covers the wait. A *Muse model* row lists the models your plan
@@ -32,9 +36,12 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
      first, as opening it on the screen does, and loads it again if the host lets it go in the middle of a call. A thread
      that cannot be loaded (it is gone, or another Muse client has it open) is replaced by a new one, which is told what
      was said before, so the conversation goes on.
-   - *Another model*: any server that speaks the OpenAI chat protocol. The tab has starting points for OpenAI,
-     OpenRouter, Groq, Ollama, LM Studio and llama.cpp. A key, if there is one, is kept in a file only you can read and is
-     never shown again. A model that runs on your computer sends nothing over the network.
+   - *Anthropic Messages API*: native `/v1/messages` streaming with tool use (`tool_use` / `tool_result`).
+   - *OpenAI-compatible cloud or local model*: any server that speaks `/chat/completions`, including OpenAI, Gemini,
+     OpenRouter, Groq, Ollama, LM Studio, llama.cpp, and vLLM. A key, if there is one, is kept in a `0o600` file only you
+     can read and is never shown again. A model that runs on your computer sends nothing over the network, and when Muse CLI
+     is unavailable on the machine, read tasks and user-approved write tasks execute directly on the configured assistant
+     model inside the confined project workspace (`runBrainReadStep` / `runBrainWriteStep`).
      - *Models on this computer*: the tab looks for Ollama, LM Studio, llama.cpp and vLLM at their usual addresses
        (`127.0.0.1`, ports 11434, 1234, 8080 and 8000) and offers the models each has, so nothing has to be typed and no
        model that is not installed is named. Press *Detect* to look again. A server in another place is typed in as before:
