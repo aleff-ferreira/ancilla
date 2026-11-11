@@ -10,7 +10,7 @@ import type { CallMode, ClientMessage, ServerMessage } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import type { Scheduler } from "./scheduler.js";
 import { SpeechOut } from "./speech.js";
-import { guessLanguage, hasCodeSwitch, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
+import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
 import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEvent } from "./turn.js";
 
 /**
@@ -80,6 +80,26 @@ export interface SessionDeps {
 
 const INPUT_RATE = 16;
 
+const ECHO_NEVER_SUPPRESS = new Set([
+  "no", "nope", "not", "cancel", "never", "stop", "wait", "hold", "pause",
+  "nao", "não", "pare", "para", "espera", "espere", "cancela", "cancele",
+]);
+
+function hasContiguousPhrase(words: readonly string[], phrase: readonly string[]): boolean {
+  if (phrase.length === 0 || words.length < phrase.length) return false;
+  for (let i = 0; i + phrase.length <= words.length; i++) {
+    let match = true;
+    for (let k = 0; k < phrase.length; k++) {
+      if (words[i + k] !== phrase[k]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
+}
+
 class SampleRing {
   private readonly buf: Float32Array;
   private end = 0;
@@ -121,6 +141,7 @@ interface Reply {
   fillerUsed: boolean;
   cancelFiller: (() => void) | null;
   sentFirstToken: boolean;
+  completedTools: string[];
 }
 
 export class VoiceSession {
@@ -157,6 +178,9 @@ export class VoiceSession {
   private lastTurnEndAt = -Infinity;
   private pendingMerge: { text: string; turn: number } | null = null;
   private speculativeContext: { text: string; promise: Promise<string | null> } | null = null;
+  private abortedToolNotes: string[] = [];
+  private echoDismissedAtSample = 0;
+  private echoDismissedUntilQuiet = false;
   private recentSpoken: Array<{ at: number; words: string[] }> = [];
   private readonly pendingSay: HostEvent[] = [];
   /** The news waiting for the call to open, said once after a moment's quiet; dropped if the person speaks first. */
@@ -363,6 +387,10 @@ export class VoiceSession {
     }
     const prob = await this.deps.engines.vad.process(frame);
     this.ring.append(frame);
+    if (this.echoDismissedUntilQuiet) {
+      if (prob >= this.cfg.turn.offProb) this.echoDismissedAtSample = this.ring.total;
+      else this.echoDismissedUntilQuiet = false;
+    }
     const t = this.nowMs();
     const fed = await this.handleEvents(this.taker.frame(t, prob), t);
     // Once the recogniser has been flushed it is fed nothing until the person speaks again: the quiet is not worth decoding,
@@ -467,7 +495,7 @@ export class VoiceSession {
     this.userText = "";
     this.flushed = false;
     this.lastPartialAt = this.deps.scheduler.now();
-    const pre = this.ring.read(fromSample);
+    const pre = this.ring.read(Math.max(fromSample, this.echoDismissedAtSample));
     if (pre.length > 0) await stream.accept(pre);
   }
 
@@ -497,6 +525,8 @@ export class VoiceSession {
     if (this.agent === "speaking" && !this.taker.inTurn) {
       // Something over the assistant's voice that is the assistant's voice coming back is not the person.
       if (this.looksLikeEcho(result.text)) {
+        this.echoDismissedAtSample = this.ring.total;
+        this.echoDismissedUntilQuiet = true;
         await this.handleEvents(this.taker.dismissOverlap(t), t);
         return;
       }
@@ -507,8 +537,19 @@ export class VoiceSession {
 
   private looksLikeEcho(text: string): boolean {
     const heard = wordsOf(text);
-    if (heard.length < 3) return false;
+    if (heard.length === 0) return false;
     const now = this.deps.scheduler.now();
+    if (heard.length < 3) {
+      if (isStopIntent(text) || isBackchannel(text) || heard.some((w) => ECHO_NEVER_SUPPRESS.has(w))) return false;
+      const recent = this.recentSpoken.filter((s) => now - s.at < 3500);
+      if (recent.length === 0) return false;
+      if (heard.length === 1) {
+        const w = heard[0] ?? "";
+        if (w.length < 4) return false;
+        return recent.some((s) => now - s.at < 2500 && ((s.words.length === 1 && s.words[0] === w) || s.words[0] === w));
+      }
+      return recent.some((s) => hasContiguousPhrase(s.words, heard));
+    }
     const spoken = new Set(this.recentSpoken.filter((s) => now - s.at < 8000).flatMap((s) => s.words));
     if (spoken.size === 0) return false;
     const hits = heard.filter((w) => spoken.has(w)).length;
@@ -642,6 +683,7 @@ export class VoiceSession {
       fillerUsed: false,
       cancelFiller: null,
       sentFirstToken: false,
+      completedTools: [],
     };
     return reply;
   }
@@ -725,8 +767,17 @@ export class VoiceSession {
     const { brain, host, scheduler } = this.deps;
     const context = await (prewarmedContext ?? host.context(text, source));
     if (reply.aborted) return;
+    const priorToolNote =
+      this.abortedToolNotes.length > 0
+        ? `[Tool actions already completed earlier in this turn before the user continued speaking — do not repeat them: ${this.abortedToolNotes.splice(0).join("; ")}]`
+        : null;
+    const fullContext = [priorToolNote, context].filter((part): part is string => Boolean(part && part.trim() !== "")).join("\n\n");
     const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), { codeSwitched: hasCodeSwitch(text) });
-    const base: ChatMessage[] = [{ role: "system", content: system }, ...this.history.slice(-this.cfg.maxHistory), { role: "user", content: context ? `${context}\n\n${text}` : text }];
+    const base: ChatMessage[] = [
+      { role: "system", content: system },
+      ...this.history.slice(-this.cfg.maxHistory),
+      { role: "user", content: fullContext !== "" ? `${fullContext}\n\n${text}` : text },
+    ];
     this.history.push({ role: "user", content: text });
     const tools = host.tools();
     const rounds: ChatMessage[] = [];
@@ -752,7 +803,12 @@ export class VoiceSession {
       for (const call of calls) {
         if (reply.aborted) return;
         const result = await host.runTool(call, { turn: reply.turn, signal: reply.abort.signal });
-        if (reply.aborted) return;
+        const summary = `${call.name} -> ${result.text.replace(/\s+/g, " ").trim().slice(0, 140)}`;
+        if (reply.aborted) {
+          this.noteAbortedToolOutcome(summary);
+          return;
+        }
+        reply.completedTools.push(summary);
         if (result.narration && !reply.sentFirstToken) {
           reply.sentFirstToken = true;
           for (const piece of new SpeechChunker(() => this.replyLang()).push(result.narration + " ")) reply.speech.enqueue(piece);
@@ -810,6 +866,18 @@ export class VoiceSession {
     this.setAgent("idle");
   }
 
+  private noteAbortedToolOutcome(summary: string): void {
+    const last = this.history[this.history.length - 1];
+    if (last && last.role === "assistant" && last.content.includes("[the user interrupted")) {
+      const markerIdx = last.content.indexOf("[the user interrupted");
+      const prefix = last.content.slice(0, markerIdx);
+      const suffix = last.content.slice(markerIdx);
+      last.content = `${prefix}[completed before interruption: ${summary}] ${suffix}`;
+      return;
+    }
+    this.abortedToolNotes.push(summary);
+  }
+
   /** The reply is over before it was heard (the person spoke again), or is being replaced. */
   private cancelPendingReply(): void {
     const r = this.reply;
@@ -818,6 +886,7 @@ export class VoiceSession {
     r.abort.abort();
     r.cancelFiller?.();
     r.speech.abort();
+    if (r.completedTools.length > 0) this.abortedToolNotes.push(...r.completedTools);
     this.reply = null;
     this.setAgent("idle");
   }
@@ -833,12 +902,15 @@ export class VoiceSession {
     const heard = r.speech.heard().text;
     r.speech.abort();
     this.reply = null;
+    const toolNote = r.completedTools.length > 0 ? `[completed before interruption: ${r.completedTools.join("; ")}] ` : "";
     if (wasSpeaking) {
       this.send({ type: "interrupted", utterance: r.speech.utterance, heard });
-      if (heard.trim() !== "") this.history.push({ role: "assistant", content: `${heard.trim()} [the user interrupted here]` });
-      else this.history.push({ role: "assistant", content: "[the user interrupted before you said anything]" });
+      if (heard.trim() !== "") this.history.push({ role: "assistant", content: `${heard.trim()} ${toolNote}[the user interrupted here]` });
+      else this.history.push({ role: "assistant", content: `${toolNote}[the user interrupted before you said anything]` });
       this.deps.host.record({ turn: r.turn, role: "assistant", text: r.full.trim(), source: "voice", at: this.deps.scheduler.now(), heard, interrupted: true });
       if (r.trace) r.trace.bargeIn = true;
+    } else if (r.completedTools.length > 0) {
+      this.abortedToolNotes.push(...r.completedTools);
     }
     this.deps.log(`reply ${r.id} stopped: ${reason}${wasSpeaking ? `, heard "${heard.slice(0, 60)}"` : ""}`);
     this.setAgent("idle");

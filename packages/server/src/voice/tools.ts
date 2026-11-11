@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import type { AssistantService } from "../assistant/service.js";
 import type { Task } from "../assistant/tasks.js";
-import { parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks.js";
+import { awaitsApproval, parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks.js";
 import { ConflictError, NotFoundError, ValidationError } from "../assistant/store.js";
 import type { ToolCall, ToolSpec } from "./brain.js";
 import type { ToolResult } from "./host.js";
@@ -70,7 +70,7 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
   {
     name: "browse",
     description:
-      "Look something up on the web, or do a short task on a web page, in the background, in a browser of its own. It reads pages; it cannot sign in, buy, post or download. The user is asked on the screen to allow each new site, and is told when it is done.",
+      "Look something up on the web, or do a short task on a web page, in the background, in a browser of its own. It reads pages; it cannot sign in, buy, post or download on its own — every site, form, download, or file upload requires the user's approval on the screen, and the user is told when it is done.",
     parameters: {
       type: "object",
       properties: {
@@ -140,6 +140,10 @@ function str(value: unknown, max: number): string {
   return typeof value === "string" ? value.trim().slice(0, max) : "";
 }
 
+function normalizeGoal(goal: string): string {
+  return goal.trim().toLowerCase().replace(/[.!?]+$/g, "").replace(/\s+/g, " ").trim();
+}
+
 function describe(task: Task): string {
   const progress = task.progress.total > 0 ? `, ${task.progress.done} of ${task.progress.total} steps` : "";
   return `${task.id} | ${task.status} | ${sayable(task.title, 80)}${progress}${task.reason ? ` | ${task.reason.slice(0, 120)}` : ""}`;
@@ -190,6 +194,16 @@ export class VoiceTools {
           const cwd = this.deps.project();
           if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
           const spec = parseTaskSpec({ goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const wantedGoal = normalizeGoal(spec.goal);
+          const existing = assistant.tasks
+            .list("active", 50)
+            .find((t) => t.origin === "user" && !t.allowWrites && t.cwd === spec.cwd && normalizeGoal(t.goal) === wantedGoal);
+          if (existing) {
+            return {
+              ok: true,
+              text: `Task ${existing.id}, "${sayable(existing.title, 80)}", is already ${existing.status} for that goal. Nothing new was started; tell the user it is already under way.`,
+            };
+          }
           const task = executive.create({ ...spec, origin: "user" });
           return {
             ok: true,
@@ -204,6 +218,22 @@ export class VoiceTools {
           const cwd = this.deps.project();
           if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
           const spec = parseTaskSpec({ goal, cwd, allowWrites: true, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const wantedGoal = normalizeGoal(spec.goal);
+          const existing = assistant.tasks
+            .list("active", 50)
+            .find((t) => t.allowWrites && t.cwd === spec.cwd && normalizeGoal(t.goal) === wantedGoal);
+          if (existing) {
+            if (awaitsApproval(existing)) {
+              return {
+                ok: true,
+                text: `Proposed task ${existing.id}, "${sayable(existing.title, 80)}", is already waiting on the user's screen, and only they can approve or decline it there. Do not say it is under way; say that it waits for their approval.`,
+              };
+            }
+            return {
+              ok: true,
+              text: `Task ${existing.id}, "${sayable(existing.title, 80)}", was already approved and is currently ${existing.status}. Nothing new was proposed; report its actual status (${existing.status}).`,
+            };
+          }
           const task = executive.propose(spec);
           return {
             ok: true,
@@ -222,6 +252,14 @@ export class VoiceTools {
           // A web task belongs to no project, but a task row names a folder: the project of the call, or the home folder.
           const cwd = this.deps.project() ?? homedir();
           const spec = parseTaskSpec({ goal: url ? `${goal}\nStart at: ${url}` : goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const wantedGoal = normalizeGoal(spec.goal);
+          const existing = assistant.tasks.list("active", 50).find((t) => t.origin === "browse" && normalizeGoal(t.goal) === wantedGoal);
+          if (existing) {
+            return {
+              ok: true,
+              text: `Web task ${existing.id}, "${sayable(existing.title, 80)}", is already ${existing.status} for that goal. Nothing new was started; report its actual status (${existing.status}).`,
+            };
+          }
           const task = executive.createBrowse(spec);
           return {
             ok: true,
@@ -243,6 +281,16 @@ export class VoiceTools {
           // A task on an account belongs to no project, but a task row names a folder: the project of the call, or the home folder.
           const cwd = this.deps.project() ?? homedir();
           const spec = parseTaskSpec({ goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const wantedGoal = normalizeGoal(spec.goal);
+          const existing = assistant.tasks
+            .list("active", 50)
+            .find((t) => t.origin === "connector" && t.account === connector.id && normalizeGoal(t.goal) === wantedGoal);
+          if (existing) {
+            return {
+              ok: true,
+              text: `Task ${existing.id}, "${sayable(existing.title, 80)}", is already ${existing.status} in ${connector.name} for that goal. Nothing new was started; report its actual status (${existing.status}).`,
+            };
+          }
           const task = executive.createConnector(spec, connector.id, "person");
           return {
             ok: true,

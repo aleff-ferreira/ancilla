@@ -24,7 +24,8 @@ import { ManualScheduler, systemScheduler } from "../src/voice/scheduler.js";
 import { VoiceService } from "../src/voice/service.js";
 import { VoiceSession } from "../src/voice/session.js";
 import { DEFAULT_VOICE_SETTINGS } from "../src/voice/settings.js";
-import { FakeAsr, FakeTts, FakeVad, ScriptedBrain, SimClient, tone, type Reply } from "../src/voice/testing.js";
+import { VoiceTools } from "../src/voice/tools.js";
+import { FakeAsr, FakeTts, FakeVad, makeRig, ScriptedBrain, SimClient, tone, type Reply } from "../src/voice/testing.js";
 import { VOICE_SOCKET_PATH, VoiceSocketServer } from "../src/voice/ws.js";
 
 const T0 = Date.UTC(2026, 10, 11, 14, 0, 0);
@@ -536,5 +537,147 @@ describe("realistic multi-turn conversational evaluation", () => {
     assert.equal(report.taskCompletionReliability, 1);
     assert.ok(report.latency.endpointP50Ms !== null && report.latency.endpointP50Ms <= 600, `endpoint p50 ${report.latency.endpointP50Ms}ms`);
     assert.ok(report.latency.firstAudioP50Ms !== null && report.latency.firstAudioP50Ms <= 950, `firstAudio p50 ${report.latency.firstAudioP50Ms}ms (even with 180ms async context lookup!)`);
+  });
+
+  it("prevents duplicate tasks or proposals across interruptions/retries, keeps spoken status consistent with execution, and suppresses short 1-2 word speaker echo", async () => {
+    const clock = { t: T0 };
+    const store = MemoryStore.open(":memory:", { now: () => clock.t });
+    store.saveProfile({ name: "Ancilla", enabled: true, policy: { allowProjectWrites: true } });
+    const execHost = new ExecutiveFakeHost(clock);
+    const assistant = new AssistantService(store, { log: () => undefined, emit: () => undefined, now: () => clock.t, host: execHost });
+    const tools = new VoiceTools({
+      assistant,
+      project: () => "/work/atlas",
+      lang: () => "en",
+      conversationId: "cv_dedupe",
+      browse: { available: async () => ({ ok: true }) },
+    });
+
+    // 1. Duplicate delegate_task calls (even with varied casing and trailing punctuation) reuse the active task instead of spawning duplicates.
+    const firstRead = await tools.run({
+      id: "t1",
+      name: "delegate_task",
+      arguments: JSON.stringify({ goal: "Audit dependency licenses across packages", title: "License audit" }),
+    });
+    assert.equal(firstRead.ok, true);
+    assert.ok(firstRead.narration, "initial delegation speaks narration");
+
+    const retryRead = await tools.run({
+      id: "t2",
+      name: "delegate_task",
+      arguments: JSON.stringify({ goal: "  audit dependency licenses across packages!  ", title: "License audit retry" }),
+    });
+    assert.equal(retryRead.ok, true);
+    assert.equal(retryRead.narration, undefined, "idempotent retry does not re-play starting narration");
+    assert.match(retryRead.text, /already (queued|running) for that goal/);
+    assert.equal(assistant.tasks.list("all").filter((t) => !t.allowWrites).length, 1, "zero duplicate read tasks created");
+
+    // 2. Propose change -> retry while paused -> screen approval -> retry after approval reports actual running status without creating a second proposal.
+    const firstProp = await tools.run({
+      id: "p1",
+      name: "propose_change",
+      arguments: JSON.stringify({ goal: "Update retry backoff in client.ts", title: "Retry backoff" }),
+    });
+    assert.equal(firstProp.ok, true);
+    const propTask = assistant.tasks.list("all").find((t) => t.allowWrites);
+    assert.ok(propTask);
+    assert.equal(awaitsApproval(propTask), true);
+
+    const retryPausedProp = await tools.run({
+      id: "p2",
+      name: "propose_change",
+      arguments: JSON.stringify({ goal: "update retry backoff in client.ts.", title: "Retry backoff" }),
+    });
+    assert.equal(retryPausedProp.ok, true);
+    assert.match(retryPausedProp.text, /already waiting on the user's screen/);
+    assert.equal(assistant.tasks.list("all").filter((t) => t.allowWrites).length, 1);
+
+    // Cancel the first task so the approved proposal immediately advances to running.
+    const firstTaskId = assistant.tasks.list("all").find((t) => !t.allowWrites)?.id;
+    assert.ok(firstTaskId);
+    await assistant.executive!.cancel(firstTaskId, "done");
+    assistant.executive!.approve(propTask.id);
+    await flush();
+    assert.equal(assistant.tasks.require(propTask.id).status, "running");
+
+    const retryApprovedProp = await tools.run({
+      id: "p3",
+      name: "propose_change",
+      arguments: JSON.stringify({ goal: "Update retry backoff in client.ts", title: "Retry backoff" }),
+    });
+    assert.equal(retryApprovedProp.ok, true);
+    assert.match(retryApprovedProp.text, /already approved and is currently running/);
+    assert.equal(assistant.tasks.list("all").filter((t) => t.allowWrites).length, 1, "zero duplicate proposals after approval");
+
+    // 3. Interrupted tool turn in VoiceSession preserves completed tool ledger in history, and short 2-word speaker echo is suppressed while 1-word 'Espera' interrupts immediately.
+    const ECHO_SENTENCES: Record<number, string> = {
+      1: "Start checking the build logs.",
+      2: "Actually tell me if that check started.",
+      3: "Checking your",
+      4: "Espera",
+    };
+    let roundCount = 0;
+    const rig = await makeRig({
+      sentences: ECHO_SENTENCES,
+      script: (messages) => {
+        roundCount++;
+        const last = messages[messages.length - 1];
+        if (last?.role === "tool") {
+          return {
+            ttftMs: 80,
+            text: "Checking your build logs in the background across every workspace package right now so you get the full report.",
+          };
+        }
+        const userText = lastUserMessage(messages);
+        if (userText.includes("Start checking")) {
+          return { ttftMs: 80, tool: { name: "delegate_task", args: { goal: "check build logs" } } };
+        }
+        if (userText.includes("if that check started")) {
+          const sawCompletedLedger = messages.some(
+            (m) => m.role === "assistant" && m.content.includes("[completed before interruption: delegate_task -> done]"),
+          );
+          return {
+            ttftMs: 80,
+            text: sawCompletedLedger
+              ? "Checking your build logs is already running in the background while we keep talking about the release."
+              : "I am not sure whether it started.",
+          };
+        }
+        return { ttftMs: 80, text: "Pronto, parei." };
+      },
+    });
+    rig.host.toolList = [{ name: "delegate_task", description: "Start work in the background.", parameters: { type: "object" } }];
+
+    // Turn 1: runs delegate_task, starts speaking, then user barges in mid-sentence.
+    await rig.client.speak(1, 1100);
+    await rig.client.quiet(100);
+    assert.ok(await rig.client.until(() => rig.client.playbackActive, 6000));
+    await rig.client.quiet(350);
+    await rig.client.speak(2, 1300); // Barge-in asking if the check already started!
+    assert.equal(rig.client.of("interrupted").length, 1, "first turn interrupted cleanly");
+    await rig.client.quiet(100);
+
+    // Wait until Turn 2 starts speaking ("Checking your build logs is already running...").
+    assert.ok(await rig.client.until(() => rig.client.playbackActive && rig.tts.said.some((s) => s.text.startsWith("Checking your build logs is already")), 8000));
+    assert.equal(rig.host.toolCalls.length, 1, "tool was NOT duplicated on the post-interruption turn");
+    await rig.client.quiet(150);
+
+    // Simulate 2-word speaker echo ("Checking your") leaking back into the mic while speaking: must be dismissed as echo!
+    const interruptsBeforeEcho = rig.client.of("interrupted").length;
+    await rig.client.speak(3, 520);
+    await rig.client.quiet(320);
+    assert.equal(rig.client.of("interrupted").length, interruptsBeforeEcho, "2-word speaker bleed ('Checking your') was suppressed without false interruption");
+    assert.equal(rig.client.playbackActive, true, "assistant kept speaking smoothly through short echo");
+
+    // Genuine 1-word Portuguese barge-in ("Espera") interrupts immediately!
+    const stopBefore = rig.client.sched.now();
+    await rig.client.speak(4, 480);
+    assert.equal(rig.client.of("interrupted").length, interruptsBeforeEcho + 1, "1-word 'Espera' interrupted immediately");
+    const cutAt = rig.client.of("interrupted").at(-1)!.at;
+    assert.ok(cutAt - stopBefore <= 420, `stopped in ${cutAt - stopBefore}ms`);
+    await rig.client.quiet(100);
+    assert.ok(await rig.client.until(() => rig.session.snapshot().agent === "idle", 15_000));
+    assert.ok(roundCount >= 3);
+    await rig.session.close("done");
   });
 });
