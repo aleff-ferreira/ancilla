@@ -32,6 +32,7 @@ export interface PaneDownload {
   origin: string;
   page: string;
   folder: string;
+  rememberFolder?: boolean;
   warning: string | null;
 }
 
@@ -80,7 +81,7 @@ export type ClientMessage =
   | { type: "key"; id: string; input: KeyWire }
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
-  | { type: "save"; id: string; accept: boolean; folder?: string }
+  | { type: "save"; id: string; accept: boolean; folder?: string; remember?: boolean }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
 

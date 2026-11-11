@@ -7,7 +7,7 @@ import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
 import { bodyText } from "./commit.js";
 import { originOf } from "./sites.js";
-import { DownloadDesk, DownloadError, checkDownloadFolder, MAX_DOWNLOAD_BYTES, MAX_STAGED_BYTES, ASK_MS, riskWarning, sanitizeFileName, type DownloadInfo } from "./downloads.js";
+import { DownloadDesk, DownloadError, checkDownloadFolder, MAX_DOWNLOAD_BYTES, MAX_STAGED_BYTES, ASK_MS, pickNativeFolder, riskWarning, sanitizeFileName, type DownloadInfo, type NativeFolderPickResult } from "./downloads.js";
 import { buildSnapshot, passwordInputNames, visibleBackendIds, type AxNode, type DomSnapshotLike } from "./snapshot.js";
 
 /**
@@ -154,8 +154,72 @@ export interface BrowserServiceOptions {
    * for it, or null for "don't save". Absent: the assistant's downloads are deleted.
    */
   downloadGate?: (request: DownloadRequest) => Promise<string | null>;
+  /**
+   * Asked after `siteGate` allows a request: when true, cookies for that exact `origin` from the persistent `you` profile are
+   * copied into the assistant's browser context before the request is sent. Unapproved origins never receive cookies.
+   */
+  signInGate?: (request: { url: string; origin: string; tabId: string; mainFrame: boolean }) => boolean | Promise<boolean>;
+  /** Native OS folder picker override (for tests or embedded hosts). */
+  pickFolder?: (initialFolder?: string) => Promise<NativeFolderPickResult>;
   /** How long the person's own pane may take to answer a download question (default 10 minutes). */
   downloadAskMs?: number;
+}
+
+export interface CdpCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  session?: boolean;
+  sameSite?: string;
+  hostOnly?: boolean;
+}
+
+/**
+ * RFC 6265 origin check for selective cookie sharing: true only when `cookie` would legitimately be sent to `origin`
+ * (matching domain/host-only scope, HTTPS requirement for Secure cookies, and not expired).
+ */
+export function cookieMatchesOrigin(cookie: CdpCookie, origin: string, nowSec = Date.now() / 1000): boolean {
+  if (!cookie.name || typeof cookie.value !== "string") return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const rawDomain = String(cookie.domain ?? "").trim().toLowerCase();
+  const bareDomain = rawDomain.replace(/^\.+/, "");
+  if (!bareDomain) return false;
+  const host = u.hostname.toLowerCase();
+  const isDomainCookie = rawDomain.startsWith(".") || cookie.hostOnly === false;
+  const domainMatch = isDomainCookie ? host === bareDomain || host.endsWith(`.${bareDomain}`) : host === bareDomain;
+  if (!domainMatch) return false;
+  if (cookie.secure && u.protocol !== "https:") return false;
+  if (!cookie.session && typeof cookie.expires === "number" && cookie.expires > 0 && cookie.expires < nowSec) return false;
+  return true;
+}
+
+function toCookieParam(cookie: CdpCookie, origin: string): Record<string, unknown> {
+  const rawDomain = String(cookie.domain ?? "").trim();
+  const bareDomain = rawDomain.replace(/^\.+/, "");
+  const isDomainCookie = rawDomain.startsWith(".") || cookie.hostOnly === false;
+  const path = cookie.path || "/";
+  const u = new URL(origin);
+  const scheme = cookie.secure ? "https:" : u.protocol;
+  return {
+    name: cookie.name,
+    value: cookie.value,
+    path,
+    ...(isDomainCookie ? { domain: rawDomain.startsWith(".") ? rawDomain : `.${bareDomain}` } : { url: `${scheme}//${bareDomain}${path.startsWith("/") ? path : `/${path}`}` }),
+    secure: Boolean(cookie.secure),
+    httpOnly: Boolean(cookie.httpOnly),
+    ...(typeof cookie.sameSite === "string" && cookie.sameSite !== "" ? { sameSite: cookie.sameSite } : {}),
+    ...(!cookie.session && typeof cookie.expires === "number" && cookie.expires > 0 ? { expires: cookie.expires } : {}),
+  };
 }
 
 /** A form the assistant's page is about to send. */
@@ -300,6 +364,7 @@ interface Runtime {
   tabs: Map<string, Tab>;
   bySession: Map<string, Tab>;
   assistantContextId: string | null;
+  sharedOrigins: Set<string>;
   activeId: string | null;
   stopping: boolean;
 }
@@ -441,7 +506,7 @@ export class BrowserService {
     const proc = launch({ path: browser.path, profileDir: this.profileDir });
     const conn = new CdpConnection(proc.toBrowser, proc.fromBrowser);
     const tabs = new Map<string, Tab>();
-    const rt: Runtime = { proc, conn, version: "", browser, tabs, bySession: new Map(), assistantContextId: null, activeId: null, stopping: false };
+    const rt: Runtime = { proc, conn, version: "", browser, tabs, bySession: new Map(), assistantContextId: null, sharedOrigins: new Set(), activeId: null, stopping: false };
 
     const died = proc.exited.then((code) => {
       throw new BrowserError(
@@ -538,11 +603,19 @@ export class BrowserService {
     this.emit({ type: "notice", kind: "download", ...(flight.tabId ? { tabId: flight.tabId } : {}), text: why });
   }
 
-  /** The file is complete and staged: ask where to put it, then move it (or delete it). */
+  /** The file is complete and staged: auto-save if the user remembered a preferred folder on their own tab, else ask where to put it. */
   private async finishDownload(flight: Flight): Promise<void> {
     const request: DownloadRequest = { name: flight.name, size: flight.size, origin: flight.origin, page: flight.page, folder: this.downloads.defaultFolder(), warning: riskWarning(flight.name) };
     let folder: string | null = null;
     try {
+      if (flight.context === "you") {
+        const autoFolder = this.downloads.shouldAutoSave(flight.name);
+        if (autoFolder !== null) {
+          const saved = this.downloads.save(flight.guid, flight.name, autoFolder);
+          this.say(flight, `Saved ${flight.name} to ${dirname(saved)}.`);
+          return;
+        }
+      }
       folder = flight.context === "assistant" ? (this.options.downloadGate ? await this.options.downloadGate(request) : null) : await this.askPane(flight, request);
       if (folder === null) {
         this.say(flight, `${flight.name} was not saved.`);
@@ -564,7 +637,8 @@ export class BrowserService {
 
   private askPane(flight: Flight, request: DownloadRequest): Promise<string | null> {
     return new Promise<string | null>((resolve) => {
-      const info: DownloadInfo = { ...request, id: flight.guid, tabId: flight.tabId };
+      const prefs = this.downloads.preferences();
+      const info: DownloadInfo = { ...request, id: flight.guid, tabId: flight.tabId, ...(prefs.rememberFolder ? { rememberFolder: true } : {}) };
       const done = (folder: string | null): void => {
         if (!flight.ask) return;
         clearTimeout(flight.ask.timer);
@@ -580,15 +654,25 @@ export class BrowserService {
   }
 
   /** The pane's answer: a folder saves the file there, null deletes it. A folder that cannot be used throws and the question stays. */
-  answerDownload(id: string, accept: boolean, folder?: string): void {
+  answerDownload(id: string, accept: boolean, folder?: string, rememberFolder?: boolean): void {
     const flight = this.flights.get(id);
     if (!flight?.ask) throw new BrowserError("invalid", "That download is not waiting any more.");
     if (!accept) return flight.ask.resolve(null);
     try {
-      flight.ask.resolve(checkDownloadFolder(folder ?? flight.ask.info.folder));
+      const chosen = checkDownloadFolder(folder ?? flight.ask.info.folder);
+      if (typeof rememberFolder === "boolean") {
+        this.downloads.setPreferences({ folder: chosen, rememberFolder });
+      }
+      flight.ask.resolve(chosen);
     } catch (error) {
       throw new BrowserError("invalid", error instanceof DownloadError ? error.message : "That folder cannot be used.");
     }
+  }
+
+  /** Opens a native OS folder picker for downloads on this host, or reports `{ supported: false }` when unavailable. */
+  async pickDownloadFolder(initialFolder?: string): Promise<NativeFolderPickResult> {
+    const start = initialFolder ?? this.downloads.defaultFolder();
+    return this.options.pickFolder ? this.options.pickFolder(start) : pickNativeFolder(start);
   }
 
   /** The questions the pane has not answered yet (a pane that connects late is told of them). */
@@ -762,7 +846,32 @@ export class BrowserService {
     for (const tab of [...rt.tabs.values()].filter((t) => t.context === "assistant")) this.removeTab(rt, tab.id);
     const id = rt.assistantContextId;
     rt.assistantContextId = null;
+    rt.sharedOrigins.clear();
     await rt.conn.send("Target.disposeBrowserContext", { browserContextId: id }).catch(() => undefined);
+  }
+
+  /**
+   * Copies cookies matching `origin` from the persistent `you` profile into the assistant's isolated browser context.
+   * Cookies belonging to any other origin are never copied.
+   */
+  async shareOriginSignIn(origin: string): Promise<number> {
+    if (originOf(origin) !== origin) throw new BrowserError("invalid", "A full http:// or https:// origin is required.");
+    const rt = await this.ensure();
+    return this.ensureOriginSignIn(rt, origin, true);
+  }
+
+  private async ensureOriginSignIn(rt: Runtime, origin: string, force = false): Promise<number> {
+    if (!rt.assistantContextId) return 0;
+    if (!force && rt.sharedOrigins.has(origin)) return 0;
+    const reply = await rt.conn.send<{ cookies?: CdpCookie[] }>("Storage.getCookies", {}).catch(() => ({ cookies: [] as CdpCookie[] }));
+    const cookies = (Array.isArray(reply.cookies) ? reply.cookies : [])
+      .filter((c) => cookieMatchesOrigin(c, origin))
+      .map((c) => toCookieParam(c, origin));
+    rt.sharedOrigins.add(origin);
+    if (cookies.length > 0) {
+      await rt.conn.send("Storage.setCookies", { browserContextId: rt.assistantContextId, cookies }).catch(() => undefined);
+    }
+    return cookies.length;
   }
 
   private removeTab(rt: Runtime, id: string): void {
@@ -1017,6 +1126,86 @@ export class BrowserService {
       deltaX: options.deltaX ?? 0,
       deltaY: options.deltaY ?? 0,
     });
+  }
+
+  /** Moves the pointer onto an element (or point) to trigger hover menus and tooltips. */
+  async hover(id: string, target: { ref: string } | { x: number; y: number }): Promise<{ x: number; y: number }> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    const point = "ref" in target ? await this.centerOf(rt, tab, target.ref) : target;
+    const { x, y } = point;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new BrowserError("invalid", "x and y must be numbers.");
+    await this.mouse(rt, tab, { type: "mouseMoved", x, y });
+    await sleep(SETTLE_MS);
+    return { x, y };
+  }
+
+  /**
+   * Selects an `<option>` inside a `<select>` element by ref and option value, label, or 0-based index, firing `input` and
+   * `change` events just as a user's choice does. Returns the chosen option's visible label.
+   */
+  async selectOption(id: string, target: { ref: string }, option: string): Promise<string> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    const backendNodeId = tab.refs.get(target.ref);
+    if (backendNodeId === undefined) throw new BrowserError("stale-ref", `${target.ref} is not a ref of the latest snapshot; take a new snapshot.`);
+    const wanted = String(option ?? "").trim();
+    if (wanted === "") throw new BrowserError("invalid", "select needs an option label, value, or index.");
+    await this.lookAtSecrets(rt, tab);
+    let resolved: { object: { objectId: string } };
+    try {
+      resolved = await rt.conn.send<{ object: { objectId: string } }>("DOM.resolveNode", { backendNodeId }, tab.sessionId);
+    } catch (error) {
+      if (error instanceof CdpError) throw new BrowserError("stale-ref", `${target.ref} is no longer on the page; take a new snapshot.`);
+      throw error;
+    }
+    const reply = await rt.conn.send<{ result?: { value?: { ok: boolean; label?: string; error?: string } } }>(
+      "Runtime.callFunctionOn",
+      {
+        objectId: resolved.object.objectId,
+        arguments: [{ value: wanted }],
+        functionDeclaration: `function(query) {
+          var el = this && (this.tagName && this.tagName.toLowerCase() === "select" ? this : (this.closest ? this.closest("select") : null));
+          if (!el) return { ok: false, error: "That element is not a <select> dropdown." };
+          if (el.disabled) return { ok: false, error: "That dropdown is disabled." };
+          var opts = Array.prototype.slice.call(el.options || []);
+          var q = String(query || "").trim();
+          var qLower = q.toLowerCase();
+          var pick = -1;
+          for (var i = 0; i < opts.length; i++) {
+            var lbl = String(opts[i].label || opts[i].text || "").trim();
+            var val = String(opts[i].value || "").trim();
+            if (!opts[i].disabled && (val === q || lbl === q)) { pick = i; break; }
+          }
+          if (pick < 0) {
+            for (var j = 0; j < opts.length; j++) {
+              var lbl2 = String(opts[j].label || opts[j].text || "").trim().toLowerCase();
+              var val2 = String(opts[j].value || "").trim().toLowerCase();
+              if (!opts[j].disabled && (lbl2 === qLower || val2 === qLower)) { pick = j; break; }
+            }
+          }
+          if (pick < 0 && /^\\d+$/.test(q)) {
+            var idx = Number(q);
+            if (idx >= 0 && idx < opts.length && !opts[idx].disabled) pick = idx;
+          }
+          if (pick < 0) {
+            var names = opts.filter(function(o){ return !o.disabled; }).slice(0, 15).map(function(o){ return String(o.label || o.text || o.value || "").trim(); }).filter(Boolean);
+            return { ok: false, error: 'No enabled option matched "' + q.slice(0, 60) + '". Available options: ' + (names.join(", ") || "none") + "." };
+          }
+          el.focus();
+          el.selectedIndex = pick;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          return { ok: true, label: String(opts[pick].label || opts[pick].text || opts[pick].value || "").trim().slice(0, 120) };
+        }`,
+        returnByValue: true,
+      },
+      tab.sessionId,
+    );
+    const out = reply.result?.value;
+    if (!out?.ok) throw new BrowserError("invalid", out?.error ?? "Could not select that option.");
+    await this.settle(tab);
+    return out.label ?? wanted;
   }
 
   // ---------------------------------------------------------------- raw input (the pane)
@@ -1326,6 +1515,15 @@ export class BrowserService {
         allowed = await this.options.siteGate({ url, origin, tabId: tab.id, mainFrame });
       } catch {
         allowed = false;
+      }
+    }
+    if (allowed && origin && this.options.signInGate) {
+      try {
+        if (await this.options.signInGate({ url, origin, tabId: tab.id, mainFrame })) {
+          await this.ensureOriginSignIn(rt, origin);
+        }
+      } catch {
+        // cookie hydration failure never turns a refusal into a pass or crashes the gate
       }
     }
     // A form is held until the person says it may be sent (any frame); with nobody to ask, it is not sent.

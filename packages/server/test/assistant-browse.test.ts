@@ -79,10 +79,19 @@ class AskingSurface implements BrowseSurface {
   async type() {
     return this.view("https://a.example/");
   }
+  async select() {
+    return this.view("https://a.example/");
+  }
+  async hover() {
+    return this.view("https://a.example/");
+  }
   async press() {
     return this.view("https://a.example/");
   }
   async scroll() {
+    return this.view("https://a.example/");
+  }
+  async wait() {
     return this.view("https://a.example/");
   }
   async back() {
@@ -315,6 +324,14 @@ describe("a web task", () => {
     r.sites.rules.set("https://b.example", "block");
     const listed = await call("GET", "/api/assistant/browse/sites");
     assert.deepEqual((listed?.body as { rules: Array<{ origin: string; decision: string }> }).rules.map((x) => [x.origin, x.decision]), [["https://a.example", "allow"], ["https://b.example", "block"]]);
+    assert.equal((await call("PATCH", "/api/assistant/browse/sites", { origin: "https://a.example" }))?.status, 400, "useSignIn boolean required");
+    assert.equal((await call("PATCH", "/api/assistant/browse/sites", { origin: "https://b.example", useSignIn: true }))?.status, 404, "blocked site cannot share sign-in");
+    const shared = await call("PATCH", "/api/assistant/browse/sites", { origin: "https://a.example", useSignIn: true });
+    assert.equal(shared?.status, 200);
+    assert.equal(r.sites.rules.get("https://a.example")?.useSignIn, true);
+    const unshared = await call("PATCH", "/api/assistant/browse/sites", { origin: "https://a.example", useSignIn: false });
+    assert.equal(unshared?.status, 200);
+    assert.equal(r.sites.rules.get("https://a.example")?.useSignIn, undefined);
     assert.equal((await call("DELETE", "/api/assistant/browse/sites", {}))?.status, 400, "which site?");
     assert.equal((await call("DELETE", "/api/assistant/browse/sites", { origin: "https://nope.example" }))?.status, 404);
     const removed = await call("DELETE", "/api/assistant/browse/sites", { origin: "https://a.example" });

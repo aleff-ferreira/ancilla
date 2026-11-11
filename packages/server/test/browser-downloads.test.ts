@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DownloadDesk, DownloadError, MAX_DOWNLOAD_BYTES, checkDownloadFolder, freeName, riskWarning, sanitizeFileName } from "../src/browser/downloads.js";
+import { DownloadDesk, DownloadError, MAX_DOWNLOAD_BYTES, checkDownloadFolder, freeName, pickNativeFolder, riskWarning, sanitizeFileName } from "../src/browser/downloads.js";
+import { handleBrowser } from "../src/browser/routes.js";
 import { BrowseRunner } from "../src/browser/runner.js";
 import { BrowseSites } from "../src/browser/sites.js";
 import { BrowserService, type BrowserEvent, type DownloadRequest } from "../src/browser/service.js";
@@ -254,4 +255,121 @@ test("a web task's download: no folder given uses the default shown; a no is nul
   const idle = new BrowseSites(null, () => ({ taskId: () => null, gateChanged: () => undefined }));
   assert.equal(await idle.decideDownload({ name: "a", size: null, origin: "", page: "", folder: def, warning: null }), null);
   mkdirSync(join(def, "x"), { recursive: true });
+});
+
+// ------------------------------------------------------------------ native picker & remembered folder
+
+test("pickNativeFolder: supports Windows, macOS, and Linux, passes start folder via env, and degrades cleanly when headless", async () => {
+  const chosen = tmp("picked");
+  const start = tmp("start");
+  const seenCalls: Array<{ cmd: string; args: string[]; startEnv: string | undefined }> = [];
+
+  const winChosen = await pickNativeFolder(start, {
+    platform: "win32",
+    env: {},
+    exec: async (cmd, args, env) => {
+      seenCalls.push({ cmd, args, startEnv: env["ANCILLA_START_DIR"] });
+      return { code: 0, stdout: `${chosen}\r\n`, stderr: "", missing: false };
+    },
+  });
+  assert.deepEqual(winChosen, { supported: true, folder: chosen });
+  assert.equal(seenCalls[0]?.cmd, "powershell.exe");
+  assert.equal(seenCalls[0]?.startEnv, start);
+  assert.ok(!seenCalls[0]?.args.join(" ").includes(start), "start folder is passed via env, never interpolated into script");
+
+  const winCancel = await pickNativeFolder(start, {
+    platform: "win32",
+    env: {},
+    exec: async () => ({ code: 2, stdout: "", stderr: "", missing: false }),
+  });
+  assert.deepEqual(winCancel, { supported: true, folder: null });
+
+  const macChosen = await pickNativeFolder(start, {
+    platform: "darwin",
+    env: {},
+    exec: async (cmd) => {
+      assert.equal(cmd, "osascript");
+      return { code: 0, stdout: `${chosen}\n`, stderr: "", missing: false };
+    },
+  });
+  assert.deepEqual(macChosen, { supported: true, folder: chosen });
+
+  const linuxHeadless = await pickNativeFolder(start, {
+    platform: "linux",
+    env: {},
+    exec: async () => {
+      assert.fail("headless Linux should not invoke zenity or kdialog");
+    },
+  });
+  assert.deepEqual(linuxHeadless, { supported: false, folder: null });
+
+  const linuxKdialogFallback = await pickNativeFolder(start, {
+    platform: "linux",
+    env: { DISPLAY: ":0" },
+    exec: async (cmd) => {
+      if (cmd === "zenity") return { code: 127, stdout: "", stderr: "", missing: true };
+      assert.equal(cmd, "kdialog");
+      return { code: 0, stdout: `${chosen}\n`, stderr: "", missing: false };
+    },
+  });
+  assert.deepEqual(linuxKdialogFallback, { supported: true, folder: chosen });
+});
+
+test("remembered preferred folder: auto-saves normal downloads in the person's tab, while runnable files and assistant downloads still ask", async () => {
+  const folder = tmp("preferred");
+  const askedAssistant: DownloadRequest[] = [];
+  const r = rig({ downloadGate: async (req) => (askedAssistant.push(req), null) });
+  const youTab = await r.svc.openTab("you");
+  const aiTab = await r.svc.openTab("assistant");
+
+  // First download asks and user saves with rememberFolder = true
+  await finished(r, youTab.id, { guid: "11111111-2222-3333-4444-555555555551", name: "first.pdf", bytes: "one" });
+  await waitFor(() => r.svc.pendingDownloads().length === 1, "first download prompt");
+  r.svc.answerDownload("11111111-2222-3333-4444-555555555551", true, folder, true);
+  await waitFor(() => existsSync(join(folder, "first.pdf")), "first saved");
+  assert.equal(r.svc.downloads.preferences().rememberFolder, true);
+
+  // Second normal download in user's tab saves automatically without prompting
+  const promptsBefore = r.events.filter((e) => e.type === "download").length;
+  await finished(r, youTab.id, { guid: "11111111-2222-3333-4444-555555555552", name: "second.pdf", bytes: "two" });
+  await waitFor(() => existsSync(join(folder, "second.pdf")), "second auto-saved");
+  assert.equal(r.events.filter((e) => e.type === "download").length, promptsBefore, "no prompt for normal file when folder is remembered");
+  assert.equal(readFileSync(join(folder, "second.pdf"), "utf8"), "two");
+
+  // Runnable file in user's tab STILL prompts with warning despite remembered folder
+  await finished(r, youTab.id, { guid: "11111111-2222-3333-4444-555555555553", name: "installer.exe", bytes: "exe" });
+  await waitFor(() => r.svc.pendingDownloads().length === 1, "runnable file still prompts");
+  assert.match(r.svc.pendingDownloads()[0]?.warning ?? "", /can run programs/);
+  r.svc.answerDownload("11111111-2222-3333-4444-555555555553", false);
+
+  // Assistant tab download STILL goes through downloadGate and never auto-saves silently
+  await finished(r, aiTab.id, { guid: "11111111-2222-3333-4444-555555555554", name: "agent-doc.pdf", bytes: "ai" });
+  await waitFor(() => askedAssistant.length === 1, "assistant download still asks gate");
+  assert.equal(existsSync(join(folder, "agent-doc.pdf")), false);
+
+  await r.svc.dispose();
+});
+
+test("browser HTTP routes: read and update download preferences and invoke folder picker", async () => {
+  const picked = tmp("http-picked");
+  const r = rig({ pickFolder: async () => ({ supported: true, folder: picked }) });
+  const call = (method: string, sub: string, body: Record<string, unknown> = {}) =>
+    handleBrowser(r.svc, { method, path: `/api/browser${sub}`, query: new URLSearchParams(), body: async () => body });
+
+  const initial = await call("GET", "/downloads/prefs");
+  assert.equal(initial.status, 200);
+  assert.equal((initial.body as { rememberFolder: boolean }).rememberFolder, false);
+
+  const updated = await call("PATCH", "/downloads/prefs", { folder: picked, rememberFolder: true });
+  assert.equal(updated.status, 200);
+  assert.deepEqual(updated.body, { folder: picked, preferredFolder: picked, rememberFolder: true });
+
+  const invalid = await call("PATCH", "/downloads/prefs", { folder: join(picked, "does-not-exist") });
+  assert.equal(invalid.status, 400);
+
+  const dialog = await call("POST", "/downloads/pick-folder", { folder: picked });
+  assert.equal(dialog.status, 200);
+  assert.deepEqual(dialog.body, { supported: true, folder: picked });
+
+  await r.svc.dispose();
 });

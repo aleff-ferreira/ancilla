@@ -1150,6 +1150,8 @@ export class AncillaServer {
       log: (line) => this.log(line),
       // The assistant's pages are asked about before they load; the person's own tabs never are.
       siteGate: (request) => this.browseGate().decide(request),
+      // Only origins explicitly granted signed-in sharing receive cookies from the persistent Browser profile.
+      signInGate: (request) => this.browseGate().shouldShareSignIn(request),
       // A form is sent only when the person says so on the screen, every time.
       commitGate: (request) => this.browseGate().decideCommit(request),
       // A download of the assistant's browser is saved only into a folder the person chooses on the screen.

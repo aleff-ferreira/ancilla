@@ -229,6 +229,8 @@ export interface AncillaClient {
   assistant<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
   /** The voice's HTTP surface (`/api/voice/...`): its status, settings and the conversations it keeps. Absent on a client without voice. */
   voice?<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
+  /** The browser's HTTP surface (`/api/browser/...`): download folder preferences and native folder picker. Absent where there is no browser. */
+  browser?<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T>;
   /** The address of a call's WebSocket (`ws://` or `wss://`), carrying whatever the client's own calls carry; null where there is no voice. */
   voiceSocketUrl?(): string | null;
   /** The address of the Browser panel's WebSocket; null or missing where there is no browser. */

@@ -68,12 +68,25 @@ class FakeSurface implements BrowseSurface {
     this.calls.push(`type ${ref ?? "-"} ${text} ${submit}`);
     return this.view("https://a.example/results");
   }
+  async select(ref: string, option: string): Promise<PageView> {
+    this.calls.push(`select ${ref} ${option}`);
+    return this.view("https://a.example/selected");
+  }
+  async hover(ref: string): Promise<PageView> {
+    this.calls.push(`hover ${ref}`);
+    return this.view("https://a.example/hovered");
+  }
   async press(key: string): Promise<PageView> {
     this.calls.push(`press ${key}`);
     return this.view("https://a.example/");
   }
   async scroll(direction: "up" | "down"): Promise<PageView> {
     this.calls.push(`scroll ${direction}`);
+    return this.view("https://a.example/");
+  }
+  async wait(seconds: number, signal?: AbortSignal): Promise<PageView> {
+    if (signal?.aborted) throw new Error("aborted");
+    this.calls.push(`wait ${seconds}`);
     return this.view("https://a.example/");
   }
   async back(): Promise<PageView> {
@@ -116,9 +129,50 @@ describe("the browsing loop", () => {
   });
 
   it("has exactly the browser's tools: none reads a file, runs a command, or starts a task", () => {
-    assert.deepEqual([...BROWSE_TOOL_NAMES].sort(), ["back", "click", "done", "open", "press", "read", "scroll", "type"]);
-    assert.equal(BROWSE_TOOLS.length, 8);
+    assert.deepEqual([...BROWSE_TOOL_NAMES].sort(), ["back", "click", "done", "hover", "open", "press", "read", "scroll", "select", "type", "wait"]);
+    assert.equal(BROWSE_TOOLS.length, 11);
     for (const tool of BROWSE_TOOLS) assert.match(tool.description, /^[A-Z]/);
+  });
+
+  it("supports select, hover, and wait tools and validates their required arguments", async () => {
+    const surface = new FakeSurface();
+    const steps: string[] = [];
+    const brain = new ScriptedBrain([
+      {
+        calls: [
+          { name: "open", args: { url: "https://a.example/" } },
+          { name: "hover", args: { ref: "e3" } },
+          { name: "select", args: { ref: "e4", option: "Monthly" } },
+          { name: "wait", args: { seconds: 99 } },
+        ],
+      },
+      {
+        calls: [
+          { name: "hover", args: {} },
+          { name: "select", args: { ref: "e4" } },
+          { name: "done", args: { answer: "Selected Monthly." } },
+        ],
+      },
+    ]);
+    const outcome = await new BrowseAgent(brain, surface).run("Select Monthly", null, hooks({ onStep: (s) => steps.push(s) }));
+    assert.equal(outcome.ok, true);
+    assert.deepEqual(surface.calls, ["open https://a.example/", "hover e3", "select e4 Monthly", "wait 5"]);
+    assert.deepEqual(steps, ["Opened a.example", "Hovered over e3", 'Selected "Monthly" in e4', "Waited 5s"]);
+  });
+
+  it("validates missing arguments for select and hover", async () => {
+    const surface = new FakeSurface();
+    const brain = new ScriptedBrain([
+      { calls: [{ name: "hover", args: {} }, { name: "select", args: {} }, { name: "select", args: { ref: "e4" } }] },
+      { calls: [{ name: "done", args: { answer: "checked" } }] },
+    ]);
+    await new BrowseAgent(brain, surface).run("check", null, hooks());
+    const results = (brain.requests[1]?.messages as ChatMessage[]).filter((m) => m.role === "tool") as Array<{ content: string }>;
+    assert.deepEqual(results.map((r) => r.content), [
+      "hover needs a ref from the latest page.",
+      "select needs a ref from the latest page.",
+      "select needs an option label, value, or index.",
+    ]);
   });
 
   it("answers a tool it does not have with the ones it does, and goes on: a page that asks for another tool gets nothing", async () => {
@@ -139,7 +193,7 @@ describe("the browsing loop", () => {
     assert.deepEqual(surface.calls, ["open https://evil.example/"], "nothing but the browser was ever touched");
     const results = (brain.requests[2]?.messages as ChatMessage[]).filter((m) => m.role === "tool").slice(1) as Array<{ name: string; content: string }>;
     assert.deepEqual(results.map((r) => r.name), ["propose_change", "run_shell", "read_file"]);
-    for (const result of results) assert.match(result.content, /There is no tool called .*The tools are: open, read, click, type, press, scroll, back, done\./);
+    for (const result of results) assert.match(result.content, /There is no tool called .*The tools are: open, read, click, type, select, hover, press, scroll, wait, back, done\./);
   });
 
   it("runs the calls of one reply in order, up to four, and says so for the rest and for anything after done", async () => {

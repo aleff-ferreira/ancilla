@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { accessSync, constants, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
@@ -86,10 +87,141 @@ export interface DownloadInfo {
   /** Where it will go unless the person picks another folder. */
   folder: string;
   warning: string | null;
+  /** True when the user opted to remember their preferred download folder. */
+  rememberFolder?: boolean;
+}
+
+export interface DownloadPreferences {
+  /** Effective default folder (preferred if valid, else Downloads, else home). */
+  folder: string;
+  /** Saved folder path if still valid, else null. */
+  preferredFolder: string | null;
+  /** When true, non-runnable downloads in the user's own tabs save directly to `folder`. */
+  rememberFolder: boolean;
+}
+
+export interface NativeFolderPickResult {
+  /** False when this machine/session has no native GUI folder dialog (the UI falls back to `FolderPicker`). */
+  supported: boolean;
+  /** Chosen folder path, or null when cancelled or unsupported. */
+  folder: string | null;
+}
+
+export type NativePickerExec = (
+  file: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+) => Promise<{ code: number | null; stdout: string; stderr: string; missing?: boolean }>;
+
+const PICKER_TIMEOUT_MS = 120_000;
+
+const defaultPickerExec: NativePickerExec = (file, args, env, timeoutMs) =>
+  new Promise((resolvePromise) => {
+    execFile(file, args, { env, timeout: timeoutMs, windowsHide: false }, (error, stdout, stderr) => {
+      const errno = error as NodeJS.ErrnoException | null;
+      if (errno?.code === "ENOENT") {
+        resolvePromise({ code: null, stdout: "", stderr: String(stderr ?? ""), missing: true });
+        return;
+      }
+      const exitCode = error && typeof (error as { code?: unknown }).code === "number" ? ((error as { code: number }).code) : error ? 1 : 0;
+      resolvePromise({ code: exitCode, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+
+/**
+ * Opens a native OS folder-picker dialog on the host running Ancilla (Windows FolderBrowserDialog, macOS `osascript`
+ * `choose folder`, or Linux `zenity`/`kdialog` when a GUI display is active). Initial directory is passed via
+ * `ANCILLA_START_DIR` in the child environment so paths are never interpolated into script text.
+ */
+export async function pickNativeFolder(
+  initialFolder?: string,
+  options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv; exec?: NativePickerExec; timeoutMs?: number } = {},
+): Promise<NativeFolderPickResult> {
+  const platform = options.platform ?? process.platform;
+  const baseEnv = options.env ?? process.env;
+  const run = options.exec ?? defaultPickerExec;
+  const timeoutMs = options.timeoutMs ?? PICKER_TIMEOUT_MS;
+  let startDir = "";
+  if (initialFolder) {
+    try {
+      startDir = checkDownloadFolder(initialFolder);
+    } catch {
+      startDir = "";
+    }
+  }
+  const env: NodeJS.ProcessEnv = { ...baseEnv, ANCILLA_START_DIR: startDir };
+
+  const acceptPicked = (raw: string): NativeFolderPickResult => {
+    const trimmed = raw.trim();
+    if (!trimmed) return { supported: true, folder: null };
+    try {
+      return { supported: true, folder: checkDownloadFolder(trimmed) };
+    } catch {
+      return { supported: true, folder: null };
+    }
+  };
+
+  if (platform === "win32") {
+    const script = [
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      "$d = New-Object System.Windows.Forms.FolderBrowserDialog;",
+      "$d.Description = 'Choose a download folder';",
+      "$d.ShowNewFolderButton = $true;",
+      "if ($env:ANCILLA_START_DIR -and (Test-Path -LiteralPath $env:ANCILLA_START_DIR)) { $d.SelectedPath = $env:ANCILLA_START_DIR };",
+      "$r = $d.ShowDialog();",
+      "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($d.SelectedPath); exit 0 } else { exit 2 }",
+    ].join(" ");
+    const res = await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-STA", "-Command", script], env, timeoutMs);
+    if (res.missing) return { supported: false, folder: null };
+    if (res.code === 0) return acceptPicked(res.stdout);
+    if (res.code === 2) return { supported: true, folder: null };
+    return { supported: false, folder: null };
+  }
+
+  if (platform === "darwin") {
+    const args = [
+      "-e", 'set startDir to system attribute "ANCILLA_START_DIR"',
+      "-e", 'if startDir is not "" then',
+      "-e", "try",
+      "-e", 'return POSIX path of (choose folder with prompt "Choose a download folder" default location (POSIX file startDir))',
+      "-e", "end try",
+      "-e", "end if",
+      "-e", 'return POSIX path of (choose folder with prompt "Choose a download folder")',
+    ];
+    const res = await run("osascript", args, env, timeoutMs);
+    if (res.missing) return { supported: false, folder: null };
+    if (res.code === 0) return acceptPicked(res.stdout);
+    if (/user canceled|-128/i.test(res.stderr)) return { supported: true, folder: null };
+    return { supported: false, folder: null };
+  }
+
+  if (platform === "linux") {
+    if (!baseEnv["DISPLAY"] && !baseEnv["WAYLAND_DISPLAY"]) {
+      return { supported: false, folder: null };
+    }
+    const zenityArgs = ["--file-selection", "--directory", "--title=Choose a download folder"];
+    if (startDir) zenityArgs.push(`--filename=${startDir.endsWith("/") ? startDir : `${startDir}/`}`);
+    const zen = await run("zenity", zenityArgs, env, timeoutMs);
+    if (!zen.missing) {
+      if (zen.code === 0) return acceptPicked(zen.stdout);
+      if (zen.code === 1 && !/cannot open display/i.test(zen.stderr)) return { supported: true, folder: null };
+      return { supported: false, folder: null };
+    }
+    const kd = await run("kdialog", ["--getexistingdirectory", startDir || homedir(), "--title", "Choose a download folder"], env, timeoutMs);
+    if (!kd.missing) {
+      if (kd.code === 0) return acceptPicked(kd.stdout);
+      if (kd.code === 1 && !/cannot connect to X server/i.test(kd.stderr)) return { supported: true, folder: null };
+    }
+    return { supported: false, folder: null };
+  }
+
+  return { supported: false, folder: null };
 }
 
 export class DownloadDesk {
   private lastFolder: string | null = null;
+  private rememberPreferred = false;
 
   constructor(
     /** The staging folder. Emptied by `reset`. */
@@ -98,8 +230,9 @@ export class DownloadDesk {
     private readonly home: string = homedir(),
   ) {
     try {
-      const saved = JSON.parse(readFileSync(memoryFile ?? "", "utf8")) as { folder?: unknown };
+      const saved = JSON.parse(readFileSync(memoryFile ?? "", "utf8")) as { folder?: unknown; rememberFolder?: unknown };
       if (typeof saved.folder === "string") this.lastFolder = saved.folder;
+      if (saved.rememberFolder === true) this.rememberPreferred = true;
     } catch {
       // nothing remembered yet
     }
@@ -144,6 +277,50 @@ export class DownloadDesk {
     return this.home;
   }
 
+  preferences(): DownloadPreferences {
+    let preferredFolder: string | null = null;
+    if (this.lastFolder) {
+      try {
+        preferredFolder = checkDownloadFolder(this.lastFolder);
+      } catch {
+        preferredFolder = null;
+      }
+    }
+    return {
+      folder: this.defaultFolder(),
+      preferredFolder,
+      rememberFolder: this.rememberPreferred,
+    };
+  }
+
+  setPreferences(patch: { folder?: string; rememberFolder?: boolean }): DownloadPreferences {
+    if (patch.folder !== undefined) {
+      this.lastFolder = checkDownloadFolder(patch.folder);
+    } else if (patch.rememberFolder === true && !this.lastFolder) {
+      this.lastFolder = checkDownloadFolder(this.defaultFolder());
+    }
+    if (typeof patch.rememberFolder === "boolean") {
+      this.rememberPreferred = patch.rememberFolder;
+    }
+    this.persist();
+    return this.preferences();
+  }
+
+  /**
+   * When the user opted to remember their preferred download folder, normal files in their own tabs save straight there.
+   * Runnable files (.exe, .sh, ...) always return null so the warning dialog is shown first.
+   */
+  shouldAutoSave(fileName: string): string | null {
+    if (!this.rememberPreferred) return null;
+    if (riskWarning(fileName) !== null) return null;
+    const candidate = this.lastFolder ?? this.defaultFolder();
+    try {
+      return checkDownloadFolder(candidate);
+    } catch {
+      return null;
+    }
+  }
+
   discard(guid: string): void {
     try {
       unlinkSync(this.stagedPath(guid));
@@ -156,7 +333,7 @@ export class DownloadDesk {
    * Moves the staged file into the folder the person chose, under its cleaned name, never over a file that is there. Returns the
    * path it was saved to. The folder is checked again here: it may have changed since it was picked.
    */
-  save(guid: string, name: string, folderInput: string): string {
+  save(guid: string, name: string, folderInput: string, rememberFolder?: boolean): string {
     const folder = checkDownloadFolder(folderInput);
     const staged = this.stagedPath(guid);
     if (!existsSync(staged)) throw new DownloadError("The downloaded file is gone.");
@@ -171,6 +348,7 @@ export class DownloadDesk {
         throw new DownloadError(`Could not save the file: ${(error as Error).message}`);
       }
       this.discard(guid);
+      if (typeof rememberFolder === "boolean") this.rememberPreferred = rememberFolder;
       this.remember(folder);
       return target;
     }
@@ -179,11 +357,18 @@ export class DownloadDesk {
 
   private remember(folder: string): void {
     this.lastFolder = folder;
+    this.persist();
+  }
+
+  private persist(): void {
     if (!this.memoryFile) return;
     try {
       mkdirSync(dirname(this.memoryFile), { recursive: true });
       const temp = `${this.memoryFile}.${process.pid}.tmp`;
-      writeFileSync(temp, JSON.stringify({ folder }), "utf8");
+      const payload: Record<string, unknown> = {};
+      if (this.lastFolder) payload["folder"] = this.lastFolder;
+      if (this.rememberPreferred) payload["rememberFolder"] = true;
+      writeFileSync(temp, JSON.stringify(payload), "utf8");
       renameSync(temp, this.memoryFile);
     } catch {
       // the folder still holds for this run

@@ -2196,6 +2196,17 @@ export class AncillaController {
     return this.client.voice<T>(method, path, body);
   }
 
+  /** One call of the browser's HTTP surface: download preferences and native folder selection. */
+  browser<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    if (!this.client.browser) return Promise.reject(new Error("This version of Ancilla has no browser."));
+    return this.client.browser<T>(method, path, body);
+  }
+
+  /** Whether this client exposes the browser's HTTP surface. */
+  get hasBrowserHttp(): boolean {
+    return Boolean(this.client.browser);
+  }
+
   /** Where a call's socket is, or null when this client has no voice. */
   /** Where the Browser panel's socket is; null where this client has no browser. */
   browserSocketUrl(): string | null {

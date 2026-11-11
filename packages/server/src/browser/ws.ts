@@ -526,7 +526,7 @@ class PaneSession {
         return;
       case "save":
         try {
-          this.service.answerDownload(message.id, message.accept, message.folder);
+          this.service.answerDownload(message.id, message.accept, message.folder, message.remember);
         } catch (error) {
           this.fail(error);
         }

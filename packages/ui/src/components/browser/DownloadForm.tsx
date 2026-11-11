@@ -31,17 +31,51 @@ export interface DownloadFormProps {
   page?: string;
   /** Where it goes unless another folder is picked. */
   folder: string;
+  rememberFolder?: boolean;
   warning: string | null;
   /** The assistant's file says so: it asked for nothing and picked nothing. */
   fromAssistant?: boolean;
   busy?: boolean;
-  onSave(folder: string): void;
+  onSave(folder: string, rememberFolder?: boolean): void;
   onDont(): void;
+  /** Opens a native OS folder picker on the local host when supported; falls back to the inline folder browser otherwise. */
+  onPickNative?(currentFolder: string): Promise<{ supported: boolean; folder: string | null }>;
+}
+
+/** True when the UI is running in a local window on the same machine as the Ancilla server (so a native OS dialog appears here). */
+export function isLocalBrowserHost(): boolean {
+  if (typeof window === "undefined" || !window.location) return false;
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
 }
 
 export function DownloadForm(props: DownloadFormProps) {
   const [folder, setFolder] = useState(props.folder);
   const [picking, setPicking] = useState(false);
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const [nativeUnsupported, setNativeUnsupported] = useState(false);
+  const canRemember = !props.fromAssistant && !props.warning;
+  const [remember, setRemember] = useState(Boolean(props.rememberFolder));
+
+  const chooseNative = async () => {
+    if (!props.onPickNative || nativeBusy) return;
+    setNativeBusy(true);
+    try {
+      const picked = await props.onPickNative(folder);
+      if (!picked.supported) {
+        setNativeUnsupported(true);
+        setPicking(true);
+      } else if (picked.folder) {
+        setFolder(picked.folder);
+        setPicking(false);
+      }
+    } catch {
+      setPicking(true);
+    } finally {
+      setNativeBusy(false);
+    }
+  };
+
   return (
     <div role="group" aria-label="Save a download" className="w-full space-y-1.5 text-xs">
       <p className="font-medium text-fg [overflow-wrap:anywhere]">{props.name}</p>
@@ -60,7 +94,12 @@ export function DownloadForm(props: DownloadFormProps) {
         <span title={folder} className="min-w-0 flex-1 truncate rounded bg-sunken px-2 py-1 text-fg">
           {folder}
         </span>
-        <Button size="xs" variant="secondary" disabled={props.busy} onClick={() => setPicking((v) => !v)}>
+        {props.onPickNative && !nativeUnsupported ? (
+          <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={() => void chooseNative()}>
+            Choose folder…
+          </Button>
+        ) : null}
+        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={() => setPicking((v) => !v)}>
           Change
         </Button>
       </div>
@@ -74,12 +113,18 @@ export function DownloadForm(props: DownloadFormProps) {
           onCancel={() => setPicking(false)}
         />
       ) : null}
+      {canRemember ? (
+        <label className="flex items-center gap-1.5 text-muted">
+          <input type="checkbox" checked={remember} disabled={props.busy} onChange={(e) => setRemember(e.currentTarget.checked)} />
+          <span>Always save downloads in this folder</span>
+        </label>
+      ) : null}
       <p className="text-subtle">Nothing is saved until you press Save.</p>
       <div className="flex flex-wrap gap-1.5">
-        <Button size="xs" variant="accent" disabled={props.busy} onClick={() => props.onSave(folder)}>
+        <Button size="xs" variant="accent" disabled={props.busy || nativeBusy} onClick={() => props.onSave(folder, canRemember ? remember : undefined)}>
           Save
         </Button>
-        <Button size="xs" variant="secondary" disabled={props.busy} onClick={props.onDont}>
+        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onDont}>
           Don&apos;t save
         </Button>
       </div>
@@ -147,13 +192,28 @@ export function FolderPicker(props: { start: string; onPick(path: string): void;
 }
 
 /** The person's own tab: the question as a small dialog over the pane, like a script's dialog. */
-export function DownloadBox(props: { download: { id: string; name: string; size: number | null; origin: string; page: string; folder: string; warning: string | null }; onAnswer(accept: boolean, folder?: string): void }) {
+export function DownloadBox(props: {
+  download: { id: string; name: string; size: number | null; origin: string; page: string; folder: string; rememberFolder?: boolean; warning: string | null };
+  onAnswer(accept: boolean, folder?: string, remember?: boolean): void;
+  onPickNative?(currentFolder: string): Promise<{ supported: boolean; folder: string | null }>;
+}) {
   const { download } = props;
   return (
     <div role="dialog" aria-modal="true" aria-label="Save this file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/60 p-4">
       <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border border-line bg-raised p-4 shadow-pop">
         <h2 className="mb-2 text-xs font-semibold text-muted">Save this file?</h2>
-        <DownloadForm key={download.id} name={download.name} size={download.size} origin={download.origin} folder={download.folder} warning={download.warning} onSave={(folder) => props.onAnswer(true, folder)} onDont={() => props.onAnswer(false)} />
+        <DownloadForm
+          key={download.id}
+          name={download.name}
+          size={download.size}
+          origin={download.origin}
+          folder={download.folder}
+          rememberFolder={download.rememberFolder}
+          warning={download.warning}
+          onPickNative={props.onPickNative}
+          onSave={(folder, remember) => props.onAnswer(true, folder, remember)}
+          onDont={() => props.onAnswer(false)}
+        />
       </div>
     </div>
   );

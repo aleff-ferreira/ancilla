@@ -161,8 +161,18 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     const task = exec.createBrowse(parseTaskSpec({ goal: url ? `${goal}\nStart at: ${url}` : goal, cwd }, profile, projectKey));
     return { status: 201, body: { task } };
   }
-  // The sites the person said yes or no to for good: listed, and taken back one at a time.
+  // The sites the person said yes or no to for good: listed, updated for sign-in sharing, and taken back one at a time.
   if (sub === "/browse/sites" && req.method === "GET") return { status: 200, body: { rules: exec.browseSites() } };
+  if (sub === "/browse/sites" && req.method === "PATCH") {
+    const body = await req.body();
+    const origin = typeof body["origin"] === "string" ? body["origin"] : "";
+    if (origin === "") bad("origin is required", "origin");
+    if (typeof body["useSignIn"] !== "boolean") bad("useSignIn must be a boolean", "useSignIn");
+    if (!exec.setBrowseSiteSignIn(origin, body["useSignIn"])) {
+      return { status: 404, body: { error: "That site has no saved Always allow rule.", kind: "not_found" } };
+    }
+    return { status: 200, body: { rules: exec.browseSites() } };
+  }
   if (sub === "/browse/sites" && req.method === "DELETE") {
     const body = await req.body();
     const origin = typeof body["origin"] === "string" ? body["origin"] : "";

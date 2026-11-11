@@ -22,8 +22,11 @@ export interface BrowseSurface {
   read(): Promise<PageView>;
   click(ref: string): Promise<PageView>;
   type(ref: string | null, text: string, submit: boolean): Promise<PageView>;
+  select(ref: string, option: string): Promise<PageView>;
+  hover(ref: string): Promise<PageView>;
   press(key: string): Promise<PageView>;
   scroll(direction: "up" | "down"): Promise<PageView>;
+  wait(seconds: number, signal?: AbortSignal): Promise<PageView>;
   back(): Promise<PageView>;
   /** Done with the browser: the assistant's context (cookies, storage, tabs) is thrown away. */
   close(): Promise<void>;
@@ -47,6 +50,8 @@ const AFTER_QUESTION_LOAD_MS = 15_000;
 export interface SurfaceGate {
   /** Resolves true when the site may be opened (a rule or an earlier answer says so, or the person answers yes). */
   request(url: string): Promise<boolean>;
+  /** True when `url`'s origin was explicitly granted signed-in cookie sharing from the persistent Browser profile. */
+  usesSignIn?(url: string): boolean;
   /** Resolves when no question about this task is waiting. */
   settled(): Promise<void>;
   /** Resolves true when the person allows this action: asked every time, nothing is remembered. */
@@ -105,7 +110,13 @@ export class ServiceSurface implements BrowseSurface {
     }
     // Asked here, before anything is sent: a question can take a person minutes, and a navigation that waits that long times out.
     if (!(await this.gate.request(target))) throw new SurfaceError("The person did not allow that site, so it was not opened. Try another site, or call done and say what you could not reach.");
-    return this.act((id) => this.service.navigate(id, target));
+    return this.act(async (id) => {
+      const origin = originOf(target);
+      if (origin && this.gate.usesSignIn?.(target) && typeof this.service.shareOriginSignIn === "function") {
+        await this.service.shareOriginSignIn(origin).catch(() => undefined);
+      }
+      await this.service.navigate(id, target);
+    });
   }
 
   read(): Promise<PageView> {
@@ -156,8 +167,42 @@ export class ServiceSurface implements BrowseSurface {
     return this.act((id) => this.pressGuarded(id, key));
   }
 
+  select(ref: string, option: string): Promise<PageView> {
+    return this.act(async (id) => {
+      if (looksLikeCommit("menuitem", option)) {
+        await this.confirm(id, "Select", option, await this.service.elementFacts(id, ref));
+      }
+      await this.service.selectOption(id, { ref }, option);
+    });
+  }
+
+  hover(ref: string): Promise<PageView> {
+    return this.act((id) => this.service.hover(id, { ref }));
+  }
+
   scroll(direction: "up" | "down"): Promise<PageView> {
     return this.act((id) => this.service.scroll(id, { deltaY: direction === "up" ? -SCROLL_PX : SCROLL_PX }));
+  }
+
+  wait(seconds: number, signal?: AbortSignal): Promise<PageView> {
+    const ms = Math.round(Math.min(5000, Math.max(200, (Number.isFinite(seconds) ? seconds : 1) * 1000)));
+    return this.act(
+      () =>
+        new Promise<void>((resolve) => {
+          if (signal?.aborted) {
+            resolve();
+            return;
+          }
+          const done = (): void => {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, ms);
+          timer.unref?.();
+          signal?.addEventListener("abort", done, { once: true });
+        }),
+    );
   }
 
   back(): Promise<PageView> {

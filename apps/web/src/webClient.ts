@@ -314,6 +314,10 @@ export class WebAncillaClient implements AncillaClient {
     return call<T>(method, `/api/voice${path}`, body);
   }
 
+  async browser<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
+    return call<T>(method, `/api/browser${path}`, body);
+  }
+
   /**
    * Where a call's WebSocket is. A socket cannot carry a header, so, like the event stream, it relies on the cookie the
    * token bought at the handshake: nothing secret is in the address.

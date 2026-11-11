@@ -1,4 +1,4 @@
-import type { QuestionView } from "../browser/sites.js";
+import type { QuestionView, SiteRule } from "../browser/sites.js";
 import type { Trigger } from "../connectors/gate.js";
 import { ConflictError, NotFoundError, ValidationError } from "./store.js";
 import { awaitsApproval, stepPrompt, runVerifier, TERMINAL_TASK, type FileRead, type NewTask, type Schedule, type Task, type TaskAttempt, type TaskStatus, type TaskStep, type TaskStore } from "./tasks.js";
@@ -33,7 +33,8 @@ export interface BrowseRunnerPort {
   /** Whether a browser and a model are there for a web task, and if not, why. */
   available(): Promise<{ ok: boolean; reason?: string }>;
   /** The saved rules about which sites the assistant may open, and may not. */
-  sites(): Array<{ origin: string; decision: "allow" | "block"; at: number }>;
+  sites(): SiteRule[];
+  setSiteSignIn?(origin: string, useSignIn: boolean): boolean;
   removeSite(origin: string): boolean;
 }
 
@@ -300,8 +301,12 @@ export class Executive {
   }
 
   /** The saved rules about which sites the assistant may open, and may not. */
-  browseSites(): Array<{ origin: string; decision: "allow" | "block"; at: number }> {
+  browseSites(): SiteRule[] {
     return this.opts.browse?.sites() ?? [];
+  }
+
+  setBrowseSiteSignIn(origin: string, useSignIn: boolean): boolean {
+    return this.opts.browse?.setSiteSignIn?.(origin, useSignIn) ?? false;
   }
 
   removeBrowseSite(origin: string): boolean {

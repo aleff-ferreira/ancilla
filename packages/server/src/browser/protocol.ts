@@ -38,7 +38,7 @@ export type ClientMessage =
   | { type: "key"; id: string; input: KeyInput }
   | { type: "text"; id: string; text: string }
   | { type: "dialog"; id: string; accept: boolean; promptText?: string }
-  | { type: "save"; id: string; accept: boolean; folder?: string }
+  | { type: "save"; id: string; accept: boolean; folder?: string; remember?: boolean }
   | { type: "selection"; id: string }
   | { type: "choose"; id: string; index: number }
   | { type: "ack"; seq: number };
@@ -179,7 +179,14 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       const download = id(value["id"]) ?? (typeof value["id"] === "string" && /^[A-Za-z0-9-]{8,64}$/.test(value["id"]) ? value["id"] : null);
       if (download === null || typeof value["accept"] !== "boolean") return null;
       const folder = str(value["folder"], 1024);
-      return { type: "save", id: download, accept: value["accept"], ...(folder !== null && folder !== "" ? { folder } : {}) };
+      const remember = typeof value["remember"] === "boolean" ? value["remember"] : undefined;
+      return {
+        type: "save",
+        id: download,
+        accept: value["accept"],
+        ...(folder !== null && folder !== "" ? { folder } : {}),
+        ...(remember !== undefined ? { remember } : {}),
+      };
     }
     case "choose": {
       const tab = id(value["id"]);

@@ -6,7 +6,7 @@ import { IconButton, MOD, cn } from "../ui/primitives.js";
 import { DOCK_MIN_THREAD, useWindowWidth } from "../crew/CrewPanel.js";
 import { PanelResize } from "../crew/PanelResize.js";
 import { AssistantBar } from "./AssistantBar.js";
-import { DownloadBox } from "./DownloadForm.js";
+import { DownloadBox, isLocalBrowserHost } from "./DownloadForm.js";
 import { type Frame, type PaneDialog, type PaneTab, type SelectProbe } from "./protocol.js";
 import { MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, TextGate, planKeyDown, planKeyUp, resolveAddress, toPagePoint, toScreenRect } from "./input.js";
 import { BrowserSession, EMPTY_VIEW, type SessionView, type SocketLike } from "./session.js";
@@ -318,7 +318,25 @@ export function BrowserPanel() {
         ) : null}
       </div>
       <AssistantBar />
-      {view.downloads[0] ? <DownloadBox download={view.downloads[0]} onAnswer={(accept, folder) => session.send({ type: "save", id: view.downloads[0]!.id, accept, ...(folder !== undefined ? { folder } : {}) })} /> : null}
+      {view.downloads[0] ? (
+        <DownloadBox
+          download={view.downloads[0]}
+          onPickNative={
+            isLocalBrowserHost() && controller.hasBrowserHttp
+              ? (current) => controller.browser<{ supported: boolean; folder: string | null }>("POST", "/downloads/pick-folder", { folder: current })
+              : undefined
+          }
+          onAnswer={(accept, folder, remember) =>
+            session.send({
+              type: "save",
+              id: view.downloads[0]!.id,
+              accept,
+              ...(folder !== undefined ? { folder } : {}),
+              ...(remember !== undefined ? { remember } : {}),
+            })
+          }
+        />
+      ) : null}
     </aside>
   );
   return aside;

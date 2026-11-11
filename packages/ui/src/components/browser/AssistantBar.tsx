@@ -5,6 +5,7 @@ import { useAssistantCall } from "../assistant/api.js";
 import { Chip, Notice } from "../assistant/parts.js";
 import { Button } from "../ui/primitives.js";
 import { ActionQuestionCard, type ActionAnswer } from "./ActionQuestion.js";
+import { isLocalBrowserHost } from "./DownloadForm.js";
 import { isActionQuestion, watchUrl, type Frame } from "./protocol.js";
 import type { SocketLike } from "./session.js";
 import { AssistantWatch, EMPTY_WATCH, type WatchView } from "./watch.js";
@@ -18,10 +19,11 @@ import { AssistantWatch, EMPTY_WATCH, type WatchView } from "./watch.js";
 export interface SiteRuleView {
   origin: string;
   decision: "allow" | "block";
+  useSignIn?: boolean;
   at: number;
 }
 
-export type SiteAnswer = "task" | "always" | "not-now" | "block";
+export type SiteAnswer = "task" | "always" | "task-signed-in" | "always-signed-in" | "not-now" | "block";
 
 export interface AssistantBarViewProps {
   watch: WatchView;
@@ -39,11 +41,19 @@ export interface AssistantBarViewProps {
   onAction(answer: ActionAnswer, folder?: string): void;
   onToggleSites(): void;
   onRemove(origin: string): void;
+  onToggleSignIn?(origin: string, useSignIn: boolean): void;
+  onPickNative?(currentFolder: string): Promise<{ supported: boolean; folder: string | null }>;
 }
 
 export function AssistantBarView(props: AssistantBarViewProps) {
   const { watch, sites } = props;
   const job = watch.job;
+  const siteQuestionOrigin = job?.question && !isActionQuestion(job.question) ? job.question.origin : null;
+  const [shareSignIn, setShareSignIn] = useState(false);
+  useEffect(() => {
+    setShareSignIn(false);
+  }, [siteQuestionOrigin]);
+
   return (
     <section aria-label="The assistant's browsing" className="shrink-0 border-t border-line bg-raised">
       {job ? (
@@ -69,18 +79,22 @@ export function AssistantBarView(props: AssistantBarViewProps) {
               ))}
             </ol>
           ) : null}
-          {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onAnswer={props.onAction} /> : null}
+          {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onPickNative={props.onPickNative} onAnswer={props.onAction} /> : null}
           {job.question && !isActionQuestion(job.question) ? (
             <div role="group" aria-label="A site the assistant wants to open" className="space-y-1.5 rounded border border-line bg-bg p-2">
               <p className="text-xs text-fg [overflow-wrap:anywhere]">
                 It wants to open <span className="font-medium">{job.question.origin}</span>
                 {job.question.kind === "local" ? " (a page on this computer or your network)" : ""}. Allow it?
               </p>
+              <label className="flex items-center gap-1.5 text-xs text-muted">
+                <input type="checkbox" checked={shareSignIn} disabled={props.busy} onChange={(e) => setShareSignIn(e.currentTarget.checked)} />
+                <span>Use my Browser sign-in on this site</span>
+              </label>
               <div className="flex flex-wrap gap-1.5">
-                <Button size="xs" variant="accent" disabled={props.busy} onClick={() => props.onAnswer("task")}>
+                <Button size="xs" variant="accent" disabled={props.busy} onClick={() => props.onAnswer(shareSignIn ? "task-signed-in" : "task")}>
                   Allow for this task
                 </Button>
-                <Button size="xs" variant="secondary" disabled={props.busy} onClick={() => props.onAnswer("always")}>
+                <Button size="xs" variant="secondary" disabled={props.busy} onClick={() => props.onAnswer(shareSignIn ? "always-signed-in" : "always")}>
                   Always allow
                 </Button>
                 <Button size="xs" variant="secondary" disabled={props.busy} onClick={() => props.onAnswer("not-now")}>
@@ -133,9 +147,15 @@ export function AssistantBarView(props: AssistantBarViewProps) {
                 {sites.map((rule) => (
                   <li key={rule.origin} className="flex items-center gap-2 text-xs">
                     <Chip tone={rule.decision === "block" ? "warn" : undefined}>{rule.decision === "allow" ? "Always allowed" : "Blocked"}</Chip>
+                    {rule.decision === "allow" && rule.useSignIn ? <Chip>Sign-in shared</Chip> : null}
                     <span className="min-w-0 flex-1 truncate text-fg" title={rule.origin}>
                       {rule.origin}
                     </span>
+                    {rule.decision === "allow" && props.onToggleSignIn ? (
+                      <Button size="xs" variant="ghost" disabled={props.busy} onClick={() => props.onToggleSignIn?.(rule.origin, !rule.useSignIn)}>
+                        {rule.useSignIn ? "Stop sharing sign-in" : "Share sign-in"}
+                      </Button>
+                    ) : null}
                     <Button size="xs" variant="ghost" disabled={props.busy} onClick={() => props.onRemove(rule.origin)}>
                       Remove
                     </Button>
@@ -259,6 +279,12 @@ export function AssistantBar() {
         if (next) void run(async () => setSites((await call<{ rules: SiteRuleView[] }>("GET", "/browse/sites")).rules));
       }}
       onRemove={(origin) => void run(async () => setSites((await call<{ rules: SiteRuleView[] }>("DELETE", "/browse/sites", { origin })).rules))}
+      onToggleSignIn={(origin, useSignIn) => void run(async () => setSites((await call<{ rules: SiteRuleView[] }>("PATCH", "/browse/sites", { origin, useSignIn })).rules))}
+      onPickNative={
+        isLocalBrowserHost() && controller.hasBrowserHttp
+          ? (current) => controller.browser<{ supported: boolean; folder: string | null }>("POST", "/downloads/pick-folder", { folder: current })
+          : undefined
+      }
     />
   );
 }

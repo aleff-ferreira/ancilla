@@ -13,14 +13,16 @@ import { describeRequest, type ActionAsk, type ShownField } from "./commit.js";
 
 export type SiteKind = "public" | "local";
 export type SiteDecision = "allow" | "block";
-/** The four things a person can answer: allow it for this task, allow it always, not now (this task only), or block it for good. */
-export type SiteAnswer = "task" | "always" | "not-now" | "block";
-export const SITE_ANSWERS: readonly SiteAnswer[] = ["task", "always", "not-now", "block"];
+/** The answers a person can give: allow for this task (with or without sign-in), allow always (with or without sign-in), not now, or block. */
+export type SiteAnswer = "task" | "task-signed-in" | "always" | "always-signed-in" | "not-now" | "block";
+export const SITE_ANSWERS: readonly SiteAnswer[] = ["task", "task-signed-in", "always", "always-signed-in", "not-now", "block"];
 
 export interface SiteRule {
   origin: string;
   decision: SiteDecision;
   at: number;
+  /** When true on an allowed origin, cookies for this origin from the persistent Browser profile are shared with the assistant's tab. */
+  useSignIn?: boolean;
 }
 
 export interface SiteQuestion {
@@ -112,7 +114,12 @@ export class SiteRules {
       for (const item of Array.isArray(parsed.rules) ? parsed.rules : []) {
         const rule = item as Partial<SiteRule>;
         if (typeof rule.origin === "string" && originOf(rule.origin) === rule.origin && (rule.decision === "allow" || rule.decision === "block")) {
-          this.rules.set(rule.origin, { origin: rule.origin, decision: rule.decision, at: typeof rule.at === "number" ? rule.at : 0 });
+          this.rules.set(rule.origin, {
+            origin: rule.origin,
+            decision: rule.decision,
+            at: typeof rule.at === "number" ? rule.at : 0,
+            ...(rule.decision === "allow" && rule.useSignIn === true ? { useSignIn: true } : {}),
+          });
         }
       }
     } catch {
@@ -140,14 +147,33 @@ export class SiteRules {
     return this.rules.get(origin) ?? null;
   }
 
-  set(origin: string, decision: SiteDecision): void {
+  set(origin: string, decision: SiteDecision, useSignIn = false): void {
     if (originOf(origin) !== origin) return;
     if (!this.rules.has(origin) && this.rules.size >= MAX_RULES) {
       const oldest = [...this.rules.values()].sort((a, b) => a.at - b.at)[0];
       if (oldest) this.rules.delete(oldest.origin);
     }
-    this.rules.set(origin, { origin, decision, at: this.now() });
+    this.rules.set(origin, {
+      origin,
+      decision,
+      at: this.now(),
+      ...(decision === "allow" && useSignIn ? { useSignIn: true } : {}),
+    });
     this.save();
+  }
+
+  /** Switches persistent signed-in cookie sharing on or off for an already-allowed origin. */
+  setSignIn(origin: string, useSignIn: boolean): boolean {
+    const existing = this.rules.get(origin);
+    if (!existing || existing.decision !== "allow") return false;
+    this.rules.set(origin, {
+      origin: existing.origin,
+      decision: "allow",
+      at: this.now(),
+      ...(useSignIn ? { useSignIn: true } : {}),
+    });
+    this.save();
+    return true;
   }
 
   remove(origin: string): boolean {
@@ -174,6 +200,7 @@ const APPROVAL_MS = 20_000;
  */
 export class SiteGate {
   private readonly grants = new Map<string, Set<string>>();
+  private readonly signedInGrants = new Map<string, Set<string>>();
   private readonly refusals = new Map<string, Set<string>>();
   private queue: Waiting[] = [];
   /** The task whose last approved click may send its own form without a second question, and until when. */
@@ -193,6 +220,13 @@ export class SiteGate {
     if (rule?.decision === "allow") return "allow";
     if (this.grants.get(taskId)?.has(origin)) return "allow";
     return "ask";
+  }
+
+  /** Whether `origin` is both allowed for `taskId` and explicitly approved to use cookies from the user's persistent Browser sign-in. */
+  usesSignIn(taskId: string, origin: string): boolean {
+    if (this.check(taskId, origin) !== "allow") return false;
+    if (this.rules.get(origin)?.useSignIn === true) return true;
+    return this.signedInGrants.get(taskId)?.has(origin) === true;
   }
 
   /** The question the person is looking at, or null. */
@@ -305,8 +339,15 @@ export class SiteGate {
     } else if (answer === "task") {
       this.set(this.grants, taskId, origin);
       allowed = true;
+    } else if (answer === "task-signed-in") {
+      this.set(this.grants, taskId, origin);
+      this.set(this.signedInGrants, taskId, origin);
+      allowed = true;
     } else if (answer === "always") {
-      this.rules.set(origin, "allow");
+      this.rules.set(origin, "allow", false);
+      allowed = true;
+    } else if (answer === "always-signed-in") {
+      this.rules.set(origin, "allow", true);
       allowed = true;
     } else if (answer === "not-now") {
       this.set(this.refusals, taskId, origin);
@@ -338,6 +379,7 @@ export class SiteGate {
     this.queue = this.queue.filter((w) => w.question.taskId !== taskId);
     for (const entry of gone) for (const wake of entry.waiters) wake(false);
     this.grants.delete(taskId);
+    this.signedInGrants.delete(taskId);
     this.refusals.delete(taskId);
     if (this.approval?.taskId === taskId) this.approval = null;
     if (gone.length > 0) this.changed();
@@ -412,6 +454,13 @@ export class BrowseSites {
     }
     if (taskId === null) return false;
     return this.gate.request(taskId, request.url);
+  }
+
+  /** Whether `request.origin` was explicitly granted signed-in cookie sharing for the active web task. */
+  shouldShareSignIn(request: { url: string; origin: string; tabId: string; mainFrame: boolean }): boolean {
+    const taskId = this.source().taskId();
+    if (taskId === null) return false;
+    return this.gate.usesSignIn(taskId, request.origin);
   }
 
   /**

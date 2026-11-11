@@ -249,5 +249,20 @@ describe("the assistant's bar in the Browser panel", () => {
     const local = render(props({ watch: watching({ question: { origin: "http://localhost:5173", kind: "local" } }) }));
     assert.match(local, /http:\/\/localhost:5173<\/span> \(a page on this computer or your network\)\. Allow it\?/);
     assert.match(render(props({ watch: watching({ question: { origin: "https://shop.example", kind: "public" } }), busy: true })), /disabled=""[^>]*>Allow for this task</);
+    assert.match(html, /Use my Browser sign-in on this site/);
+
+    const withSignInRules = render(
+      props({
+        sitesOpen: true,
+        sites: [
+          { origin: "https://mail.example", decision: "allow", useSignIn: true, at: 1 },
+          { origin: "https://docs.example", decision: "allow", at: 2 },
+        ],
+        onToggleSignIn: () => undefined,
+      }),
+    );
+    assert.match(withSignInRules, /Sign-in shared/);
+    assert.match(withSignInRules, />Stop sharing sign-in</);
+    assert.match(withSignInRules, />Share sign-in</);
   });
 });

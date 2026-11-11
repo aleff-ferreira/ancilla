@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BrowserError, BrowserService, type BrowserEvent } from "../src/browser/service.js";
+import { BrowserError, BrowserService, cookieMatchesOrigin, type BrowserEvent, type CdpCookie } from "../src/browser/service.js";
 import { BrowseSites, hostKind, kindOfOrigin, originOf, SiteGate, SiteRules, type SiteQuestion } from "../src/browser/sites.js";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
 
@@ -307,5 +307,124 @@ test("service: a popup of the assistant's tab is closed and noted; a dialog is d
   assert.match(notes[0] as string, /popup window/);
   assert.match(notes[2] as string, /confirm dialog.*Delete everything\?.*dismissed/);
   assert.equal(events.some((e) => e.type === "dialog"), false, "no pane is told: nobody is there to answer it");
+  await svc.dispose();
+});
+
+// ------------------------------------------------------------------ controlled sign-in persistence & origin cookie sharing
+
+test("rules & gate: per-origin sign-in sharing persists when saved, clears on task end for task grants, and never applies to blocks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ancilla-signin-"));
+  try {
+    const file = join(dir, "sites.json");
+    const rules = new SiteRules(file, () => 100);
+    const g = new SiteGate(rules, { now: () => 200 });
+
+    // Task-scoped signed-in grant
+    const askTask = g.request("t1", "https://mail.example/inbox");
+    g.answer((g.pending() as SiteQuestion).id, "task-signed-in");
+    assert.equal(await askTask, true);
+    assert.equal(g.usesSignIn("t1", "https://mail.example"), true);
+    assert.equal(g.usesSignIn("t2", "https://mail.example"), false, "not shared with other tasks");
+    assert.equal(rules.get("https://mail.example"), null, "task grant is not persisted to disk");
+    g.end("t1");
+    assert.equal(g.usesSignIn("t1", "https://mail.example"), false, "cleared when task ends");
+
+    // Persistent signed-in rule
+    const askAlways = g.request("t2", "https://drive.example/files");
+    g.answer((g.pending() as SiteQuestion).id, "always-signed-in");
+    assert.equal(await askAlways, true);
+    assert.equal(g.usesSignIn("t9", "https://drive.example"), true);
+
+    const reloaded = new SiteRules(file);
+    assert.equal(reloaded.get("https://drive.example")?.useSignIn, true);
+    assert.equal(reloaded.setSignIn("https://drive.example", false), true);
+    assert.equal(new SiteRules(file).get("https://drive.example")?.useSignIn, undefined);
+
+    rules.set("https://blocked.example", "block", true);
+    assert.equal(rules.get("https://blocked.example")?.useSignIn, undefined, "blocked sites never store useSignIn");
+    assert.equal(rules.setSignIn("https://blocked.example", true), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cookieMatchesOrigin: enforces RFC 6265 host-only vs domain matching, HTTPS Secure flag, and expiration", () => {
+  const now = 1_700_000_000;
+  const domainCookie: CdpCookie = { name: "sid", value: "1", domain: ".example.com", path: "/", secure: true, expires: now + 3600 };
+  const hostOnlyCookie: CdpCookie = { name: "__Host-sess", value: "2", domain: "app.example.com", hostOnly: true, path: "/", secure: true, session: true };
+  const expiredCookie: CdpCookie = { name: "old", value: "3", domain: ".example.com", expires: now - 10 };
+
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://example.com", now), true);
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://app.example.com", now), true);
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://badexample.com", now), false);
+  assert.equal(cookieMatchesOrigin(domainCookie, "http://app.example.com", now), false, "Secure cookie never sent to http");
+
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://app.example.com", now), true);
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://sub.app.example.com", now), false, "host-only cookie does not match subdomains");
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://example.com", now), false);
+
+  assert.equal(cookieMatchesOrigin(expiredCookie, "https://example.com", now), false);
+});
+
+test("service: hydrates only matching origin cookies one-way from you -> assistant when signInGate allows, resets on resetAssistant, and still holds POSTs", async () => {
+  const youCookies: CdpCookie[] = [
+    { name: "__Host-session", value: "secret-app", domain: "app.example.com", hostOnly: true, path: "/", secure: true, httpOnly: true, sameSite: "Lax", session: true },
+    { name: "org_pref", value: "dark", domain: ".example.com", hostOnly: false, path: "/", secure: true, session: true },
+    { name: "other_secret", value: "never-leak", domain: "bank.example.org", hostOnly: true, path: "/", secure: true, session: true },
+  ];
+  const fake = fakeBrowser(
+    healthy((method) => {
+      if (method === "Storage.getCookies") return { cookies: youCookies };
+      return undefined;
+    }),
+  );
+  const commits: string[] = [];
+  const svc = new BrowserService({
+    dataDir: ":memory:",
+    find: () => FOUND,
+    launch: () => fake.proc,
+    gracefulMs: 200,
+    siteGate: async () => true,
+    signInGate: (req) => req.origin === "https://app.example.com",
+    commitGate: async (req) => (commits.push(`${req.method} ${req.url}`), false),
+  });
+  const tab = await svc.openTab("assistant");
+  const session = `S-${tab.id}`;
+
+  // Approved signed-in origin hydrates matching cookies once before continuing request
+  fake.emit("Fetch.requestPaused", { requestId: "R1", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/dashboard", method: "GET" } }, session);
+  await tick();
+  const setCalls = sent(fake, "Storage.setCookies");
+  assert.equal(setCalls.length, 1);
+  assert.equal(setCalls[0]?.params["browserContextId"], "CTX-A", "written only into assistant ephemeral context");
+  const copied = setCalls[0]?.params["cookies"] as Array<Record<string, unknown>>;
+  assert.deepEqual(copied.map((c) => c["name"]), ["__Host-session", "org_pref"], "bank.example.org cookie is never copied");
+  assert.equal(copied[0]?.["url"], "https://app.example.com/", "host-only cookie uses url, preserving host-only scope");
+  assert.equal(copied[0]?.["domain"], undefined);
+  assert.equal(copied[1]?.["domain"], ".example.com", "domain cookie preserves domain scope");
+
+  // Second request to same origin does not re-copy until resetAssistant()
+  fake.emit("Fetch.requestPaused", { requestId: "R2", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/settings", method: "GET" } }, session);
+  await tick();
+  assert.equal(sent(fake, "Storage.setCookies").length, 1);
+
+  // Origin without signInGate grant receives zero cookies
+  fake.emit("Fetch.requestPaused", { requestId: "R3", frameId: tab.id, resourceType: "Document", request: { url: "https://bank.example.org/", method: "GET" } }, session);
+  await tick();
+  assert.equal(sent(fake, "Storage.setCookies").length, 1);
+
+  // Form POST on signed-in origin is STILL intercepted by commitGate!
+  fake.emit("Fetch.requestPaused", { requestId: "R4", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/delete", method: "POST", postData: "confirm=1" } }, session);
+  await tick();
+  assert.deepEqual(commits, ["POST https://app.example.com/delete"]);
+  assert.ok(sent(fake, "Fetch.failRequest").some((c) => c.params["requestId"] === "R4"));
+
+  // resetAssistant clears sharedOrigins so a fresh task hydrates fresh cookies
+  await svc.resetAssistant();
+  const tab2 = await svc.openTab("assistant");
+  await svc.shareOriginSignIn("https://app.example.com");
+  assert.equal(sent(fake, "Storage.setCookies").length, 2);
+  void tab2;
+
   await svc.dispose();
 });

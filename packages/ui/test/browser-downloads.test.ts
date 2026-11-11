@@ -30,6 +30,17 @@ describe("the Save to dialog of the person's own tab", () => {
     const out = html(createElement(DownloadBox, { download: { ...download, name: "setup.exe", warning: ".exe files can run programs. Only keep it if you trust where it came from." }, onAnswer: () => undefined }));
     assert.match(out, /role="alert"/);
     assert.match(out, /\.exe files can run programs/);
+    assert.doesNotMatch(out, /Always save downloads in this folder/, "runnable files never offer auto-save");
+  });
+
+  it("offers the native OS folder picker when available locally and the remember-folder checkbox on safe user downloads", () => {
+    const withNative = html(createElement(DownloadBox, { download, onPickNative: async () => ({ supported: true, folder: null }), onAnswer: () => undefined }));
+    assert.match(withNative, />Choose folder…<\/button>/);
+    assert.match(withNative, /Always save downloads in this folder/);
+
+    const withoutNative = html(createElement(DownloadBox, { download, onAnswer: () => undefined }));
+    assert.doesNotMatch(withoutNative, /Choose folder…/);
+    assert.match(withoutNative, /Always save downloads in this folder/);
   });
 
   it("sizes in words", () => {

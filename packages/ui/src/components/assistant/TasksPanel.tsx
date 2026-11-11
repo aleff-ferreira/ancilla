@@ -9,6 +9,7 @@ import { ago, useAssistantCall, useAssistantData } from "./api.js";
 import { Chip, Notice } from "./parts.js";
 import { WriteCardView } from "./WriteCard.js";
 import { ACTION_REASON, ActionQuestionCard } from "../browser/ActionQuestion.js";
+import { isLocalBrowserHost } from "../browser/DownloadForm.js";
 import { isActionQuestion, parseQuestion, type WatchQuestion } from "../browser/protocol.js";
 
 const STATUS: Record<AssistantTaskStatus, { label: string; tone: "plain" | "ok" | "warn" | "danger" | "accent" }> = {
@@ -266,6 +267,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
   const call = useAssistantCall();
   const controller = useController();
   const [error, setError] = useState<string | null>(null);
+  const [shareSignIn, setShareSignIn] = useState(false);
   // A change the voice proposed that nobody approved yet: paused and never started, it runs only when it is approved here.
   const proposal = task.origin === "voice" && task.status === "paused" && task.startedAt === null;
   // A web task is worked on by the assistant's own browser; while it waits it is the person's answer about a site it wants to open.
@@ -283,6 +285,7 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
     setError(null);
     try {
       await call("POST", `/tasks/${encodeURIComponent(task.id)}/${name}`, body);
+      setShareSignIn(false);
       props.changed();
     } catch (e) {
       setError(errorMessage(e));
@@ -340,7 +343,17 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           {open && !inProcess ? <Button size="xs" variant="secondary" onClick={() => void act("pause")}>Pause</Button> : null}
           {proposal ? <Button size="xs" variant="accent" onClick={() => void act("approve")}>Approve</Button> : null}
           {holding && writeCard ? <WriteCardView card={writeCard} onAnswer={(answer) => void answerWrite(writeCard.id, answer)} /> : null}
-          {asking && action && question && isActionQuestion(question) ? <ActionQuestionCard question={question} onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })} /> : null}
+          {asking && action && question && isActionQuestion(question) ? (
+            <ActionQuestionCard
+              question={question}
+              onPickNative={
+                isLocalBrowserHost() && Boolean(controller.hasBrowserHttp)
+                  ? (current) => controller.browser<{ supported: boolean; folder: string | null }>("POST", "/downloads/pick-folder", { folder: current })
+                  : undefined
+              }
+              onAnswer={(answer, folder) => void act("action", folder ? { answer, folder } : { answer })}
+            />
+          ) : null}
           {asking && action && !(question && isActionQuestion(question)) ? (
             <>
               <Button size="xs" variant="accent" onClick={() => void act("action", { answer: "do" })}>Do it</Button>
@@ -349,8 +362,12 @@ export function TaskRow(props: { task: AssistantTaskView; now: number; open: boo
           ) : null}
           {asking && !action ? (
             <>
-              <Button size="xs" variant="accent" onClick={() => void act("site", { answer: "task" })}>Allow for this task</Button>
-              <Button size="xs" variant="secondary" onClick={() => void act("site", { answer: "always" })}>Always allow</Button>
+              <label className="flex w-full items-center gap-1.5 text-xs text-muted">
+                <input type="checkbox" checked={shareSignIn} onChange={(e) => setShareSignIn(e.currentTarget.checked)} />
+                <span>Use my Browser sign-in on this site</span>
+              </label>
+              <Button size="xs" variant="accent" onClick={() => void act("site", { answer: shareSignIn ? "task-signed-in" : "task" })}>Allow for this task</Button>
+              <Button size="xs" variant="secondary" onClick={() => void act("site", { answer: shareSignIn ? "always-signed-in" : "always" })}>Always allow</Button>
               <Button size="xs" variant="secondary" onClick={() => void act("site", { answer: "not-now" })}>Not now</Button>
               <Button size="xs" variant="danger" onClick={() => void act("site", { answer: "block" })}>Block</Button>
             </>

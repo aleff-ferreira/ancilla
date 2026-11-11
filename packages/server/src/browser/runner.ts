@@ -6,7 +6,7 @@ import { BrowseAgent, type BrowseOutcome } from "./agent.js";
 import type { BrowserService } from "./service.js";
 import { actionReason } from "./commit.js";
 import { checkDownloadFolder } from "./downloads.js";
-import { ACTION_ANSWERS, SITE_ANSWERS, questionView, type ActionAnswer, type GateQuestion, type QuestionView, type SiteAnswer, type SiteGate } from "./sites.js";
+import { ACTION_ANSWERS, SITE_ANSWERS, originOf, questionView, type ActionAnswer, type GateQuestion, type QuestionView, type SiteAnswer, type SiteGate, type SiteRule } from "./sites.js";
 import { ServiceSurface, type BrowseSurface, type SurfaceGate } from "./surface.js";
 
 /**
@@ -101,8 +101,12 @@ export class BrowseRunner implements BrowseRunnerPort {
   }
 
   /** The saved rules about which sites the assistant may open. */
-  sites(): Array<{ origin: string; decision: "allow" | "block"; at: number }> {
+  sites(): SiteRule[] {
     return this.deps.gate.rules.list();
+  }
+
+  setSiteSignIn(origin: string, useSignIn: boolean): boolean {
+    return this.deps.gate.rules.setSignIn(origin, useSignIn);
   }
 
   removeSite(origin: string): boolean {
@@ -140,7 +144,7 @@ export class BrowseRunner implements BrowseRunnerPort {
 
   /** The person's answer to the site question shown for this task. */
   answer(taskId: string, answer: string): void {
-    if (!(SITE_ANSWERS as readonly string[]).includes(answer)) throw new ValidationError("answer", "answer must be task, always, not-now or block");
+    if (!(SITE_ANSWERS as readonly string[]).includes(answer)) throw new ValidationError("answer", "answer must be task, always, not-now or block (or task-signed-in, always-signed-in)");
     const question = this.deps.gate.pending();
     if (!question || question.taskId !== taskId) throw new ConflictError("No site is waiting for an answer on this task.");
     if (question.type !== "site") throw new ConflictError("An action is waiting for your answer, not a site.");
@@ -207,6 +211,10 @@ export class BrowseRunner implements BrowseRunnerPort {
       if (!status.available) throw new Error(status.reason ?? "No browser was found on this computer.");
       const gate: SurfaceGate = {
         request: (url) => this.deps.gate.request(task.id, url, AbortSignal.any([job.abort.signal, AbortSignal.timeout(QUESTION_MS)])),
+        usesSignIn: (url) => {
+          const origin = originOf(url);
+          return origin ? this.deps.gate.usesSignIn(task.id, origin) : false;
+        },
         confirm: async (ask) => {
           const allowed = await this.deps.gate.ask(task.id, ask, AbortSignal.any([job.abort.signal, AbortSignal.timeout(QUESTION_MS)]));
           // The click they allowed may send the form it is in: that form needs no second question.
