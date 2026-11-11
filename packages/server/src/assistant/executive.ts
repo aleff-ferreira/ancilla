@@ -115,6 +115,15 @@ export interface FallbackReadRunner {
   run(input: { cwd: string; prompt: string; signal: AbortSignal }): Promise<{ ok: true; answer: string } | { ok: false; error: string }>;
 }
 
+/** Runs an authorized project write step directly on a non-Muse `BrainProvider` when Muse CLI is not installed or reachable. */
+export interface FallbackWriteRunner {
+  available(): { ok: boolean; label?: string };
+  run(input: { cwd: string; prompt: string; signal: AbortSignal }): Promise<
+    | { ok: true; answer: string; changedFiles: string[]; checksRun: string[] }
+    | { ok: false; error: string; changedFiles?: string[] }
+  >;
+}
+
 export interface ExecutiveOptions {
   profile: () => AssistantProfile;
   /** The notes that bear on a step, as the block to put in front of its prompt. Its words are never read for memories. */
@@ -129,6 +138,8 @@ export interface ExecutiveOptions {
   connector?: ConnectorRunnerPort;
   /** Runs read-only project steps on the configured assistant model when Muse is not reachable. */
   fallbackRead?: FallbackReadRunner;
+  /** Runs authorized project write steps on the configured assistant model when Muse is not reachable. */
+  fallbackWrite?: FallbackWriteRunner;
 }
 
 const MIN = 60_000;
@@ -642,6 +653,25 @@ export class Executive {
         void this.runFallbackStep(task, step, attempt, notes ? `${notes}\n\n${prompt}` : prompt, abort);
         return;
       }
+      if (step.effect === "write" && this.opts.fallbackWrite?.available().ok) {
+        if (awaitsApproval(task)) return;
+        if (!task.allowWrites || !this.opts.profile().policy.allowProjectWrites) {
+          this.block(task, "Project writes are off in the assistant's settings, so this step did not run.");
+          return;
+        }
+        const current = this.tasks.get(taskId);
+        if (!current || (current.status !== "queued" && current.status !== "running")) return;
+        const attempt = this.tasks.startAttempt(taskId, step.id);
+        this.tasks.bindTurn(attempt.id, "brain", attempt.commandId);
+        this.tasks.setStatus(taskId, "running", `Step ${step.ord + 1} of ${steps.length}: ${step.title}`, { retryAt: null });
+        this.opts.changed(taskId);
+        const notes = this.opts.memory({ text: `${task.goal}\n${step.title}`, sessionId: null, project: task.project, account: task.account });
+        const prompt = stepPrompt(task, step, step.ord, steps.length);
+        const abort = new AbortController();
+        this.brainAborts.set(taskId, abort);
+        void this.runFallbackWriteStep(task, step, attempt, notes ? `${notes}\n\n${prompt}` : prompt, abort);
+        return;
+      }
       this.wait(task, `Muse is not reachable${reach.reason ? `: ${reach.reason}` : ""}. Trying again shortly.`);
       return;
     }
@@ -709,6 +739,45 @@ export class Executive {
     } else {
       this.tasks.finishAttempt(attempt.id, "failed", outcome.error);
       this.afterFailure(nowTask, latestStep, outcome.error);
+    }
+  }
+
+  private async runFallbackWriteStep(task: Task, step: TaskStep, attempt: TaskAttempt, prompt: string, abort: AbortController): Promise<void> {
+    const runner = this.opts.fallbackWrite;
+    if (!runner) return;
+    let outcome:
+      | { ok: true; answer: string; changedFiles: string[]; checksRun: string[] }
+      | { ok: false; error: string; changedFiles?: string[] };
+    try {
+      outcome = await runner.run({ cwd: task.cwd, prompt, signal: abort.signal });
+    } catch (error) {
+      outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      if (this.brainAborts.get(task.id) === abort) this.brainAborts.delete(task.id);
+    }
+    if (this.closed) return;
+    const nowTask = this.tasks.get(task.id);
+    const fresh = this.tasks.attempt(attempt.id);
+    if (!nowTask || !fresh || fresh.outcome !== "running" || fresh.fence !== nowTask.fence || TERMINAL_TASK.has(nowTask.status)) return;
+    const latestStep = this.tasks.step(step.id);
+    if (!latestStep) return;
+    if (outcome.ok) {
+      const lines = [outcome.answer];
+      if (outcome.changedFiles.length > 0) lines.push(`Changed files: ${outcome.changedFiles.join(", ")}`);
+      if (outcome.checksRun.length > 0) lines.push(`Checks: ${outcome.checksRun.join("; ")}`);
+      const summary = lines.join("\n");
+      const detail = outcome.changedFiles.length > 0
+        ? `Updated ${outcome.changedFiles.join(", ")} with the assistant model.`
+        : "Completed write step with the assistant model.";
+      this.tasks.finishAttempt(attempt.id, "succeeded", detail);
+      const merged = nowTask.result ? `${nowTask.result}\n\n${summary}` : summary;
+      const updated = this.tasks.setStatus(task.id, nowTask.status, nowTask.reason, { result: merged });
+      await this.afterSuccess(updated, latestStep, summary);
+    } else {
+      const touched = outcome.changedFiles && outcome.changedFiles.length > 0 ? ` (touched before failure: ${outcome.changedFiles.join(", ")})` : "";
+      const detail = `${outcome.error}${touched}`;
+      this.tasks.finishAttempt(attempt.id, "failed", detail);
+      this.afterFailure(nowTask, latestStep, detail);
     }
   }
 

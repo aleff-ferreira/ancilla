@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_EMBEDDING_SETTINGS, embedderFor, EmbeddingRejected, keyIsSet, readEmbeddingSettings, writeEmbeddingSettings, type Embedder, type EmbeddingSettings } from "./embed.js";
-import { Executive, type BrowseRunnerPort, type ConnectorRunnerPort, type ExecutiveHost, type FallbackReadRunner, type RecoverySummary } from "./executive.js";
+import { Executive, type BrowseRunnerPort, type ConnectorRunnerPort, type ExecutiveHost, type FallbackReadRunner, type FallbackWriteRunner, type RecoverySummary } from "./executive.js";
 import { withMeaningVectors, type MeaningOptions } from "./meaning.js";
 import { looksSecret } from "./secrets.js";
 import { digest, isPastQuestion, parseAsOf, tokens } from "./text.js";
@@ -87,6 +87,8 @@ export interface AssistantDeps {
   connector?: ConnectorRunnerPort;
   /** Runs read-only project steps on the configured assistant model when Muse is not reachable. */
   fallbackRead?: FallbackReadRunner;
+  /** Runs authorized project write steps on the configured assistant model when Muse is not reachable. */
+  fallbackWrite?: FallbackWriteRunner;
   /** How often the executive looks for work, in milliseconds. */
   tickMs?: number;
   /** The data folder, where the meaning-search settings are kept; without it they last only as long as the process. */
@@ -207,6 +209,7 @@ export class AssistantService {
           ...(deps.browse ? { browse: deps.browse } : {}),
           ...(deps.connector ? { connector: deps.connector } : {}),
           ...(deps.fallbackRead ? { fallbackRead: deps.fallbackRead } : {}),
+          ...(deps.fallbackWrite ? { fallbackWrite: deps.fallbackWrite } : {}),
         })
       : null;
   }
