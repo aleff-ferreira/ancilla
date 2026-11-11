@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.27.1
+
+### New
+
+- **Twelve studio-rendered 3D companions replace the flat cartoon presets.** **Persona, Look, Choose** and first-run setup now offer twelve built-in 3D companions across *Cores & Chassis*, *Drones & Instruments* and *Constructs* (*Vesper*, *Orbital Core*, *Sentry Pod*, *Reliquary*, *Recon Probe*, *Chronometer*, *Terminal*, *Bathysphere*, *Automaton Owl*, *Cybernetic Fox*, *Valkyrie* and *Arcane Core*), alongside three minimal geometric forms of light (*Halo*, *Optic* and *Cipher*). Each companion renders on a dark-lit stage with pointer-tracking 2.5D parallax, optical lens glint and blink, synchronized ground shadow, customizable **Stage and aura light** (with a one-click **Signature** reset), and per-mood choreography.
+- **Direct desktop-pet `.zip` package and v1/v2 sprite-sheet import.** **Bring your own** now accepts desktop-pet `.zip` archives (`pet.json` + `spritesheet.webp`) directly without manual extraction, populates the companion's display name automatically, recognizes both `8×9` (`1536×1872`) and `8×11` (`1536×2288`) desktop-pet atlases, maps their rows accurately to Ancilla's six moods by default, and compacts unused movement rows when encoding so saved frames stay ~35% sharper within the size cap.
+
+### Changed
+
+- **Cleaner Look tabs with full compatibility for saved avatars.** The flat cartoon presets (`Fox`, `Tabby`, `Slime`, `Ghost` and the rest) and the part-blob **Build** tab are removed from the main Look picker, while previously saved avatars in **Mine** (imported pictures, sprite sheets, pixel art and legacy figures) keep working and remain editable.
+
 ## 0.27.0
 
 ### New
