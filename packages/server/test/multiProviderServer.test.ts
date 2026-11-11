@@ -57,8 +57,10 @@ describe("multi-provider catalog, account CRUD, and AGPL source offer", () => {
     const dataDir = await mkdtemp(join(tmpdir(), "ancilla-mp-crud-"));
     const workDir = await mkdtemp(join(tmpdir(), "ancilla-mp-work-"));
     const connection = new FakeConnection();
+    let srvRef: Awaited<ReturnType<typeof start>>["server"] | null = null;
     try {
-      const { base } = await start(connection, { dataDir });
+      const { base, server } = await start(connection, { dataDir });
+      srvRef = server;
 
       const initialCatalog = await get(base, "/api/providers");
       assert.equal(initialCatalog.license, "AGPL-3.0-only");
@@ -121,8 +123,9 @@ describe("multi-provider catalog, account CRUD, and AGPL source offer", () => {
       assert.equal(proj.defaultProviderId, "muse");
       assert.equal(proj.defaultAccountId, null);
     } finally {
-      await rm(dataDir, { recursive: true, force: true });
-      await rm(workDir, { recursive: true, force: true });
+      await srvRef?.close().catch(() => undefined);
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -181,8 +184,10 @@ describe("end-to-end built-in API agent host (ApiAgentHost)", () => {
     });
 
     const connection = new FakeConnection();
+    let srvRef: Awaited<ReturnType<typeof start>>["server"] | null = null;
     try {
-      const { base } = await start(connection, { dataDir });
+      const { base, server } = await start(connection, { dataDir });
+      srvRef = server;
 
       const acctRes = await send(base, "/api/providers/accounts", {
         providerId: "api",
@@ -277,9 +282,10 @@ describe("end-to-end built-in API agent host (ApiAgentHost)", () => {
         (t) => t.sessionId === sessionId && t.providerId === "api",
       ));
     } finally {
+      await srvRef?.close().catch(() => undefined);
       await mockLlm.close();
-      await rm(dataDir, { recursive: true, force: true });
-      await rm(workDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -293,6 +299,7 @@ describe("multi-provider host pool isolation and Codex subscription quota forwar
 
     const spawnedProviders: { providerId: ProviderId; accountId: string | null }[] = [];
     const runtimes = new Map<string, CanonicalSessionRuntime>();
+    let srvRef: Awaited<ReturnType<typeof start>>["server"] | null = null;
 
     try {
       const { base, server } = await start(museConn, {
@@ -323,6 +330,7 @@ describe("multi-provider host pool isolation and Codex subscription quota forwar
           };
         },
       });
+      srvRef = server;
 
       const museStart = await send(base, "/api/sessions", { cwd: workDir, providerId: "muse" });
       const codexStart = await send(base, "/api/sessions", { cwd: workDir, providerId: "codex" });
@@ -358,8 +366,9 @@ describe("multi-provider host pool isolation and Codex subscription quota forwar
       assert.equal(codexQuota.usage.window.usedPercent, 18);
       assert.equal(codexQuota.usage.weekly.usedPercent, 42);
     } finally {
-      await rm(dataDir, { recursive: true, force: true });
-      await rm(workDir, { recursive: true, force: true });
+      await srvRef?.close().catch(() => undefined);
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
@@ -391,8 +400,10 @@ describe("live model catalog discovery and immediate post-login refresh", () => 
       });
     });
 
+    let srvRef: Awaited<ReturnType<typeof start>>["server"] | null = null;
     try {
-      const { base } = await start(new FakeConnection(), { dataDir });
+      const { base, server } = await start(new FakeConnection(), { dataDir });
+      srvRef = server;
       const created = await send(base, "/api/providers/accounts", {
         providerId: "api",
         name: "Live OpenRouter",
@@ -415,8 +426,9 @@ describe("live model catalog discovery and immediate post-login refresh", () => 
         ],
       );
     } finally {
+      await srvRef?.close().catch(() => undefined);
       await new Promise<void>((r) => srv.close(() => r()));
-      await rm(dataDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
@@ -438,8 +450,9 @@ describe("live model catalog discovery and immediate post-login refresh", () => 
     }
 
     let pendingLogin: StubLoginChild | null = null;
+    let srvRef: Awaited<ReturnType<typeof start>>["server"] | null = null;
     try {
-      const { base } = await start(new FakeConnection(), {
+      const { base, server } = await start(new FakeConnection(), {
         dataDir,
         hostFactory: () => {
           spawnedHosts += 1;
@@ -482,6 +495,7 @@ describe("live model catalog discovery and immediate post-login refresh", () => 
           return child as unknown as LoginChild;
         },
       });
+      srvRef = server;
 
       // 1. Pre-login: Muse 1.4.15 returns empty bundledCatalog on the listing host AND a busy turn starts
       const preLoginModels = await get(base, "/api/models");
@@ -515,8 +529,9 @@ describe("live model catalog discovery and immediate post-login refresh", () => 
       );
       assert.ok(spawnedHosts >= 3, "spawned a fresh post-login host to read live subscription models");
     } finally {
-      await rm(dataDir, { recursive: true, force: true });
-      await rm(workDir, { recursive: true, force: true });
+      await srvRef?.close().catch(() => undefined);
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      await rm(workDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });

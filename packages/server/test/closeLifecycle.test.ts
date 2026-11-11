@@ -111,10 +111,14 @@ describe("a server that is closing", () => {
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const startGate = deferred();
+    let wedgedInStart = false;
     const closed: string[] = [];
     const factory = (target: { cwd: string }): HostHandle => ({
       start: async () => {
-        if (target.cwd === "/work/wedged") await startGate.promise;
+        if (target.cwd === "/work/wedged") {
+          wedgedInStart = true;
+          await startGate.promise;
+        }
         return { initializeResult: { serverInfo: { name: "muse", version: "1.1.1" } } };
       },
       connection: connection as never,
@@ -127,7 +131,7 @@ describe("a server that is closing", () => {
     const { server, base } = await start(connection, { hostFactory: factory as never, hostWaits: { startsMs: 60_000, closeMs: 60_000 } });
     assert.equal((await send(base, "/api/sessions", { cwd: "/work/ok" })).status, 200);
     const wedged = send(base, "/api/sessions", { cwd: "/work/wedged" }).then((reply) => reply.status, () => -1);
-    await waitFor(() => server["starting"].size === 1, "the wedged start to be in flight");
+    await waitFor(() => server["starting"].size === 1 && wedgedInStart, "the wedged start to be in flight");
 
     const closing = server.close();
     // The registered host is closed while the start is still open: nothing waits for the start first.
