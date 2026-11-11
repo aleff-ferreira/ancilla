@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.27.2
+
+### New
+
+- **Authorized launching of dev servers, commands, web URLs, folders and editors from voice and chat.** Across Muse CLI, cloud APIs and local model servers, the assistant can now inspect project files and folders directly (`inspect_project`), launch local dev servers (`localhost`), shell commands, web addresses, project folders or your desktop editor (`launch`, `launch_status`), and open detected `http://localhost:<port>` servers straight into Ancilla's Browser panel. Spoken project and thread names match flexibly across variations and speech-to-text slips (such as *"Amazon River"* or *"trail of Amazonia River"* matching `amazonia_river`).
+- **Inline call-card and spoken authorization, with instant execution in YOLO mode.** When **YOLO** mode is enabled, launches, thread tools and workspace proposals execute immediately under your standing authorization. When **YOLO** mode is off, consequential actions place an inline **Allow / Deny** card directly on the floating call dock—and you can either click **Allow** or confirm aloud in your next turn (*"go ahead"*, *"just launch it"*, *"yes"*). No model tool can ever self-approve a request, daemon secrets are scrubbed from launched child environments, and every background process group is tracked and stopped cleanly when requested or on shutdown.
+- **Live web page and animation diagnostics in the integrated browser.** When verifying why a web page or animation stutters or looks blurry, `inspect_page` opens or reuses the tab in Ancilla's Browser panel and samples live `requestAnimationFrame` frame pacing (FPS, frame drops and worst frame time), `<canvas>` CSS-versus-backing-buffer DPI mismatches, running CSS/Web Animations and layout-thrashing properties (`top`, `left`, `width`, `height`, `filter`, `box-shadow`), dev-server error overlays, and console/JavaScript exceptions.
+
+### Fixed
+
+- **Voice calls using Muse threads now use tools and answer promptly.** Call turns running on Muse threads are no longer instructed to avoid tools, default to `medium` reasoning effort instead of burning 20–25 seconds on `Max` thinking per short spoken turn, and pause cleanly on live thread approvals instead of aborting the turn.
+- **Voice call transcripts no longer duplicate words after a thinking filler, and show the companion's name.** Streaming replies after a *"Let me check."* filler now grow monotonically without repeating words, and the call card labels replies with your companion's name instead of `IT`.
+- **Contended data-folder locks reset their wait budget when ownership changes hands,** and companion stage badges, Connectors and Browser surfaces receive visual polish.
+
 ## 0.27.1
 
 ### New

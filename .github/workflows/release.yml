@@ -41,9 +41,9 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.27.1**
-    - **Twelve studio-rendered 3D companions replace the flat cartoon avatars.** **Persona → Look → Choose** and first-run setup now offer twelve high-detail 3D companions across *Cores & Chassis*, *Drones & Instruments* and *Constructs* (*Vesper*, *Orbital Core*, *Sentry Pod*, *Reliquary*, *Recon Probe*, *Chronometer*, *Terminal*, *Bathysphere*, *Automaton Owl*, *Cybernetic Fox*, *Valkyrie* and *Arcane Core*), alongside three minimal geometric forms of light (*Halo*, *Optic* and *Cipher*), with pointer-tracking 2.5D parallax, lens glint, customizable stage lighting and mood choreography. Previously saved avatars remain compatible.
-    - **One-drop desktop-pet `.zip` and v1/v2 sprite-sheet import.** **Bring your own** now unpacks desktop-pet `.zip` archives (`pet.json` + `spritesheet.webp`) directly, auto-populates the companion's name, accurately maps all six moods for both `8×9` (`1536×1872`) and `8×11` (`1536×2288`) desktop-pet atlases, and strips unused movement rows on save for sharper frame resolution.
+    **New in 0.27.2**
+    - **Authorized launching from voice and chat across every model backend.** Ask the assistant to inspect project files, start `localhost` dev servers, run commands, or open URLs, folders and editors: actions run immediately when **YOLO** mode is on, or show an inline **Allow / Deny** card on the call dock that you can click or confirm aloud (*"go ahead"*).
+    - **Live web page and animation diagnostics in the Browser panel.** The assistant can open your running `localhost` app in Ancilla's Browser panel and measure live FPS, frame drops, `<canvas>` DPI buffer mismatches, layout-thrashing animations, build overlays and console errors, while voice calls on Muse threads now use tools at responsive `medium` reasoning effort without filler-word duplication.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 

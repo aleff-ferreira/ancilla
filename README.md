@@ -15,10 +15,10 @@ on Windows, macOS and Linux.
 [See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.27.1:** twelve studio-rendered 3D companions (*Vesper*, *Orbital Core*, *Sentry Pod*, *Reliquary*, *Recon Probe*,
-> *Chronometer*, *Terminal*, *Bathysphere*, *Automaton Owl*, *Cybernetic Fox*, *Valkyrie* and *Arcane Core*) replace the flat cartoon
-> presets, and **Bring your own** imports desktop-pet `.zip` packages and `8×9` / `8×11` sprite sheets in one drop.
-> [Read the release notes](docs/CHANGELOG.md#0271).
+> **New in 0.27.2:** authorized launching of `localhost` dev servers, commands, web URLs, folders and editors from voice and chat
+> (instant in **YOLO** mode, or one click / spoken *"go ahead"* on the call card), live web animation and `<canvas>` DPI diagnostics
+> in the Browser panel, and faster tool-enabled voice turns on Muse threads.
+> [Read the release notes](docs/CHANGELOG.md#0272).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
