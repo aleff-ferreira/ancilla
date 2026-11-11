@@ -47,7 +47,7 @@ export const DEFAULT_PROFILE: AssistantProfile = {
   character: DEFAULT_CHARACTER,
   communication: { verbosity: "balanced", tone: "plain", language: "", notes: "" },
   autonomy: "ask",
-  policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 1, maxTurnsPerTask: 12, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
+  policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 3, maxTurnsPerTask: 12, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
   capturePaused: false,
   contextBudgetTokens: 900,
   updatedAt: 0,
@@ -253,7 +253,7 @@ export function normalizeProfile(raw: unknown): AssistantProfile {
     policy: {
       allowReadOnly: typeof pol.allowReadOnly === "boolean" ? pol.allowReadOnly : d.policy.allowReadOnly,
       allowProjectWrites: typeof pol.allowProjectWrites === "boolean" ? pol.allowProjectWrites : d.policy.allowProjectWrites,
-      maxConcurrent: clamp(pol.maxConcurrent, 1, 4, d.policy.maxConcurrent),
+      maxConcurrent: clamp(pol.maxConcurrent, 1, 8, d.policy.maxConcurrent),
       maxTurnsPerTask: clamp(pol.maxTurnsPerTask, 1, 50, d.policy.maxTurnsPerTask),
       maxMinutesPerTask: clamp(pol.maxMinutesPerTask, 1, 240, d.policy.maxMinutesPerTask),
       maxTasksPerDay: clamp(pol.maxTasksPerDay, 1, 100, d.policy.maxTasksPerDay),
@@ -362,7 +362,7 @@ export function parseProfilePatch(raw: unknown): ProfilePatch {
     for (const key of Object.keys(p)) if (!["allowReadOnly", "allowProjectWrites", "maxConcurrent", "maxTurnsPerTask", "maxMinutesPerTask", "maxTasksPerDay"].includes(key)) throw new ValidationError(`policy.${key}`, `unknown field policy.${key}`);
     if ("allowReadOnly" in p) pol.allowReadOnly = flag(p.allowReadOnly, "policy.allowReadOnly");
     if ("allowProjectWrites" in p) pol.allowProjectWrites = flag(p.allowProjectWrites, "policy.allowProjectWrites");
-    if ("maxConcurrent" in p) pol.maxConcurrent = whole(p.maxConcurrent, "policy.maxConcurrent", 1, 4);
+    if ("maxConcurrent" in p) pol.maxConcurrent = whole(p.maxConcurrent, "policy.maxConcurrent", 1, 8);
     if ("maxTurnsPerTask" in p) pol.maxTurnsPerTask = whole(p.maxTurnsPerTask, "policy.maxTurnsPerTask", 1, 50);
     if ("maxMinutesPerTask" in p) pol.maxMinutesPerTask = whole(p.maxMinutesPerTask, "policy.maxMinutesPerTask", 1, 240);
     if ("maxTasksPerDay" in p) pol.maxTasksPerDay = whole(p.maxTasksPerDay, "policy.maxTasksPerDay", 1, 100);

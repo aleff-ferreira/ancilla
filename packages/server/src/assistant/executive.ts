@@ -76,7 +76,7 @@ export interface ExecutiveHost {
   /** Whether a Muse host can be reached for this folder and account now. */
   hostAvailable(cwd: string, account: string | null): Promise<{ ok: boolean; reason?: string }>;
   /** `modelId` is the model the thread starts on; absent leaves it to Muse. */
-  startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }>;
+  startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null; allowWrites?: boolean }): Promise<{ sessionId: string }>;
   /** Puts a thread on a model, doing nothing when it is on it already. Only a call's thread is ever asked to; a task keeps its model. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
   /**
@@ -140,6 +140,8 @@ export interface ExecutiveOptions {
   fallbackRead?: FallbackReadRunner;
   /** Runs authorized project write steps on the configured assistant model when Muse is not reachable. */
   fallbackWrite?: FallbackWriteRunner;
+  /** True when global user pre-authorization (such as YOLO mode) permits project writes without requiring separate settings toggles. */
+  isPreAuthorized?: () => boolean;
 }
 
 const MIN = 60_000;
@@ -164,6 +166,10 @@ export class Executive {
   private readonly watchers = new Map<string, () => void>();
   /** Events heard before the start that caused them was recorded: kept briefly, then matched, never dropped on a race. */
   private readonly early = new Map<string, { at: number; events: { method: string; params: Record<string, unknown> }[] }>();
+  /** Assistant text items streamed during a task turn (`sessionId:turnId` -> `itemId` -> text), harvested when the turn finishes. */
+  private readonly turnMessages = new Map<string, Map<string, string>>();
+  /** Metadata recorded from `item/started` (`sessionId:itemId` -> `{ turnId, kind }`) so `item/delta` frames without `turnId` still resolve. */
+  private readonly itemMeta = new Map<string, { turnId: string; kind: string }>();
   private readonly brainAborts = new Map<string, AbortController>();
 
   constructor(
@@ -176,8 +182,14 @@ export class Executive {
     this.closed = true;
     for (const stop of this.watchers.values()) stop();
     this.watchers.clear();
+    this.turnMessages.clear();
+    this.itemMeta.clear();
     for (const abort of this.brainAborts.values()) abort.abort();
     this.brainAborts.clear();
+  }
+
+  private writesAllowed(profile: AssistantProfile): boolean {
+    return profile.policy.allowProjectWrites || this.opts.isPreAuthorized?.() === true;
   }
 
   private log(line: string): void {
@@ -213,7 +225,7 @@ export class Executive {
   propose(spec: NewTask): Task {
     const profile = this.opts.profile();
     if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
-    if (!spec.allowWrites || !profile.policy.allowProjectWrites) throw new ConflictError("Project writes are off in the assistant's settings, so a change cannot be proposed.");
+    if (!spec.allowWrites || !this.writesAllowed(profile)) throw new ConflictError("Project writes are off in the assistant's settings, so a change cannot be proposed.");
     const waiting = this.tasks.byStatus(["paused"]).filter(awaitsApproval);
     const same = waiting.find((t) => t.goal === spec.goal && t.cwd === spec.cwd);
     if (same) return same;
@@ -231,7 +243,7 @@ export class Executive {
     if (!awaitsApproval(task)) throw new ConflictError("There is nothing here to approve.");
     const profile = this.opts.profile();
     if (!profile.enabled) throw new ConflictError("The assistant is switched off.");
-    if (!profile.policy.allowProjectWrites) throw new ConflictError("Project writes are off in the assistant's settings. Switch them on to approve this.");
+    if (!this.writesAllowed(profile)) throw new ConflictError("Project writes are off in the assistant's settings. Switch them on to approve this.");
     this.tasks.event(taskId, "approved", null, "the user approved it on the screen");
     const out = this.tasks.setStatus(taskId, "queued", "Approved by you.", { retryAt: null });
     this.opts.changed(taskId);
@@ -655,7 +667,7 @@ export class Executive {
       }
       if (step.effect === "write" && this.opts.fallbackWrite?.available().ok) {
         if (awaitsApproval(task)) return;
-        if (!task.allowWrites || !this.opts.profile().policy.allowProjectWrites) {
+        if (!task.allowWrites || !this.writesAllowed(this.opts.profile())) {
           this.block(task, "Project writes are off in the assistant's settings, so this step did not run.");
           return;
         }
@@ -678,7 +690,7 @@ export class Executive {
     let sessionId = task.sessionId;
     if (!sessionId) {
       try {
-        sessionId = (await this.host.startSession({ cwd: task.cwd, account: task.account, title: `Task: ${task.title}` })).sessionId;
+        sessionId = (await this.host.startSession({ cwd: task.cwd, account: task.account, title: `Task: ${task.title}`, allowWrites: task.allowWrites })).sessionId;
       } catch (error) {
         this.wait(task, `Could not open a thread for it: ${error instanceof Error ? error.message : String(error)}`);
         return;
@@ -806,8 +818,93 @@ export class Executive {
 
   // ------------------------------------------------------------------------------------------------ hearing the turn
 
+  private appendTurnText(sessionId: string, turnId: string, itemId: string, text: string, replace: boolean): void {
+    const key = `${sessionId}:${turnId}`;
+    let byItem = this.turnMessages.get(key);
+    if (!byItem) {
+      byItem = new Map();
+      this.turnMessages.set(key, byItem);
+      if (this.turnMessages.size > 200) {
+        this.turnMessages.delete(this.turnMessages.keys().next().value as string);
+      }
+    }
+    const next = replace ? text : `${byItem.get(itemId) ?? ""}${text}`;
+    byItem.set(itemId, next.length > 4000 ? next.slice(-4000) : next);
+  }
+
+  private takeTurnText(sessionId: string, turnId: string): string {
+    const key = `${sessionId}:${turnId}`;
+    const byItem = this.turnMessages.get(key);
+    this.turnMessages.delete(key);
+    if (!byItem || byItem.size === 0) return "";
+    const parts = [...byItem.values()].map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) return "";
+    return (parts[parts.length - 1] as string).slice(0, 1500);
+  }
+
   onTurnEvent(sessionId: string, method: string, params: Record<string, unknown>): void {
     if (this.closed) return;
+    if (method === "approval/requested" || method === "approval/resolved" || method === "userInput/requested" || method === "userInput/settled") {
+      for (const task of this.tasks.byStatus(["running", "queued", "waiting", "paused", "blocked"])) {
+        if (task.sessionId === sessionId) this.opts.changed(task.id);
+      }
+      return;
+    }
+    if (method === "session/goalChanged") {
+      const rawGoal = params["goal"];
+      if (rawGoal && typeof rawGoal === "object" && !Array.isArray(rawGoal)) {
+        const g = rawGoal as Record<string, unknown>;
+        const objective = typeof g["objective"] === "string" ? g["objective"].trim() : "";
+        const currentWork = typeof g["currentWork"] === "string" ? g["currentWork"].trim() : "";
+        const pct = typeof g["percentComplete"] === "number" && Number.isFinite(g["percentComplete"]) ? Math.max(0, Math.min(100, Math.round(g["percentComplete"]))) : null;
+        const detail = currentWork || objective;
+        if (detail) {
+          const progressLine = pct !== null && pct > 0 ? `${pct}% — ${detail}` : detail;
+          for (const task of this.tasks.byStatus(["running"])) {
+            if (task.sessionId !== sessionId) continue;
+            if (task.reason !== progressLine) {
+              this.tasks.setStatus(task.id, "running", progressLine, { retryAt: null });
+              this.opts.changed(task.id);
+            }
+          }
+        }
+      }
+      return;
+    }
+    if (method === "item/delta") {
+      const itemId = typeof params["itemId"] === "string" ? params["itemId"] : null;
+      const field = params["field"];
+      if (!itemId || (field !== undefined && field !== "text")) return;
+      const meta = this.itemMeta.get(`${sessionId}:${itemId}`);
+      if (meta && meta.kind !== "agentMessage") return;
+      const tId = (typeof params["turnId"] === "string" ? params["turnId"] : null) ?? meta?.turnId ?? null;
+      const rawDelta = params["delta"];
+      const textDelta =
+        typeof rawDelta === "string"
+          ? rawDelta
+          : rawDelta && typeof rawDelta === "object" && (rawDelta as Record<string, unknown>)["type"] === "text" && typeof (rawDelta as Record<string, unknown>)["text"] === "string"
+            ? String((rawDelta as Record<string, unknown>)["text"])
+            : "";
+      if (tId && textDelta !== "") {
+        this.appendTurnText(sessionId, tId, itemId, textDelta, false);
+      }
+      return;
+    }
+    if (method === "item/started" || method === "item/updated" || method === "item/completed") {
+      const item = params["item"] as Record<string, unknown> | undefined;
+      if (!item) return;
+      const kind = typeof item["kind"] === "string" ? item["kind"] : "";
+      const itemId = typeof item["itemId"] === "string" ? item["itemId"] : "default";
+      const tId = (typeof item["turnId"] === "string" ? item["turnId"] : null) ?? (typeof params["turnId"] === "string" ? params["turnId"] : null);
+      if (tId && itemId !== "default" && kind) {
+        this.itemMeta.set(`${sessionId}:${itemId}`, { turnId: tId, kind });
+        if (this.itemMeta.size > 400) this.itemMeta.delete(this.itemMeta.keys().next().value as string);
+      }
+      if (kind === "agentMessage" && typeof item["text"] === "string" && item["text"].trim() !== "" && tId) {
+        this.appendTurnText(sessionId, tId, itemId, item["text"], true);
+      }
+      return;
+    }
     const turnId = typeof params["turnId"] === "string" ? params["turnId"] : null;
     if (!turnId) return;
     if (method !== "turn/started" && method !== "turn/completed") return;
@@ -867,11 +964,17 @@ export class Executive {
       return;
     }
     const terminal = typeof params["terminal"] === "string" ? params["terminal"] : "completed";
+    const turnSummary = attempt.sessionId && attempt.turnId ? this.takeTurnText(attempt.sessionId, attempt.turnId) : "";
     const step = this.tasks.step(attempt.stepId);
     if (!step) return;
     if (terminal === "completed") {
       this.tasks.finishAttempt(attempt.id, "succeeded", "The turn finished without an error.");
-      await this.afterSuccess(task, step);
+      let nextTask = task;
+      if (turnSummary) {
+        const merged = task.result ? `${task.result}\n\n${turnSummary}` : turnSummary;
+        nextTask = this.tasks.setStatus(task.id, task.status, task.reason, { result: merged });
+      }
+      await this.afterSuccess(nextTask, step, turnSummary || undefined);
       return;
     }
     const errorText = typeof (params["error"] as { message?: unknown } | undefined)?.message === "string" ? String((params["error"] as { message: string }).message) : `The turn ${terminal}.`;

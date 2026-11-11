@@ -69,14 +69,19 @@ function isNotLoaded(error: unknown): boolean {
 const DEFAULT_IDLE_MS = 90_000;
 const MAX_APPROVAL_WAIT_MS = 10 * 60_000;
 
+const BACKGROUND_TASK_TOOLS = new Set(["delegate_task", "propose_change", "browse", "use_connector"]);
+
 const RULES = [
   "This is a live voice call: everything you write in your spoken reply is read aloud.",
   "Answer first, in one to three short sentences, the way a person talks. No markdown, lists, headings, code blocks or emoji in spoken text.",
-  "Use your workspace tools and any [[tool_name {...}]] call tools whenever the user asks to check files or threads, inspect a project, launch localhost or a command or URL, or inspect a live page or animation.",
+  "You are a multi-tasking voice coordinator: multiple background tasks can run simultaneously while you continue listening and answering new questions. Answering a question or starting a new task never stops already-running tasks unless the user explicitly asks to pause or cancel one.",
+  "Use your workspace tools for quick read-only lookups and any [[tool_name {...}]] call tools whenever the user asks to check files or threads, inspect a project, launch localhost or a command or URL, inspect a live page or animation, or start background work.",
+  "Never edit files, run builds, or carry out multi-step coding work directly inside this voice thread — start a background task with [[propose_change {...}]], [[delegate_task {...}]], [[browse {...}]] or [[use_connector {...}]], and once a tool confirms the task is started or waiting for approval, reply briefly and end your turn immediately.",
   "Prefer the [[launch {...}]] and [[inspect_page {...}]] call tools when starting a local server or checking graphics and animations on localhost so Ancilla manages the process and measures FPS, Canvas scaling, CSS animations and console errors.",
 ].join(" ");
 
-const REMINDER = "(Voice call: speak naturally in one to three short sentences, no markdown; use workspace or [[tool {...}]] call tools whenever needed.)";
+const REMINDER =
+  "(Voice call: speak naturally in one to three short sentences with no markdown. Keep existing background tasks running unless asked to pause or cancel them. Delegate edits or multi-step work via [[propose_change {...}]] or [[delegate_task {...}]], use workspace tools only for quick read-only checks, and end your turn as soon as a background task is started.)";
 
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -167,6 +172,7 @@ export class MuseThreadBrain implements BrainProvider {
     if (fresh.length === 0) return null;
     const parts: string[] = [];
     let shown = "";
+    let startedBackgroundTask = false;
     for (const m of fresh) {
       if (m.role === "user") {
         parts.push(m.content);
@@ -174,7 +180,11 @@ export class MuseThreadBrain implements BrainProvider {
       } else if (m.role === "tool") {
         parts.push(`[Result of ${m.name}] ${m.content}`);
         shown = shown || `(${m.name} finished)`;
+        if (BACKGROUND_TASK_TOOLS.has(m.name)) startedBackgroundTask = true;
       }
+    }
+    if (startedBackgroundTask) {
+      parts.push("(The background task is now managed independently in its own session. Give a brief spoken confirmation in one or two plain sentences and finish this turn immediately — do not read or edit project files for that task in this voice thread.)");
     }
     let text = parts.join("\n\n");
     if (!this.told) {

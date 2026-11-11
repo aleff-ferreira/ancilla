@@ -17,6 +17,8 @@ import type {
   OutgoingAttachment,
   OutputRange,
   ProjectView,
+  ProviderAccountView,
+  ProviderId,
   ReasoningEffort,
   ResearchConfig,
   ResearchExportFormat,
@@ -58,6 +60,7 @@ import {
   modelsNeedSignIn,
   modelsShown,
   modelsStanding,
+  providerBadgeName,
   publishedStubs,
   trustedModel,
   type ModelsScope,
@@ -697,6 +700,10 @@ export class AncillaController {
   /** The scheduled next poll tick for an in-progress device-code login, if one is pending. */
   private loginPollHandle: unknown = null;
   private loginPollAttempts = 0;
+  private providersRev = 0;
+  private providerLoginRev = 0;
+  private providerLoginPollHandle: unknown = null;
+  private providerLoginPollAttempts = 0;
   private linuxSetupRev = 0;
   private linuxSetupPollHandle: unknown = null;
   private linuxDesktopRev = 0;
@@ -852,7 +859,7 @@ export class AncillaController {
     for (const dispose of this.disposers.splice(0)) {
       dispose();
     }
-    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.resyncHandle, this.loginPollHandle, this.linuxSetupPollHandle]) {
+    for (const handle of [this.flushHandle, this.refreshHandle, this.saveHandle, this.staleHandle, this.resyncHandle, this.loginPollHandle, this.providerLoginPollHandle, this.linuxSetupPollHandle]) {
       if (handle !== null) {
         this.platform.cancel(handle);
       }
@@ -860,6 +867,7 @@ export class AncillaController {
     this.staleHandle = null;
     this.resyncHandle = null;
     this.loginPollHandle = null;
+    this.providerLoginPollHandle = null;
     this.linuxSetupPollHandle = null;
     for (const handle of this.modelTimers) {
       this.platform.cancel(handle);
@@ -884,22 +892,42 @@ export class AncillaController {
         void this.refreshLinuxDesktop();
       }
       if (!env.museFound) {
-        this.update((s) => ({ ...s, boot: "ready" }));
-        return;
+        if (!this.client.listProviders) {
+          this.update((s) => ({ ...s, boot: "ready" }));
+          return;
+        }
+        await this.loadProviders(refreshEnv);
+        if (this.disposed || rev !== this.bootRev) return;
+        const hasAltProvider =
+          this.state.skipMuseOnboarding ||
+          (this.state.providers ?? []).some(
+            (p) => p.id !== "muse" && (p.id === "api" ? p.accounts.length > 0 : p.binary.available || p.accounts.length > 0),
+          );
+        if (!hasAltProvider) {
+          this.update((s) => ({ ...s, boot: "ready" }));
+          return;
+        }
       }
       await this.refresh();
       if (this.disposed || rev !== this.bootRev) return;
       this.update((s) => ({ ...s, boot: "ready" }));
       // Ahead of the route, so a composer that asks for its models on arrival meets the load already under way.
-      void this.bootModels();
+      if (env.museFound) {
+        void this.bootModels();
+      } else {
+        this.refreshModelsInUse(false);
+      }
       this.applyRoute(hashToRoute(this.platform.readHash()), false);
-      void this.discoverAll(true);
+      if (env.museFound) {
+        void this.discoverAll(true);
+      }
       void this.loadTitleSettings();
       void this.loadSandboxSettings();
       void this.loadYoloSettings();
       void this.loadResearchSettings();
       void this.loadPlanUsage();
       void this.loadAccounts();
+      void this.loadProviders();
       void this.loadAssistantGlance();
     } catch (error) {
       if (this.disposed || rev !== this.bootRev) return;
@@ -909,6 +937,23 @@ export class AncillaController {
 
   retryBoot(): void {
     void this.boot(true);
+  }
+
+  /** Leaves the Muse onboarding screen to configure another AI subscription CLI or Direct API endpoint in Settings. */
+  async openProvidersWithoutMuse(): Promise<void> {
+    this.update((s) => ({ ...s, skipMuseOnboarding: true }));
+    await this.refresh().catch(() => undefined);
+    if (this.disposed) return;
+    this.update((s) => ({ ...s, boot: "ready" }));
+    void this.loadProviders();
+    void this.loadTitleSettings();
+    void this.loadSandboxSettings();
+    void this.loadYoloSettings();
+    void this.loadResearchSettings();
+    void this.loadPlanUsage();
+    void this.loadAccounts();
+    void this.loadAssistantGlance();
+    this.navigate({ kind: "settings" });
   }
 
   // ---------------------------------------------------------------- Linux setup
@@ -1166,10 +1211,17 @@ export class AncillaController {
   modelsScope(): ModelsScope {
     const route = this.state.route;
     if (route.kind === "thread") {
-      return { sessionId: route.sessionId };
+      const sessionProvider = this.state.sessions[route.sessionId]?.providerId;
+      return sessionProvider && sessionProvider !== "muse"
+        ? { sessionId: route.sessionId, providerId: sessionProvider }
+        : { sessionId: route.sessionId };
     }
     if (route.kind === "new" || route.kind === "home") {
-      return { accountId: projectForCwd(this.state.projects, this.composerCwd())?.defaultAccountId ?? null };
+      const proj = projectForCwd(this.state.projects, this.composerCwd());
+      const providerId = proj?.defaultProviderId;
+      return providerId && providerId !== "muse"
+        ? { providerId, accountId: proj?.defaultAccountId ?? null }
+        : { accountId: proj?.defaultAccountId ?? null };
     }
     return {};
   }
@@ -1185,20 +1237,25 @@ export class AncillaController {
    * lands over a newer one. A named account with no login yet is never asked: its menu offers to sign in instead.
    */
   refreshModels(options: ModelsRefresh = {}): Promise<void> {
-    const scope: ModelsScope = { accountId: options.accountId ?? null, sessionId: options.sessionId ?? null };
+    const scope: ModelsScope = {
+      ...(options.providerId ? { providerId: options.providerId } : {}),
+      accountId: options.accountId ?? null,
+      sessionId: options.sessionId ?? null,
+    };
     const watching = options.watch === true;
     return this.loadModelsFor(scope, options.force === true || watching, watching ? this.startModelsWatch(scope) : null, options.navigation === true);
   }
 
   private loadModelsFor(scope: ModelsScope, force: boolean, watch: ModelsWatch | null, navigation = false): Promise<void> {
     const key = modelsKey(scope);
+    const isMuse = !scope.providerId || scope.providerId === "muse";
     const account = this.modelsAccount(scope);
-    if (modelsNeedSignIn(this.state.accounts, account)) {
+    if (isMuse && modelsNeedSignIn(this.state.accounts, account)) {
       return Promise.resolve();
     }
     // Until the accounts have been read, whether a named account has a login is not known, and asking one that has
     // none would start a Muse host for nothing: reading the accounts asks for the lists in use when it ends.
-    if (account !== null && this.state.accounts === null && !this.accountsSettled) {
+    if (isMuse && account !== null && this.state.accounts === null && !this.accountsSettled) {
       return Promise.resolve();
     }
     if (!force) {
@@ -1233,7 +1290,11 @@ export class AncillaController {
         // A thread its host has not loaded cannot flag an active row, but its account's catalog still lists the models.
         const kind = errorKind(error);
         if (scope.sessionId && (kind === "sessionNotLoaded" || kind === "sessionNotFound" || kind === "sessionStreamMismatch")) {
-          return this.fetchModelCatalog({ accountId: this.modelsAccount(scope) });
+          const sessionProvider = scope.providerId ?? this.state.sessions[scope.sessionId]?.providerId;
+          return this.fetchModelCatalog({
+            ...(sessionProvider && sessionProvider !== "muse" ? { providerId: sessionProvider } : {}),
+            accountId: this.modelsAccount(scope),
+          });
         }
         throw error;
       });
@@ -1257,13 +1318,18 @@ export class AncillaController {
   private fetchModelCatalog(scope: ModelsScope): Promise<ModelCatalog> {
     const sessionId = scope.sessionId ?? undefined;
     const accountId = scope.accountId ?? undefined;
+    const providerId = scope.providerId && scope.providerId !== "muse" ? scope.providerId : undefined;
     if (this.client.listModelCatalog) {
-      return this.client.listModelCatalog(sessionId, accountId);
+      return providerId !== undefined
+        ? this.client.listModelCatalog(sessionId, accountId, providerId)
+        : this.client.listModelCatalog(sessionId, accountId);
     }
     // A transport that cannot say where its list came from gives the rows alone.
-    return this.client
-      .listModels(sessionId, accountId)
-      .then((models) => ({ models, source: null, providerId: null, profileId: null, hostVersion: null }));
+    return (
+      providerId !== undefined
+        ? this.client.listModels(sessionId, accountId, providerId)
+        : this.client.listModels(sessionId, accountId)
+    ).then((models) => ({ models, source: null, providerId: providerId ?? null, profileId: null, hostVersion: null }));
   }
 
   /** Files a scope's list and/or load status. The union every lookup reads is rebuilt when a list lands. */
@@ -1378,7 +1444,9 @@ export class AncillaController {
    */
   private refreshModelsInUse(navigation = true): void {
     const scope = this.modelsScope();
-    void this.refreshModels({ navigation });
+    if (this.state.env?.museFound !== false) {
+      void this.refreshModels({ navigation });
+    }
     if (modelsKey(scope) === "default") {
       return;
     }
@@ -1716,6 +1784,9 @@ export class AncillaController {
       }
       if (this.state.accounts === null) {
         void this.loadAccounts();
+      }
+      if (this.state.providers === null) {
+        void this.loadProviders();
       }
     }
   }
@@ -2091,6 +2162,52 @@ export class AncillaController {
       case "plan-usage":
         this.takePlanUsage(event.usage, event.accountId, true);
         break;
+      case "provider-usage":
+        this.update((s) => {
+          const idx = s.providerQuotas.findIndex(
+            (q) => q.providerId === event.providerId && q.accountId === event.accountId,
+          );
+          if (idx < 0) {
+            return s;
+          }
+          const next = [...s.providerQuotas];
+          const cur = next[idx]!;
+          next[idx] = {
+            ...cur,
+            usage: event.usage,
+          };
+          return { ...s, providerQuotas: next };
+        });
+        break;
+      case "login-completed": {
+        const activeScope = this.modelsScope();
+        if (event.providerId === "muse") {
+          void this.loadAccounts().then(() => {
+            void this.refreshModels({ accountId: event.accountId, force: true, watch: true });
+            if (
+              activeScope.sessionId &&
+              (!activeScope.providerId || activeScope.providerId === "muse") &&
+              this.modelsAccount(activeScope) === event.accountId
+            ) {
+              void this.refreshModels({ ...activeScope, force: true, watch: true });
+            }
+          });
+          void this.loadPlanUsage({ background: true });
+        } else {
+          void this.loadProviders(true).then(() => {
+            void this.refreshModels({ providerId: event.providerId, accountId: event.accountId, force: true, watch: true });
+            if (
+              activeScope.sessionId &&
+              activeScope.providerId === event.providerId &&
+              this.modelsAccount(activeScope) === event.accountId
+            ) {
+              void this.refreshModels({ ...activeScope, force: true, watch: true });
+            }
+          });
+          void this.loadPlanUsage({ background: true });
+        }
+        break;
+      }
       case "session-status": {
         const known = this.state.sessions[event.sessionId];
         if (!known) {
@@ -2211,6 +2328,11 @@ export class AncillaController {
   /** Where the Browser panel's socket is; null where this client has no browser. */
   browserSocketUrl(): string | null {
     return this.client.browserSocketUrl ? this.client.browserSocketUrl() : null;
+  }
+
+  /** Completes any auth-cookie handshake needed before opening a browser WebSocket. */
+  prepareBrowserSocket(): Promise<void> | void {
+    return this.client.prepareBrowserSocket?.();
   }
 
   voiceSocketUrl(): string | null {
@@ -2634,16 +2756,23 @@ export class AncillaController {
       const approvalMode: ApprovalMode = this.state.yoloSettings?.enabled === true ? "allowAll" : defaultMode;
       // The account is the project's, whichever of its folders the thread starts in.
       const project = projectForCwd(this.state.projects, cwd);
+      const providerId = project?.defaultProviderId ?? "muse";
       const accountId = project?.defaultAccountId ?? null;
-      const modelId = this.startModel(defaultModelId, accountId);
+      const isMuse = providerId === "muse";
+      const nonMuseList = isMuse ? [] : (this.state.accountModels[modelsKey({ providerId, accountId })] ?? []);
+      const nonMuseTried = !isMuse && defaultModelId !== null && this.state.prefs.defaultModelTried && !/^muse-/i.test(defaultModelId);
+      const modelId = isMuse
+        ? this.startModel(defaultModelId, accountId)
+        : (defaultModelId && (nonMuseList.some((m) => m.modelId === defaultModelId) || nonMuseTried) ? defaultModelId : null);
       const session = await this.client.startSession(cwd, {
         approvalMode,
         modelId: modelId ?? undefined,
         accountId,
+        ...(isMuse ? {} : { providerId }),
       });
       // No model was asked for by name, so the one Muse started on is Muse's own pick: a Contributor model is said once,
       // whatever the list names as its default (a built-in list names none).
-      if (modelId === null) {
+      if (isMuse && modelId === null) {
         this.noteStartedContributor(session.modelId, accountId);
       }
       const base = emptyFold();
@@ -3318,7 +3447,13 @@ export class AncillaController {
    */
   private modelsOwner(scope: ModelsScope): string | null {
     const accountId = this.modelsAccount(scope);
-    return accountId === null ? null : (this.state.accounts?.find((account) => account.id === accountId)?.name ?? accountId);
+    if (accountId === null) {
+      return null;
+    }
+    if (scope.providerId && scope.providerId !== "muse") {
+      return this.state.providerAccounts.find((account) => account.id === accountId)?.name ?? accountId;
+    }
+    return this.state.accounts?.find((account) => account.id === accountId)?.name ?? accountId;
   }
 
   /** The notice every Contributor model carries, once a switch to one has taken: a refused switch leaves it unsaid and unspent. */
@@ -3338,10 +3473,16 @@ export class AncillaController {
    * did not load (`standIn`) has not confirmed it, and what the new model does with the effort.
    */
   private settleModel(id: string, unlisted: boolean, standIn: string | null): void {
+    const scope = this.modelsScope();
+    const providerLabel = scope.providerId && scope.providerId !== "muse" ? providerBadgeName(scope.providerId) : "Muse";
     if (standIn !== null) {
       this.toast("info", MODEL_COPY.unconfirmed(id, standIn), MODEL_COPY.unconfirmedDetail);
     } else if (unlisted) {
-      this.toast("info", `Using ${id}, which your Muse did not list`, "Muse checks access when you send a prompt.");
+      this.toast(
+        "info",
+        providerLabel === "Muse" ? `Using ${id}, which your Muse did not list` : `Using ${id}, which ${providerLabel} did not list`,
+        `${providerLabel} checks access when you send a prompt.`,
+      );
     }
     // A new model starts the effort notes over: the level wished for may be one it does not have.
     for (const note of this.modelNotes) {
@@ -3490,7 +3631,7 @@ export class AncillaController {
       found = findModel(shown(), name, modelDisplayName);
       matches = modelMatches(shown(), name, modelDisplayName);
     }
-    if (!found && matches.length === 0 && modelsStanding(this.state, scope).limited) {
+    if (!found && matches.length === 0 && (!scope.providerId || scope.providerId === "muse") && modelsStanding(this.state, scope).limited) {
       // The built-in list names few models; what Meta publishes stands in for the rest, ranked the same way.
       const pool = [...shown(), ...publishedStubs(shown())];
       found = findModel(pool, name, modelDisplayName);
@@ -3822,6 +3963,7 @@ export class AncillaController {
         planUsageAccounts: mergePlanAccounts(s.planUsageAccounts, recordsBefore, report.accounts ?? legacyPlanAccounts({
           ...report, usage: s.planUsage, accountId: s.planUsageAccountId, byAccount: s.planUsageByAccount,
         }, recordsBefore)),
+        providerQuotas: report.providerQuotas ?? s.providerQuotas,
       }));
     } catch {
       this.update((s) => ({ ...s,
@@ -3961,11 +4103,22 @@ export class AncillaController {
     }));
   }
 
-  async setProjectDefaultAccount(cwd: string, accountId: string | null): Promise<void> {
+  async setProjectDefaultAccount(cwd: string, accountId: string | null, providerId?: ProviderId): Promise<void> {
     const previous = this.state.projects;
     const rev = ++this.projectDefaultRev;
-    this.update((s) => ({ ...s, projects: s.projects.map((p) => (p.cwd === cwd ? { ...p, defaultAccountId: accountId } : p)) }));
-    const run = this.accountsChain.then(() => this.client.setProjectDefaultAccount(cwd, accountId));
+    this.update((s) => ({
+      ...s,
+      projects: s.projects.map((p) =>
+        p.cwd === cwd
+          ? { ...p, defaultAccountId: accountId, ...(providerId !== undefined ? { defaultProviderId: providerId } : {}) }
+          : p,
+      ),
+    }));
+    const run = this.accountsChain.then(() =>
+      providerId !== undefined
+        ? this.client.setProjectDefaultAccount(cwd, accountId, providerId)
+        : this.client.setProjectDefaultAccount(cwd, accountId),
+    );
     this.accountsChain = run.then(
       () => undefined,
       () => undefined,
@@ -3973,8 +4126,12 @@ export class AncillaController {
     try {
       await run;
       if (rev === this.projectDefaultRev) {
-        // New threads in the project run on this account, so its catalog is the one the new-thread picker lists.
-        void this.refreshModels({ accountId });
+        // New threads in the project run on this account/provider, so its catalog is the one the new-thread picker lists.
+        const effectiveProvider = providerId ?? projectForCwd(this.state.projects, cwd)?.defaultProviderId;
+        void this.refreshModels({
+          accountId,
+          ...(effectiveProvider && effectiveProvider !== "muse" ? { providerId: effectiveProvider } : {}),
+        });
       }
     } catch (error) {
       if (rev === this.projectDefaultRev) {
@@ -4086,7 +4243,13 @@ export class AncillaController {
       });
       // The sign-in is what lets the account's models be asked for, so its record is read first. Muse can answer
       // with only its built-in list for a moment after a login: the watch asks again until the plan's own arrives.
-      void this.loadAccounts().then(() => this.refreshModels({ accountId: id, watch: true }));
+      void this.loadAccounts().then(() => {
+        void this.refreshModels({ accountId: id, force: true, watch: true });
+        const activeScope = this.modelsScope();
+        if (activeScope.sessionId && (!activeScope.providerId || activeScope.providerId === "muse") && this.modelsAccount(activeScope) === id) {
+          void this.refreshModels({ ...activeScope, force: true, watch: true });
+        }
+      });
       void this.loadPlanUsage();
       return;
     }
@@ -4114,6 +4277,252 @@ export class AncillaController {
       this.loginPollHandle = null;
     }
     this.loginPollAttempts = 0;
+  }
+
+  // ---------------------------------------------------------------- multi-provider subscriptions & API endpoints
+
+  async loadProviders(refresh = false): Promise<void> {
+    if (!this.client.listProviders) {
+      return;
+    }
+    const rev = ++this.providersRev;
+    try {
+      const catalog = await this.client.listProviders(refresh);
+      if (this.disposed || rev !== this.providersRev) {
+        return;
+      }
+      this.update((s) => ({
+        ...s,
+        providers: catalog.providers,
+        providerAccounts: catalog.accounts,
+        ambientKeyOverrides: catalog.ambientKeyOverrides ?? {},
+        remoteDeployment: catalog.remoteDeployment === true,
+        sourceOfferUrl: catalog.sourceOfferUrl ?? null,
+      }));
+      this.refreshModelsInUse();
+    } catch {
+      /* older servers without /api/providers leave providers null */
+    }
+  }
+
+  async saveProviderAccount(id: string | null, input: Record<string, unknown>): Promise<ProviderAccountView | null> {
+    const fn = id === null ? this.client.createProviderAccount : this.client.updateProviderAccount;
+    if (!fn) {
+      return null;
+    }
+    const key = `provider-account:${id ?? "new"}`;
+    if (this.state.busy[key]) {
+      return null;
+    }
+    this.setBusy(key, true);
+    try {
+      const saved = id === null
+        ? await this.client.createProviderAccount!(input)
+        : await this.client.updateProviderAccount!(id, input);
+      await Promise.all([this.loadProviders(true), this.loadPlanUsage({ background: true })]);
+      void this.refreshModels({ providerId: saved.providerId, accountId: saved.id, force: true });
+      this.toast("success", id === null ? `Added ${saved.name}` : `Saved ${saved.name}`);
+      return saved;
+    } catch (error) {
+      this.toast("error", id === null ? "Could not add provider profile" : "Could not update provider profile", errorMessage(error));
+      return null;
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  async removeProviderAccount(id: string): Promise<boolean> {
+    if (!this.client.deleteProviderAccount) {
+      return false;
+    }
+    const key = `provider-account:delete:${id}`;
+    if (this.state.busy[key]) {
+      return false;
+    }
+    const existing = this.state.providerAccounts.find((a) => a.id === id);
+    this.setBusy(key, true);
+    try {
+      await this.client.deleteProviderAccount(id);
+      if (existing) {
+        this.forgetModelsScopes([modelsKey({ providerId: existing.providerId, accountId: id })]);
+      }
+      await Promise.all([this.loadProviders(true), this.refresh(), this.loadPlanUsage({ background: true })]);
+      this.toast("info", existing ? `Removed ${existing.name}` : "Removed provider profile");
+      return true;
+    } catch (error) {
+      this.toast("error", "Could not remove provider profile", errorMessage(error));
+      return false;
+    } finally {
+      this.setBusy(key, false);
+    }
+  }
+
+  async beginProviderLogin(providerId: ProviderId, accountId: string | null = null): Promise<void> {
+    if (!this.client.loginProvider) {
+      return;
+    }
+    this.cancelProviderLogin();
+    const rev = ++this.providerLoginRev;
+    this.update((s) => ({
+      ...s,
+      providerLogin: { providerId, accountId, status: "starting", url: null, code: null },
+    }));
+    try {
+      const res = await this.client.loginProvider(providerId, accountId);
+      if (rev !== this.providerLoginRev) {
+        if (res.loginId) {
+          void this.client.cancelProviderLogin?.(providerId, res.loginId, accountId).catch(() => undefined);
+        }
+        return;
+      }
+      this.update((s) => ({
+        ...s,
+        providerLogin: {
+          providerId,
+          accountId,
+          status: res.status,
+          url: res.url,
+          code: res.code,
+          ...(res.loginId ? { loginId: res.loginId } : {}),
+          ...(res.terminalCommand ? { terminalCommand: res.terminalCommand } : {}),
+          ...(res.message ? { message: res.message } : {}),
+        },
+      }));
+      if (res.status === "done") {
+        await Promise.all([this.loadProviders(true), this.loadPlanUsage({ background: true })]);
+        void this.refreshModels({ providerId, accountId, force: true, watch: true });
+        return;
+      }
+      if (res.status === "waiting" && res.loginId) {
+        this.providerLoginPollAttempts = 0;
+        this.scheduleProviderLoginPoll(res.loginId, rev);
+      }
+    } catch (error) {
+      if (rev !== this.providerLoginRev) {
+        return;
+      }
+      this.update((s) => ({
+        ...s,
+        providerLogin: {
+          providerId,
+          accountId,
+          status: "error",
+          url: null,
+          code: null,
+          message: errorMessage(error),
+        },
+      }));
+    }
+  }
+
+  cancelProviderLogin(): void {
+    const current = this.state.providerLogin;
+    this.providerLoginRev += 1;
+    this.stopProviderLoginPoll();
+    this.update((s) => ({ ...s, providerLogin: null }));
+    if (current?.loginId && current.status === "waiting") {
+      void this.client.cancelProviderLogin?.(current.providerId, current.loginId, current.accountId).catch(() => undefined);
+    }
+  }
+
+  async checkProviderLogin(): Promise<void> {
+    const login = this.state.providerLogin;
+    if (!login) {
+      return;
+    }
+    if (login.loginId && this.client.providerLoginProgress) {
+      this.stopProviderLoginPoll();
+      const rev = ++this.providerLoginRev;
+      await this.pollProviderLogin(login.loginId, rev);
+      return;
+    }
+    await this.loadProviders(true);
+    const provider = this.state.providers?.find((p) => p.id === login.providerId);
+    const authed = login.accountId
+      ? provider?.accounts.some((a) => "providerId" in a && a.id === login.accountId && a.auth?.state === "authenticated")
+      : provider?.defaultAuth?.state === "authenticated";
+    if (authed) {
+      this.update((s) => (s.providerLogin ? { ...s, providerLogin: { ...s.providerLogin, status: "done" } } : s));
+      void this.loadPlanUsage({ background: true });
+      void this.refreshModels({ providerId: login.providerId, accountId: login.accountId, force: true, watch: true });
+    }
+  }
+
+  private scheduleProviderLoginPoll(loginId: string, rev: number): void {
+    if (this.disposed || rev !== this.providerLoginRev) {
+      return;
+    }
+    this.providerLoginPollHandle = this.platform.schedule(() => {
+      this.providerLoginPollHandle = null;
+      void this.pollProviderLogin(loginId, rev);
+    }, LOGIN_POLL_MS);
+  }
+
+  private async pollProviderLogin(loginId: string, rev: number): Promise<void> {
+    const current = this.state.providerLogin;
+    if (rev !== this.providerLoginRev || !current || current.loginId !== loginId || current.status !== "waiting") {
+      return;
+    }
+    this.providerLoginPollAttempts += 1;
+    if (!this.client.providerLoginProgress) {
+      return;
+    }
+    try {
+      const res = await this.client.providerLoginProgress(current.providerId, loginId, current.accountId);
+      if (rev !== this.providerLoginRev || !this.state.providerLogin || this.state.providerLogin.loginId !== loginId) {
+        return;
+      }
+      if (res.status === "done") {
+        this.update((s) =>
+          s.providerLogin ? { ...s, providerLogin: { ...s.providerLogin, status: "done" } } : s,
+        );
+        await Promise.all([this.loadProviders(true), this.loadPlanUsage({ background: true })]);
+        void this.refreshModels({ providerId: current.providerId, accountId: current.accountId, force: true, watch: true });
+        return;
+      }
+      if (res.status === "error" || res.status === "idle") {
+        this.update((s) =>
+          s.providerLogin
+            ? {
+                ...s,
+                providerLogin: {
+                  ...s.providerLogin,
+                  status: "error",
+                  message: res.message ?? "Sign-in is no longer active.",
+                },
+              }
+            : s,
+        );
+        return;
+      }
+      this.update((s) =>
+        s.providerLogin
+          ? {
+              ...s,
+              providerLogin: {
+                ...s.providerLogin,
+                url: res.url ?? s.providerLogin.url,
+                code: res.code ?? s.providerLogin.code,
+              },
+            }
+          : s,
+      );
+      if (this.providerLoginPollAttempts < LOGIN_POLL_MAX_ATTEMPTS) {
+        this.scheduleProviderLoginPoll(loginId, rev);
+      }
+    } catch {
+      if (this.providerLoginPollAttempts < LOGIN_POLL_MAX_ATTEMPTS) {
+        this.scheduleProviderLoginPoll(loginId, rev);
+      }
+    }
+  }
+
+  private stopProviderLoginPoll(): void {
+    if (this.providerLoginPollHandle !== null) {
+      this.platform.cancel(this.providerLoginPollHandle);
+      this.providerLoginPollHandle = null;
+    }
+    this.providerLoginPollAttempts = 0;
   }
 
   // ---------------------------------------------------------------- threads and projects

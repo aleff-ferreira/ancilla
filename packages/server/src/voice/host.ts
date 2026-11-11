@@ -45,6 +45,8 @@ export interface HostEvent {
   kind: "task" | "notice";
   title: string;
   status: string;
+  /** Short human-readable progress or outcome note for the call card, or null. */
+  note?: string | null;
   /** Something worth saying aloud when there is a lull, or null to show it without speaking. */
   say: string | null;
   needsUser: boolean;
@@ -62,6 +64,8 @@ export interface VoiceHost {
   runTool(call: ToolCall, context: { turn: number; signal: AbortSignal }): Promise<ToolResult>;
   /** Hears what happens in the background until the returned function is called. */
   subscribe(handler: (event: HostEvent) => void): () => void;
+  /** Snapshot of active background tasks already running or waiting when a call opens, shown on the call card without speaking. */
+  activeTasks?(): HostEvent[];
   /** The earlier turns of a thread, to go on from; empty when there are none. */
   history(thread: string | null): ChatMessage[];
   /**

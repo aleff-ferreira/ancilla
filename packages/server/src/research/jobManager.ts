@@ -82,6 +82,7 @@ export interface ResearchThread {
   cwd: string;
   accountId: string | null;
   modelId: string | null;
+  providerId?: string;
 }
 
 /**

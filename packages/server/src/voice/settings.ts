@@ -20,6 +20,8 @@ export type BrainSetting =
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   /** Any server that speaks the Messages API (`/v1/messages`): Anthropic, or a compatible server. */
   | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
+  /** Google Gemini / Generative Language API (`/v1beta/models/...:streamGenerateContent`). */
+  | { kind: "google"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   /** No model: the call can be opened to be set up, and says so. */
   | { kind: "none" };
 
@@ -109,9 +111,14 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
   if (!isObject(value)) throw new ValidationError("brain", "brain must be an object");
   if (value["kind"] === "muse") return { kind: "muse", model: "model" in value ? museModel(value["model"]) : current?.kind === "muse" ? current.model : null };
   if (value["kind"] === "none") return { kind: "none" };
-  if (value["kind"] === "openai" || value["kind"] === "anthropic") {
+  if (value["kind"] === "openai" || value["kind"] === "anthropic" || value["kind"] === "google") {
     const kind = value["kind"];
-    const rawBase = value["baseUrl"] === undefined && kind === "anthropic" ? "https://api.anthropic.com/v1" : value["baseUrl"];
+    const rawBase =
+      value["baseUrl"] === undefined && kind === "anthropic"
+        ? "https://api.anthropic.com/v1"
+        : value["baseUrl"] === undefined && kind === "google"
+          ? "https://generativelanguage.googleapis.com/v1beta"
+          : value["baseUrl"];
     const baseUrl = text(rawBase, "brain.baseUrl", 300).trim();
     if (!/^https?:\/\/[^\s]+$/i.test(baseUrl)) throw new ValidationError("brain.baseUrl", "brain.baseUrl must be an http or https address");
     const model = text(value["model"], "brain.model", 200).trim();
@@ -120,7 +127,7 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
     if (apiKeyEnv !== null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) throw new ValidationError("brain.apiKeyEnv", "brain.apiKeyEnv must be the name of an environment variable");
     return { kind, baseUrl, model, local: value["local"] === true, label: optionalText(value["label"], "brain.label", 80), apiKeyEnv };
   }
-  throw new ValidationError("brain.kind", "brain.kind must be muse, openai, anthropic or none");
+  throw new ValidationError("brain.kind", "brain.kind must be muse, openai, anthropic, google or none");
 }
 
 function parseSpeech(value: unknown): SpeechSetting {
@@ -223,6 +230,7 @@ export class VoiceSettingsStore {
   private keyOf(brain: BrainSetting): string | null {
     if (brain.kind === "openai") return `${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}`;
     if (brain.kind === "anthropic") return `anthropic:${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}`;
+    if (brain.kind === "google") return `google:${brain.baseUrl.replace(/\/+$/, "")}|${brain.model}`;
     return null;
   }
 
@@ -232,7 +240,7 @@ export class VoiceSettingsStore {
 
   /** The key for the model in use: the one saved, or the one in the environment variable the settings name. */
   keyFor(brain: BrainSetting): string | null {
-    if (brain.kind !== "openai" && brain.kind !== "anthropic") return null;
+    if (brain.kind !== "openai" && brain.kind !== "anthropic" && brain.kind !== "google") return null;
     const saved = this.secrets[this.keyOf(brain) as string];
     if (saved) return saved;
     if (brain.apiKeyEnv) {

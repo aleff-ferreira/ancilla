@@ -219,6 +219,7 @@ export function AssistantBar() {
       new AssistantWatch({
         url: () => watchUrl(controller.browserSocketUrl()),
         open: (url) => new WebSocket(url) as unknown as SocketLike,
+        prepare: () => controller.prepareBrowserSocket(),
         onChange: setWatch,
         onFrame: (frame, done) => {
           done();

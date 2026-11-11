@@ -1,7 +1,49 @@
 import { DatabaseSync } from "node:sqlite";
 import { parseSubscriptionUsage, type SubscriptionUsage } from "./sessions.js";
+import {
+  normalizeProviderId,
+  type ProviderId,
+  type SessionJournal,
+  type StoredJournalEvent,
+} from "./providers/types.js";
 import { DEFAULT_RESEARCH_SETTINGS, resolveResearchConfig, type ResearchConfig, type ResearchSettings } from "./research/config.js";
 import type { ResearchEvent, ResearchRunState, ResearchStatus, WorkerStatus } from "./research/types.js";
+
+export type ApiProviderKind = "openai" | "anthropic" | "google";
+
+export interface ProviderAccountRecord {
+  id: string;
+  providerId: ProviderId;
+  name: string;
+  runtimeOverride: string | null;
+  binaryPath: string | null;
+  customArgs: string[];
+  apiKind: ApiProviderKind | null;
+  apiBaseUrl: string | null;
+  secretKeyId: string | null;
+  stripAmbientKeys: boolean;
+  defaultModelId: string | null;
+  customModels: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface UpsertProviderAccountInput {
+  id: string;
+  providerId: ProviderId;
+  name: string;
+  runtimeOverride?: string | null;
+  binaryPath?: string | null;
+  customArgs?: string[];
+  apiKind?: ApiProviderKind | null;
+  apiBaseUrl?: string | null;
+  secretKeyId?: string | null;
+  stripAmbientKeys?: boolean;
+  defaultModelId?: string | null;
+  customModels?: string[];
+  createdAt?: string;
+  lastUsedAt?: string | null;
+}
 
 export interface Project {
   id: number;
@@ -13,7 +55,9 @@ export interface Project {
   updatedAt: string;
   /** Latest activity across the project's visible sessions, or its creation time. */
   activityAt: string;
-  /** The aonia profile new threads in this project default to; null for the default login. */
+  /** Which agent provider new threads in this project default to (`muse` when unset). */
+  defaultProviderId: ProviderId;
+  /** The profile new threads in this project default to; null for the default login. */
   defaultAccountId: string | null;
   /** Every folder the project groups: its own cwd first, then the folders added to it. */
   folders: ProjectFolder[];
@@ -61,7 +105,9 @@ export interface SessionRecord {
   unsettledAt: string | null;
   /** Sandbox posture at creation: null for sessions recorded before tracking. */
   sandboxDisabled: boolean | null;
-  /** The aonia profile a session was created under; null for the default login. Set once, never changed. */
+  /** Which agent provider owns this session (`muse`, `codex`, `claude`, `gemini`, `copilot`, `api`, ...). */
+  providerId: ProviderId;
+  /** The profile a session was created under; null for the provider's default login. Set once, never changed. */
   accountId: string | null;
 }
 
@@ -89,6 +135,8 @@ export interface RecordSessionInput {
   activityAt?: string;
   /** Creation posture; later touches never overwrite it. */
   sandboxDisabled?: boolean | null;
+  /** Creation provider; defaults to `muse` and later touches never overwrite it. */
+  providerId?: ProviderId;
   /** Creation account; later touches never overwrite it. */
   accountId?: string | null;
 }
@@ -238,6 +286,30 @@ CREATE TABLE IF NOT EXISTS research_events (
 CREATE TABLE IF NOT EXISTS research_workers (
   run_id TEXT NOT NULL REFERENCES research_runs(id), worker_session_id TEXT NOT NULL,
   round INTEGER NOT NULL, agent_id INTEGER NOT NULL, status TEXT NOT NULL, PRIMARY KEY (run_id, worker_session_id));
+CREATE TABLE IF NOT EXISTS provider_accounts (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  runtime_override TEXT,
+  binary_path TEXT,
+  custom_args_json TEXT,
+  api_kind TEXT,
+  api_base_url TEXT,
+  secret_key_id TEXT,
+  strip_ambient_keys INTEGER NOT NULL DEFAULT 1,
+  default_model_id TEXT,
+  custom_models_json TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE TABLE IF NOT EXISTS session_events (
+  session_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  method TEXT NOT NULL,
+  params TEXT NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (session_id, seq)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_shell_runs_session ON shell_runs(session_id, at);
 CREATE INDEX IF NOT EXISTS idx_usage_at ON usage(at);
@@ -247,6 +319,8 @@ CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id, turn_id);
 CREATE INDEX IF NOT EXISTS idx_research_runs_session ON research_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_research_events_run ON research_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_provider_accounts_provider ON provider_accounts(provider_id);
+CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, seq);
 `;
 
 /** Columns added after the first release; applied in place so existing databases keep their data. */
@@ -276,6 +350,10 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "research_runs", column: "report_path", ddl: "ALTER TABLE research_runs ADD COLUMN report_path TEXT" },
   // NULL for calls stored before dates were tracked; `live` and `replay` say where a row's `at` came from.
   { table: "usage", column: "at_source", ddl: "ALTER TABLE usage ADD COLUMN at_source TEXT" },
+  // Provider IDs default to `muse` so existing single-provider databases upgrade in place.
+  { table: "sessions", column: "provider_id", ddl: "ALTER TABLE sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'muse'" },
+  { table: "projects", column: "default_provider_id", ddl: "ALTER TABLE projects ADD COLUMN default_provider_id TEXT NOT NULL DEFAULT 'muse'" },
+  { table: "usage", column: "provider_id", ddl: "ALTER TABLE usage ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'muse'" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -333,6 +411,7 @@ export interface UsageCall {
   sessionId: string;
   turnId: string | null;
   modelId: string | null;
+  providerId?: ProviderId;
   promptTokens: number;
   outputTokens: number;
   inputTokens: number;
@@ -346,7 +425,8 @@ export interface UsageCall {
   atSource?: UsageAtSource;
 }
 
-export interface UsageRow extends Omit<UsageCall, "atSource"> {
+export interface UsageRow extends Omit<UsageCall, "atSource" | "providerId"> {
+  providerId: ProviderId;
   /** `live` or `replay` as stored; null for rows from before sources were tracked. */
   atSource: "live" | "replay" | null;
   sessionTitle: string | null;
@@ -354,7 +434,7 @@ export interface UsageRow extends Omit<UsageCall, "atSource"> {
   /** Who made the thread: `research-worker` for a DeepResearch session. Null when the session row is gone. */
   origin: string | null;
   archived: boolean;
-  /** The aonia profile the thread runs under; null for the default login. */
+  /** The profile the thread runs under; null for the provider's default login. */
   accountId: string | null;
 }
 
@@ -1112,9 +1192,9 @@ export class AncillaStore {
     }
     this.db
       .prepare(
-        `INSERT INTO usage (key, session_id, turn_id, model_id, prompt_tokens, output_tokens, input_tokens,
+        `INSERT INTO usage (key, session_id, turn_id, model_id, provider_id, prompt_tokens, output_tokens, input_tokens,
            cached_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, duration_ms, at, at_source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(key) DO NOTHING`,
       )
       .run(
@@ -1122,6 +1202,7 @@ export class AncillaStore {
         call.sessionId,
         call.turnId ?? null,
         call.modelId ?? null,
+        normalizeProviderId(call.providerId ?? this.getSession(call.sessionId)?.providerId),
         call.promptTokens,
         call.outputTokens,
         call.inputTokens,
@@ -1208,7 +1289,7 @@ export class AncillaStore {
     const rows = this.db
       .prepare(
         `SELECT u.*, s.title AS session_title, s.origin AS session_origin, s.archived AS session_archived,
-           s.account_id AS session_account_id, COALESCE(owner.cwd, p.cwd) AS project_cwd
+           s.provider_id AS session_provider_id, s.account_id AS session_account_id, COALESCE(owner.cwd, p.cwd) AS project_cwd
          FROM usage u
          LEFT JOIN sessions s ON s.id = u.session_id
          LEFT JOIN projects p ON p.id = s.project_id
@@ -1222,6 +1303,7 @@ export class AncillaStore {
       sessionId: String(row["session_id"]),
       turnId: row["turn_id"] === null ? null : String(row["turn_id"]),
       modelId: row["model_id"] === null ? null : String(row["model_id"]),
+      providerId: normalizeProviderId(row["session_provider_id"] ?? row["provider_id"]),
       promptTokens: Number(row["prompt_tokens"] ?? 0),
       outputTokens: Number(row["output_tokens"] ?? 0),
       inputTokens: Number(row["input_tokens"] ?? 0),
@@ -1271,9 +1353,161 @@ export class AncillaStore {
       .run(accountId, nowIso(), cwd);
   }
 
+  /** Which provider (and optionally profile) new threads here default to. */
+  setDefaultProvider(cwd: string, providerId: ProviderId, accountId?: string | null): void {
+    const normalized = normalizeProviderId(providerId);
+    if (accountId !== undefined) {
+      this.db
+        .prepare(`UPDATE projects SET default_provider_id = ?, default_account_id = ?, updated_at = ? WHERE cwd = ?`)
+        .run(normalized, accountId, nowIso(), cwd);
+      return;
+    }
+    this.db
+      .prepare(`UPDATE projects SET default_provider_id = ?, updated_at = ? WHERE cwd = ?`)
+      .run(normalized, nowIso(), cwd);
+  }
+
   /** An account that was removed is no project's default any more; each project that named it is back on the default login. */
   clearDefaultAccount(accountId: string): void {
     this.db.prepare(`UPDATE projects SET default_account_id = NULL WHERE default_account_id = ?`).run(accountId);
+  }
+
+  // ---------------------------------------------------------------- provider accounts & session journal
+
+  listProviderAccounts(providerId?: ProviderId): ProviderAccountRecord[] {
+    const rows = (providerId
+      ? this.db
+          .prepare(`SELECT * FROM provider_accounts WHERE provider_id = ? ORDER BY created_at, id`)
+          .all(providerId)
+      : this.db.prepare(`SELECT * FROM provider_accounts ORDER BY provider_id, created_at, id`).all()) as Row[];
+    return rows.map((row) => this.toProviderAccount(row));
+  }
+
+  getProviderAccount(id: string): ProviderAccountRecord | null {
+    const row = this.db.prepare(`SELECT * FROM provider_accounts WHERE id = ?`).get(id) as Row | undefined;
+    return row ? this.toProviderAccount(row) : null;
+  }
+
+  upsertProviderAccount(input: UpsertProviderAccountInput): ProviderAccountRecord {
+    const existing = this.getProviderAccount(input.id);
+    const createdAt = existing?.createdAt ?? input.createdAt ?? nowIso();
+    const lastUsedAt = input.lastUsedAt !== undefined ? input.lastUsedAt : (existing?.lastUsedAt ?? null);
+    const customArgs = input.customArgs ?? existing?.customArgs ?? [];
+    const customModels = input.customModels ?? existing?.customModels ?? [];
+    const stripAmbientKeys =
+      input.stripAmbientKeys !== undefined ? input.stripAmbientKeys : (existing?.stripAmbientKeys ?? true);
+    this.db
+      .prepare(
+        `INSERT INTO provider_accounts (
+           id, provider_id, name, runtime_override, binary_path, custom_args_json,
+           api_kind, api_base_url, secret_key_id, strip_ambient_keys, default_model_id,
+           custom_models_json, created_at, last_used_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           provider_id = excluded.provider_id,
+           name = excluded.name,
+           runtime_override = excluded.runtime_override,
+           binary_path = excluded.binary_path,
+           custom_args_json = excluded.custom_args_json,
+           api_kind = excluded.api_kind,
+           api_base_url = excluded.api_base_url,
+           secret_key_id = excluded.secret_key_id,
+           strip_ambient_keys = excluded.strip_ambient_keys,
+           default_model_id = excluded.default_model_id,
+           custom_models_json = excluded.custom_models_json,
+           last_used_at = excluded.last_used_at`,
+      )
+      .run(
+        input.id,
+        normalizeProviderId(input.providerId),
+        input.name,
+        input.runtimeOverride !== undefined ? input.runtimeOverride : (existing?.runtimeOverride ?? null),
+        input.binaryPath !== undefined ? input.binaryPath : (existing?.binaryPath ?? null),
+        JSON.stringify(customArgs),
+        input.apiKind !== undefined ? input.apiKind : (existing?.apiKind ?? null),
+        input.apiBaseUrl !== undefined ? input.apiBaseUrl : (existing?.apiBaseUrl ?? null),
+        input.secretKeyId !== undefined ? input.secretKeyId : (existing?.secretKeyId ?? null),
+        stripAmbientKeys ? 1 : 0,
+        input.defaultModelId !== undefined ? input.defaultModelId : (existing?.defaultModelId ?? null),
+        JSON.stringify(customModels),
+        createdAt,
+        lastUsedAt,
+      );
+    return this.getProviderAccount(input.id) as ProviderAccountRecord;
+  }
+
+  touchProviderAccount(id: string, at: string = nowIso()): void {
+    this.db.prepare(`UPDATE provider_accounts SET last_used_at = ? WHERE id = ?`).run(at, id);
+  }
+
+  deleteProviderAccount(id: string): boolean {
+    const existing = this.getProviderAccount(id);
+    const result = this.db.prepare(`DELETE FROM provider_accounts WHERE id = ?`).run(id);
+    if (Number(result.changes) > 0) {
+      if (
+        existing &&
+        (existing.providerId === "api" || existing.providerId === "acp-custom" || existing.providerId.startsWith("acp:")) &&
+        this.listProviderAccounts(existing.providerId).length === 0
+      ) {
+        this.db
+          .prepare(`UPDATE projects SET default_provider_id = 'muse', default_account_id = NULL WHERE default_account_id = ?`)
+          .run(id);
+      } else {
+        this.clearDefaultAccount(id);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  appendSessionEvent(sessionId: string, method: string, params: Record<string, unknown>, at: string = nowIso()): number {
+    return this.transaction(() => {
+      const last = this.db
+        .prepare(`SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id = ?`)
+        .get(sessionId) as Row;
+      const seq = Number(last["seq"] ?? 0) + 1;
+      const enriched = { ...params };
+      if (typeof enriched["viewCursor"] !== "string") {
+        enriched["viewCursor"] = `v:${sessionId}:${seq}`;
+      }
+      if (typeof enriched["sourceRange"] !== "object" || enriched["sourceRange"] === null) {
+        enriched["sourceRange"] = { startSeq: seq, endSeq: seq };
+      }
+      this.db
+        .prepare(`INSERT INTO session_events (session_id, seq, method, params, at) VALUES (?, ?, ?, ?, ?)`)
+        .run(sessionId, seq, method, JSON.stringify(enriched), at);
+      return seq;
+    });
+  }
+
+  listSessionEvents(sessionId: string): StoredJournalEvent[] {
+    const rows = this.db
+      .prepare(`SELECT seq, method, params, at FROM session_events WHERE session_id = ? ORDER BY seq`)
+      .all(sessionId) as Row[];
+    return rows.map((row) => {
+      let params: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(String(row["params"]));
+        if (typeof parsed === "object" && parsed !== null) {
+          params = parsed as Record<string, unknown>;
+        }
+      } catch {
+        /* malformed event payload falls back to empty object */
+      }
+      return {
+        seq: Number(row["seq"]),
+        method: String(row["method"]),
+        params,
+        at: String(row["at"]),
+      };
+    });
+  }
+
+  sessionJournal(): SessionJournal {
+    return {
+      append: (sessionId, method, params, at) => this.appendSessionEvent(sessionId, method, params, at),
+      list: (sessionId) => this.listSessionEvents(sessionId),
+    };
   }
 
   /**
@@ -1339,8 +1573,8 @@ export class AncillaStore {
       this.db
         .prepare(
           `INSERT INTO sessions (id, project_id, title, title_source, status, turn_count, model_id, chosen_model_id, origin,
-             archived, sandbox_disabled, account_id, created_at, updated_at, activity_at)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+             archived, sandbox_disabled, provider_id, account_id, created_at, updated_at, activity_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.id,
@@ -1352,6 +1586,7 @@ export class AncillaStore {
           input.chosenModelId ?? null,
           input.origin ?? "ancilla",
           input.sandboxDisabled === undefined || input.sandboxDisabled === null ? null : input.sandboxDisabled ? 1 : 0,
+          normalizeProviderId(input.providerId),
           input.accountId ?? null,
           input.createdAt ?? now,
           now,
@@ -1616,8 +1851,52 @@ export class AncillaStore {
       createdAt: String(row["created_at"]),
       updatedAt: String(row["updated_at"]),
       activityAt: String(row["activity_at"] ?? row["created_at"]),
+      defaultProviderId: normalizeProviderId(row["default_provider_id"]),
       defaultAccountId: row["default_account_id"] === null || row["default_account_id"] === undefined ? null : String(row["default_account_id"]),
       folders: this.foldersOf(row),
+    };
+  }
+
+  private toProviderAccount(row: Row): ProviderAccountRecord {
+    const parseStringArray = (raw: unknown): string[] => {
+      if (typeof raw !== "string" || raw.trim().length === 0) {
+        return [];
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+      } catch {
+        return [];
+      }
+    };
+    const apiKindRaw = row["api_kind"];
+    const apiKind: ApiProviderKind | null =
+      apiKindRaw === "openai" || apiKindRaw === "anthropic" || apiKindRaw === "google" ? apiKindRaw : null;
+    return {
+      id: String(row["id"]),
+      providerId: normalizeProviderId(row["provider_id"]),
+      name: String(row["name"]),
+      runtimeOverride:
+        row["runtime_override"] === null || row["runtime_override"] === undefined
+          ? null
+          : String(row["runtime_override"]),
+      binaryPath:
+        row["binary_path"] === null || row["binary_path"] === undefined ? null : String(row["binary_path"]),
+      customArgs: parseStringArray(row["custom_args_json"]),
+      apiKind,
+      apiBaseUrl:
+        row["api_base_url"] === null || row["api_base_url"] === undefined ? null : String(row["api_base_url"]),
+      secretKeyId:
+        row["secret_key_id"] === null || row["secret_key_id"] === undefined ? null : String(row["secret_key_id"]),
+      stripAmbientKeys: Number(row["strip_ambient_keys"] ?? 1) === 1,
+      defaultModelId:
+        row["default_model_id"] === null || row["default_model_id"] === undefined
+          ? null
+          : String(row["default_model_id"]),
+      customModels: parseStringArray(row["custom_models_json"]),
+      createdAt: String(row["created_at"]),
+      lastUsedAt:
+        row["last_used_at"] === null || row["last_used_at"] === undefined ? null : String(row["last_used_at"]),
     };
   }
 
@@ -1671,6 +1950,7 @@ export class AncillaStore {
       settledAt: row["settled_at"] === null || row["settled_at"] === undefined ? null : String(row["settled_at"]),
       unsettledAt: row["unsettled_at"] === null || row["unsettled_at"] === undefined ? null : String(row["unsettled_at"]),
       sandboxDisabled: row["sandbox_disabled"] === null || row["sandbox_disabled"] === undefined ? null : Number(row["sandbox_disabled"]) === 1,
+      providerId: normalizeProviderId(row["provider_id"]),
       accountId: row["account_id"] === null || row["account_id"] === undefined ? null : String(row["account_id"]),
     };
   }

@@ -502,4 +502,68 @@ describe("the pane's socket", () => {
     assert.equal((await pane.waitFor((m) => m.type === "selection", "selection")).text, "texto copiado");
     pane.ws.close();
   });
+
+  it("reports unavailable startup failures with code 4011 and the browser's diagnostic message", async () => {
+    const broken = fakeBrowser(() => new Promise(() => undefined));
+    const service = new BrowserService({ dataDir: ":memory:", find: () => FOUND, launch: () => broken.proc, gracefulMs: 100 });
+    const sockets = new BrowserSocketServer(() => service, () => undefined);
+    const http: Server = createServer();
+    http.on("upgrade", (req, socket, head) => sockets.handleUpgrade(req, socket, head));
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    after(async () => {
+      sockets.close();
+      await service.dispose();
+      http.closeAllConnections?.();
+      http.close();
+    });
+    const url = `ws://127.0.0.1:${(http.address() as AddressInfo).port}${BROWSER_SOCKET_PATH}`;
+    const pane = await connect(url);
+    pane.send(hello());
+    broken.stderr("sandbox namespace denied");
+    broken.closePipeThenExit(0, 20);
+    const err = await pane.waitFor((m) => m.type === "error", "startup error");
+    assert.match(err["message"], /sandbox namespace denied/);
+    assert.equal((await pane.closed).code, 4011);
+  });
+
+  it("recovers cleanly when a running browser stops: restarts, re-applies viewport, and streams the fresh tab", async () => {
+    const fakes: FakeBrowser[] = [];
+    const service = new BrowserService({
+      dataDir: ":memory:",
+      find: () => FOUND,
+      gracefulMs: 100,
+      launch: () => {
+        const f = fakeBrowser(healthy());
+        fakes.push(f);
+        return f.proc;
+      },
+    });
+    const sockets = new BrowserSocketServer(() => service, () => undefined);
+    const http: Server = createServer();
+    http.on("upgrade", (req, socket, head) => sockets.handleUpgrade(req, socket, head));
+    await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+    after(async () => {
+      sockets.close();
+      await service.dispose();
+      http.closeAllConnections?.();
+      http.close();
+    });
+    const url = `ws://127.0.0.1:${(http.address() as AddressInfo).port}${BROWSER_SOCKET_PATH}`;
+    const pane = await connect(url);
+    pane.send(hello());
+    await pane.waitFor((m) => m.type === "ready", "ready");
+    pane.send({ type: "viewport", id: "T0", width: 820, height: 540 });
+    await waitFor(() => sent(fakes[0]!, "Emulation.setDeviceMetricsOverride").some((c) => c.params["width"] === 820), "initial viewport");
+
+    // Crash the first browser process; PaneSession should restart and re-apply the 820x540 viewport on the new browser.
+    fakes[0]!.exit(1);
+    await waitFor(() => fakes.length === 2 && sent(fakes[1]!, "Page.startScreencast").length >= 1, "restarted screencast", 4000);
+    await waitFor(
+      () => sent(fakes[1]!, "Emulation.setDeviceMetricsOverride").some((c) => c.params["width"] === 820 && c.params["height"] === 540),
+      "viewport re-applied after restart",
+    );
+    fakes[1]!.emit("Page.screencastFrame", { data: jpegOf(820, 540).toString("base64"), sessionId: 1, metadata: { deviceWidth: 820, deviceHeight: 540 } }, "S-T0");
+    await waitFor(() => pane.frames.some((f) => f?.width === 820 && f.height === 540), "frame from restarted browser");
+    pane.ws.close();
+  });
 });

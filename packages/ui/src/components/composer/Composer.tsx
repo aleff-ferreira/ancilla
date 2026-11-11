@@ -33,7 +33,9 @@ import {
   modelCompletions,
   modelIdError,
   modelMenu,
+  modelsKey,
   modelsStanding,
+  providerBadgeName,
   restartAction,
   selectedValue,
   tryTypedModel,
@@ -50,7 +52,7 @@ import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, re
 import { projectForCwd } from "../../model/status.js";
 import type { SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
-import type { ApprovalMode, ModelOption, ReasoningEffort } from "../../types.js";
+import type { ApprovalMode, ModelOption, ProviderAccountView, ProviderCapabilities, ProviderId, ReasoningEffort } from "../../types.js";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Modal, Tip, FLOATING } from "../ui/overlays.js";
 import { Button, IconButton, MOD, Spinner, Toggle, cn } from "../ui/primitives.js";
 import { PixelFlow } from "../ui/PixelFlow.js";
@@ -147,7 +149,8 @@ export function slashMenuOver(
   scope: ModelsScope,
 ): SlashMenuView | null {
   const { models, limited } = modelsStanding(source, scope);
-  return slashMenuFor(text, caret, commands, skills, models, limited);
+  const isMuse = !scope.providerId || scope.providerId === "muse";
+  return slashMenuFor(text, caret, commands, skills, models, isMuse && limited);
 }
 
 /** As many files per message as the server takes. */
@@ -157,12 +160,50 @@ const MAX_FILES = 10;
  * The catalog the composer on screen picks models from, as the controller reads it: an open thread's own host, else
  * the account the project's new threads run on. `accountId` is the login that host runs as, null for the default one.
  */
-function useModelsScope(sessionId: string | null, cwd: string | null): { scope: ModelsScope; accountId: string | null } {
+function useModelsScope(sessionId: string | null, cwd: string | null): {
+  scope: ModelsScope;
+  accountId: string | null;
+  providerId: ProviderId;
+} {
   const accountId = useApp((s) =>
     sessionId ? (s.sessions[sessionId]?.accountId ?? null) : (projectForCwd(s.projects, cwd)?.defaultAccountId ?? null),
   );
-  const scope = useMemo<ModelsScope>(() => (sessionId ? { sessionId } : { accountId }), [sessionId, accountId]);
-  return { scope, accountId };
+  const providerId = useApp(
+    (s) => (sessionId ? s.sessions[sessionId]?.providerId : projectForCwd(s.projects, cwd)?.defaultProviderId) ?? "muse",
+  );
+  const scope = useMemo<ModelsScope>(
+    () =>
+      sessionId
+        ? providerId !== "muse"
+          ? { sessionId, providerId }
+          : { sessionId }
+        : providerId !== "muse"
+          ? { providerId, accountId }
+          : { accountId },
+    [sessionId, accountId, providerId],
+  );
+  return { scope, accountId, providerId };
+}
+
+function useActiveCapabilities(sessionId: string | null, cwd: string | null): ProviderCapabilities | null {
+  return useApp((s) => {
+    if (sessionId) {
+      const sess = s.sessions[sessionId];
+      if (sess?.capabilities) {
+        return sess.capabilities;
+      }
+      const pid = sess?.providerId;
+      if (pid && pid !== "muse") {
+        return s.providers?.find((p) => p.id === pid)?.capabilities ?? null;
+      }
+      return null;
+    }
+    const pid = projectForCwd(s.projects, cwd)?.defaultProviderId;
+    if (pid && pid !== "muse") {
+      return s.providers?.find((p) => p.id === pid)?.capabilities ?? null;
+    }
+    return null;
+  });
 }
 
 /** The lists and loads the model menus read, held together so they re-render only when one changes. */
@@ -171,7 +212,13 @@ function useModelSource() {
   const accountModels = useApp((s) => s.accountModels);
   const modelsStatus = useApp((s) => s.modelsStatus);
   const accounts = useApp((s) => s.accounts);
-  return useMemo(() => ({ models, accountModels, modelsStatus, accounts }), [models, accountModels, modelsStatus, accounts]);
+  const defaultLogin = useApp((s) => s.defaultLogin);
+  const planUsageAccounts = useApp((s) => s.planUsageAccounts);
+  const providers = useApp((s) => s.providers);
+  return useMemo(
+    () => ({ models, accountModels, modelsStatus, accounts, defaultLogin, planUsageAccounts, providers }),
+    [models, accountModels, modelsStatus, accounts, defaultLogin, planUsageAccounts, providers],
+  );
 }
 
 /** The model an open thread runs on, from its own record first. */
@@ -543,7 +590,7 @@ export function Composer(props: ComposerProps) {
         <ModelPicker sessionId={props.sessionId} cwd={props.cwd} side={props.variant === "home" ? "bottom" : "top"} />
         <ResearchTrigger sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} disabled={props.readOnly || starting} />
         <EffortPicker sessionId={props.sessionId} cwd={props.cwd} side={props.variant === "home" ? "bottom" : "top"} />
-        <AccessPicker sessionId={props.sessionId} side={props.variant === "home" ? "bottom" : "top"} />
+        <AccessPicker sessionId={props.sessionId} cwd={props.cwd} side={props.variant === "home" ? "bottom" : "top"} />
         <AccountPicker sessionId={props.sessionId} cwd={props.cwd} variant={props.variant} />
         <span className="min-w-2 flex-1" />
         {props.sessionId ? <SpeedReadout sessionId={props.sessionId} /> : null}
@@ -752,8 +799,19 @@ function ModelMenuBody(props: { menu: ModelMenu; scope: ModelsScope; onOther: ()
         </MenuItem>
       ) : null}
       {menu.signIn ? (
-        <MenuItem icon={<SignInIcon size={14} />} onSelect={() => void controller.beginLogin(menu.signIn?.id ?? null)}>
-          {MODEL_COPY.signInAction}
+        <MenuItem
+          icon={<SignInIcon size={14} />}
+          onSelect={() => {
+            const signIn = menu.signIn;
+            if (!signIn) return;
+            if (signIn.providerId && signIn.providerId !== "muse") {
+              void controller.beginProviderLogin(signIn.providerId, signIn.id);
+            } else {
+              void controller.beginLogin(signIn.id);
+            }
+          }}
+        >
+          {menu.signIn.actionLabel ?? MODEL_COPY.signInAction}
         </MenuItem>
       ) : null}
       {menu.notes.map((note) => (
@@ -787,7 +845,7 @@ function ModelMenuBody(props: { menu: ModelMenu; scope: ModelsScope; onOther: ()
           {MODEL_COPY.refresh}
         </MenuItem>
       ) : null}
-      {controller.client.restartHosts ? (
+      {(!props.scope.providerId || props.scope.providerId === "muse") && controller.client.restartHosts ? (
         <MenuItem icon={<ArrowClockwiseIcon size={14} />} keepOpen disabled={restart.disabled} hint={restart.hint ?? undefined} onSelect={() => void controller.restartMuse()}>
           {MODEL_COPY.restart}
         </MenuItem>
@@ -806,17 +864,34 @@ function ModelMenuBody(props: { menu: ModelMenu; scope: ModelsScope; onOther: ()
 export function ModelPicker(props: { sessionId: string | null; cwd: string | null; side: PickerSide }) {
   const controller = useController();
   const open = useApp((s) => s.picker === "model");
-  const { scope, accountId } = useModelsScope(props.sessionId, props.cwd);
+  const { scope, accountId, providerId } = useModelsScope(props.sessionId, props.cwd);
   const source = useModelSource();
   const current = useThreadModel(props.sessionId);
   const preferred = useApp((s) => s.prefs.defaultModelId);
   const tried = useApp((s) => s.prefs.defaultModelTried);
-  const plan = useApp((s) => planAccount(s, accountId).planName);
+  const plan = useApp((s) => {
+    if (providerId === "muse") {
+      return planAccount(s, accountId).planName;
+    }
+    const prov = s.providers?.find((p) => p.id === providerId);
+    const auth = accountId
+      ? prov?.accounts.find((a): a is ProviderAccountView => "providerId" in a && a.id === accountId)?.auth
+      : prov?.defaultAuth;
+    return auth?.state === "authenticated" ? (auth.planTier ?? auth.summary ?? null) : null;
+  });
   const [typing, setTyping] = useState(false);
+  const isMuse = providerId === "muse";
+  const nonMuseTried = !isMuse && tried && preferred !== null && !/^muse-/i.test(preferred);
+  const scopedPref = isMuse
+    ? preferred
+    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || nonMuseTried)
+      ? preferred
+      : null;
   // A thread whose model Muse has not said yet runs on Muse's default, whatever the saved default is. A saved default
   // the user tried by its id is kept: it is shown as not in Muse's list, never as unavailable.
-  const menu = modelMenu(source, { scope, accountId, current, pref: props.sessionId && !current ? null : preferred, plan, tried });
+  const menu = modelMenu(source, { scope, accountId, current, pref: props.sessionId && !current ? null : scopedPref, plan, tried: isMuse ? tried : nonMuseTried });
   const { trigger } = menu;
+  const triggerName = trigger.name;
   return (
     <>
       <Menu
@@ -833,12 +908,12 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
       >
         <MenuTrigger asChild>
           <ToolbarTrigger
-            aria-label={modelButtonLabel(trigger)}
+            aria-label={isMuse ? modelButtonLabel(trigger) : `Model: ${triggerName}`}
             icon={<CpuIcon size={13} />}
             tone={trigger.note ? "warn" : undefined}
             label={
               <>
-                <span className="truncate">{trigger.name}</span>
+                <span className="truncate">{triggerName}</span>
                 {/* A long name gives way before the reason the model cannot be chosen again does. */}
                 {trigger.note ? <span className="ml-1 shrink-0">({trigger.note})</span> : null}
                 {trigger.contributor ? (
@@ -858,7 +933,11 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
         open={typing}
         onOpenChange={setTyping}
         title="Use another model"
-        description="Type the id of a model Muse did not list. Muse checks access when you send a prompt."
+        description={
+          isMuse
+            ? "Type the id of a model Muse did not list. Muse checks access when you send a prompt."
+            : "Type a model identifier supported by the selected provider."
+        }
       >
         <div className="mt-4">
           <ModelIdForm onUse={(modelId) => tryTypedModel(controller, modelId)} onDone={() => setTyping(false)} onCancel={() => setTyping(false)} />
@@ -869,37 +948,126 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
 }
 
 /**
- * Sets the project's default account for new threads (`startThread` reads `project.defaultAccountId`); no
- * transient state of its own. Shows only on the new-thread composer, and only once accounts exist. On an
- * existing thread the account is fixed at spawn and shown by the sidebar badge instead.
+ * Sets the project's default provider and account for new threads (`startThread` reads `project.defaultProviderId` and
+ * `project.defaultAccountId`). Shows only on the new-thread composer once accounts or providers are available. On an
+ * existing thread the provider and account are fixed at spawn and shown by the sidebar badge instead.
  */
 function AccountPicker(props: { sessionId: string | null; cwd: string | null; variant: "thread" | "home" }) {
   const controller = useController();
   const accounts = useApp((s) => s.accounts);
+  const providers = useApp((s) => s.providers);
+  const museFound = useApp((s) => s.env?.museFound !== false);
   const open = useApp((s) => s.picker === "account");
   // The thread may start in any folder of a project; the account is the project's.
   const project = useApp((s) => projectForCwd(s.projects, props.cwd));
-  const current = project?.defaultAccountId ?? null;
-  if (props.sessionId !== null || !project || !(accounts && accounts.length > 0)) {
+  const currentProvider: ProviderId = project?.defaultProviderId ?? "muse";
+  const currentAccount = project?.defaultAccountId ?? null;
+
+  const altProviders = useMemo(
+    () =>
+      (providers ?? []).filter(
+        (p) =>
+          p.id !== "muse" &&
+          (p.id === "api" ? p.accounts.length > 0 : p.binary.available || p.accounts.length > 0 || p.id === currentProvider),
+      ),
+    [providers, currentProvider],
+  );
+
+  const hasMuseAccounts = Boolean(accounts && accounts.length > 0);
+  if (props.sessionId !== null || !project || (!hasMuseAccounts && providers === null && currentProvider === "muse")) {
     return null;
   }
-  const label = accounts.find((a) => a.id === current)?.name ?? "Default login";
+
+  const encodeChoice = (providerId: ProviderId, accountId: string | null) => `${providerId}::${accountId ?? ""}`;
+  const selectedKey = encodeChoice(currentProvider, currentAccount);
+
+  let label: string;
+  if (currentProvider === "muse") {
+    const museName = accounts?.find((a) => a.id === currentAccount)?.name;
+    label = altProviders.length > 0 ? (museName ? `Muse · ${museName}` : "Meta Muse") : (museName ?? "Default login");
+  } else {
+    const prov = providers?.find((p) => p.id === currentProvider);
+    const acct = prov?.accounts.find((a) => a.id === currentAccount);
+    const shortName = providerBadgeName(currentProvider);
+    label = acct ? `${shortName} · ${acct.name}` : (prov?.displayName ?? shortName);
+  }
+
   return (
     <Menu open={open} onOpenChange={(next) => (next ? controller.setPicker("account") : controller.closePicker("account"))}>
       <MenuTrigger asChild>
         <ToolbarTrigger aria-label={`Account: ${label}`} icon={<UserIcon size={13} />} label={<span className="truncate">{label}</span>} />
       </MenuTrigger>
-      <MenuContent side={props.variant === "home" ? "bottom" : "top"} className="w-[300px]">
-        <MenuLabel>Account</MenuLabel>
+      <MenuContent side={props.variant === "home" ? "bottom" : "top"} className="w-[320px]">
+        <MenuLabel>{altProviders.length > 0 || providers !== null ? "Provider & Account" : "Account"}</MenuLabel>
         <MenuRadioGroup
-          value={current ?? ""}
-          onValueChange={(value) => void controller.setProjectDefaultAccount(project.cwd, value || null)}
+          value={selectedKey}
+          onValueChange={(raw) => {
+            const sep = raw.indexOf("::");
+            const nextProvider = (sep >= 0 ? raw.slice(0, sep) : "muse") as ProviderId;
+            const nextAccount = sep >= 0 ? raw.slice(sep + 2) || null : null;
+            if (nextProvider === "muse") {
+              void controller.setProjectDefaultAccount(project.cwd, nextAccount, currentProvider !== "muse" ? "muse" : undefined);
+            } else {
+              void controller.setProjectDefaultAccount(project.cwd, nextAccount, nextProvider);
+            }
+          }}
         >
-          <MenuOption value="" label="Default login" />
-          {accounts.map((a) => (
-            <MenuOption key={a.id} value={a.id} label={a.name} description={a.hasLogin ? (a.email ?? "Signed in") : "Not signed in"} />
-          ))}
+          {museFound || currentProvider === "muse" || hasMuseAccounts ? (
+            <>
+              <MenuOption
+                value={encodeChoice("muse", null)}
+                label={altProviders.length > 0 ? "Meta Muse · Default login" : "Default login"}
+                description={museFound ? undefined : "Muse CLI not installed"}
+              />
+              {(accounts ?? []).map((a) => (
+                <MenuOption
+                  key={`muse:${a.id}`}
+                  value={encodeChoice("muse", a.id)}
+                  label={altProviders.length > 0 ? `Meta Muse · ${a.name}` : a.name}
+                  description={a.hasLogin ? (a.email ?? "Signed in") : "Not signed in"}
+                />
+              ))}
+            </>
+          ) : null}
+          {altProviders.map((p) => {
+            const showDefault = p.id !== "api" && !p.id.startsWith("acp:") && p.binary.available;
+            const provAccounts = p.accounts.filter((a): a is import("../../types.js").ProviderAccountView => "providerId" in a);
+            return (
+              <div key={p.id}>
+                {showDefault ? (
+                  <MenuOption
+                    value={encodeChoice(p.id, null)}
+                    label={p.displayName}
+                    description={
+                      p.defaultAuth?.summary ??
+                      (p.defaultAuth?.state === "authenticated" ? "Signed in" : "Sign in in Settings")
+                    }
+                  />
+                ) : null}
+                {provAccounts.map((a) => (
+                  <MenuOption
+                    key={`${p.id}:${a.id}`}
+                    value={encodeChoice(p.id, a.id)}
+                    label={p.id === "api" ? `API · ${a.name}` : `${providerBadgeName(p.id)} · ${a.name}`}
+                    description={
+                      p.id === "api"
+                        ? (a.apiBaseUrl ?? a.apiKind ?? "Direct API")
+                        : (a.auth?.summary ?? (a.auth?.state === "authenticated" ? "Signed in" : "Sign in in Settings"))
+                    }
+                  />
+                ))}
+              </div>
+            );
+          })}
         </MenuRadioGroup>
+        {providers !== null ? (
+          <>
+            <MenuSeparator />
+            <MenuItem onSelect={() => controller.navigate({ kind: "settings" })}>
+              Configure providers &amp; API keys…
+            </MenuItem>
+          </>
+        ) : null}
       </MenuContent>
     </Menu>
   );
@@ -1105,14 +1273,26 @@ export function EffortPicker(props: { sessionId: string | null; cwd: string | nu
   const controller = useController();
   const open = useApp((s) => s.picker === "effort");
   const effort = useApp((s) => s.prefs.effort);
-  const { scope } = useModelsScope(props.sessionId, props.cwd);
+  const capabilities = useActiveCapabilities(props.sessionId, props.cwd);
+  const { scope, providerId } = useModelsScope(props.sessionId, props.cwd);
   const source = useModelSource();
   const current = useThreadModel(props.sessionId);
   const preferred = useApp((s) => s.prefs.defaultModelId);
-  const model = activeModel(source, scope, current, props.sessionId && !current ? null : preferred);
+  const tried = useApp((s) => s.prefs.defaultModelTried);
+  const isMuse = providerId === "muse";
+  const providerName = providerBadgeName(providerId);
+  const scopedPref = isMuse
+    ? preferred
+    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || (tried && !/^muse-/i.test(preferred)))
+      ? preferred
+      : null;
+  const model = activeModel(source, scope, current, props.sessionId && !current ? null : scopedPref);
   const [resting, setResting] = useState<ReasoningEffort>(RESTING);
   const thumb = useRef<HTMLSpanElement>(null);
   const switchId = useId();
+  if (capabilities && !capabilities.supportsReasoningEffort) {
+    return null;
+  }
   const { levels, auto, shown, position } = effortView(model, effort, LEVELS, resting);
   const top = Math.max(levels.length - 1, 1);
   const label = shown ? effortLabel(shown) : "Auto";
@@ -1198,12 +1378,12 @@ export function EffortPicker(props: { sessionId: string | null; cwd: string | nu
             />
           </Slider.Root>
           <p className={cn("mt-2 text-xs", auto ? "text-subtle" : "text-muted")}>
-            {auto ? "Muse picks the effort for each turn" : levels[position]?.description}
+            {auto ? `${providerName} picks the effort for each turn` : levels[position]?.description}
           </p>
           {note ? <p className="mt-1 text-xs text-subtle">{note}</p> : null}
           <div className="mt-3 flex items-center gap-3 border-t border-line pt-3">
             <label htmlFor={switchId} className="min-w-0 flex-1 cursor-default text-sm text-fg">
-              Let Muse decide
+              Let {providerName} decide
             </label>
             <Switch.Root
               id={switchId}
@@ -1242,9 +1422,10 @@ export const MODES: { value: ApprovalMode; label: string; description: string; i
   },
 ];
 
-function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
+function AccessPicker(props: { sessionId: string | null; cwd?: string | null; side: PickerSide }) {
   const controller = useController();
   const open = useApp((s) => s.picker === "permissions");
+  const capabilities = useActiveCapabilities(props.sessionId, props.cwd ?? null);
   // `/permissions full` opens the confirmation directly, so it lives in app state rather than here.
   const confirming = useApp((s) => s.picker === "confirmFullAccess");
   const bypass = useApp((s) => s.bypassAll);
@@ -1257,7 +1438,14 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
   const preferred = useApp((s) => s.prefs.defaultMode);
   const threadMode = useApp((s) => (props.sessionId ? (s.threads[props.sessionId]?.fold.meta.approvalMode ?? null) : null));
   const current = (props.sessionId ? threadMode : null) ?? preferred;
-  const mode = MODES.find((m) => m.value === current) ?? MODES[0];
+  const availableModes = useMemo(() => {
+    if (!capabilities?.supportsApprovalModes?.length) {
+      return MODES;
+    }
+    const filtered = MODES.filter((m) => capabilities.supportsApprovalModes.includes(m.value));
+    return filtered.length > 0 ? filtered : MODES;
+  }, [capabilities]);
+  const mode = availableModes.find((m) => m.value === current) ?? MODES.find((m) => m.value === current) ?? MODES[0];
   const setConfirming = (next: boolean) => (next ? controller.setPicker("confirmFullAccess") : controller.closePicker("confirmFullAccess"));
   return (
     <>
@@ -1301,7 +1489,7 @@ function AccessPicker(props: { sessionId: string | null; side: PickerSide }) {
               }
             }}
           >
-            {MODES.map((m) => (
+            {availableModes.map((m) => (
               <MenuOption key={m.value} value={m.value} icon={m.icon} label={m.label} description={m.description} disabled={yolo} />
             ))}
           </MenuRadioGroup>

@@ -35,9 +35,14 @@ export interface WaitingTask {
 export const MAX_WAITING = 10;
 
 /** `question` is what a web task is asking now (the runner knows), or null when it is not known. */
-export function waitingCause(task: Pick<Task, "origin" | "status" | "startedAt">, question: QuestionView | null): WaitingCause | null {
+export function waitingCause(
+  task: Pick<Task, "origin" | "status" | "startedAt" | "sessionId">,
+  question: QuestionView | null,
+  needsUser: ((sessionId: string) => boolean) | null = null,
+): WaitingCause | null {
   if (awaitsApproval(task)) return "approval";
   if (task.status === "blocked") return "blocked";
+  if (task.status === "running" && task.sessionId && needsUser?.(task.sessionId)) return "approval";
   // A connector task is only ever running, over, or paused with a change in front of the person.
   if (task.origin === "connector" && task.status === "paused") return "change";
   if (task.origin === "browse" && task.status === "paused") {
@@ -49,11 +54,18 @@ export function waitingCause(task: Pick<Task, "origin" | "status" | "startedAt">
 }
 
 /** The tasks that wait on the person among `tasks`, in the order given, at most `MAX_WAITING`. */
-export function waitingTasks(tasks: readonly Task[], questionOf: (taskId: string) => QuestionView | null): WaitingTask[] {
+export function waitingTasks(
+  tasks: readonly Task[],
+  questionOf: (taskId: string) => QuestionView | null,
+  needsUser: ((sessionId: string) => boolean) | null = null,
+): WaitingTask[] {
   const out: WaitingTask[] = [];
   for (const task of tasks) {
-    const cause = waitingCause(task, task.origin === "browse" ? questionOf(task.id) : null);
-    if (cause) out.push({ id: task.id, title: task.title, cause, reason: task.reason });
+    const cause = waitingCause(task, task.origin === "browse" ? questionOf(task.id) : null, needsUser);
+    if (cause) {
+      const reason = task.status === "running" && cause === "approval" ? "Waiting for your approval in the task thread." : task.reason;
+      out.push({ id: task.id, title: task.title, cause, reason });
+    }
     if (out.length >= MAX_WAITING) break;
   }
   return out;

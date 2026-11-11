@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
@@ -54,7 +54,28 @@ import {
   type SessionSkill,
   type SubscriptionUsage,
   type TurnImage,
+  BUILTIN_PROVIDER_IDS,
+  PROVIDER_CATALOG,
+  UnsupportedCapabilityError,
+  capabilitiesForProvider,
+  createCliAgentHost,
+  descriptorForProvider,
+  isProviderId,
+  normalizeProviderId as normalizeProviderIdValue,
+  planProviderCli,
+  planProviderServe,
+  probeAllBuiltinProviders,
+  probeProviderBinary,
+  type ApiProviderKind,
+  type BuiltinProviderId,
+  type ProviderAccountRecord,
+  type ProviderBinaryProbe,
+  type ProviderCapabilities,
+  type ProviderId,
 } from "@ancilla/daemon";
+import { ApiAgentHost } from "./providers/apiAgentHost.js";
+import { ProfileIsolator, detectAmbientKeyOverrides } from "./providers/profiles.js";
+import { OpenAiCompatibleProvider, AnthropicProvider, GoogleGenAiProvider } from "./voice/brain.js";
 import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
 import { attachmentHeaders, normalizeMediaType } from "./attachments.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles, serveProjectFile, writeProjectFile } from "./files.js";
@@ -157,9 +178,16 @@ export interface HostHandle {
   close(): Promise<unknown>;
   onExit?(handler: (exit: HostExit) => void): void;
   readonly recentStderr?: string;
+  readonly capabilities?: ProviderCapabilities;
 }
 
 export type HostFactory = (target: ServeTarget) => HostHandle;
+export type ProviderHostFactory = (spec: {
+  providerId: ProviderId;
+  accountId: string | null;
+  cwd: string;
+  target: ServeTarget;
+}) => HostHandle | null | undefined;
 
 export type OpenTarget = "files" | "editor";
 export type Opener = (path: string, target: OpenTarget) => Promise<void>;
@@ -216,6 +244,7 @@ export interface ServerOptions {
   /** Finds native Windows Muse; the real install folders by default. */
   findNativeMuse?: () => NativeMuse | null;
   hostFactory?: HostFactory;
+  providerHostFactory?: ProviderHostFactory;
   opener?: Opener;
   /** Where `~` points in typed paths; the OS home by default. */
   home?: string;
@@ -298,6 +327,7 @@ interface StartToken {
 }
 
 interface ManagedHost {
+  providerId: ProviderId;
   quotaCacheScope: string | null;
   quotaAccountGeneration: number;
   key: string;
@@ -597,6 +627,9 @@ function errorInfo(error: unknown): { status: number; message: string; kind: str
   }
   if (error instanceof PathError || error instanceof ProjectFolderError) {
     return { status: 400, message, kind: null };
+  }
+  if (error instanceof UnsupportedCapabilityError || kind === "unsupportedCapability") {
+    return { status: 400, message, kind: "unsupportedCapability" };
   }
   if (error instanceof FileError) {
     return { status: error.status, message, kind: error.kind };
@@ -998,6 +1031,7 @@ export class AncillaServer {
       | "distro"
       | "musePath"
       | "hostFactory"
+      | "providerHostFactory"
       | "opener"
       | "exec"
       | "findNativeMuse"
@@ -1071,8 +1105,15 @@ export class AncillaServer {
   private readonly preparedFiles = new Map<string, { root: string; name: string; size: number; at: number }>();
   /** Per-session listeners on host notifications, for the research worker runner; called from `forward`. */
   private readonly sessionListeners = new Map<string, Set<SessionNotificationHandler>>();
+  private readonly providerHostFactory?: ProviderHostFactory;
+  private providerSecrets: FileSecretStore | null = null;
+  private profileIsolator: ProfileIsolator | null = null;
+  private providerProbeCache: { at: number; probes: Record<string, ProviderBinaryProbe> } | null = null;
+  private readonly providerUsageByKey = new Map<string, SubscriptionUsage>();
+  private readonly staleAfterLoginHosts = new WeakSet<ManagedHost>();
 
   constructor(options: ServerOptions = {}) {
+    this.providerHostFactory = options.providerHostFactory;
     this.hostStartTimeoutMs = resolveHostStartTimeoutMs({
       option: options.hostStartTimeoutMs,
       env: process.env[HOST_START_TIMEOUT_ENV],
@@ -1228,7 +1269,7 @@ export class AncillaServer {
       available: () => {
         const voice = this.voiceFor();
         const kind = voice.settings.get().brain.kind;
-        if (kind !== "openai" && kind !== "anthropic") return { ok: false };
+        if (kind !== "openai" && kind !== "anthropic" && kind !== "google") return { ok: false };
         const chosen = voice.browseBrain();
         return chosen.problem ? { ok: false } : { ok: true, label: chosen.brain.label };
       },
@@ -1248,7 +1289,7 @@ export class AncillaServer {
       available: () => {
         const voice = this.voiceFor();
         const kind = voice.settings.get().brain.kind;
-        if (kind !== "openai" && kind !== "anthropic") return { ok: false };
+        if (kind !== "openai" && kind !== "anthropic" && kind !== "google") return { ok: false };
         const chosen = voice.browseBrain();
         return chosen.problem ? { ok: false } : { ok: true, label: chosen.brain.label };
       },
@@ -1537,6 +1578,7 @@ export class AncillaServer {
       onApprovalResolved: (approvalId) => {
         this.authorizationsFor().cancel(`muse_${approvalId}`);
       },
+      watch: (sessionId, handler) => this.onSessionNotification(sessionId, (method, params) => handler(method, params)),
     };
   }
 
@@ -1654,9 +1696,22 @@ export class AncillaServer {
       store: this.store,
       engine: this.researchEngine,
       globalWorkerCap: this.researchMaxWorkers,
-      // `muse exec` while the prompt fits the command line, a turn in the run's control session when it does not.
-      createModelClient: (run, thread) =>
-        new MuseModelClient({
+      // `muse exec` while the prompt fits the command line for Muse threads, or a turn in the run's control session for non-Muse providers and oversized prompts.
+      createModelClient: (run, thread) => {
+        const sessionClient = new MuseSessionModelClient({
+          host: {
+            startControlSession: (modelId, giveUp) => this.startResearchSession(thread, "Research control", modelId, giveUp),
+            subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
+            log: (message) => this.log(message),
+          },
+          models: run.config.models,
+          fallbackModelId: thread.modelId,
+          startupMs: () => this.researchStartupMs(),
+        });
+        if (thread.providerId && thread.providerId !== "muse") {
+          return sessionClient;
+        }
+        return new MuseModelClient({
           exec: new MuseExecModelClient({
             exec: this.options.exec,
             plan: (args) => this.planMuseExec(args, thread.accountId),
@@ -1665,19 +1720,11 @@ export class AncillaServer {
             platform: this.options.platform,
             log: (message) => this.log(message),
           }),
-          session: new MuseSessionModelClient({
-            host: {
-              startControlSession: (modelId, giveUp) => this.startResearchSession(thread, "Research control", modelId, giveUp),
-              subscribe: (sessionId, handler) => this.onSessionNotification(sessionId, handler),
-              log: (message) => this.log(message),
-            },
-            models: run.config.models,
-            fallbackModelId: thread.modelId,
-            startupMs: () => this.researchStartupMs(),
-          }),
+          session: sessionClient,
           platform: this.options.platform,
           log: (message) => this.log(message),
-        }),
+        });
+      },
       createWorkerRunner: (run, thread, onWorkerUpdate) =>
         new MuseSessionWorkerRunner({
           host: {
@@ -1731,6 +1778,13 @@ export class AncillaServer {
         connector: this.connectorRunnerFor(),
         fallbackRead: this.fallbackReadFor(),
         fallbackWrite: this.fallbackWriteFor(),
+        isPreAuthorized: () => {
+          try {
+            return this.store.getYoloSettings().enabled;
+          } catch {
+            return false;
+          }
+        },
       });
       this.assistantUnavailable = null;
       // Settles what a restart left in the air and starts looking for work; it never fails the request that opened it.
@@ -1804,7 +1858,11 @@ export class AncillaServer {
       messages: async (threadId, count): Promise<HarnessMessage[]> => {
         const found = this.store.findSession(threadId);
         if (!found) return [];
-        const host = await this.hostFor(found.cwd, found.session.accountId ?? null);
+        const host = await this.hostFor(
+          found.cwd,
+          found.session.accountId ?? null,
+          this.normalizeProviderId(found.session.providerId),
+        );
         const out: HarnessMessage[] = [];
         for (const event of eventsFromHistory(await host.manager.readSession(threadId, false))) {
           const item = asRecord(event.params["item"]);
@@ -1829,19 +1887,50 @@ export class AncillaServer {
    * clicks do, so a task is an ordinary visible thread whose approvals reach the user like any other.
    */
   private assistantHost(): ExecutiveHost {
+    const yolo = (): boolean => {
+      try {
+        return this.store.getYoloSettings().enabled;
+      } catch {
+        return false;
+      }
+    };
+    const describeTaskApproval = (sessionId: string, params: Record<string, unknown>): { title: string; detail: string; allowLabel: string } => {
+      const threadTitle = this.store.findSession(sessionId)?.session.title?.trim() ?? "";
+      const prefix = threadTitle ? `${threadTitle}: ` : "";
+      const info = approvalSubjectOf(params);
+      const subject = asRecord(params["subject"]);
+      const cmd = str(subject?.["command"]) ?? str(params["command"]);
+      if (cmd) return { title: `${prefix}Allow command`, detail: cmd.slice(0, 220), allowLabel: "Allow" };
+      const path = str(subject?.["path"]) ?? str(subject?.["filePath"]) ?? str(params["path"]);
+      if (path) return { title: `${prefix}Allow ${info.kind === "fileWrite" ? "file write" : "file access"}`, detail: path.slice(0, 220), allowLabel: "Allow" };
+      const host = str(subject?.["host"]) ?? str(subject?.["url"]) ?? str(params["url"]);
+      if (host) return { title: `${prefix}Allow network access`, detail: host.slice(0, 220), allowLabel: "Allow" };
+      return {
+        title: `${prefix}${info.toolName ? `Allow ${info.toolName}` : "Allow action"}`,
+        detail: str(params["reason"]) ?? str(subject?.["description"]) ?? info.kind,
+        allowLabel: "Allow",
+      };
+    };
     return {
       now: () => Date.now(),
       projectKey: (cwd) => normalizeCwd(cwd),
       hostAvailable: async (cwd, account) => {
         try {
-          await this.hostFor(normalizeCwd(cwd), account);
+          const norm = normalizeCwd(cwd);
+          const proj = norm ? this.store.projectForFolder(norm) : null;
+          const providerId = this.normalizeProviderId(proj?.defaultProviderId);
+          await this.hostFor(norm, account ?? (providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null), providerId);
           return { ok: true };
         } catch (error) {
           return { ok: false, reason: errorInfo(error).message };
         }
       },
       startSession: async ({ cwd, account, title, modelId }) => {
-        const created = await this.startSession(normalizeCwd(cwd), undefined, modelId ?? undefined, account);
+        const norm = normalizeCwd(cwd);
+        const proj = norm ? this.store.projectForFolder(norm) : null;
+        const providerId = this.normalizeProviderId(proj?.defaultProviderId);
+        const effectiveAccount = account ?? (providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null);
+        const created = await this.startSession(norm, yolo() ? "allowAll" : undefined, modelId ?? undefined, effectiveAccount, providerId);
         const sessionId = String(created["sessionId"]);
         try {
           this.store.updateSession(sessionId, { title, titleSource: "user" });
@@ -1855,7 +1944,10 @@ export class AncillaServer {
         if (!found) return false;
         const managed = await this.hostForSession(sessionId);
         // A host of this server that has held the thread since it was made or opened has it loaded.
-        if (this.sessionHosts.get(sessionId) === managed.key && this.hosts.get(managed.key) === managed) return true;
+        if (this.sessionHosts.get(sessionId) === managed.key && this.hosts.get(managed.key) === managed) {
+          if (yolo()) await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          return true;
+        }
         if (!this.mayLoadUnloaded(sessionId, managed)) return false;
         try {
           // What opening the thread on the screen does to load it, without reading its transcript.
@@ -1863,6 +1955,7 @@ export class AncillaServer {
           if (this.hosts.get(managed.key) === managed) this.sessionHosts.set(sessionId, managed.key);
           this.liveFor(sessionId).readOnlyReason = null;
           await this.restoreChosenModel(managed.manager, sessionId, found.session.chosenModelId ?? null, asRecord(reply?.["session"]));
+          if (yolo()) await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
           return true;
         } catch (error) {
           // Only a thread that is gone, or that another Muse client holds, cannot be used; a host that cannot be reached is an error.
@@ -1881,6 +1974,9 @@ export class AncillaServer {
       },
       startTurn: async ({ sessionId, text, displayText }) => {
         const managed = await this.hostForSession(sessionId);
+        if (yolo()) {
+          await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+        }
         this.wake(sessionId);
         const live = this.liveFor(sessionId);
         const sentAtRevision = ++live.activityRevision;
@@ -1934,7 +2030,65 @@ export class AncillaServer {
         const live = this.live.get(sessionId);
         return Boolean(live && (live.pendingApprovals.size > 0 || live.pendingInputs.size > 0));
       },
-      watch: (sessionId, handler) => this.onSessionNotification(sessionId, (method, params) => handler(method, params)),
+      watch: (sessionId, handler) =>
+        this.onSessionNotification(sessionId, (method, params) => {
+          if (method === "approval/requested") {
+            const approvalId = str(params["approvalId"]);
+            const turnId = str(params["turnId"]) ?? "";
+            if (approvalId) {
+              if (yolo()) {
+                const planned = planApproval(params, true, "");
+                void this.managerForSession(sessionId)
+                  .then((manager) =>
+                    manager.decideApproval({
+                      sessionId,
+                      approvalId,
+                      requirementId: planned ? planned.requirementId : (params["currentRequirementId"] ?? params["requirementId"] ?? null),
+                      choiceId: planned ? planned.choiceId : "allow_once",
+                      feedback: null,
+                    }),
+                  )
+                  .catch(() => undefined);
+              } else {
+                const desc = describeTaskApproval(sessionId, params);
+                this.authorizationsFor().request({
+                  id: `muse_${approvalId}`,
+                  kind: "muse-approval",
+                  title: desc.title,
+                  detail: desc.detail,
+                  allowLabel: desc.allowLabel,
+                  denyLabel: "Deny",
+                  createdTurn: 0,
+                  inFlightMuse: true,
+                  onDecide: async (allow) => {
+                    const manager = await this.managerForSession(sessionId);
+                    const planned = planApproval(params, allow, allow ? "" : "Denied by user during voice call.");
+                    try {
+                      await manager.decideApproval({
+                        sessionId,
+                        approvalId,
+                        requirementId: planned ? planned.requirementId : (params["currentRequirementId"] ?? params["requirementId"] ?? null),
+                        choiceId: planned ? planned.choiceId : allow ? "allow_once" : "deny_once",
+                        feedback: planned ? planned.feedback : null,
+                      });
+                      return { ok: true, message: allow ? "Approved in task thread." : "Denied." };
+                    } catch (error) {
+                      if (!allow) {
+                        await manager.interruptTurn(sessionId, turnId || undefined, false).catch(() => undefined);
+                        return { ok: true, message: "Denied." };
+                      }
+                      return { ok: false, message: errorInfo(error).message };
+                    }
+                  },
+                });
+              }
+            }
+          } else if (method === "approval/resolved") {
+            const approvalId = str(params["approvalId"]);
+            if (approvalId) this.authorizationsFor().cancel(`muse_${approvalId}`);
+          }
+          handler(method, params);
+        }),
       log: (line) => this.log(line),
     };
   }
@@ -2869,11 +3023,26 @@ export class AncillaServer {
       if (accountRaw !== undefined && accountRaw !== null && typeof accountRaw !== "string") {
         throw new HttpError(400, "accountId must be a string.");
       }
+      const providerRaw = body["providerId"];
+      if (providerRaw !== undefined && providerRaw !== null && !isProviderId(providerRaw)) {
+        throw new HttpError(400, "Unknown providerId.");
+      }
+      const normCwd = normalizeCwd(raw);
+      const existingProj = this.store.projectForFolder(normCwd);
+      const resolvedProvider =
+        providerRaw !== undefined && providerRaw !== null
+          ? providerRaw
+          : this.normalizeProviderId(existingProj?.defaultProviderId);
+      const resolvedAccount =
+        accountRaw !== undefined
+          ? (typeof accountRaw === "string" && accountRaw.length > 0 ? accountRaw : null)
+          : (resolvedProvider !== "muse" ? (existingProj?.defaultAccountId ?? null) : null);
       const session = await this.startSession(
-        normalizeCwd(raw),
+        normCwd,
         mode === undefined || mode === null ? undefined : (mode as ApprovalMode),
         str(body["modelId"]) ?? undefined,
-        typeof accountRaw === "string" && accountRaw.length > 0 ? accountRaw : null,
+        resolvedAccount,
+        resolvedProvider,
       );
       this.json(res, 200, { session });
       return true;
@@ -3223,6 +3392,97 @@ export class AncillaServer {
       this.json(res, 200, { ok: true });
       return true;
     }
+    if (method === "GET" && path === "/api/providers") {
+      const refresh = url.searchParams.get("refresh") === "true";
+      this.json(res, 200, await this.listProvidersView(refresh));
+      return true;
+    }
+    if (method === "POST" && path === "/api/providers/accounts") {
+      const body = await this.readBody(req);
+      const account = await this.createOrUpdateProviderAccount(null, body);
+      this.json(res, 200, { account });
+      return true;
+    }
+    const providerAccountMatch = /^\/api\/providers\/accounts\/([^/]+)$/.exec(path);
+    if (providerAccountMatch) {
+      const accountId = this.segment(providerAccountMatch[1] as string);
+      if (method === "PATCH") {
+        const body = await this.readBody(req);
+        const account = await this.createOrUpdateProviderAccount(accountId, body);
+        this.json(res, 200, { account });
+        return true;
+      }
+      if (method === "DELETE") {
+        await this.removeProviderAccount(accountId);
+        this.json(res, 200, { ok: true });
+        return true;
+      }
+    }
+    const providerLoginMatch = /^\/api\/providers\/([^/]+)\/login$/.exec(path);
+    if (providerLoginMatch) {
+      const rawProvider = this.segment(providerLoginMatch[1] as string);
+      if (!isProviderId(rawProvider)) {
+        throw new HttpError(400, "Unknown providerId.");
+      }
+      if (rawProvider === "muse") {
+        const body = method === "POST" ? await this.readBody(req) : {};
+        const id = str(body["accountId"]) ?? url.searchParams.get("accountId") ?? null;
+        const key = id ?? "";
+        if (method === "GET" || method === "DELETE") {
+          const attempt = this.loginAttempts.get(key);
+          const matches = attempt && attempt.loginId === url.searchParams.get("loginId");
+          if (method === "DELETE") {
+            if (matches && attempt.status === "waiting") {
+              attempt.status = "error";
+              attempt.message = "Sign-in was cancelled. Start again for a new code.";
+              this.loginChildren.get(key)?.kill();
+            }
+            this.json(res, 200, { ok: true });
+          } else {
+            this.json(res, 200, matches ? { status: attempt.status, ...(attempt.message ? { message: attempt.message } : {}) } : { status: "idle" });
+          }
+          return true;
+        }
+        if (method === "POST") {
+          const generation = (this.loginStartGenerations.get(key) ?? 0) + 1;
+          this.loginStartGenerations.set(key, generation);
+          let profile: Profile | null = null;
+          if (id !== null) {
+            try { profile = await this.aonia.getProfile(id); }
+            catch (error) { throw this.accountError(error); }
+          }
+          this.json(res, 200, await this.runLogin(key, profile, generation));
+          return true;
+        }
+      } else {
+        const accountIdParam = url.searchParams.get("accountId") || null;
+        if (method === "GET" || method === "DELETE") {
+          const key = `provider:${rawProvider}:${accountIdParam ?? ""}`;
+          const attempt = this.loginAttempts.get(key);
+          const matches = attempt && attempt.loginId === url.searchParams.get("loginId");
+          if (method === "DELETE") {
+            if (matches && attempt.status === "waiting") {
+              attempt.status = "error";
+              attempt.message = "Sign-in was cancelled.";
+              this.loginChildren.get(key)?.kill();
+            }
+            this.json(res, 200, { ok: true });
+          } else {
+            this.json(res, 200, matches ? { status: attempt.status, ...(attempt.message ? { message: attempt.message } : {}) } : { status: "idle" });
+          }
+          return true;
+        }
+        if (method === "POST") {
+          const body = await this.readBody(req);
+          const accountId = str(body["accountId"]) ?? accountIdParam;
+          const key = `provider:${rawProvider}:${accountId ?? ""}`;
+          const generation = (this.loginStartGenerations.get(key) ?? 0) + 1;
+          this.loginStartGenerations.set(key, generation);
+          this.json(res, 200, await this.runProviderLogin(rawProvider, accountId, generation));
+          return true;
+        }
+      }
+    }
     if (method === "GET" && path === "/api/accounts") {
       this.json(res, 200, { accounts: await this.accountList() });
       return true;
@@ -3326,10 +3586,26 @@ export class AncillaServer {
       if (accountRaw !== undefined && accountRaw !== null && typeof accountRaw !== "string") {
         throw new HttpError(400, "accountId must be a string or null.");
       }
+      const providerRaw = body["providerId"];
+      if (providerRaw !== undefined && providerRaw !== null && !isProviderId(providerRaw)) {
+        throw new HttpError(400, "Unknown providerId.");
+      }
+      const norm = normalizeCwd(cwd);
       const accountId = typeof accountRaw === "string" && accountRaw.length > 0 ? accountRaw : null;
-      this.store.upsertProject(normalizeCwd(cwd));
-      this.store.setDefaultAccount(normalizeCwd(cwd), accountId);
-      this.json(res, 200, { defaultAccountId: accountId });
+      this.store.upsertProject(norm);
+      if (providerRaw !== undefined && providerRaw !== null) {
+        if (providerRaw !== "muse" && accountId !== null && !this.store.getProviderAccount(accountId)) {
+          throw new HttpError(400, `Unknown provider account "${accountId}".`);
+        }
+        this.store.setDefaultProvider(norm, providerRaw, accountRaw === undefined ? undefined : accountId);
+      } else {
+        this.store.setDefaultAccount(norm, accountId);
+      }
+      const updated = this.store.getProject(norm);
+      this.json(res, 200, {
+        defaultProviderId: updated?.defaultProviderId ?? "muse",
+        defaultAccountId: updated?.defaultAccountId ?? accountId,
+      });
       return true;
     }
     if (method === "GET" && path === "/api/usage") {
@@ -3483,16 +3759,19 @@ export class AncillaServer {
 
     if (method === "GET" && path === "/api/models") {
       const sessionId = url.searchParams.get("sessionId") ?? undefined;
-      // A thread's own host answers for it, whatever account its record names. Without one, the account's host,
-      // which is the default login's when no account is given; an unknown account is the 400 hostFor raises. A
-      // named account's list comes from a host of that account that is already running (its threads' hosts are
-      // keyed by folder, so a listing host of its own would be one more resident process), and only a login with
-      // none running starts one.
       const accountId = url.searchParams.get("accountId") || null;
-      const host = sessionId
-        ? await this.hostForSession(sessionId)
-        : ((accountId ? await this.runningHostOf(accountId) : null) ?? (await this.hostFor("", accountId)));
-      this.json(res, 200, { models: await host.manager.listModels(sessionId), hostVersion: host.serverVersion });
+      const providerParam = url.searchParams.get("providerId");
+      if (providerParam !== null && providerParam !== "" && !isProviderId(providerParam)) {
+        throw new HttpError(400, "Unknown providerId.");
+      }
+      const providerId: ProviderId = providerParam ? providerParam : "muse";
+      if (sessionId) {
+        const host = await this.hostForSession(sessionId);
+        this.json(res, 200, { models: await host.manager.listModels(sessionId), hostVersion: host.serverVersion });
+        return true;
+      }
+      const catalogReply = await this.resolveLiveModelCatalog(providerId, accountId);
+      this.json(res, 200, catalogReply);
       return true;
     }
 
@@ -3737,6 +4016,7 @@ export class AncillaServer {
   }
 
   private summary(record: SessionRecord, cwd: string): Record<string, unknown> {
+    const providerId = this.normalizeProviderId(record.providerId);
     return {
       sessionId: record.id,
       cwd,
@@ -3752,6 +4032,8 @@ export class AncillaServer {
       settledAt: record.settledAt,
       unsettledAt: record.unsettledAt,
       sandboxDisabled: record.sandboxDisabled,
+      providerId,
+      capabilities: capabilitiesForProvider(providerId),
       accountId: record.accountId,
       live: this.liveView(record.id),
     };
@@ -3943,9 +4225,13 @@ export class AncillaServer {
     return cwd;
   }
 
-  /** One host per (account, workspace). "default" stands in for the default login so today's keys are unchanged in spirit. */
-  private hostKey(cwd: string, accountId: string | null): string {
-    return `${accountId ?? "default"}::${this.hostPathFor(cwd) || "__default__"}`;
+  /** One host per (provider, account, workspace). Muse keeps today's exact key format so health & test fixtures stay identical. */
+  private hostKey(cwd: string, accountId: string | null, providerId: ProviderId = "muse"): string {
+    if (providerId === "muse") {
+      return `${accountId ?? "default"}::${this.hostPathFor(cwd) || "__default__"}`;
+    }
+    const workspaceKey = providerId === "api" ? (cwd ? normalizeCwd(cwd) : "") : this.cliHostPathFor(cwd, providerId);
+    return `${providerId}::${accountId ?? "default"}::${workspaceKey || "__default__"}`;
   }
 
   private storePathFor(remoteRoot: string): string {
@@ -4053,6 +4339,7 @@ export class AncillaServer {
       displayName: project.displayName,
       pinned: project.pinned,
       activityAt: project.activityAt,
+      defaultProviderId: project.defaultProviderId,
       defaultAccountId: project.defaultAccountId,
       folders: project.folders,
     };
@@ -4226,6 +4513,7 @@ export class AncillaServer {
       createdAt: normalizeIso(raw?.["createdAt"]),
       // A fork branches its source session, so it inherits the source's posture.
       sandboxDisabled: found.session.sandboxDisabled,
+      providerId: found.session.providerId,
       // And its account: the host it resumes on, the models it offers and the plan it counts against.
       accountId: found.session.accountId,
     });
@@ -4365,13 +4653,20 @@ export class AncillaServer {
     approvalMode?: ApprovalMode,
     modelId?: string,
     accountId: string | null = null,
+    providerId: ProviderId = "muse",
   ): Promise<Record<string, unknown>> {
     const project = this.store.upsertProject(cwd);
     // The thread must be visible where it lands: the owning project when the folder is one of a project's folders.
     this.store.revealProject(cwd);
-    const host = await this.hostFor(cwd, accountId);
+    const host = await this.hostFor(cwd, accountId, providerId);
+    const workspaceRoot =
+      providerId === "muse"
+        ? this.hostPathFor(cwd)
+        : providerId === "api"
+          ? await this.localRootFor(cwd)
+          : this.cliHostPathFor(cwd, providerId);
     const started = await host.manager.startSession({
-      workspaceRoot: this.hostPathFor(cwd),
+      workspaceRoot,
       approvalMode,
       modelId,
     });
@@ -4384,12 +4679,17 @@ export class AncillaServer {
       chosenModelId: modelId ?? null,
       createdAt: normalizeIso(raw?.["createdAt"]),
       // The creating host's own flags, not the live switch: a flip's restart may still be closing the old host.
-      sandboxDisabled: host.target.args.includes("--disable-sandbox"),
+      sandboxDisabled: providerId === "muse" ? host.target.args.includes("--disable-sandbox") : null,
+      providerId,
       accountId,
     });
     this.sessionHosts.set(started.sessionId, host.key);
     if (accountId) {
-      await this.aonia.touch(accountId).catch(() => undefined);
+      if (providerId === "muse") {
+        await this.aonia.touch(accountId).catch(() => undefined);
+      } else {
+        this.store.touchProviderAccount(accountId);
+      }
     }
     this.liveFor(started.sessionId);
     this.sessionsChanged();
@@ -4528,11 +4828,13 @@ export class AncillaServer {
     if (promptTokens === 0 && outputTokens === 0) {
       return;
     }
+    const sessionRecord = this.store.getSession(sessionId);
     this.store.recordUsage({
       key: str(params["viewCursor"]) ?? `${sessionId}:${str(params["turnId"]) ?? "turn"}:${randomUUID()}`,
       sessionId,
       turnId: str(params["turnId"]),
       modelId: str(params["modelId"]),
+      providerId: sessionRecord?.providerId ?? "muse",
       promptTokens,
       outputTokens,
       inputTokens: num(usage["inputTokens"]) ?? 0,
@@ -4608,10 +4910,12 @@ export class AncillaServer {
     for (const row of rows) {
       const day = dayOf(row.at);
       const modelId = row.modelId ?? "unknown";
+      const providerId = row.providerId ?? "muse";
       const cached = Math.min(row.promptTokens, row.cacheReadTokens || row.cachedTokens);
-      const bucketKey = `${day}|${modelId}`;
+      const bucketKey = `${day}|${providerId}|${modelId}`;
       const bucket = buckets.get(bucketKey) ?? {
         day,
+        providerId,
         modelId,
         calls: 0,
         promptTokens: 0,
@@ -4632,16 +4936,17 @@ export class AncillaServer {
       bucket["durationMs"] = (bucket["durationMs"] as number) + (row.durationMs ?? 0);
       buckets.set(bucketKey, bucket);
 
-      // A project's research workers share one row (per account), under an id no thread can have.
+      // A project's research workers share one row (per provider and account), under an id no thread can have.
       const research = row.origin === "research-worker";
       const threadKey = research
-        ? `research-workers:${row.projectCwd ?? ""}${row.accountId ? `:${row.accountId}` : ""}`
+        ? `research-workers:${row.projectCwd ?? ""}${providerId !== "muse" ? `:${providerId}` : ""}${row.accountId ? `:${row.accountId}` : ""}`
         : row.sessionId;
       const thread = threads.get(threadKey) ?? {
         sessionId: threadKey,
         title: research ? "DeepResearch workers" : row.sessionTitle,
         cwd: row.projectCwd,
         ...(research ? { kind: "research" } : {}),
+        providerId,
         // The login the thread runs under; null is the default one.
         accountId: row.accountId,
         calls: 0,
@@ -4810,7 +5115,8 @@ export class AncillaServer {
     // A goal change can land while this load is in flight; history must not then write the older goal back.
     const goalSeqAtStart = this.liveFor(sessionId).goalSeq;
     const found = this.store.findSession(sessionId);
-    const host = await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
+    const providerId = this.normalizeProviderId(found?.session.providerId);
+    const host = await this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null, providerId);
     const manager = host.manager;
     const activityAtStart = this.liveFor(sessionId).activityRevision;
     // The run believed to be going as the load began: the only one whose outcome the load may report.
@@ -5237,7 +5543,13 @@ export class AncillaServer {
         if (current.titleSource !== "placeholder" && !this.titleUpgradePending.has(sessionId)) {
           continue;
         }
-        const host = await this.hostFor("");
+        const providerId = this.normalizeProviderId(current.providerId);
+        const cwd = providerId === "muse" ? "" : (this.store.findSession(sessionId)?.cwd ?? "");
+        const host = await this.hostFor(
+          cwd,
+          current.accountId ?? null,
+          providerId,
+        );
         const page = await host.manager.pageView(sessionId, { direction: "forward", limit: 30 });
         if (this.closed) {
           return;
@@ -5297,11 +5609,28 @@ export class AncillaServer {
     expectedTitle: string,
     modelId: string | null,
   ): Promise<void> {
-    const result = await this.museExec({ prompt: buildThreadTitlePrompt(firstText), modelId, accountId: null });
-    if (this.closed || result.exitCode !== 0) {
+    const before = this.store.getSession(sessionId);
+    if (!before) {
       return;
     }
-    const title = sanitizeThreadTitle(parseExecTitle(result.stdout) ?? "", firstText);
+    const providerId = this.normalizeProviderId(before.providerId);
+    let rawTitle: string | null = null;
+    if (providerId === "muse") {
+      const result = await this.museExec({
+        prompt: buildThreadTitlePrompt(firstText),
+        modelId,
+        accountId: before.accountId,
+      });
+      if (this.closed || result.exitCode !== 0) {
+        return;
+      }
+      rawTitle = parseExecTitle(result.stdout);
+    } else if (providerId === "api") {
+      rawTitle = await this.generateApiThreadTitle(before, firstText, modelId);
+    } else {
+      return;
+    }
+    const title = sanitizeThreadTitle(rawTitle ?? "", firstText);
     if (!title || title === expectedTitle) {
       return;
     }
@@ -5310,7 +5639,9 @@ export class AncillaServer {
       return;
     }
     this.store.updateSession(sessionId, { title, titleSource: "auto" });
-    await this.renameInMuse(sessionId, title);
+    if (providerId === "muse") {
+      await this.renameInMuse(sessionId, title);
+    }
     this.sessionsChanged();
   }
 
@@ -5409,7 +5740,8 @@ export class AncillaServer {
     if (this.closed) {
       throw new Error("Ancilla is shutting down.");
     }
-    const key = this.hostKey(thread.cwd, thread.accountId);
+    const providerId = this.normalizeProviderId(thread.providerId);
+    const key = this.hostKey(thread.cwd, thread.accountId, providerId);
     // A host that has not answered the starts earlier runs gave up on is sent no more until it does; the wait is
     // bounded by the same allowance as the start itself, which the caller's give-up signal ends.
     await this.waitForStartSlot(key, giveUp);
@@ -5486,7 +5818,8 @@ export class AncillaServer {
   }
 
   private async openResearchSession(thread: ResearchThread, title: string, modelId: string | null, giveUp?: AbortSignal): Promise<WorkerSessionHandle & TurnSession> {
-    const host = await this.hostFor(thread.cwd, thread.accountId);
+    const providerId = this.normalizeProviderId(thread.providerId);
+    const host = await this.hostFor(thread.cwd, thread.accountId, providerId);
     // A start the host answers after the server began closing must not touch a store that is about to be closed.
     if (this.closed) {
       throw new Error("Ancilla is shutting down.");
@@ -5495,8 +5828,14 @@ export class AncillaServer {
       // The caller stopped waiting while the host was still coming up (a cold distro); nobody would read the answer.
       throw new Error("The research run stopped waiting for this session start.");
     }
+    const workspaceRoot =
+      providerId === "muse"
+        ? this.hostPathFor(thread.cwd)
+        : providerId === "api"
+          ? await this.localRootFor(thread.cwd)
+          : this.cliHostPathFor(thread.cwd, providerId);
     const started = await host.manager.startSession({
-      workspaceRoot: this.hostPathFor(thread.cwd),
+      workspaceRoot,
       ...(modelId ? { modelId } : {}),
     });
     if (this.closed) {
@@ -5513,7 +5852,8 @@ export class AncillaServer {
       modelId: raw ? str(raw["modelId"]) : null,
       chosenModelId: modelId,
       createdAt: normalizeIso(raw?.["createdAt"]),
-      sandboxDisabled: host.target.args.includes("--disable-sandbox"),
+      sandboxDisabled: providerId === "muse" ? host.target.args.includes("--disable-sandbox") : null,
+      providerId,
       accountId: thread.accountId,
     });
     this.store.updateSession(started.sessionId, { archived: true });
@@ -5560,6 +5900,7 @@ export class AncillaServer {
     return {
       sessionId,
       cwd: found.cwd,
+      providerId: this.normalizeProviderId(found.session.providerId),
       accountId: found.session.accountId,
       modelId: found.session.chosenModelId ?? found.session.modelId,
     };
@@ -5766,23 +6107,27 @@ export class AncillaServer {
    * still the 400 it is everywhere else, even while a host of its is not yet closed. Like `hostFor`, it waits out a
    * restart in progress, so it never answers from a host that is being closed.
    */
-  private async runningHostOf(accountId: string): Promise<ManagedHost | null> {
+  private async runningHostOf(accountId: string, providerId: ProviderId = "muse"): Promise<ManagedHost | null> {
     await this.restartChain;
-    const running = () => [...this.hosts.values()].filter((host) => host.accountId === accountId);
+    const running = () => [...this.hosts.values()].filter((host) => host.providerId === providerId && host.accountId === accountId);
     if (running().length === 0) {
       return null;
     }
-    try {
-      await this.aonia.getProfile(accountId);
-    } catch (error) {
-      throw this.accountError(error);
+    if (providerId === "muse") {
+      try {
+        await this.aonia.getProfile(accountId);
+      } catch (error) {
+        throw this.accountError(error);
+      }
+    } else if (!this.store.getProviderAccount(accountId)) {
+      throw new HttpError(400, `Unknown provider account "${accountId}".`);
     }
     // Looked at again: a host can have gone while the profile was read.
     const up = running();
-    return up.find((host) => host.key === this.hostKey("", accountId)) ?? up[0] ?? null;
+    return up.find((host) => host.key === this.hostKey("", accountId, providerId)) ?? up[0] ?? null;
   }
 
-  /** The host that has the session loaded, else the one its workspace and account start. */
+  /** The host that has the session loaded, else the one its workspace, provider and account start. */
   private async hostForSession(sessionId: string): Promise<ManagedHost> {
     const key = this.sessionHosts.get(sessionId);
     const loaded = key ? this.hosts.get(key) : undefined;
@@ -5790,7 +6135,11 @@ export class AncillaServer {
       return loaded;
     }
     const found = this.store.findSession(sessionId);
-    return this.hostFor(found?.cwd ?? "", found?.session.accountId ?? null);
+    return this.hostFor(
+      found?.cwd ?? "",
+      found?.session.accountId ?? null,
+      this.normalizeProviderId(found?.session.providerId),
+    );
   }
 
   /**
@@ -5807,9 +6156,11 @@ export class AncillaServer {
     return !this.isBusy(sessionId);
   }
 
-  private async hostFor(cwd: string, accountId: string | null = null): Promise<ManagedHost> {
-    await this.ensureLinuxMuseStorage(accountId);
-    await this.museRuntime();
+  private async hostFor(cwd: string, accountId: string | null = null, providerId: ProviderId = "muse"): Promise<ManagedHost> {
+    if (providerId === "muse") {
+      await this.ensureLinuxMuseStorage(accountId);
+      await this.museRuntime();
+    }
     // A flip's restart runs past its PATCH response. Wait it out so a new session never
     // starts on a host with the previous posture. Starts never wait for the chain, so this
     // cannot deadlock against the restart awaiting them.
@@ -5819,7 +6170,7 @@ export class AncillaServer {
     if (this.closed) {
       throw new HttpError(503, "Ancilla is shutting down.");
     }
-    const key = this.hostKey(cwd, accountId);
+    const key = this.hostKey(cwd, accountId, providerId);
     const existing = this.hosts.get(key);
     if (existing) {
       return existing;
@@ -5829,7 +6180,10 @@ export class AncillaServer {
       return pending;
     }
     const token: StartToken = { handle: null, abandoned: false, closing: false };
-    const startup = this.spawnHost(key, cwd, accountId, token);
+    const startup =
+      providerId === "muse"
+        ? this.spawnHost(key, cwd, accountId, token)
+        : this.spawnProviderHost(key, cwd, accountId, providerId, token);
     this.starting.set(key, startup);
     this.startTokens.set(key, token);
     try {
@@ -5886,7 +6240,10 @@ export class AncillaServer {
     }
     this.lastHostError = null;
     this.fingerprints.set(key, started?.fingerprintWarning ?? null);
-    const manager = new SessionManager(handle.connection);
+    const manager = new SessionManager(handle.connection, {
+      providerId: "muse",
+      capabilities: handle.capabilities ?? capabilitiesForProvider("muse"),
+    });
     manager.onNotification((notification) => {
       // Quota has no session id: a retired host's late observation must not inherit its replacement's login.
       if (notification.method === "usage/changed" && this.hosts.get(key)?.handle !== handle) return;
@@ -5907,6 +6264,7 @@ export class AncillaServer {
       quotaCacheScope,
       quotaAccountGeneration,
       key,
+      providerId: "muse",
       accountId,
       target,
       handle,
@@ -5933,10 +6291,11 @@ export class AncillaServer {
     if (this.hosts.get(managed.key) !== managed) {
       return;
     }
+    const label = managed.providerId === "muse" ? "Muse" : descriptorForProvider(managed.providerId).displayName;
     const detail = managed.handle.recentStderr?.trim();
     const message = exit.reason === "connection-ended"
-      ? `The connection to the Muse host ended while the host was still running, so it was closed.${detail ? ` ${detail}` : ""}`
-      : `The Muse host exited (${exit.code ?? exit.signal ?? "unknown"}).${detail ? ` ${detail}` : ""}`;
+      ? `The connection to the ${label} host ended while the host was still running, so it was closed.${detail ? ` ${detail}` : ""}`
+      : `The ${label} host exited (${exit.code ?? exit.signal ?? "unknown"}).${detail ? ` ${detail}` : ""}`;
     this.hostExits += 1;
     this.lastHostExitAt = nowIso();
     this.lastHostError = message;
@@ -6189,6 +6548,7 @@ export class AncillaServer {
         }
         if (settled && exitCode === 0 && attempt.status === "waiting") {
           attempt.status = "done";
+          void this.onLoginCompleted("muse", profile?.id ?? null);
         } else {
           fail("Muse ended sign-in before it was confirmed. Start again and approve the new code in your browser.");
         }
@@ -6299,7 +6659,24 @@ export class AncillaServer {
       if (notification.method === "usage/changed") {
         const usage = parseSubscriptionUsage(params);
         const host = this.hosts.get(hostKey);
-        if (!host || !this.isCurrentQuotaHost(host)) return;
+        if (!host) return;
+        if (host.providerId !== "muse") {
+          if (usage) {
+            const pKey = `${host.providerId}::${host.accountId ?? "default"}`;
+            this.providerUsageByKey.set(pKey, usage);
+            if (host.quotaCacheScope) {
+              this.store.setSubscriptionUsage(host.quotaCacheScope, usage);
+            }
+            this.emit("ancilla", {
+              type: "provider-usage",
+              providerId: host.providerId,
+              accountId: host.accountId,
+              usage,
+            });
+          }
+          return;
+        }
+        if (!this.isCurrentQuotaHost(host)) return;
         const accountId = host.accountId;
         if (!this.quotaScopes.has(accountId) || this.quotaScopes.get(accountId) === host.quotaCacheScope) {
           this.observeUsage(usage, accountId, "runtime", host.quotaCacheScope);
@@ -6848,7 +7225,7 @@ export class AncillaServer {
   }
 
   private isCurrentQuotaHost(host: ManagedHost): boolean {
-    return this.hosts.get(host.key) === host && (!host.accountId ||
+    return host.providerId === "muse" && this.hosts.get(host.key) === host && (!host.accountId ||
       (!this.removedQuotaAccounts.has(host.accountId) &&
         host.quotaAccountGeneration === (this.quotaAccountGenerations.get(host.accountId) ?? 0)));
   }
@@ -6873,6 +7250,7 @@ export class AncillaServer {
     usage: SubscriptionUsage | null; byAccount: Record<string, SubscriptionUsage>; accountId: string | null;
     saved: boolean; savedAccountIds: string[]; status: "ready" | "no-host" | "unobserved" | "unavailable";
     accounts: PlanAccountUsage[];
+    providerQuotas: Record<string, unknown>[];
   }> {
     const revision = ++this.planUsageReadRevision;
     const profiles = await this.aonia.listProfiles().catch(() => []);
@@ -6885,7 +7263,7 @@ export class AncillaServer {
       if (scope) this.observeUsage(this.store.getSubscriptionUsage(scope), accountId, "saved", scope);
       this.quotaScopes.set(accountId, scope);
     }
-    const hosts = [...this.hosts.values()];
+    const hosts = [...this.hosts.values()].filter((h) => h.providerId === "muse");
     const hostOutcomes = new Map<string | null, { attempted: number; succeeded: number; usageAtStart: SubscriptionUsage | null }>();
     let failed = 0;
     const hostReads = hosts.map(async (managed) => {
@@ -6932,7 +7310,22 @@ export class AncillaServer {
       // A WSL login is read through a distro that may be stopped or slow; the page does not wait long for it.
       await (await this.readsWslLogin(accountId) ? this.wslUnit("read", direct, () => undefined) : direct());
     });
-    await Promise.all([...hostReads, ...directReads]);
+    const otherHostReads = [...this.hosts.values()]
+      .filter((h) => h.providerId !== "muse")
+      .map(async (managed) => {
+        try {
+          const usage = await this.readHostQuota(managed);
+          if (usage && this.hosts.get(managed.key) === managed) {
+            this.providerUsageByKey.set(`${managed.providerId}::${managed.accountId ?? "default"}`, usage);
+            if (managed.quotaCacheScope) {
+              this.store.setSubscriptionUsage(managed.quotaCacheScope, usage);
+            }
+          }
+        } catch {
+          /* ignore unsupported or timed-out non-Muse quota checks */
+        }
+      });
+    await Promise.all([...hostReads, ...directReads, ...otherHostReads]);
     const accounts: PlanAccountUsage[] = [null, ...profiles.map((profile) => profile.id)]
       .filter((id) => id === null || !this.removedQuotaAccounts.has(id))
       .map((accountId) => {
@@ -6955,6 +7348,7 @@ export class AncillaServer {
         };
       });
     const metaAvailable = accounts.some((account) => account.status === "ready");
+    const providerQuotas = this.providerQuotasView();
     return {
       usage: this.planUsage,
       byAccount: Object.fromEntries(this.planUsageByAccount),
@@ -6963,6 +7357,7 @@ export class AncillaServer {
       savedAccountIds: [...this.usageSources].flatMap(([id, source]) => id !== null && source === "saved" ? [id] : []),
       status: metaAvailable ? "ready" : hosts.length === 0 ? "no-host" : failed === hosts.length ? "unavailable" : this.planUsage ? "ready" : "unobserved",
       accounts,
+      providerQuotas,
     };
   }
 
@@ -7014,6 +7409,1151 @@ export class AncillaServer {
       void this.maybeUpgradeThreadTitle(sessionId, raw);
       this.sessionsChanged();
     }
+  }
+
+  private normalizeProviderId(value: unknown): ProviderId {
+    return normalizeProviderIdValue(value);
+  }
+
+  private profilesFor(): ProfileIsolator {
+    if (!this.profileIsolator) {
+      const inMemory = this.options.dataDir === ":memory:";
+      this.providerSecrets ??= new FileSecretStore(
+        inMemory ? null : join(this.options.dataDir, "provider-secrets.json"),
+        () => Date.now(),
+        (line) => this.log(line),
+      );
+      this.profileIsolator = new ProfileIsolator(
+        inMemory ? null : this.options.dataDir,
+        this.providerSecrets,
+      );
+    }
+    return this.profileIsolator;
+  }
+
+  private cliHostPathFor(cwd: string, providerId: ProviderId): string {
+    if (!cwd || this.options.platform !== "win32") {
+      return cwd;
+    }
+    const cachedRuntime = this.providerProbeCache?.probes[providerId]?.runtime;
+    const runtime = cachedRuntime && cachedRuntime !== "builtin" ? cachedRuntime : (this.runtimeHint() ?? this.runtimeKnown);
+    if (runtime === "native") {
+      return this.spawnCwdFor(cwd);
+    }
+    const unc = /^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)(?:\\(.*))?$/i.exec(cwd);
+    if (unc) {
+      return "/" + (unc[2] ?? "").replace(/\\/g, "/");
+    }
+    if (isWindowsAbs(cwd)) {
+      try {
+        return toWslPath(cwd);
+      } catch {
+        return cwd;
+      }
+    }
+    return cwd;
+  }
+
+  private providerAccountView(record: ProviderAccountRecord): Record<string, unknown> {
+    const isolator = this.profilesFor();
+    return {
+      id: record.id,
+      providerId: record.providerId,
+      name: record.name,
+      runtimeOverride: record.runtimeOverride,
+      binaryPath: record.binaryPath,
+      customArgs: record.customArgs,
+      apiKind: record.apiKind,
+      apiBaseUrl: record.apiBaseUrl,
+      hasApiKey: isolator.resolveApiKey(record) !== null,
+      stripAmbientKeys: record.stripAmbientKeys,
+      defaultModelId: record.defaultModelId,
+      customModels: record.customModels,
+      createdAt: record.createdAt,
+      lastUsedAt: record.lastUsedAt,
+    };
+  }
+
+  private async closeProviderAccountHosts(providerId: ProviderId, accountId: string | null, reason: string): Promise<void> {
+    const matching = [...this.hosts.values()].filter(
+      (h) => h.providerId === providerId && h.accountId === accountId,
+    );
+    await Promise.all(
+      matching.map(async (managed) => {
+        await this.closeHost(managed);
+        this.forgetHost(managed, reason);
+      }),
+    );
+  }
+
+  private async createOrUpdateProviderAccount(
+    existingId: string | null,
+    body: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const existing = existingId ? this.store.getProviderAccount(existingId) : null;
+    if (existingId && !existing) {
+      throw new HttpError(404, `Unknown provider account "${existingId}".`);
+    }
+
+    const rawProvider = body["providerId"] ?? existing?.providerId;
+    if (!isProviderId(rawProvider)) {
+      throw new HttpError(400, "A valid providerId is required.");
+    }
+    if (rawProvider === "muse") {
+      throw new HttpError(400, "Muse profiles are managed through /api/accounts.");
+    }
+    const providerId: ProviderId = rawProvider;
+
+    const rawName = str(body["name"])?.trim() ?? existing?.name;
+    if (!rawName || rawName.length > 120) {
+      throw new HttpError(400, "name must be 1 to 120 characters.");
+    }
+
+    let id = existingId ?? str(body["id"])?.trim() ?? null;
+    if (!id) {
+      const slug = rawName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 32) || "account";
+      id = `${slug}-${randomUUID().slice(0, 6)}`;
+    }
+    if (!/^[a-z0-9][a-z0-9._-]{0,62}$/i.test(id)) {
+      throw new HttpError(400, "Account id must contain only letters, digits, dots, hyphens or underscores.");
+    }
+    if (!existingId && body["upsert"] !== true && this.store.getProviderAccount(id)) {
+      throw new HttpError(409, `Provider account "${id}" already exists.`);
+    }
+
+    let apiKind: ApiProviderKind | null = existing?.apiKind ?? (providerId === "api" ? "openai" : null);
+    if ("apiKind" in body) {
+      const k = body["apiKind"];
+      if (k === null) {
+        apiKind = null;
+      } else if (k === "openai" || k === "anthropic" || k === "google") {
+        apiKind = k;
+      } else {
+        throw new HttpError(400, "apiKind must be openai, anthropic or google.");
+      }
+    }
+
+    let apiBaseUrl: string | null =
+      existing?.apiBaseUrl ??
+      (providerId === "api"
+        ? apiKind === "anthropic"
+          ? "https://api.anthropic.com"
+          : apiKind === "google"
+            ? "https://generativelanguage.googleapis.com"
+            : "https://api.openai.com/v1"
+        : null);
+    const baseInput = "apiBaseUrl" in body ? body["apiBaseUrl"] : ("baseUrl" in body ? body["baseUrl"] : undefined);
+    if (baseInput !== undefined) {
+      if (baseInput === null || baseInput === "") {
+        apiBaseUrl = null;
+      } else if (typeof baseInput === "string") {
+        let parsed: URL;
+        try {
+          parsed = new URL(baseInput.trim());
+        } catch {
+          throw new HttpError(400, "apiBaseUrl must be a valid http:// or https:// URL.");
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          throw new HttpError(400, "apiBaseUrl must use http:// or https://.");
+        }
+        apiBaseUrl = baseInput.trim().replace(/\/+$/, "");
+      } else {
+        throw new HttpError(400, "apiBaseUrl must be a string or null.");
+      }
+    }
+
+    const binaryInput = "binaryPath" in body ? body["binaryPath"] : ("command" in body ? body["command"] : undefined);
+    let binaryPath: string | null | undefined = undefined;
+    if (binaryInput !== undefined) {
+      if (binaryInput === null || binaryInput === "") {
+        binaryPath = null;
+      } else if (typeof binaryInput === "string" && binaryInput.trim().length > 0) {
+        binaryPath = binaryInput.trim();
+      } else {
+        throw new HttpError(400, "binaryPath must be a string or null.");
+      }
+    }
+
+    const argsInput = "customArgs" in body ? body["customArgs"] : ("args" in body ? body["args"] : undefined);
+    let customArgs: string[] | undefined = undefined;
+    if (argsInput !== undefined) {
+      if (!Array.isArray(argsInput) || !argsInput.every((item) => typeof item === "string")) {
+        throw new HttpError(400, "customArgs must be an array of strings.");
+      }
+      customArgs = argsInput.map((s) => s.trim()).filter(Boolean);
+    }
+
+    let runtimeOverride: string | null | undefined = undefined;
+    if ("runtimeOverride" in body) {
+      const r = body["runtimeOverride"];
+      if (r === null || r === "") {
+        runtimeOverride = null;
+      } else if (r === "native" || r === "wsl" || r === "posix") {
+        runtimeOverride = r;
+      } else {
+        throw new HttpError(400, "runtimeOverride must be native, wsl, posix or null.");
+      }
+    }
+
+    let stripAmbientKeys: boolean | undefined = undefined;
+    if ("stripAmbientKeys" in body) {
+      if (typeof body["stripAmbientKeys"] !== "boolean") {
+        throw new HttpError(400, "stripAmbientKeys must be a boolean.");
+      }
+      stripAmbientKeys = body["stripAmbientKeys"];
+    }
+
+    let defaultModelId: string | null | undefined = undefined;
+    if ("defaultModelId" in body) {
+      const m = body["defaultModelId"];
+      if (m === null || m === "") {
+        defaultModelId = null;
+      } else if (typeof m === "string") {
+        defaultModelId = m.trim();
+      } else {
+        throw new HttpError(400, "defaultModelId must be a string or null.");
+      }
+    }
+
+    let customModels: string[] | undefined = undefined;
+    if ("customModels" in body) {
+      if (!Array.isArray(body["customModels"]) || !body["customModels"].every((m) => typeof m === "string")) {
+        throw new HttpError(400, "customModels must be an array of model ID strings.");
+      }
+      customModels = [...new Set((body["customModels"] as string[]).map((m) => m.trim()).filter(Boolean))];
+    }
+
+    const isolator = this.profilesFor();
+    let secretKeyId: string | null | undefined = undefined;
+    if ("apiKey" in body) {
+      const keyVal = body["apiKey"];
+      if (keyVal === null || keyVal === "") {
+        if (existing) {
+          isolator.deleteApiKey(existing);
+        }
+        secretKeyId = null;
+      } else if (typeof keyVal === "string" && keyVal.trim().length > 0) {
+        secretKeyId = isolator.setApiKey(id, keyVal.trim());
+      } else {
+        throw new HttpError(400, "apiKey must be a non-empty string or null.");
+      }
+    }
+
+    if (providerId !== "api") {
+      isolator.profileDir(providerId, id);
+    }
+
+    const saved = this.store.upsertProviderAccount({
+      id,
+      providerId,
+      name: rawName,
+      ...(runtimeOverride !== undefined ? { runtimeOverride } : {}),
+      ...(binaryPath !== undefined ? { binaryPath } : {}),
+      ...(customArgs !== undefined ? { customArgs } : {}),
+      apiKind,
+      apiBaseUrl,
+      ...(secretKeyId !== undefined ? { secretKeyId } : {}),
+      ...(stripAmbientKeys !== undefined ? { stripAmbientKeys } : {}),
+      ...(defaultModelId !== undefined ? { defaultModelId } : {}),
+      ...(customModels !== undefined ? { customModels } : {}),
+    });
+
+    if (existing) {
+      await this.closeProviderAccountHosts(providerId, id, "Provider account configuration changed.");
+    }
+
+    return this.providerAccountView(saved);
+  }
+
+  private async removeProviderAccount(accountId: string): Promise<void> {
+    const existing = this.store.getProviderAccount(accountId);
+    if (!existing) {
+      throw new HttpError(404, `Unknown provider account "${accountId}".`);
+    }
+    const isolator = this.profilesFor();
+    isolator.deleteApiKey(existing);
+    if (this.options.dataDir !== ":memory:" && existing.providerId !== "api") {
+      const dir = isolator.profileDir(existing.providerId, accountId);
+      if (dir) {
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
+    this.store.deleteProviderAccount(accountId);
+    this.providerUsageByKey.delete(`${existing.providerId}::${accountId}`);
+    await this.closeProviderAccountHosts(existing.providerId, accountId, "Provider account was removed.");
+  }
+
+  private async probeProvidersCached(refresh: boolean): Promise<Record<string, ProviderBinaryProbe>> {
+    const now = Date.now();
+    if (!refresh && this.providerProbeCache && now - this.providerProbeCache.at < 30_000) {
+      return this.providerProbeCache.probes;
+    }
+    const builtins = await probeAllBuiltinProviders({
+      exec: this.options.exec,
+      platform: this.options.platform,
+      preference: this.options.runtime,
+      distro: this.options.distro,
+    });
+    const probes: Record<string, ProviderBinaryProbe> = { ...builtins };
+    // Preserve Muse path discovery when configured explicitly via options.musePath
+    if (this.options.musePath) {
+      const museRuntime = await this.museRuntime().catch(() => "posix" as MuseRuntime);
+      const musePath = await this.cliMusePath().catch(() => this.options.musePath ?? null);
+      if (musePath) {
+        probes["muse"] = {
+          providerId: "muse",
+          available: true,
+          runtime: museRuntime,
+          binaryPath: musePath,
+          distro: museRuntime === "wsl" ? this.wslDistro() : null,
+          version: probes["muse"]?.version ?? null,
+        };
+      }
+    }
+    this.providerProbeCache = { at: now, probes };
+    return probes;
+  }
+
+  private async listProvidersView(refresh: boolean): Promise<Record<string, unknown>> {
+    const probes = await this.probeProvidersCached(refresh);
+    const isolator = this.profilesFor();
+    const allStoredAccounts = this.store.listProviderAccounts();
+    const museAccounts = await this.accountList().catch(() => []);
+    const museDefault = await this.defaultLoginIdentity().catch(() => ({ hasLogin: null, email: null }));
+
+    const customIds = [
+      ...new Set(
+        allStoredAccounts
+          .map((a) => a.providerId)
+          .filter((id) => !(BUILTIN_PROVIDER_IDS as readonly string[]).includes(id)),
+      ),
+    ];
+    const providerIds: ProviderId[] = [...BUILTIN_PROVIDER_IDS, ...customIds];
+    const ambientKeyOverrides: Record<string, string[]> = {};
+
+    const providers = await Promise.all(
+      providerIds.map(async (providerId) => {
+        const descriptor = descriptorForProvider(providerId);
+        const ambient = detectAmbientKeyOverrides(providerId);
+        if (ambient.length > 0) {
+          ambientKeyOverrides[providerId] = ambient;
+        }
+        const accountsForProvider = allStoredAccounts.filter((a) => a.providerId === providerId);
+        let probe = probes[providerId];
+        if (!probe) {
+          const customAccount = accountsForProvider[0] ?? null;
+          probe = await probeProviderBinary(providerId, {
+            exec: this.options.exec,
+            platform: this.options.platform,
+            preference: this.options.runtime,
+            distro: this.options.distro,
+            configuredPath: customAccount?.binaryPath ?? undefined,
+          });
+        }
+
+        if (providerId === "muse") {
+          return {
+            id: providerId,
+            displayName: descriptor.displayName,
+            vendorName: descriptor.vendorName,
+            subscriptionSummary: descriptor.subscriptionSummary,
+            binaryName: descriptor.binaryName,
+            serveArgs: descriptor.serveArgs,
+            loginArgs: descriptor.loginArgs,
+            installDocsUrl: descriptor.installDocsUrl,
+            usageDashboardUrl: descriptor.usageDashboardUrl,
+            capabilities: descriptor.capabilities,
+            binary: probe,
+            ambientKeyOverrides: ambient,
+            defaultAuth: {
+              state: museDefault.hasLogin === true ? "authenticated" : museDefault.hasLogin === false ? "unauthenticated" : "unknown",
+              summary: museDefault.email ? `Signed in as ${museDefault.email}` : (museDefault.hasLogin ? "Signed in" : null),
+              email: museDefault.email,
+              planTier: null,
+              authMethod: "device-code",
+            },
+            accounts: museAccounts,
+          };
+        }
+
+        const defaultAuth =
+          providerId === "api"
+            ? await isolator.probeAuthStatus({
+                providerId: "api",
+                accountId: accountsForProvider[0]?.id ?? null,
+                account: accountsForProvider[0] ?? null,
+                binaryAvailable: true,
+              })
+            : await isolator.probeAuthStatus({
+                providerId,
+                accountId: null,
+                account: null,
+                binaryAvailable: probe.available,
+                binaryPath: probe.binaryPath,
+                runtime: probe.runtime,
+                distro: probe.distro,
+                platform: this.options.platform,
+                exec: this.options.exec,
+              });
+
+        const accountViews = await Promise.all(
+          accountsForProvider.map(async (acc) => {
+            const auth = await isolator.probeAuthStatus({
+              providerId,
+              accountId: acc.id,
+              account: acc,
+              binaryAvailable: Boolean(acc.binaryPath) || probe.available,
+              binaryPath: acc.binaryPath ?? probe.binaryPath,
+              runtime: (acc.runtimeOverride as MuseRuntime | null) ?? probe.runtime,
+              distro: probe.distro,
+              platform: this.options.platform,
+              exec: this.options.exec,
+            });
+            return {
+              ...this.providerAccountView(acc),
+              auth,
+            };
+          }),
+        );
+
+        return {
+          id: providerId,
+          displayName:
+            providerId.startsWith("acp:") && accountsForProvider[0]
+              ? accountsForProvider[0].name
+              : descriptor.displayName,
+          vendorName: descriptor.vendorName,
+          subscriptionSummary: descriptor.subscriptionSummary,
+          binaryName: descriptor.binaryName,
+          serveArgs: descriptor.serveArgs,
+          loginArgs: descriptor.loginArgs,
+          installDocsUrl: descriptor.installDocsUrl,
+          usageDashboardUrl: descriptor.usageDashboardUrl,
+          capabilities: descriptor.capabilities,
+          binary: probe,
+          ambientKeyOverrides: ambient,
+          defaultAuth,
+          accounts: accountViews,
+        };
+      }),
+    );
+
+    return {
+      providers,
+      accounts: allStoredAccounts.map((acc) => this.providerAccountView(acc)),
+      ambientKeyOverrides,
+      remoteDeployment: !isLoopbackBind(this.options.host),
+      license: "AGPL-3.0-only",
+      sourceOfferUrl: "https://github.com/aleff-ferreira/ancilla",
+    };
+  }
+
+  private isHostIdle(managed: ManagedHost): boolean {
+    for (const [sessionId, live] of this.live) {
+      if (
+        live.turnHost === managed.key &&
+        (live.activeTurnId || live.pendingApprovals.size > 0 || live.pendingInputs.size > 0)
+      ) {
+        return false;
+      }
+      if (this.sessionHosts.get(sessionId) === managed.key && this.isBusy(sessionId)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async onLoginCompleted(providerId: ProviderId, accountId: string | null): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    this.providerProbeCache = null;
+    if (providerId === "muse") {
+      this.quotaScopes.delete(accountId);
+    }
+    const matching = [...this.hosts.values()].filter(
+      (h) => h.providerId === providerId && h.accountId === accountId,
+    );
+    const idleHosts: ManagedHost[] = [];
+    for (const host of matching) {
+      this.staleAfterLoginHosts.add(host);
+      if (this.isHostIdle(host)) {
+        idleHosts.push(host);
+      }
+    }
+    await Promise.all(
+      idleHosts.map(async (managed) => {
+        await this.closeHost(managed);
+        this.forgetHost(managed, "Refreshing host after sign-in.");
+      }),
+    );
+    this.emit("ancilla", { type: "login-completed", providerId, accountId });
+  }
+
+  private async oneShotListModels(
+    providerId: ProviderId,
+    accountId: string | null,
+  ): Promise<{ models: unknown; hostVersion: string | null }> {
+    const token: StartToken = { handle: null, abandoned: false, closing: false };
+    const tempKey = `__probe__:${providerId}:${accountId ?? ""}:${randomUUID()}`;
+    const managed =
+      providerId === "muse"
+        ? await this.spawnHost(tempKey, "", accountId, token)
+        : await this.spawnProviderHost(tempKey, "", accountId, providerId, token);
+    this.hosts.delete(tempKey);
+    try {
+      const models = await managed.manager.listModels(undefined);
+      return { models, hostVersion: managed.serverVersion };
+    } finally {
+      await this.closeHost(managed);
+    }
+  }
+
+  private async resolveLiveModelCatalog(
+    providerId: ProviderId,
+    accountId: string | null,
+  ): Promise<{ models: unknown; hostVersion: string | null }> {
+    const recycleStaleListingHost = async (): Promise<"ready" | "busy"> => {
+      const listingKey = this.hostKey("", accountId, providerId);
+      const existing = this.hosts.get(listingKey);
+      if (existing && this.staleAfterLoginHosts.has(existing)) {
+        if (this.isHostIdle(existing)) {
+          await this.closeHost(existing);
+          this.forgetHost(existing, "Refreshing host after sign-in.");
+          return "ready";
+        }
+        return "busy";
+      }
+      return "ready";
+    };
+
+    if (providerId === "muse") {
+      const candidate = accountId ? await this.runningHostOf(accountId, "muse") : null;
+      if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
+        return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+      }
+      if ((await recycleStaleListingHost()) === "busy") {
+        return this.oneShotListModels("muse", accountId);
+      }
+      const host = await this.hostFor("", accountId, "muse");
+      return { models: await host.manager.listModels(undefined), hostVersion: host.serverVersion };
+    }
+
+    if (providerId === "api") {
+      const candidate = accountId ? await this.runningHostOf(accountId, "api") : null;
+      if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
+        return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+      }
+      if ((await recycleStaleListingHost()) === "busy") {
+        return this.oneShotListModels("api", accountId);
+      }
+      const host = await this.hostFor("", accountId, "api");
+      return { models: await host.manager.listModels(undefined), hostVersion: host.serverVersion };
+    }
+
+    const descriptor = descriptorForProvider(providerId);
+    let account: ProviderAccountRecord | null = null;
+    if (accountId !== null) {
+      account = this.store.getProviderAccount(accountId);
+      if (!account || account.providerId !== providerId) {
+        throw new HttpError(400, `Unknown ${descriptor.displayName} account "${accountId}".`);
+      }
+    }
+
+    const running = accountId
+      ? await this.runningHostOf(accountId, providerId)
+      : ([...this.hosts.values()].find(
+          (h) => h.providerId === providerId && h.accountId === null && !this.staleAfterLoginHosts.has(h),
+        ) ?? null);
+    const freshRunning = running && !this.staleAfterLoginHosts.has(running) ? running : null;
+
+    if (freshRunning) {
+      return { models: await freshRunning.manager.listModels(undefined), hostVersion: freshRunning.serverVersion };
+    }
+
+    if ((await recycleStaleListingHost()) === "busy") {
+      return this.oneShotListModels(providerId, accountId);
+    }
+
+    if (this.providerHostFactory) {
+      const host = await this.hostFor("", accountId, providerId);
+      return { models: await host.manager.listModels(undefined), hostVersion: host.serverVersion };
+    }
+
+    const cachedProbes = await this.probeProvidersCached(false);
+    let probe = cachedProbes[providerId];
+    if (!probe || account?.binaryPath || account?.runtimeOverride) {
+      probe = await probeProviderBinary(providerId, {
+        exec: this.options.exec,
+        platform: this.options.platform,
+        preference: (account?.runtimeOverride as RuntimePreference | null) ?? this.options.runtime,
+        distro: this.options.distro,
+        configuredPath: account?.binaryPath ?? undefined,
+      });
+    }
+    if (!probe.available && !account?.binaryPath) {
+      return { models: this.staticModelCatalog(providerId, accountId), hostVersion: null };
+    }
+
+    const auth = await this.profilesFor().probeAuthStatus({
+      providerId,
+      accountId,
+      account,
+      binaryAvailable: true,
+      binaryPath: account?.binaryPath ?? probe.binaryPath,
+      runtime: (account?.runtimeOverride as MuseRuntime | null) ?? probe.runtime,
+      distro: probe.distro,
+      platform: this.options.platform,
+      exec: this.options.exec,
+    });
+    if (providerId !== "claude" && (auth.state === "unauthenticated" || auth.state === "missing-key")) {
+      return { models: this.staticModelCatalog(providerId, accountId), hostVersion: probe.version };
+    }
+
+    try {
+      const host = await this.hostFor("", accountId, providerId);
+      return {
+        models: await host.manager.listModels(undefined),
+        hostVersion: host.serverVersion ?? probe.version,
+      };
+    } catch {
+      return { models: this.staticModelCatalog(providerId, accountId), hostVersion: probe.version };
+    }
+  }
+
+  private staticModelCatalog(providerId: ProviderId, accountId: string | null): Record<string, unknown> {
+    const descriptor = descriptorForProvider(providerId);
+    const account = accountId ? this.store.getProviderAccount(accountId) : null;
+    const defaultId = account?.defaultModelId ?? descriptor.fallbackModels[0]?.modelId ?? null;
+    const seen = new Set<string>();
+    const models: Record<string, unknown>[] = [];
+    for (const seed of descriptor.fallbackModels) {
+      seen.add(seed.modelId);
+      const active = seed.modelId === defaultId;
+      models.push({
+        modelId: seed.modelId,
+        displayLabel: seed.displayLabel,
+        description: seed.description ?? null,
+        providerId,
+        profileId: accountId,
+        isActive: active,
+        isDefault: active,
+        contextLimit: seed.contextWindowTokens ?? null,
+        contextWindowTokens: seed.contextWindowTokens ?? null,
+        variants: seed.supportedReasoningEfforts ? [...seed.supportedReasoningEfforts] : null,
+        reasoningEffortVariants: seed.supportedReasoningEfforts ? [...seed.supportedReasoningEfforts] : null,
+        supportedReasoningEfforts: seed.supportedReasoningEfforts ? [...seed.supportedReasoningEfforts] : [],
+        defaultReasoningEffort: seed.defaultReasoningEffort ?? null,
+      });
+    }
+    if (account) {
+      for (const customId of account.customModels) {
+        if (seen.has(customId)) continue;
+        seen.add(customId);
+        const active = customId === defaultId;
+        models.push({
+          modelId: customId,
+          displayLabel: customId,
+          description: null,
+          providerId,
+          profileId: accountId,
+          isActive: active,
+          isDefault: active,
+          contextLimit: null,
+          contextWindowTokens: null,
+          reasoningEffortVariants: null,
+          supportedReasoningEfforts: [],
+          defaultReasoningEffort: null,
+        });
+      }
+    }
+    if (models.length > 0 && !models.some((m) => m["isDefault"] === true)) {
+      models[0]!["isDefault"] = true;
+      models[0]!["isActive"] = true;
+    }
+    return {
+      source: "bundledCatalog",
+      providerId,
+      profileId: accountId,
+      models,
+    };
+  }
+
+  private async spawnProviderHost(
+    key: string,
+    cwd: string,
+    accountId: string | null,
+    providerId: ProviderId,
+    token: StartToken,
+  ): Promise<ManagedHost> {
+    const descriptor = descriptorForProvider(providerId);
+    const label = descriptor.displayName;
+    const isolator = this.profilesFor();
+
+    let account: ProviderAccountRecord | null = null;
+    if (accountId !== null) {
+      account = this.store.getProviderAccount(accountId);
+      if (!account || account.providerId !== providerId) {
+        throw new HttpError(400, `Unknown ${label} account "${accountId}".`);
+      }
+    } else if (providerId === "api") {
+      account = this.store.listProviderAccounts("api")[0] ?? null;
+    }
+
+    const quotaScope = `provider-quota:${providerId}:${account?.id ?? accountId ?? "default"}`;
+    const savedQuota = this.store.getSubscriptionUsage(quotaScope);
+    if (savedQuota && !this.providerUsageByKey.has(`${providerId}::${account?.id ?? accountId ?? "default"}`)) {
+      this.providerUsageByKey.set(`${providerId}::${account?.id ?? accountId ?? "default"}`, savedQuota);
+    }
+
+    let target: ServeTarget;
+    let handle: HostHandle | null | undefined = null;
+
+    if (providerId === "api") {
+      const effectiveUrl = account?.apiBaseUrl ?? "https://api.openai.com/v1";
+      target = {
+        command: "http-api",
+        args: [account?.apiKind ?? "openai", effectiveUrl],
+        cwd: cwd || process.cwd(),
+      };
+      this.assertStartWanted(token);
+      if (this.providerHostFactory) {
+        handle = this.providerHostFactory({ providerId, accountId: account?.id ?? accountId, cwd, target });
+      }
+      if (!handle) {
+        if (!account) {
+          throw new HttpError(400, "Add an API or local model endpoint in Settings -> Providers first.");
+        }
+        handle = new ApiAgentHost({
+          accountName: account.name,
+          apiKind: account.apiKind ?? "openai",
+          baseUrl: effectiveUrl,
+          resolveApiKey: () => isolator.resolveApiKey(account),
+          defaultModelId: account.defaultModelId,
+          customModels: account.customModels,
+          journal: this.store.sessionJournal(),
+        });
+      }
+    } else {
+      let probe: ProviderBinaryProbe | null = null;
+      if (!this.providerHostFactory) {
+        probe = await probeProviderBinary(providerId, {
+          exec: this.options.exec,
+          platform: this.options.platform,
+          preference: (account?.runtimeOverride as RuntimePreference | null) ?? this.options.runtime,
+          distro: this.options.distro,
+          configuredPath: account?.binaryPath ?? undefined,
+        });
+        if (!probe.available && !account?.binaryPath) {
+          const docsHint = descriptor.installDocsUrl ? ` See ${descriptor.installDocsUrl}.` : "";
+          throw new HttpError(
+            503,
+            `${label} CLI (${descriptor.binaryName ?? providerId}) is not installed or not on PATH.${docsHint}`,
+          );
+        }
+      }
+      const runtime =
+        (account?.runtimeOverride as MuseRuntime | null) ??
+        (probe && probe.runtime !== "builtin" ? probe.runtime : (this.options.platform === "win32" ? "native" : "posix"));
+      const plan = planProviderServe({
+        providerId,
+        platform: this.options.platform,
+        runtime,
+        distro: probe?.distro ?? this.wslDistro(),
+        binaryPath: account?.binaryPath ?? probe?.binaryPath ?? null,
+        customArgs: account && account.customArgs.length > 0 ? account.customArgs : null,
+        cwd: this.spawnCwdFor(cwd),
+        sandboxDisabled: this.store.getSandboxSettings().disabled,
+        yoloEnabled: this.store.getYoloSettings().enabled,
+      });
+      const env = isolator.buildCliEnv({
+        providerId,
+        accountId,
+        account,
+        viaWsl: plan.viaWsl,
+      });
+      target = {
+        command: plan.command,
+        args: plan.args,
+        cwd: plan.cwd,
+        env: Object.fromEntries(
+          Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        ),
+      };
+      this.assertStartWanted(token);
+      if (this.providerHostFactory) {
+        handle = this.providerHostFactory({ providerId, accountId, cwd, target });
+      }
+      if (!handle) {
+        handle = createCliAgentHost(
+          {
+            providerId,
+            target,
+            journal: this.store.sessionJournal(),
+            initialUsage: savedQuota,
+          },
+          {
+            startTimeoutMs: this.hostStartTimeoutMs,
+            log: (line) => this.log(line),
+          },
+        );
+      }
+    }
+
+    token.handle = handle;
+    let started: { fingerprintWarning?: unknown; initializeResult?: unknown } | null;
+    try {
+      started = (await handle.start(ANCILLA_VERSION)) as typeof started;
+    } catch (error) {
+      this.assertStartWanted(token);
+      this.lastHostError = error instanceof Error ? error.message : String(error);
+      this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
+      if (error instanceof HostStartTimeoutError) {
+        throw new HttpError(504, `Could not start ${label}: ${this.lastHostError}`);
+      }
+      throw new HttpError(502, `Could not start ${label}: ${this.lastHostError}`);
+    }
+    if (token.abandoned || this.closed) {
+      if (!token.closing) {
+        token.closing = true;
+        closeInBackground(handle);
+      }
+      this.assertStartWanted(token);
+    }
+    this.lastHostError = null;
+    this.fingerprints.set(key, started?.fingerprintWarning ?? null);
+    const manager = new SessionManager(handle.connection, {
+      providerId,
+      capabilities: handle.capabilities ?? capabilitiesForProvider(providerId),
+    });
+    manager.onNotification((notification) => {
+      if (notification.method === "usage/changed" && this.hosts.get(key)?.handle !== handle) return;
+      this.forward(key, notification, handle);
+    });
+    manager.onProtocolError((error) => {
+      this.protocolErrors += 1;
+      this.lastProtocolError = error instanceof Error ? error.message : String(error);
+      this.log(`protocol error on host ${key}: ${this.lastProtocolError}`);
+    });
+    const serverInfo = asRecord(asRecord(started?.initializeResult)?.["serverInfo"]);
+    const managed: ManagedHost = {
+      quotaCacheScope: quotaScope,
+      quotaAccountGeneration: 0,
+      key,
+      providerId,
+      accountId: account?.id ?? accountId,
+      target,
+      handle,
+      manager,
+      serverVersion: serverInfo ? str(serverInfo["version"]) : null,
+      startedAt: nowIso(),
+    };
+    handle.onExit?.((exit) => this.hostExited(managed, exit));
+    this.hosts.set(key, managed);
+    return managed;
+  }
+
+  private async runProviderLogin(
+    providerId: ProviderId,
+    accountId: string | null,
+    generation: number,
+  ): Promise<Record<string, unknown>> {
+    if (providerId === "api") {
+      throw new HttpError(400, "API providers authenticate with an API key in Settings -> Providers.");
+    }
+    const descriptor = descriptorForProvider(providerId);
+    const account = accountId ? this.store.getProviderAccount(accountId) : null;
+    if (accountId && (!account || account.providerId !== providerId)) {
+      throw new HttpError(400, `Unknown ${descriptor.displayName} account "${accountId}".`);
+    }
+
+    const isolator = this.profilesFor();
+    const probe = await probeProviderBinary(providerId, {
+      exec: this.options.exec,
+      platform: this.options.platform,
+      preference: (account?.runtimeOverride as RuntimePreference | null) ?? this.options.runtime,
+      distro: this.options.distro,
+      configuredPath: account?.binaryPath ?? undefined,
+    });
+    const runtime =
+      (account?.runtimeOverride as MuseRuntime | null) ??
+      (probe.runtime !== "builtin" ? probe.runtime : "posix");
+    const viaWsl = this.options.platform === "win32" && runtime === "wsl";
+    const env = isolator.buildCliEnv({ providerId, accountId, account, viaWsl });
+    const loginEnv = Object.fromEntries(
+      Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    );
+
+    const binaryDisplay = account?.binaryPath ?? probe.binaryPath ?? descriptor.binaryName ?? providerId;
+    const profileDir = accountId ? isolator.profileDir(providerId, accountId) : null;
+    const envPrefix =
+      profileDir && providerId === "codex"
+        ? `CODEX_HOME="${profileDir}" `
+        : profileDir && providerId === "claude"
+          ? `CLAUDE_CONFIG_DIR="${profileDir}" `
+          : profileDir && providerId === "gemini"
+            ? `GEMINI_CLI_HOME="${profileDir}" `
+            : profileDir && providerId === "copilot"
+              ? `COPILOT_HOME="${profileDir}" `
+              : "";
+    const loginArgs = descriptor.loginArgs;
+    const terminalCommand = loginArgs && loginArgs.length > 0
+      ? `${envPrefix}${binaryDisplay} ${loginArgs.join(" ")}`
+      : `${envPrefix}${binaryDisplay}`;
+
+    const key = `provider:${providerId}:${accountId ?? ""}`;
+    if (this.closed || this.loginStartGenerations.get(key) !== generation) {
+      throw new HttpError(409, "A newer sign-in request replaced this one.");
+    }
+
+    if (!loginArgs || loginArgs.length === 0) {
+      const loginId = randomUUID();
+      this.loginAttempts.set(key, {
+        loginId,
+        status: "done",
+        message: `Run \`${terminalCommand}\` in a terminal once to complete interactive sign-in.`,
+      });
+      return {
+        status: "interactive",
+        url: null,
+        code: null,
+        loginId,
+        terminalCommand,
+        message: `Run \`${terminalCommand}\` in a terminal once to complete interactive sign-in.`,
+      };
+    }
+
+    if (!probe.available && !account?.binaryPath) {
+      throw new HttpError(
+        503,
+        `${descriptor.displayName} CLI (${descriptor.binaryName ?? providerId}) is not installed. Run \`${terminalCommand}\` once installed.`,
+      );
+    }
+
+    const plan = planProviderCli({
+      providerId,
+      platform: this.options.platform,
+      runtime,
+      distro: probe.distro ?? this.wslDistro(),
+      binaryPath: account?.binaryPath ?? probe.binaryPath ?? null,
+      args: loginArgs,
+    });
+
+    const previous = this.loginChildren.get(key);
+    if (previous) {
+      previous.kill();
+      this.loginChildren.delete(key);
+    }
+
+    const attempt = {
+      loginId: randomUUID(),
+      status: "waiting" as "waiting" | "done" | "error",
+      message: undefined as string | undefined,
+    };
+    this.loginAttempts.set(key, attempt);
+    let child: LoginChild;
+    try {
+      child = this.options.loginSpawn(plan.command, plan.args, { env: loginEnv });
+    } catch {
+      attempt.status = "error";
+      attempt.message = `${descriptor.displayName} could not start sign-in. You can also run \`${terminalCommand}\` in a terminal.`;
+      throw new HttpError(503, attempt.message);
+    }
+    this.loginChildren.set(key, child);
+    this.providerProbeCache = null;
+
+    return new Promise((resolvePromise, reject) => {
+      let settled = false;
+      let accumulated = "";
+      let completionTimer: ReturnType<typeof setTimeout> | null = null;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        child.kill();
+        if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
+        attempt.status = "done";
+        attempt.message = `Finish sign-in in your browser or run \`${terminalCommand}\` in a terminal.`;
+        resolvePromise({
+          status: "interactive",
+          url: null,
+          code: null,
+          loginId: attempt.loginId,
+          terminalCommand,
+          message: attempt.message,
+        });
+      }, 8_000);
+
+      const onData = (chunk: unknown) => {
+        if (settled) return;
+        accumulated = (accumulated + String(chunk)).slice(-32_768);
+        const parsed = parseLoginOutput(accumulated);
+        if (parsed.url) {
+          settled = true;
+          clearTimeout(timer);
+          completionTimer = setTimeout(() => {
+            if (attempt.status === "waiting") {
+              attempt.status = "error";
+              attempt.message = "Sign-in timed out.";
+            }
+            child.kill();
+          }, LOGIN_COMPLETE_TIMEOUT_MS);
+          completionTimer.unref();
+          resolvePromise({
+            status: "waiting",
+            url: parsed.url,
+            code: parsed.code,
+            loginId: attempt.loginId,
+            terminalCommand,
+          });
+        }
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("close", (exitCode) => {
+        if (completionTimer) clearTimeout(completionTimer);
+        if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
+        this.providerProbeCache = null;
+        if (exitCode === 0) {
+          attempt.status = "done";
+          void this.onLoginCompleted(providerId, accountId);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolvePromise({
+              status: "done",
+              url: null,
+              code: null,
+              loginId: attempt.loginId,
+              terminalCommand,
+            });
+          }
+          return;
+        }
+        if (attempt.status === "waiting") {
+          attempt.status = "error";
+          attempt.message = `Sign-in exited before completing. Run \`${terminalCommand}\` in a terminal if needed.`;
+        }
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolvePromise({
+            status: "interactive",
+            url: null,
+            code: null,
+            loginId: attempt.loginId,
+            terminalCommand,
+            message: attempt.message,
+          });
+        }
+      });
+      child.on("error", () => {
+        if (completionTimer) clearTimeout(completionTimer);
+        if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
+        attempt.status = "error";
+        attempt.message = `Could not launch ${descriptor.displayName} login.`;
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(new HttpError(503, attempt.message));
+        }
+      });
+    });
+  }
+
+  private async generateApiThreadTitle(
+    session: SessionRecord,
+    firstText: string,
+    modelOverride: string | null,
+  ): Promise<string | null> {
+    const account = session.accountId
+      ? this.store.getProviderAccount(session.accountId)
+      : (this.store.listProviderAccounts("api")[0] ?? null);
+    if (!account) return null;
+    const apiKey = this.profilesFor().resolveApiKey(account);
+    const baseUrl = account.apiBaseUrl ?? "https://api.openai.com/v1";
+    const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(baseUrl);
+    if (!apiKey && !local) return null;
+    const model = modelOverride ?? session.modelId ?? account.defaultModelId ?? "gpt-5.3-codex";
+    const kind = account.apiKind ?? "openai";
+    const brain =
+      kind === "anthropic"
+        ? new AnthropicProvider({ baseUrl, model, apiKey, local, defaultMaxTokens: 128 })
+        : kind === "google"
+          ? new GoogleGenAiProvider({ baseUrl, model, apiKey, local })
+          : new OpenAiCompatibleProvider({ baseUrl, model, apiKey, local });
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), 12_000);
+    timeout.unref?.();
+    let out = "";
+    try {
+      for await (const delta of brain.stream({
+        messages: [
+          { role: "system", content: "Reply with a short, specific 3 to 6 word title for the user's request, with no quotes or punctuation." },
+          { role: "user", content: buildThreadTitlePrompt(firstText) },
+        ],
+        tools: [],
+        maxTokens: 128,
+        signal: abort.signal,
+      })) {
+        if (delta.type === "text") out += delta.delta;
+      }
+      return out.trim() || null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private providerQuotasView(): Record<string, unknown>[] {
+    const out: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    const addEntry = (providerId: ProviderId, accountId: string | null, accountName: string | null) => {
+      if (providerId === "muse") return;
+      const pKey = `${providerId}::${accountId ?? "default"}`;
+      if (seen.has(pKey)) return;
+      seen.add(pKey);
+      const descriptor = descriptorForProvider(providerId);
+      const scope = `provider-quota:${providerId}:${accountId ?? "default"}`;
+      const usage = this.providerUsageByKey.get(pKey) ?? this.store.getSubscriptionUsage(scope);
+      if (usage && !this.providerUsageByKey.has(pKey)) {
+        this.providerUsageByKey.set(pKey, usage);
+      }
+      out.push({
+        providerId,
+        displayName: descriptor.displayName,
+        accountId,
+        accountName,
+        quotaSupport: descriptor.capabilities.quotaSupport,
+        usageDashboardUrl: descriptor.usageDashboardUrl,
+        usage: usage ?? null,
+      });
+    };
+
+    for (const host of this.hosts.values()) {
+      if (host.providerId !== "muse") {
+        const acc = host.accountId ? this.store.getProviderAccount(host.accountId) : null;
+        addEntry(host.providerId, host.accountId, acc?.name ?? null);
+      }
+    }
+    for (const acc of this.store.listProviderAccounts()) {
+      addEntry(acc.providerId, acc.id, acc.name);
+    }
+    for (const [pKey] of this.providerUsageByKey) {
+      const idx = pKey.indexOf("::");
+      if (idx > 0) {
+        const providerId = this.normalizeProviderId(pKey.slice(0, idx));
+        const rawAcc = pKey.slice(idx + 2);
+        const accountId = rawAcc === "default" ? null : rawAcc;
+        const acc = accountId ? this.store.getProviderAccount(accountId) : null;
+        addEntry(providerId, accountId, acc?.name ?? null);
+      }
+    }
+    return out;
   }
 }
 

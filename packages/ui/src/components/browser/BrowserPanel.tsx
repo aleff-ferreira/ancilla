@@ -36,6 +36,11 @@ export function addressOf(tab: PaneTab | undefined): string {
   return !tab || tab.url === "about:blank" ? "" : tab.url;
 }
 
+/** What the transient toast shows: never `message` when `<Status>` is already showing it (or would clear it on timer). */
+export function toastText(view: Pick<SessionView, "status" | "notice" | "message">): string | null {
+  return view.notice ?? (view.status === "open" ? view.message : null);
+}
+
 export function openInMyBrowser(url: string): void {
   if (/^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener,noreferrer");
 }
@@ -66,6 +71,8 @@ export function BrowserPanel() {
     const created = new BrowserSession({
       url: () => controller.browserSocketUrl(),
       open: (url) => new WebSocket(url) as unknown as SocketLike,
+      prepare: () => controller.prepareBrowserSocket(),
+      retryMs: 1500,
       onChange: setView,
       // A picture is acknowledged when it arrives, so the server never waits on the decoder; one still waiting to be decoded
       // when a newer one comes is dropped, so a slow machine shows the latest picture, not a queue of old ones.
@@ -313,8 +320,8 @@ export function BrowserPanel() {
         {view.select ? <SelectList select={view.select} stage={stage} page={page} onPick={(index) => { session.send({ type: "choose", id: view.select!.tabId, index }); session.closeSelect(); }} onClose={() => session.closeSelect()} /> : null}
         {view.dialog ? <DialogBox dialog={view.dialog} onAnswer={(accept, promptText) => session.send({ type: "dialog", id: view.dialog!.tabId, accept, ...(promptText !== undefined ? { promptText } : {}) })} /> : null}
         {view.status !== "open" ? <Status view={view} onConnect={(takeover) => session.connect(takeover)} /> : null}
-        {view.notice || view.message ? (
-          <Toast text={(view.notice ?? view.message) as string} onDismiss={() => (view.notice ? session.clearNotice() : session.clearMessage())} />
+        {toastText(view) ? (
+          <Toast text={toastText(view) as string} onDismiss={() => (view.notice ? session.clearNotice() : session.clearMessage())} />
         ) : null}
       </div>
       <AssistantBar />

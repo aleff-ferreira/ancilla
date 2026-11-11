@@ -16,6 +16,7 @@ import { Button, IconButton, MOD, Toggle, cn } from "../ui/primitives.js";
 import { About } from "./About.js";
 import { MuseSubscriptionCard } from "./MuseSignIn.js";
 import { LinuxSetupCard } from "./LinuxSetup.js";
+import { ProvidersSettings } from "./ProvidersSettings.js";
 
 /** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
 export function Pick<T extends string | number | null>(props: {
@@ -427,6 +428,8 @@ export function SettingsPage() {
   const researchSettings = useApp((s) => s.researchSettings);
   const sandboxSettings = useApp((s) => s.sandboxSettings);
   const env = useApp((s) => s.env);
+  const remoteDeployment = useApp((s) => s.remoteDeployment);
+  const sourceOfferUrl = useApp((s) => s.sourceOfferUrl);
   const updates = useApp((s) => s.updates);
   const bypassAll = useApp((s) => s.bypassAll);
   const armedThreads = useApp((s) => s.bypassThreads.length);
@@ -579,6 +582,8 @@ export function SettingsPage() {
             </Row>
           ))}
         </Section>
+
+        <ProvidersSettings />
 
         <Section title="Threads list">
           <Row label="Group by" description="How the sidebar arranges threads.">
@@ -747,7 +752,7 @@ export function SettingsPage() {
         </Section>
 
         <Section title="About">
-          <About version={env?.version ?? null} />
+          <About version={env?.version ?? null} remoteDeployment={remoteDeployment} sourceOfferUrl={sourceOfferUrl} />
         </Section>
       </div>
       </div>

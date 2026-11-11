@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { CdpConnection } from "../src/browser/cdp.js";
-import { findBrowser } from "../src/browser/find.js";
-import { launchArgs, launchBrowser, type ChildLike } from "../src/browser/launch.js";
+import { findBrowser, findBrowsers } from "../src/browser/find.js";
+import { browserEnv, launchArgs, launchBrowser, type ChildLike } from "../src/browser/launch.js";
 import { handleBrowser } from "../src/browser/routes.js";
 import { buildSnapshot, passwordInputNames, visibleBackendIds, type AxNode } from "../src/browser/snapshot.js";
-import { BrowserError, BrowserService, checkUrl, type BrowserEvent } from "../src/browser/service.js";
+import { BrowserError, BrowserService, checkUrl, prepareProfileDir, type BrowserEvent } from "../src/browser/service.js";
 import { PassThrough } from "node:stream";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
 
@@ -43,6 +46,12 @@ test("find: macOS bundles, Linux names on PATH, override, and plain reasons", ()
   assert.match(wsl.reason!, /WSL/);
   assert.match(wsl.reason!, /not used through WSL interop/);
   assert.equal(findBrowser({ platform: "win32", env: {}, exists: () => false }).browser, null);
+  const all = findBrowsers({
+    platform: "win32",
+    env: {},
+    exists: (p) => p === "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" || p === "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  });
+  assert.deepEqual(all.browsers.map((b) => b.kind), ["edge", "chrome"]);
 });
 
 // ------------------------------------------------------------------ cdp framing and launch
@@ -77,18 +86,38 @@ test("launch: the flags are the documented ones and never disable the sandbox; f
     assert.ok(args.includes("--headless=new") && args.includes("--remote-debugging-pipe") && args.includes("--user-data-dir=/p"));
     assert.ok(!args.some((a) => /no-sandbox|remote-debugging-port|disable-web-security/.test(a)));
   }
-  let seen: { stdio: unknown; detached: boolean } | null = null;
+  let seen: { stdio: unknown; detached: boolean; env?: NodeJS.ProcessEnv } | null = null;
+  const stderr = new PassThrough();
   const proc = launchBrowser({
     path: "/x",
     profileDir: "/p",
     platform: "linux",
+    env: {
+      PATH: "/usr/bin",
+      CHROME_CRASHPAD_PIPE_NAME: "\\\\.\\pipe\\crashpad_host",
+      ELECTRON_RUN_AS_NODE: "1",
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--foo",
+      COREWEBVIEW2_FORCED_HOSTING_MODE: "1",
+    },
     spawnFn: (_p, _a, o) => {
       seen = o;
-      return { pid: 7, stdio: [null, null, null, new PassThrough(), new PassThrough()], on: () => undefined, kill: () => true } as unknown as ChildLike;
+      return { pid: 7, stdio: [null, null, stderr, new PassThrough(), new PassThrough()], on: () => undefined, kill: () => true } as unknown as ChildLike;
     },
   });
-  assert.deepEqual((seen as any).stdio, ["ignore", "ignore", "ignore", "pipe", "pipe"]);
+  assert.deepEqual((seen as any).stdio, ["ignore", "ignore", "pipe", "pipe", "pipe"]);
   assert.equal((seen as any).detached, true);
+  assert.equal((seen as any).env?.PATH, "/usr/bin");
+  assert.equal((seen as any).env?.CHROME_CRASHPAD_PIPE_NAME, undefined);
+  assert.equal((seen as any).env?.ELECTRON_RUN_AS_NODE, undefined);
+  assert.equal((seen as any).env?.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, undefined);
+  assert.equal((seen as any).env?.COREWEBVIEW2_FORCED_HOSTING_MODE, undefined);
+  stderr.write("x".repeat(5000) + "\nFATAL:startup failed\n");
+  assert.match(proc.recentStderr?.() ?? "", /FATAL:startup failed$/);
+  assert.ok((proc.recentStderr?.() ?? "").length <= 4096);
+  assert.deepEqual(
+    Object.keys(browserEnv({ KEEP: "1", chrome_headless: "1", WEBVIEW2_USER_DATA_FOLDER: "x" })),
+    ["KEEP"],
+  );
   assert.equal(proc.pid, 7);
 });
 
@@ -460,6 +489,103 @@ test("a browser that exits at start is reported plainly, with the sandbox hint, 
   await assert.rejects(pending, (e: unknown) => e instanceof BrowserError && e.code === "unavailable" && /sandbox/.test(e.message));
   assert.equal(fake.proc.hasExited(), true);
   await svc.dispose();
+});
+
+test("pipe EOF before process exit still folds exit code and stderr into BrowserError(unavailable)", async () => {
+  const fake = fakeBrowser(() => new Promise(() => undefined));
+  const svc = service(fake);
+  const pending = svc.openTab("you");
+  fake.stderr("[0411:FATAL:sandbox.cc] Failed to move to new namespace\n");
+  fake.closePipeThenExit(0, 35);
+  await assert.rejects(
+    pending,
+    (e: unknown) =>
+      e instanceof BrowserError &&
+      e.code === "unavailable" &&
+      /code 0/.test(e.message) &&
+      /Failed to move to new namespace/.test(e.message) &&
+      /sandbox/.test(e.message),
+  );
+  await svc.dispose();
+});
+
+test("falls back to the next installed browser with an isolated profile when the first browser fails to start", async () => {
+  const edge = { kind: "edge" as const, path: "/fake/msedge" };
+  const chrome = { kind: "chrome" as const, path: "/fake/chrome" };
+  const launched: Array<{ path: string; profileDir: string }> = [];
+  const logs: string[] = [];
+  const svc = new BrowserService({
+    dataDir: ":memory:",
+    findAll: () => ({ browsers: [edge, chrome] }),
+    startupRetries: 1,
+    gracefulMs: 100,
+    log: (line) => logs.push(line),
+    launch: ({ path, profileDir }) => {
+      launched.push({ path, profileDir });
+      if (path === edge.path) {
+        const broken = fakeBrowser(() => new Promise(() => undefined));
+        broken.stderr("side-by-side update in progress");
+        broken.closePipeThenExit(0, 15);
+        return broken.proc;
+      }
+      return fakeBrowser(healthy(), { exitsOnClose: true }).proc;
+    },
+  });
+  const tab = await svc.openTab("you");
+  assert.equal(tab.context, "you");
+  assert.deepEqual(
+    launched.map((l) => l.path),
+    [edge.path, edge.path, chrome.path],
+    "retried edge once, then fell back to chrome",
+  );
+  assert.equal(launched[0]!.profileDir, svc.profilePath());
+  assert.ok(launched[2]!.profileDir.endsWith("profile-chrome") && launched[2]!.profileDir !== svc.profilePath());
+  assert.equal((await svc.status()).browser?.kind, "chrome");
+  assert.ok(logs.some((l) => l.includes("after edge failed")));
+
+  // After an idle stop, the working browser is tried first instead of repeating the broken primary.
+  await svc.stop();
+  assert.equal((await svc.status()).browser?.kind, "chrome");
+  await svc.openTab("you");
+  assert.equal(launched.at(-1)!.path, chrome.path);
+  assert.equal(launched.length, 4);
+  await svc.dispose();
+});
+
+test("prepareProfileDir cleans orphaned Crashpad stubs and stale POSIX SingletonLock symlinks while sparing real profiles", () => {
+  const root = mkdtempSync(join(tmpdir(), "ancilla-browser-hygiene-"));
+  try {
+    const aborted = join(root, "aborted");
+    mkdirSync(join(aborted, "Crashpad"), { recursive: true });
+    writeFileSync(join(aborted, "Crashpad", "metadata"), "");
+    prepareProfileDir(aborted);
+    assert.equal(existsSync(join(aborted, "Crashpad")), false, "orphaned Crashpad stub removed");
+
+    const established = join(root, "established");
+    mkdirSync(join(established, "Crashpad"), { recursive: true });
+    mkdirSync(join(established, "Default"), { recursive: true });
+    writeFileSync(join(established, "Crashpad", "metadata"), "ok");
+    prepareProfileDir(established);
+    assert.equal(existsSync(join(established, "Crashpad", "metadata")), true, "real profile untouched");
+
+    if (process.platform !== "win32") {
+      const locked = join(root, "locked");
+      mkdirSync(locked, { recursive: true });
+      symlinkSync("box-99999", join(locked, "SingletonLock"));
+      writeFileSync(join(locked, "SingletonCookie"), "c");
+      writeFileSync(join(locked, "SingletonSocket"), "s");
+      prepareProfileDir(locked, { platform: "linux", host: "box", isAlive: () => true });
+      assert.equal(readdirSync(locked).includes("SingletonLock"), true, "live PID lock kept");
+      prepareProfileDir(locked, { platform: "linux", host: "other-box", isAlive: () => false });
+      assert.equal(readdirSync(locked).includes("SingletonLock"), true, "other host lock kept");
+      prepareProfileDir(locked, { platform: "linux", host: "box", isAlive: () => false });
+      assert.equal(readdirSync(locked).includes("SingletonLock"), false, "dead PID lock removed");
+      assert.equal(readdirSync(locked).includes("SingletonCookie"), false);
+      assert.equal(readdirSync(locked).includes("SingletonSocket"), false);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("status and route: unavailable carries the reason; available carries kind, path and version", async () => {

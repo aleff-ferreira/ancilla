@@ -343,7 +343,7 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
   const mood: AvatarMood = view ? moodOfCall(view) : idleFace.mood;
   const burst = view ? 0 : idleFace.burst;
   const lastMetric = view?.metrics[view.metrics.length - 1];
-  const taskLine = view?.tasks.find((t) => t.status === "running" || t.status === "queued") ?? null;
+  const activeTasks = view?.tasks.filter((t) => t.status === "running" || t.status === "queued" || t.status === "waiting") ?? [];
   const statusText = view ? (view.error ?? view.notice?.text ?? null) : null;
   const hasSpeechLines = Boolean(view && (view.lines.length > 0 || view.partial !== ""));
   const showBubble = Boolean(
@@ -351,7 +351,7 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
       ((live && view.approval !== null) ||
         statusText !== null ||
         view.micProblem !== null ||
-        (captionsOpen && (hasSpeechLines || taskLine !== null))),
+        (captionsOpen && (hasSpeechLines || activeTasks.length > 0))),
   );
 
   const sendTyped = () => {
@@ -434,10 +434,21 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
 
           {captionsOpen && hasSpeechLines ? <FloatingCaptions view={view} name={name} /> : null}
 
-          {taskLine ? (
-            <div className="flex items-center gap-1.5 truncate rounded-lg border border-line/70 bg-sunken/70 px-2 py-1 text-2xs text-muted">
-              <span className="size-1.5 shrink-0 rounded-full bg-accent" />
-              <span className="truncate">Working on: {taskLine.title}</span>
+          {activeTasks.length > 0 ? (
+            <div className="flex flex-col gap-1">
+              {activeTasks.slice(0, 3).map((t) => (
+                <div
+                  key={t.id}
+                  title={t.note ? `${t.title} — ${t.note}` : t.title}
+                  className="flex items-center gap-1.5 truncate rounded-lg border border-line/70 bg-sunken/70 px-2 py-1 text-2xs text-muted"
+                >
+                  <span className="size-1.5 shrink-0 rounded-full bg-accent" />
+                  <span className="truncate">
+                    Working on: {t.title}
+                    {t.note ? <span className="text-subtle"> · {t.note}</span> : null}
+                  </span>
+                </div>
+              ))}
             </div>
           ) : null}
         </div>
@@ -829,7 +840,7 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
   const spot = useMovableSpot(expanded ? 440 : 364, expanded ? 560 : 380);
   const ring = useRing(session, live);
   const last = view.metrics[view.metrics.length - 1];
-  const taskLine = view.tasks.find((t) => t.status === "running" || t.status === "queued");
+  const activeTasks = view.tasks.filter((t) => t.status === "running" || t.status === "queued" || t.status === "waiting");
   const name = glance?.name ?? "Assistant";
   const status = view.error ?? view.notice?.text ?? null;
   const headerAvatarPx = cardAvatarSize(avatarSize);
@@ -896,7 +907,13 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
               <span className="shrink-0 text-subtle">· {(last.firstAudioMs / 1000).toFixed(1)} s</span>
             ) : null}
           </div>
-          {taskLine ? <div className="mt-0.5 truncate text-2xs text-subtle">Working on: {taskLine.title}</div> : null}
+          {activeTasks.length === 1 ? (
+            <div className="mt-0.5 truncate text-2xs text-subtle">Working on: {activeTasks[0]!.title}</div>
+          ) : activeTasks.length > 1 ? (
+            <div className="mt-0.5 truncate text-2xs text-subtle">
+              Working on {activeTasks.length} tasks: {activeTasks.map((t) => t.title).join(", ")}
+            </div>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
@@ -972,18 +989,18 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
 
       {view.tasks.length > 0 ? (
         <ul className="mx-4 mb-2.5 flex flex-wrap gap-1.5">
-          {view.tasks.slice(0, 4).map((t) => (
+          {view.tasks.slice(0, 6).map((t) => (
             <li
               key={t.id}
-              title={t.note ?? t.title}
+              title={t.note ? `${t.title} — ${t.note}` : t.title}
               className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line/70 bg-sunken/70 px-2 py-0.5 text-2xs text-muted"
             >
               <span
                 className={cn(
                   "size-1.5 shrink-0 rounded-full",
-                  t.status === "completed"
+                  t.status === "completed" || t.status === "unverified"
                     ? "bg-ok-text"
-                    : t.status === "failed"
+                    : t.status === "failed" || t.status === "cancelled"
                       ? "bg-danger-text"
                       : t.status === "blocked" || t.status === "paused"
                         ? "bg-warn-text"
@@ -991,6 +1008,9 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
                 )}
               />
               <span className="truncate">{t.title}</span>
+              {t.note && (t.status === "running" || t.status === "blocked" || t.status === "paused") ? (
+                <span className="max-w-[140px] truncate text-subtle">· {t.note}</span>
+              ) : null}
             </li>
           ))}
         </ul>

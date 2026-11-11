@@ -253,6 +253,13 @@ export class VoiceSession {
         },
       });
     }
+    try {
+      for (const event of host.activeTasks?.() ?? []) {
+        this.send({ type: "task", id: event.id, title: event.title, status: event.status, note: event.note ?? null });
+      }
+    } catch (error) {
+      this.deps.log(`the active tasks for the call could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
     this.send({ type: "state", state: "listening" });
     try {
       this.openingSay = host.opening?.() ?? null;
@@ -802,6 +809,14 @@ export class VoiceSession {
     trace: TurnTrace | null,
     prewarmedContext: Promise<string | null> | null = null,
   ): void {
+    if (this.reply && !this.reply.aborted) {
+      const prev = this.reply;
+      prev.aborted = true;
+      prev.cancelFiller?.();
+      prev.abort.abort();
+      prev.speech.abort();
+      this.reply = null;
+    }
     const reply = this.newReply(turn, text, source, trace);
     this.reply = reply;
     this.setAgent("thinking");
@@ -1009,10 +1024,13 @@ export class VoiceSession {
 
   private onHostEvent(event: HostEvent): void {
     if (this.closed) return;
-    this.send({ type: "task", id: event.id, title: event.title, status: event.status, note: event.say });
+    const note = event.note !== undefined ? event.note : event.say;
+    this.send({ type: "task", id: event.id, title: event.title, status: event.status, note });
     if (event.say) {
+      const existing = this.pendingSay.findIndex((e) => e.id === event.id && e.kind === event.kind);
+      if (existing >= 0) this.pendingSay.splice(existing, 1);
       this.pendingSay.push(event);
-      if (this.pendingSay.length > 3) this.pendingSay.shift();
+      if (this.pendingSay.length > 8) this.pendingSay.shift();
     }
   }
 

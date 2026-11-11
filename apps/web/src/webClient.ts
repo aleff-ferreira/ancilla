@@ -31,6 +31,10 @@ import {
   type ModelOption,
   type OutputRange,
   type ProjectView,
+  type ProviderAccountView,
+  type ProviderId,
+  type ProviderLoginResult,
+  type ProvidersCatalogView,
   type ReasoningEffort,
   type SandboxSettings,
   type SessionSummary,
@@ -183,6 +187,7 @@ export class WebAncillaClient implements AncillaClient {
   private watchdog: ReturnType<typeof setTimeout> | null = null;
   /** The handshake is awaited before the stream opens; this stops a second subscriber racing it. */
   private connecting = false;
+  private authInFlight: Promise<void> | null = null;
   /** Whether the app was already told the stream is down, so a browser's retries do not tell it again. */
   private lostReported = false;
 
@@ -332,6 +337,10 @@ export class WebAncillaClient implements AncillaClient {
     }
   }
 
+  prepareBrowserSocket(): Promise<void> | void {
+    return this.ensureCookieAuth();
+  }
+
   voiceSocketUrl(): string | null {
     try {
       const address = new URL(url("/api/voice/ws"), window.location.href);
@@ -358,13 +367,14 @@ export class WebAncillaClient implements AncillaClient {
 
   async startSession(
     cwd: string,
-    options?: { approvalMode?: ApprovalMode; modelId?: string; accountId?: string | null },
+    options?: { approvalMode?: ApprovalMode; modelId?: string; accountId?: string | null; providerId?: ProviderId },
   ): Promise<SessionSummary> {
     const result = await call<{ session: SessionSummary }>("POST", "/api/sessions", {
       cwd,
       approvalMode: options?.approvalMode,
       modelId: options?.modelId,
       accountId: options?.accountId ?? undefined,
+      providerId: options?.providerId ?? undefined,
     });
     return result.session;
   }
@@ -421,12 +431,18 @@ export class WebAncillaClient implements AncillaClient {
     await call("POST", "/api/user-input/clarify", { sessionId, userInputId, content });
   }
 
-  async listModels(sessionId?: string, accountId?: string | null): Promise<ModelOption[]> {
-    return (await this.listModelCatalog(sessionId, accountId)).models;
+  async listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelOption[]> {
+    return (await this.listModelCatalog(sessionId, accountId, providerId)).models;
   }
 
-  async listModelCatalog(sessionId?: string, accountId?: string | null): Promise<ModelCatalog> {
-    const query = [sessionId ? `sessionId=${enc(sessionId)}` : "", accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
+  async listModelCatalog(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelCatalog> {
+    const query = [
+      sessionId ? `sessionId=${enc(sessionId)}` : "",
+      accountId ? `accountId=${enc(accountId)}` : "",
+      providerId ? `providerId=${enc(providerId)}` : "",
+    ]
+      .filter(Boolean)
+      .join("&");
     return parseModelCatalog(await call<unknown>("GET", `/api/models${query ? `?${query}` : ""}`));
   }
 
@@ -471,8 +487,46 @@ export class WebAncillaClient implements AncillaClient {
     await call("DELETE", `/api/accounts/${enc(id)}`);
   }
 
-  async setProjectDefaultAccount(cwd: string, accountId: string | null): Promise<void> {
-    await call("PATCH", "/api/projects/default-account", { cwd, accountId });
+  async setProjectDefaultAccount(cwd: string, accountId: string | null, providerId?: ProviderId): Promise<void> {
+    await call("PATCH", "/api/projects/default-account", {
+      cwd,
+      accountId,
+      ...(providerId !== undefined ? { providerId } : {}),
+    });
+  }
+
+  async listProviders(refresh = false): Promise<ProvidersCatalogView> {
+    return call<ProvidersCatalogView>("GET", `/api/providers${refresh ? "?refresh=1" : ""}`);
+  }
+
+  async createProviderAccount(input: Record<string, unknown>): Promise<ProviderAccountView> {
+    const res = await call<{ account: ProviderAccountView }>("POST", "/api/providers/accounts", input);
+    return res.account;
+  }
+
+  async updateProviderAccount(id: string, patch: Record<string, unknown>): Promise<ProviderAccountView> {
+    const res = await call<{ account: ProviderAccountView }>("PATCH", `/api/providers/accounts/${enc(id)}`, patch);
+    return res.account;
+  }
+
+  async deleteProviderAccount(id: string): Promise<void> {
+    await call("DELETE", `/api/providers/accounts/${enc(id)}`);
+  }
+
+  async loginProvider(providerId: ProviderId, accountId: string | null = null): Promise<ProviderLoginResult> {
+    return call<ProviderLoginResult>("POST", `/api/providers/${enc(providerId)}/login`, {
+      ...(accountId ? { accountId } : {}),
+    });
+  }
+
+  async providerLoginProgress(providerId: ProviderId, loginId: string, accountId: string | null = null): Promise<AccountLoginProgress> {
+    const query = [`loginId=${enc(loginId)}`, accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
+    return call<AccountLoginProgress>("GET", `/api/providers/${enc(providerId)}/login?${query}`);
+  }
+
+  async cancelProviderLogin(providerId: ProviderId, loginId: string, accountId: string | null = null): Promise<void> {
+    const query = [`loginId=${enc(loginId)}`, accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
+    await call("DELETE", `/api/providers/${enc(providerId)}/login?${query}`);
   }
 
   async accountsHealth(): Promise<AccountsHealth> {
@@ -619,6 +673,20 @@ export class WebAncillaClient implements AncillaClient {
     };
   }
 
+  private ensureCookieAuth(): Promise<void> | void {
+    if (!daemon.token) {
+      return;
+    }
+    if (!this.authInFlight) {
+      this.authInFlight = call("POST", "/api/auth", { token: daemon.token })
+        .then(() => undefined)
+        .finally(() => {
+          this.authInFlight = null;
+        });
+    }
+    return this.authInFlight;
+  }
+
   private async connect(): Promise<void> {
     if (this.source || this.connecting) {
       return;
@@ -626,9 +694,7 @@ export class WebAncillaClient implements AncillaClient {
     this.connecting = true;
     try {
       // EventSource cannot send a header, so the token buys a cookie first and the stream uses that.
-      if (daemon.token) {
-        await call("POST", "/api/auth", { token: daemon.token });
-      }
+      await this.ensureCookieAuth();
     } catch {
       // Let the stream try anyway: an unauthenticated daemon needs no handshake, and a real refusal
       // surfaces as a lost connection rather than a silent nothing.

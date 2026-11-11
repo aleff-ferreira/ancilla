@@ -21,7 +21,7 @@ export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang, optio
     language,
     "You are an AI. Never claim a body, feelings or experiences as fact; warmth and humor in how you speak are fine. Never invent a memory: say so when you do not know.",
     "If the user interrupts you, drop what you were saying and answer the new thing. What they heard of your last reply is what is shown to you: do not repeat what they heard.",
-    "Work that takes time goes to the background through your tools; say so in a few words and carry on talking. Report what happens when it is asked or when something needs the user.",
+    "Work that takes time goes to the background through your tools; say so in a few words and carry on talking. Multiple background tasks can run at the same time: answering a new question or starting another task never stops already-running tasks, and you only pause or cancel a task when the user asks. Share relevant progress, blockers or finished results concisely.",
     `The local time is ${now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })}.`,
   ];
   if (persona.tone) lines.push(`How you sound: ${persona.tone}`);
@@ -96,6 +96,98 @@ const TASK: Record<"en" | "pt", Record<TaskNotice, (title: string) => string>> =
 /** What is said about a task, in the language of the call. */
 export function taskPhrase(lang: Lang, kind: TaskNotice, title: string): string {
   return TASK[pick(lang)][kind](sayable(title));
+}
+
+const BOILERPLATE_RESULT_RE = /\b\d+ of \d+ steps finished(?: without an error\.)?\s*(?:No check was set for the result\.)?/gi;
+
+/** Extracts a short, natural spoken sentence or two from a task's recorded result or progress text, stripping markdown and boilerplate. */
+export function spokenTaskGist(raw: string, max = 160): string | null {
+  const cleaned = raw
+    .replace(/^\s*From the web \(not checked\):\s*/i, "")
+    .replace(BOILERPLATE_RESULT_RE, " ")
+    .replace(/^Changed files:.*$/gim, " ")
+    .replace(/^Checks:.*$/gim, " ")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/[*_`#>~]+/g, "")
+    .replace(/^\s*[-•]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned === "" || /^(ok|done|pronto)\.?$/i.test(cleaned)) return null;
+  if (cleaned.length <= max) {
+    return /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
+  }
+  const window = cleaned.slice(0, max);
+  const sentenceEnd = Math.max(window.lastIndexOf(". "), window.lastIndexOf("! "), window.lastIndexOf("? "));
+  if (sentenceEnd >= Math.floor(max * 0.45)) {
+    return window.slice(0, sentenceEnd + 1).trim();
+  }
+  const space = window.lastIndexOf(" ");
+  const clipped = (space > max / 2 ? window.slice(0, space) : window).replace(/[,;:.\-–—]+$/, "").trim();
+  return clipped ? `${clipped}.` : null;
+}
+
+/** Spoken proactive update for a task that finished, failed, or needs the user, enriched with a concise outcome summary when available. */
+export function taskUpdatePhrase(
+  lang: Lang,
+  kind: TaskNotice,
+  title: string,
+  extra?: { result?: string | null; reason?: string | null },
+): string {
+  const shortTitle = sayable(title);
+  const l = pick(lang);
+  if (kind === "done" || kind === "unverified") {
+    const gist = extra?.result ? spokenTaskGist(extra.result, 150) : null;
+    if (gist) {
+      return l === "pt"
+        ? `${shortTitle} ${kind === "done" ? "está pronto" : "terminou"}: ${gist}`
+        : `${shortTitle} ${kind === "done" ? "is done" : "finished"}: ${gist}`;
+    }
+  }
+  if (kind === "failed" && extra?.reason) {
+    const why = spokenTaskGist(extra.reason.replace(/^Step \d+ failed:\s*/i, ""), 110);
+    if (why) {
+      return l === "pt" ? `${shortTitle} não deu certo: ${why}` : `${shortTitle} did not go through: ${why}`;
+    }
+  }
+  if (kind === "needs" && extra?.reason) {
+    if (/question|answer|input/i.test(extra.reason)) {
+      return l === "pt" ? `${shortTitle} aguarda uma resposta sua.` : `${shortTitle} is waiting for an answer from you.`;
+    }
+    if (/check failed/i.test(extra.reason)) {
+      const why = spokenTaskGist(extra.reason, 120);
+      return why
+        ? (l === "pt" ? `${shortTitle}: ${why}` : `${shortTitle}: ${why}`)
+        : taskPhrase(lang, kind, title);
+    }
+  }
+  return taskPhrase(lang, kind, title);
+}
+
+/** Spoken proactive milestone update for a running task that completed a step or crossed a major milestone. */
+export function taskMilestonePhrase(
+  lang: Lang,
+  title: string,
+  milestone: { kind: "step"; done: number; total: number; nextTitle?: string } | { kind: "progress"; percent: number; detail: string },
+): string {
+  const shortTitle = sayable(title, 48);
+  const l = pick(lang);
+  if (milestone.kind === "step") {
+    const next = milestone.nextTitle ? sayable(milestone.nextTitle, 56) : null;
+    if (l === "pt") {
+      return next
+        ? `Atualização em ${shortTitle}: etapa ${milestone.done} de ${milestone.total} concluída, agora em ${next}.`
+        : `Atualização em ${shortTitle}: etapa ${milestone.done} de ${milestone.total} concluída.`;
+    }
+    return next
+      ? `Update on ${shortTitle}: step ${milestone.done} of ${milestone.total} is done, now working on ${next}.`
+      : `Update on ${shortTitle}: step ${milestone.done} of ${milestone.total} is done.`;
+  }
+  const detail = spokenTaskGist(milestone.detail, 96) ?? `${sayable(milestone.detail, 80)}.`;
+  return l === "pt"
+    ? `Atualização em ${shortTitle}: cerca de ${milestone.percent}% concluído. ${detail}`
+    : `Update on ${shortTitle}: about ${milestone.percent} percent done. ${detail}`;
 }
 
 const AWAY: Record<"en" | "pt", { lead: string; more: (n: number) => string }> = {

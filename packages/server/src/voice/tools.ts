@@ -234,7 +234,12 @@ export class VoiceTools {
           if (goal === "") return { ok: false, text: "A proposal needs a goal: say what is to be changed." };
           const cwd = this.resolveCwd(str(args["project"], 120));
           if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
-          const spec = parseTaskSpec({ goal, cwd, allowWrites: true, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
+          const preAuthorized = this.deps.isPreAuthorized?.() === true;
+          const baseProfile = assistant.store.getProfile();
+          const effectiveProfile = preAuthorized && !baseProfile.policy.allowProjectWrites
+            ? { ...baseProfile, policy: { ...baseProfile.policy, allowProjectWrites: true } }
+            : baseProfile;
+          const spec = parseTaskSpec({ goal, cwd, allowWrites: true, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, effectiveProfile, (c) => assistant.projectKey(c));
           const wantedGoal = normalizeGoal(spec.goal);
           const existing = assistant.tasks
             .list("active", 50)

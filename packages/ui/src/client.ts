@@ -12,6 +12,10 @@ import type {
   OutgoingAttachment,
   OutputRange,
   ProjectView,
+  ProviderAccountView,
+  ProviderId,
+  ProviderLoginResult,
+  ProvidersCatalogView,
   ReasoningEffort,
   SandboxSettings,
   SessionSummary,
@@ -106,7 +110,10 @@ export interface AncillaClient {
   usage(days?: number): Promise<import("./types.js").UsageReport>;
   listSessions(options?: { archived?: boolean }): Promise<SessionSummary[]>;
   discover(cwd?: string): Promise<void>;
-  startSession(cwd: string, options?: { approvalMode?: ApprovalMode; modelId?: string; accountId?: string | null }): Promise<SessionSummary>;
+  startSession(
+    cwd: string,
+    options?: { approvalMode?: ApprovalMode; modelId?: string; accountId?: string | null; providerId?: ProviderId },
+  ): Promise<SessionSummary>;
   loadTranscript(sessionId: string, options?: { refresh?: boolean }): Promise<TranscriptLoad>;
   /**
    * A server path the browser loads by itself, like an attachment's bytes, returned with whatever the
@@ -130,9 +137,9 @@ export interface AncillaClient {
    * The catalog Muse lists. With a `sessionId` the host that runs that thread answers (and flags its active row);
    * else the named account's host, or the default login's when `accountId` is absent.
    */
-  listModels(sessionId?: string, accountId?: string | null): Promise<ModelOption[]>;
-  /** The same list with what Muse says about it (source, provider, host version). Optional for older transports. */
-  listModelCatalog?(sessionId?: string, accountId?: string | null): Promise<ModelCatalog>;
+  listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelOption[]>;
+  /** The same list with what the host says about it (source, provider, host version). Optional for older transports. */
+  listModelCatalog?(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelCatalog>;
   /** Closes every live Muse host so the next use starts them again; refused while a turn is running. Optional for older transports. */
   restartHosts?(): Promise<void>;
   getTitleSettings(): Promise<TitleSettings>;
@@ -145,8 +152,16 @@ export interface AncillaClient {
   createAccount(id: string, options?: { name?: string; seedFromDefault?: boolean }): Promise<{ id: string; name: string }>;
   renameAccount(id: string, name: string): Promise<void>;
   removeAccount(id: string): Promise<void>;
-  /** Sets which account new threads in a project default to; null clears it. */
-  setProjectDefaultAccount(cwd: string, accountId: string | null): Promise<void>;
+  /** Sets which provider and account new threads in a project default to; null clears the account. */
+  setProjectDefaultAccount(cwd: string, accountId: string | null, providerId?: ProviderId): Promise<void>;
+  /** Multi-provider catalog, CLI availability, auth probes, ambient key warnings, and AGPL source offer. */
+  listProviders?(refresh?: boolean): Promise<ProvidersCatalogView>;
+  createProviderAccount?(input: Record<string, unknown>): Promise<ProviderAccountView>;
+  updateProviderAccount?(id: string, patch: Record<string, unknown>): Promise<ProviderAccountView>;
+  deleteProviderAccount?(id: string): Promise<void>;
+  loginProvider?(providerId: ProviderId, accountId?: string | null): Promise<ProviderLoginResult>;
+  providerLoginProgress?(providerId: ProviderId, loginId: string, accountId?: string | null): Promise<import("./types.js").AccountLoginProgress>;
+  cancelProviderLogin?(providerId: ProviderId, loginId: string, accountId?: string | null): Promise<void>;
   /** Whether META_API_KEY in the environment makes every account share one Meta login. */
   accountsHealth(): Promise<import("./types.js").AccountsHealth>;
   /** Starts Muse's browser sign-in; null uses the default CLI login without creating a profile. */
@@ -235,6 +250,8 @@ export interface AncillaClient {
   voiceSocketUrl?(): string | null;
   /** The address of the Browser panel's WebSocket; null or missing where there is no browser. */
   browserSocketUrl?(): string | null;
+  /** Completes any cookie/token handshake needed before opening a browser WebSocket. */
+  prepareBrowserSocket?(): Promise<void> | void;
   /** Subscribe to server events; returns an unsubscribe function. */
   subscribe(handler: EventHandler): () => void;
 }
@@ -311,8 +328,8 @@ export function parseModelList(value: unknown): ModelOption[] {
       // Muse's catalog carries no prices today, so the published table stands in when it lists none.
       cost: parseCost(r["cost"]) ?? listedPrice(modelId),
       contributor: /contributor/i.test(modelId) || /product improvement/i.test(description ?? ""),
-      // Muse 1.4.0 sends `variants`; later builds send `reasoningEffortVariants`.
-      efforts: parseEfforts(r["variants"], r["reasoningEffortVariants"]),
+      // Muse 1.4.0 sends `variants`; later builds send `reasoningEffortVariants`; Codex/ACP hosts may send `supportedReasoningEfforts`.
+      efforts: parseEfforts(r["variants"], r["reasoningEffortVariants"], r["supportedReasoningEfforts"]),
     });
   }
   return options;

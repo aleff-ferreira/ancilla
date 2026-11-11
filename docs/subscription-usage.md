@@ -110,3 +110,17 @@ CLI output schemas are owned by Muse; parsing failures fall back to clearly labe
 - `packages/ui/src/model/plan.ts` and `components/usage/PlanMeter.tsx`: account selection, freshness and presentation.
 
 The Muse schema exported by `muse schema generate-ts` specifies that `usage/read` is last-observed data and `usage/changed` may omit timestamp-only refreshes, while `muse usage --json` refreshes subscription allowance without starting a model turn. Regression tests use injected CLI runners and temporary login files.
+
+## Other AI subscriptions and endpoints
+
+Alongside Muse Code, `/api/plan-usage` (`providerQuotas[]`) and the **Other AI subscriptions & endpoints** section on the Usage page report honest, non-fabricated allowance information for every configured non-Muse provider:
+
+| Provider | Quota mode (`quotaSupport`) | What Ancilla reports |
+| --- | --- | --- |
+| **OpenAI Codex** (`codex app-server`) | `windows` | Live 5-hour and weekly used/remaining percentages and plan tier emitted by Codex's own `account/rateLimits/read` and `account/rateLimits/updated` JSON-RPC messages, plus a link to `https://chatgpt.com/codex/settings/usage`. Before the first Codex session emits rate-limit windows, Ancilla states that no live window has been observed yet rather than guessing `0%`. |
+| **Anthropic Claude Code** (`claude`), **Google Gemini CLI** (`gemini`), **GitHub Copilot CLI** (`copilot`), **Kimi**, **Qwen**, **OpenCode**, **Custom ACP** | `tier-only` | Any subscription tier reported by the official CLI (such as `claude auth status --json`) and a direct link to the vendor's official usage dashboard. Because these CLIs do not expose numeric remaining percentages over `stdio`, Ancilla never scrapes browser cookies or private web endpoints and never fabricates percentage bars. |
+| **Direct API & Local servers** (`api`) | `ledger-only` | Token totals and list-price estimates in the **Thread activity** ledger below (`session_usage_calls` tagged by `provider_id`), kept strictly separate from flat-rate subscription meters. |
+
+### Ambient API-key protection
+
+When a user has pay-as-you-go environment variables set in their shell (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `MOONSHOT_API_KEY`, `DASHSCOPE_API_KEY`), official CLIs can silently switch from a flat-rate subscription login to per-token API billing. Ancilla detects those inherited variables, warns in **Settings → AI subscriptions**, and strips them from the child environment of subscription CLI profiles by default (`stripAmbientKeys: true`).

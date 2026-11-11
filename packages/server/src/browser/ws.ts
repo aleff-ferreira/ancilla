@@ -158,19 +158,19 @@ export class BrowserSocketServer {
       let service: BrowserService;
       try {
         service = this.service();
-      } catch (error) {
+      } catch {
         ws.send(serialize({ type: "error", message: "The browser is not available on this server." }));
-        ws.close(1011, "unavailable");
+        ws.close(4011, "unavailable");
         return;
       }
       const made = new PaneSession(ws, service, this.log);
       session = made;
       made.start().catch((error: unknown) => {
         const unavailable = error instanceof BrowserError && error.code === "unavailable";
-        if (!unavailable) this.log(`browser: the pane could not start: ${error instanceof Error ? error.message : String(error)}`);
+        this.log(`browser: the pane could not start: ${error instanceof Error ? error.message : String(error)}`);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(serialize({ type: "error", message: error instanceof BrowserError ? error.message : "The browser could not start." }));
-          ws.close(1011, "the browser could not start");
+          ws.close(unavailable ? 4011 : 1011, "the browser could not start");
         }
       });
     });
@@ -343,13 +343,31 @@ class PaneSession {
         return;
       case "stopped":
         // The browser went away (idle, or it crashed): start over on the next breath, which brings a blank tab.
+        this.stopCast?.();
         this.stopCast = null;
         this.castFor = null;
+        this.owed = null;
+        this.lastSize = null;
+        this.latest = null;
         this.tabs.clear();
         this.active = null;
         this.tabList();
         setTimeout(() => {
-          if (!this.stopped) this.init().then(() => this.tabList(), (error) => this.fail(error));
+          if (this.stopped) return;
+          this.init().then(
+            () => {
+              if (this.stopped) return;
+              if (this.active) this.applyViewport(this.active);
+              this.tabList();
+            },
+            (error) => {
+              this.fail(error);
+              if (!this.stopped && this.ws.readyState === WebSocket.OPEN) {
+                const unavailable = error instanceof BrowserError && error.code === "unavailable";
+                this.ws.close(unavailable ? 4011 : 1011, "the browser could not restart");
+              }
+            },
+          );
         }, 300).unref?.();
         return;
     }

@@ -416,6 +416,22 @@ export interface AppState {
   accountLogin: AccountLoginState | null;
   /** The plan window per account, from `GET /api/plan-usage` and the `plan-usage` event. */
   planUsageByAccount: import("../types.js").PlanUsageByAccount;
+  /** Multi-provider catalog (`GET /api/providers`); null until first read. */
+  providers: import("../types.js").ProviderView[] | null;
+  /** Configured non-Muse provider profiles and API endpoints. */
+  providerAccounts: import("../types.js").ProviderAccountView[];
+  /** Detected ambient pay-as-you-go API env vars per subscription CLI (`codex`, `claude`, `gemini`, `copilot`). */
+  ambientKeyOverrides: Record<string, string[]>;
+  /** True when the daemon is bound to a non-loopback interface (`--host 0.0.0.0`), requiring AGPLv3 §13 source offer. */
+  remoteDeployment: boolean;
+  /** Complete Corresponding Source Code URL advertised by the server. */
+  sourceOfferUrl: string | null;
+  /** Non-Muse provider quota summaries from `GET /api/plan-usage` and `provider-usage` events. */
+  providerQuotas: import("../types.js").ProviderQuotaView[];
+  /** Active CLI provider sign-in attempt (`codex login`, `claude auth login`, `gemini`, `copilot`, etc.). */
+  providerLogin: ProviderAccountLoginState | null;
+  /** Set when the user chooses to configure another AI subscription or API key without installing Muse first. */
+  skipMuseOnboarding: boolean;
   /** Each thread's file viewer. */
   filePanels: Record<string, FilePanel>;
   /** Unsaved edits, by `fileKey(cwd, path)`. */
@@ -435,6 +451,18 @@ export type ComposerPicker = "model" | "effort" | "permissions" | "confirmFullAc
 export type AccountLoginState =
   | { accountId: string | null; url: string; code: string | null; status: "starting" | "waiting" | "done" | "timeout" | "error"; loginId?: string; message?: string }
   | { accountId: string | null; fallback: string };
+
+/** Non-Muse CLI subscription sign-in state. */
+export interface ProviderAccountLoginState {
+  providerId: import("../types.js").ProviderId;
+  accountId: string | null;
+  status: "starting" | "waiting" | "done" | "interactive" | "error";
+  url: string | null;
+  code: string | null;
+  loginId?: string;
+  terminalCommand?: string;
+  message?: string;
+}
 
 export interface SkillsState {
   status: "loading" | "ready" | "error";
@@ -497,6 +525,14 @@ export function initialState(prefs: Prefs): AppState {
     accountLogin: null,
     defaultLogin: null,
     planUsageByAccount: {},
+    providers: null,
+    providerAccounts: [],
+    ambientKeyOverrides: {},
+    remoteDeployment: false,
+    sourceOfferUrl: null,
+    providerQuotas: [],
+    providerLogin: null,
+    skipMuseOnboarding: false,
     filePanels: {},
     fileDrafts: {},
     fileVersions: {},

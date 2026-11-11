@@ -6,13 +6,16 @@
 
 ![Ancilla — Deep research. Agents in view. An AMAZONIA WORKS product.](docs/assets/readme-hero.svg)
 
-**Deep research, agent monitoring and approvals for Muse Code.**
+**Deep research, agent monitoring and approvals across your AI subscriptions and local models.**
 
-An open-source desktop and web app for Meta's **Muse Code CLI** (`muse`). It uses your Muse login: no extra API keys,
-on Windows, macOS and Linux.
+An open-source desktop and web app (`AGPL-3.0-only`) for Meta's **Muse Code CLI** (`muse`), **OpenAI Codex** (`codex`),
+**Anthropic Claude Code** (`claude`), **Google Gemini CLI** (`gemini`), **GitHub Copilot CLI** (`copilot`), **Kimi**,
+**Qwen**, **OpenCode**, **Agent Client Protocol (ACP)** agents, and **Direct API / local model servers** (OpenRouter,
+Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on Windows, macOS and Linux.
 
 **[Download Ancilla](https://github.com/aleff-ferreira/ancilla/releases/latest)** ·
-[See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
+[See it in action](#see-it-in-action) · [Supported subscriptions](#supported-ai-subscriptions-and-providers) ·
+[Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
 > **New in 0.27.3:** a movable assistant window with frameless floating avatar mode, directional speech and authorization bubbles,
@@ -20,9 +23,11 @@ on Windows, macOS and Linux.
 > `muse usage --json` subscription allowance checks.
 > [Read the release notes](docs/CHANGELOG.md#0273).
 
-> **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
-> It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"
-> are trademarks of Meta, used here only to describe what this client connects to.
+> **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
+> supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is
+> not affiliated with any of them. Product and company names ("Muse", "Muse Code", "ChatGPT", "Codex", "Claude",
+> "Gemini", "GitHub Copilot", "Kimi", "Qwen", "OpenRouter", "Venice") are trademarks of their respective owners, used
+> here strictly for nominative description of the official CLIs and APIs that Ancilla connects to.
 
 ## See it in action
 
@@ -134,6 +139,25 @@ See [the assistant](docs/assistant.md) for setup, the API and how to roll back, 
 ![The Persona tab, saved as you go: name, look, voice and habits](docs/assets/assistant-persona.png)
 
 </details>
+
+## Supported AI subscriptions and providers
+
+Configure subscriptions, isolated multi-account profiles, API keys, and local model servers in **Settings → AI subscriptions** (or choose a provider per project from the **Provider & Account** menu beside the model picker):
+
+| Provider | Plans / Billing | Official CLI or Transport |
+| --- | --- | --- |
+| **Meta Muse Code** (`muse`) | Muse Code subscription | `muse serve` over Muse Session Protocol (MSP) |
+| **OpenAI Codex** (`codex`) | ChatGPT Plus, Pro, Team, Edu, Enterprise | `codex app-server --listen stdio://` |
+| **Anthropic Claude Code** (`claude`) | Claude Pro, Max, Team, Enterprise | `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio` |
+| **Google Gemini CLI** (`gemini`) | Google AI Pro, AI Ultra, Gemini Code Assist | `gemini --acp` (Agent Client Protocol) |
+| **GitHub Copilot CLI** (`copilot`) | Copilot Pro, Pro+, Business, Enterprise | `copilot --acp --stdio` (ACP) |
+| **Kimi / Qwen / OpenCode** | Vendor coding subscriptions & plans | `kimi acp`, `qwen --acp`, `opencode acp` (ACP) |
+| **Custom ACP Agents** (`acp:*`) | Any ACP-compatible agent binary | User-configured JSON-RPC 2.0 ACP over `stdio` |
+| **Direct API & Local** (`api`) | OpenRouter, Venice, OpenAI/Anthropic/Google BYOK, Ollama, LM Studio, llama.cpp, vLLM | Built-in HTTP streaming + approval-gated workspace tools |
+
+- **Official CLI delegation only:** For consumer and team AI subscriptions, Ancilla spawns the unmodified official CLI you installed on your machine (or inside WSL2 on Windows) over `stdio`. Ancilla **never** reads, decrypts, copies, or proxies third-party OAuth tokens or OS keychain entries, and never spoofs first-party OAuth client IDs.
+- **Isolated named profiles:** Create separate Work and Personal profiles per CLI (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GEMINI_CLI_HOME`, `COPILOT_HOME`, XDG roots) under `~/.ancilla/provider-profiles/<provider>/<id>/` without mixing credentials.
+- **Pay-as-you-go bill protection:** When launching a subscription CLI profile, Ancilla strips inherited ambient API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, `META_API_KEY`, etc.) by default and displays a warning banner in Settings so flat-rate subscription sessions never accidentally bill per-token API keys.
 
 ## Subscription usage, alongside local activity
 
@@ -420,10 +444,11 @@ Other connections follow from the work you request or the content you open:
 
 ## Legal
 
-- Wrapper clients are the intended path: Meta ships an MIT-licensed SDK for building MSP clients, and Ancilla is built
-  on it.
-- **Name:** `Ancilla` avoids the `Muse` mark. Do not introduce `Muse` into the binary name, bundle ID, domain or title.
-- Ancilla never claims to be official, never bundles credentials, and never bypasses billing or approvals.
+- **Official protocol delegation:** Ancilla connects to Meta Muse via Meta's MIT-licensed MSP SDK, to OpenAI Codex via `codex app-server`, to Anthropic Claude Code via documented `--input-format stream-json` / `--permission-prompt-tool stdio`, and to Gemini, GitHub Copilot, Kimi, Qwen, OpenCode, and custom agents via the open Agent Client Protocol (ACP) over `stdio`. Direct HTTP requests are used strictly for user-supplied API keys (OpenRouter, Venice, OpenAI, Anthropic, Google) and local inference servers (Ollama, LM Studio, llama.cpp, vLLM).
+- **Zero credential scraping:** Ancilla never reads, extracts, decrypts, or forwards third-party OAuth tokens from CLI credential files (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `hosts.json`) or OS keychains, and never impersonates vendor OAuth client IDs.
+- **Name and trademarks:** `Ancilla` avoids vendor marks in its binary name, bundle ID, domain, and window title. Third-party product names appear solely for nominative identification of user-selected backends.
+- **AGPLv3 §13 remote source offer:** When `ancilla-server` binds to a non-loopback network interface (such as `--host 0.0.0.0`), `/api/providers` and **Settings → About** surface a direct link to the Complete Corresponding Source Code under GNU AGPL v3.
+- Ancilla never claims to be official, never bundles proprietary CLIs or credentials, and never bypasses billing or approvals.
 - Contributor-tier models: prompts and completions sent to them may be used to improve Meta's products. The model
   picker marks those models and says so.
 - See also: [Meta Brand Resources](https://www.meta.com/brand/resources/meta/our-trademarks),

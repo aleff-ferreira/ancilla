@@ -1,6 +1,6 @@
 import type { ExecResult } from "@ancilla/daemon";
 import { MuseExecBrain } from "../browser/muse-brain.js";
-import { AnthropicProvider, OpenAiCompatibleProvider, withTextTools, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "./brain.js";
+import { AnthropicProvider, GoogleGenAiProvider, OpenAiCompatibleProvider, withTextTools, withToolFallback, type BrainEvent, type BrainProvider, type BrainRequest } from "./brain.js";
 import { MuseThreadBrain, type MuseBrainHost } from "./muse-brain.js";
 import type { BrainSetting, VoiceSettings } from "./settings.js";
 
@@ -70,6 +70,14 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       problem: apiKey === null && !choice.local ? "No key is set for this model. Add one in Settings, Voice." : null,
     };
   }
+  if (choice.kind === "google") {
+    const apiKey = deps.keyFor(choice);
+    const provider = new GoogleGenAiProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });
+    return {
+      brain: withToolFallback(provider, { key: `google:${choice.baseUrl}|${choice.model}` }),
+      problem: apiKey === null && !choice.local ? "No key is set for this model. Add one in Settings, Voice." : null,
+    };
+  }
   if (choice.kind === "muse") {
     if (deps.muse) return { brain: deps.muse(context), problem: null };
     if (!deps.museHost) return { brain: new StaticBrain("I cannot reach Muse from here. Choose another model in the voice settings."), problem: "Muse is not available here." };
@@ -113,6 +121,14 @@ export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps):
     const provider = new AnthropicProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });
     return {
       brain: withToolFallback(provider, { key: `anthropic:${choice.baseUrl}|${choice.model}` }),
+      problem: apiKey === null && !choice.local ? "No key is set for the model that browses. Add one in Settings, Voice." : null,
+    };
+  }
+  if (choice.kind === "google") {
+    const apiKey = deps.keyFor(choice);
+    const provider = new GoogleGenAiProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });
+    return {
+      brain: withToolFallback(provider, { key: `google:${choice.baseUrl}|${choice.model}` }),
       problem: apiKey === null && !choice.local ? "No key is set for the model that browses. Add one in Settings, Voice." : null,
     };
   }

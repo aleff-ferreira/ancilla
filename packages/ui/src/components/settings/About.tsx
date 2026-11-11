@@ -16,7 +16,8 @@ const LINK_CLASS = "font-medium text-brand-text underline-offset-2 hover:underli
  * The version and the license, with the legal texts a click away. Plain `target="_blank"` links, which
  * the desktop shell hands to the default browser.
  */
-export function About(props: { version: string | null }) {
+export function About(props: { version: string | null; remoteDeployment?: boolean; sourceOfferUrl?: string | null }) {
+  const sourceHref = props.sourceOfferUrl ?? REPO;
   return (
     <div className="px-4 py-3">
       <p className="text-sm text-pretty text-fg">
@@ -30,6 +31,14 @@ export function About(props: { version: string | null }) {
           </a>
         ))}
       </p>
+      {props.remoteDeployment ? (
+        <p className="mt-2.5 rounded-lg border border-line bg-sunken px-3 py-2 text-xs leading-relaxed text-muted">
+          Remote network deployment active (GNU AGPLv3 §13):{" "}
+          <a href={sourceHref} target="_blank" rel="noreferrer" className={`inline-flex items-center gap-1 ${LINK_CLASS}`}>
+            Complete Corresponding Source Code <ArrowSquareOutIcon size={11} />
+          </a>
+        </p>
+      ) : null}
     </div>
   );
 }

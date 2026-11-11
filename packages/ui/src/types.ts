@@ -4,6 +4,123 @@ export type ApprovalMode = "allowAll" | "denyUnmatched" | "onRequest" | "promptU
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 export type IfBusy = "queue" | "steer";
 
+export type BuiltinProviderId =
+  | "muse"
+  | "codex"
+  | "claude"
+  | "gemini"
+  | "copilot"
+  | "kimi"
+  | "qwen"
+  | "opencode"
+  | "acp-custom"
+  | "api";
+
+export type ProviderId = BuiltinProviderId | `acp:${string}`;
+export type ApiProviderKind = "openai" | "anthropic" | "google";
+export type ProviderTransport = "msp" | "acp" | "codex-app-server" | "claude-stream-json" | "http-api";
+export type ProviderAuthKind = "cli-oauth" | "device-code" | "api-key" | "none";
+export type ProviderQuotaSupport = "windows" | "tier-only" | "ledger-only" | "none";
+
+export interface ProviderCapabilities {
+  transport: ProviderTransport;
+  authKind: ProviderAuthKind;
+  supportsResume: boolean;
+  supportsFork: boolean;
+  supportsCompact: boolean;
+  supportsSteer: boolean;
+  supportsReasoningEffort: boolean;
+  supportsApprovalModes: readonly ApprovalMode[];
+  supportsInteractiveQuestions: boolean;
+  supportsSkills: boolean;
+  supportsGoals: boolean;
+  supportsSubagents: boolean;
+  supportsOutputPaging: boolean;
+  supportsImageAttachments: boolean;
+  supportsNativeWebSearch: boolean;
+  quotaSupport: ProviderQuotaSupport;
+}
+
+export interface ProviderAuthStatus {
+  state: "authenticated" | "unauthenticated" | "ready" | "missing-key" | "unknown";
+  summary: string | null;
+  email: string | null;
+  planTier: string | null;
+  authMethod: string | null;
+}
+
+export interface ProviderBinaryInfo {
+  providerId: ProviderId;
+  available: boolean;
+  runtime: "posix" | "native" | "wsl" | "builtin";
+  binaryPath: string | null;
+  distro: string | null;
+  version: string | null;
+}
+
+export interface ProviderAccountView {
+  id: string;
+  providerId: ProviderId;
+  name: string;
+  runtimeOverride: string | null;
+  binaryPath: string | null;
+  customArgs: string[];
+  apiKind: ApiProviderKind | null;
+  apiBaseUrl: string | null;
+  hasApiKey: boolean;
+  stripAmbientKeys: boolean;
+  defaultModelId: string | null;
+  customModels: string[];
+  createdAt: string;
+  lastUsedAt: string | null;
+  auth?: ProviderAuthStatus;
+}
+
+export interface ProviderView {
+  id: ProviderId;
+  displayName: string;
+  vendorName: string;
+  subscriptionSummary: string;
+  binaryName: string | null;
+  serveArgs: readonly string[];
+  loginArgs: readonly string[] | null;
+  installDocsUrl: string | null;
+  usageDashboardUrl: string | null;
+  capabilities: ProviderCapabilities;
+  binary: ProviderBinaryInfo;
+  ambientKeyOverrides: string[];
+  defaultAuth: ProviderAuthStatus;
+  accounts: Array<ProviderAccountView | AccountView>;
+}
+
+export interface ProvidersCatalogView {
+  providers: ProviderView[];
+  accounts: ProviderAccountView[];
+  ambientKeyOverrides: Record<string, string[]>;
+  remoteDeployment: boolean;
+  license: string;
+  sourceOfferUrl: string;
+}
+
+export interface ProviderQuotaView {
+  providerId: ProviderId;
+  displayName: string;
+  accountId: string | null;
+  accountName: string | null;
+  quotaSupport: ProviderQuotaSupport;
+  usageDashboardUrl: string | null;
+  usage: PlanUsage | null;
+}
+
+export interface ProviderLoginResult {
+  status: "waiting" | "done" | "interactive" | "error";
+  url: string | null;
+  code: string | null;
+  loginId: string;
+  terminalCommand: string;
+  message?: string;
+}
+
 export interface EnvironmentStatus {
   platform: string;
   /** Where Muse runs: on the OS itself, as native Windows Muse, or in WSL. Older servers leave it out. */
@@ -51,6 +168,8 @@ export interface ProjectView {
   displayName: string;
   pinned: boolean;
   activityAt: string;
+  /** The provider new threads here default to; defaults to `muse` when absent. */
+  defaultProviderId?: ProviderId;
   /** The account new threads here default to; null for the default login. */
   defaultAccountId: string | null;
   /** Every folder the project groups, its own first. A thread runs in exactly one of them. */
@@ -93,7 +212,11 @@ export interface SessionSummary {
   unsettledAt: string | null;
   /** Sandbox posture at creation; null for threads recorded before tracking. */
   sandboxDisabled: boolean | null;
-  /** The aonia profile this thread runs under; null for the default login. */
+  /** Provider running this thread; defaults to `muse` when absent. */
+  providerId?: ProviderId;
+  /** Capabilities advertised by this thread's provider. */
+  capabilities?: ProviderCapabilities;
+  /** The profile or provider account this thread runs under; null for the default login. */
   accountId: string | null;
   live: LiveView | null;
 }
@@ -532,6 +655,7 @@ export interface ResearchRunView {
 export interface UsageBucket {
   /** `YYYY-MM-DD`: a calendar day in the report's `tz` (UTC when it names none). */
   day: string;
+  providerId?: ProviderId;
   modelId: string;
   calls: number;
   promptTokens: number;
@@ -547,6 +671,7 @@ export interface UsageThread {
   sessionId: string;
   title: string | null;
   cwd: string | null;
+  providerId?: ProviderId;
   calls: number;
   promptTokens: number;
   outputTokens: number;
@@ -655,6 +780,8 @@ export interface PlanUsageReport {
   status?: PlanUsageStatus;
   /** Includes the default login as well as named profiles, even when no quota is available. */
   accounts?: PlanAccountUsage[];
+  /** Subscription & rate-limit quota windows for non-Muse providers (`codex`, `claude`, `gemini`, `copilot`, `api`). */
+  providerQuotas?: ProviderQuotaView[];
 }
 
 export interface AccountView {
@@ -682,6 +809,8 @@ export type AccountLoginResult =
 
 export interface AccountLoginProgress {
   status: "waiting" | "done" | "error" | "idle";
+  url?: string | null;
+  code?: string | null;
   message?: string;
 }
 
@@ -1079,6 +1208,7 @@ export type VoiceBrainSetting =
   | { kind: "muse"; model: string | null }
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
+  | { kind: "google"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "none" };
 
 export type VoiceSpeechSetting =
@@ -1271,5 +1401,7 @@ export type AncillaEvent =
   | { type: "shell-run"; sessionId: string; run: ShellRun }
   | { type: "research-run"; sessionId: string; run: ResearchRunView }
   | { type: "plan-usage"; usage: PlanUsage; accountId: string | null }
+  | { type: "provider-usage"; providerId: ProviderId; accountId: string | null; usage: PlanUsage }
+  | { type: "login-completed"; providerId: ProviderId; accountId: string | null }
   | { type: "host"; key: string; state: string; message: string }
   | { type: "connection"; state: "open" | "lost" };

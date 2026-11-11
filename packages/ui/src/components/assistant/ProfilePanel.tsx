@@ -46,7 +46,7 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
 
       <Section title="How much it may spend">
         <Row label="Tasks at once">
-          <Num value={p.policy.maxConcurrent} min={1} max={4} label="Tasks at once" onChange={(maxConcurrent) => void save({ policy: { maxConcurrent } })} />
+          <Num value={p.policy.maxConcurrent} min={1} max={8} label="Tasks at once" onChange={(maxConcurrent) => void save({ policy: { maxConcurrent } })} />
         </Row>
         <Row label="Tasks a day">
           <Num value={p.policy.maxTasksPerDay} min={1} max={100} label="Tasks a day" onChange={(maxTasksPerDay) => void save({ policy: { maxTasksPerDay } })} />

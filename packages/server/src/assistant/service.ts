@@ -89,6 +89,8 @@ export interface AssistantDeps {
   fallbackRead?: FallbackReadRunner;
   /** Runs authorized project write steps on the configured assistant model when Muse is not reachable. */
   fallbackWrite?: FallbackWriteRunner;
+  /** True when global user pre-authorization (such as YOLO mode) permits project writes. */
+  isPreAuthorized?: () => boolean;
   /** How often the executive looks for work, in milliseconds. */
   tickMs?: number;
   /** The data folder, where the meaning-search settings are kept; without it they last only as long as the process. */
@@ -210,6 +212,7 @@ export class AssistantService {
           ...(deps.connector ? { connector: deps.connector } : {}),
           ...(deps.fallbackRead ? { fallbackRead: deps.fallbackRead } : {}),
           ...(deps.fallbackWrite ? { fallbackWrite: deps.fallbackWrite } : {}),
+          ...(deps.isPreAuthorized ? { isPreAuthorized: deps.isPreAuthorized } : {}),
         })
       : null;
   }
@@ -256,16 +259,27 @@ export class AssistantService {
     return this.deps.host ? this.deps.host.projectKey(cwd) : cwd;
   }
 
+  /** Whether a Muse thread is currently waiting on an approval or a question from the user. */
+  sessionNeedsUser(sessionId: string | null): boolean {
+    return Boolean(sessionId && this.deps.host?.needsUser(sessionId));
+  }
+
   /**
    * What the page shows at a glance about the work: how much is open and how much waits on the user, and which tasks have
    * stopped for the person (`waiting`, at most a few: what a notification names, told apart from a task they paused themselves).
    */
   taskSummary(): { open: number; needsYou: number; running: number; waiting: WaitingTask[] } {
+    const runningTasks = this.tasks.byStatus(["running"]);
+    const runningNeedsYou = runningTasks.filter((t) => this.sessionNeedsUser(t.sessionId)).length;
     return {
       open: this.tasks.count(["queued", "running", "waiting", "paused", "blocked"]),
-      needsYou: this.tasks.count(["blocked", "unverified", "paused"]),
-      running: this.tasks.count(["running"]),
-      waiting: waitingTasks(this.tasks.byStatus(["paused", "blocked"]), (id) => this.executive?.browseQuestion(id) ?? null),
+      needsYou: this.tasks.count(["blocked", "unverified", "paused"]) + runningNeedsYou,
+      running: runningTasks.length,
+      waiting: waitingTasks(
+        [...runningTasks, ...this.tasks.byStatus(["paused", "blocked"])],
+        (id) => this.executive?.browseQuestion(id) ?? null,
+        (sid: string) => this.sessionNeedsUser(sid),
+      ),
     };
   }
 

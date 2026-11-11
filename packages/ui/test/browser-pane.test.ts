@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { DialogBox, Status, TabStrip, Toolbar, addressOf, tabLabel } from "../src/components/browser/BrowserPanel.js";
+import { DialogBox, Status, TabStrip, Toolbar, addressOf, tabLabel, toastText } from "../src/components/browser/BrowserPanel.js";
 import { MOD_ALT, MOD_CTRL, MOD_SHIFT, TextGate, planKeyDown, planKeyUp, resolveAddress, toPagePoint, toScreenRect, type KeyLike } from "../src/components/browser/input.js";
 import { decodeFrame } from "../src/components/browser/protocol.js";
 import { BrowserSession, EMPTY_VIEW, type SocketLike } from "../src/components/browser/session.js";
@@ -258,6 +258,78 @@ describe("the pane's connection", () => {
     assert.deepEqual({ ...box.got, jpeg: [...(box.got?.jpeg ?? [])] }, { seq: 5, width: 640, height: 480, tabId: "ABCD", jpeg: [0xff, 0xd8, 0xff] });
     assert.equal(decodeFrame(new ArrayBuffer(4)), null);
   });
+
+  it("awaits prepare() before opening the socket, and retries transient disconnects with backoff while stopping on 4009/4010/4011", async () => {
+    const sockets: FakeSocket[] = [];
+    const scheduled: Array<{ run: () => void; ms: number }> = [];
+    let resolvePrep: (() => void) | null = null;
+    const session = new BrowserSession({
+      url: () => "ws://x/api/browser/ws",
+      open: () => {
+        const s = new FakeSocket();
+        sockets.push(s);
+        return s;
+      },
+      prepare: () =>
+        new Promise<void>((resolve) => {
+          resolvePrep = resolve;
+        }),
+      retryMs: 1500,
+      retryMaxMs: 5000,
+      schedule: (run, ms) => {
+        const entry = { run, ms };
+        scheduled.push(entry);
+        return entry;
+      },
+      cancel: () => undefined,
+      onChange: () => undefined,
+      onFrame: () => undefined,
+      onSelection: () => undefined,
+    });
+
+    session.connect();
+    assert.equal(session.current.status, "connecting");
+    assert.equal(sockets.length, 0, "waits for prepare handshake before opening WebSocket");
+    resolvePrep!();
+    await Promise.resolve();
+    assert.equal(sockets.length, 1);
+
+    // Transient close (1011): schedules retry at 1500ms, preserves server error message without flickering.
+    sockets[0]!.open();
+    sockets[0]!.say({ type: "error", message: "The browser could not start." });
+    sockets[0]!.onclose?.({ code: 1011, reason: "" });
+    assert.equal(session.current.status, "closed");
+    assert.equal(session.current.message, "The browser could not start.");
+    assert.equal(scheduled.length, 1);
+    assert.equal(scheduled[0]!.ms, 1500);
+
+    // First retry fails with 1006: next retry backs off to 3000ms, keeping status closed and message intact.
+    scheduled[0]!.run();
+    assert.equal(session.current.status, "closed", "background retry does not flicker status to connecting");
+    assert.equal(session.current.message, "The browser could not start.");
+    resolvePrep!();
+    await Promise.resolve();
+    assert.equal(sockets.length, 2);
+    sockets[1]!.onclose?.({ code: 1006, reason: "" });
+    assert.equal(scheduled.length, 2);
+    assert.equal(scheduled[1]!.ms, 3000);
+
+    // Second retry succeeds: ready clears message and resets attempts.
+    scheduled[1]!.run();
+    resolvePrep!();
+    await Promise.resolve();
+    sockets[2]!.open();
+    sockets[2]!.say({ type: "ready", v: 1, tabs: [{ id: "T1", url: "about:blank", title: "", loading: false }], active: "T1" });
+    assert.equal(session.current.status, "open");
+    assert.equal(session.current.message, null);
+
+    // Non-retryable 4011 (unavailable): does not schedule a background retry and keeps the message visible.
+    sockets[2]!.say({ type: "error", message: "No browser was found." });
+    sockets[2]!.onclose?.({ code: 4011, reason: "unavailable" });
+    assert.equal(session.current.status, "closed");
+    assert.equal(session.current.message, "No browser was found.");
+    assert.equal(scheduled.length, 2, "no auto-retry on 4011 unavailable");
+  });
 });
 
 describe("what the pane shows", () => {
@@ -291,6 +363,11 @@ describe("what the pane shows", () => {
     const gone = html(createElement(Status, { view: { ...EMPTY_VIEW, status: "closed", message: "The connection to the browser ended." }, onConnect: () => undefined }));
     assert.match(gone, /Reconnect/);
     assert.match(html(createElement(Status, { view: { ...EMPTY_VIEW, status: "connecting" }, onConnect: () => undefined })), /Opening the browser/);
+    // Toast never shows `message` while Status is displayed, so the 7s auto-dismiss cannot wipe out Status's error text.
+    assert.equal(toastText({ status: "closed", notice: null, message: "No browser was found." }), null);
+    assert.equal(toastText({ status: "busy", notice: null, message: "The browser is open in another window." }), null);
+    assert.equal(toastText({ status: "open", notice: null, message: "That folder does not exist." }), "That folder does not exist.");
+    assert.equal(toastText({ status: "closed", notice: "Downloads are not allowed.", message: "No browser was found." }), "Downloads are not allowed.");
   });
 
   it("shows a script's dialog with the buttons its kind needs", () => {

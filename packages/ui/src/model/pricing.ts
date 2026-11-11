@@ -29,6 +29,21 @@ const PRICES: Record<string, TokenPrice> = {
   "muse-wonder-1.0": { input: 4, output: 20, cached: 0.2, currency: USD },
 };
 
+/** Published API rates (USD per million tokens) for non-Muse models so token ledgers show API-equivalent value. */
+const OTHER_PROVIDER_PRICES: Record<string, TokenPrice> = {
+  "gpt-5.4": { input: 2.5, output: 15, cached: 0.25, currency: USD },
+  "gpt-5.3-codex": { input: 1.75, output: 14, cached: 0.175, currency: USD },
+  "gpt-5-mini": { input: 0.25, output: 2, cached: 0.025, currency: USD },
+  "o3": { input: 2, output: 8, cached: 0.5, currency: USD },
+  "claude-opus-4-6": { input: 5, output: 25, cached: 0.5, currency: USD },
+  "claude-sonnet-4-6": { input: 3, output: 15, cached: 0.3, currency: USD },
+  "claude-haiku-4-5": { input: 1, output: 5, cached: 0.1, currency: USD },
+  "gemini-2.5-pro": { input: 1.25, output: 10, cached: 0.125, currency: USD },
+  "gemini-2.5-flash": { input: 0.3, output: 2.5, cached: 0.03, currency: USD },
+  "kimi-k2.5": { input: 0.6, output: 2.5, cached: 0.15, currency: USD },
+  "qwen3-coder-plus": { input: 1, output: 5, cached: 0.2, currency: USD },
+};
+
 /**
  * The published price for a model id, or null when none is known. Only Muse Spark falls back by family, so a
  * new Spark minor version is priced like its siblings. Every other id needs its own row: a family match would
@@ -40,6 +55,17 @@ export function listedPrice(modelId: string | null): TokenPrice | null {
   }
   if (Object.prototype.hasOwnProperty.call(PRICES, modelId)) {
     return PRICES[modelId] as TokenPrice;
+  }
+  if (Object.prototype.hasOwnProperty.call(OTHER_PROVIDER_PRICES, modelId)) {
+    return OTHER_PROVIDER_PRICES[modelId] as TokenPrice;
+  }
+  const bare = modelId.includes("/") ? modelId.slice(modelId.lastIndexOf("/") + 1) : modelId;
+  if (Object.prototype.hasOwnProperty.call(OTHER_PROVIDER_PRICES, bare)) {
+    return OTHER_PROVIDER_PRICES[bare] as TokenPrice;
+  }
+  const hyphenated = bare.replace(/\./g, "-");
+  if (Object.prototype.hasOwnProperty.call(OTHER_PROVIDER_PRICES, hyphenated)) {
+    return OTHER_PROVIDER_PRICES[hyphenated] as TokenPrice;
   }
   if (!modelId.startsWith(SPARK_PREFIX)) {
     return null;

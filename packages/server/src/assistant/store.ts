@@ -337,6 +337,21 @@ export class MemoryStore {
       this.run("INSERT OR IGNORE INTO assistant_meta (key, value) VALUES ('salt', ?)", [randomBytes(16).toString("hex")]);
       this.run("INSERT OR IGNORE INTO assistant_meta (key, value) VALUES ('epoch', '0')");
       this.run("INSERT OR IGNORE INTO assistant_profile (id, json, updated_at) VALUES (?, ?, 0)", [ASSISTANT_ID, JSON.stringify(DEFAULT_PROFILE)]);
+      if (!this.get("SELECT value FROM assistant_meta WHERE key = 'concurrent_default_v2'")) {
+        const row = this.get("SELECT json FROM assistant_profile WHERE id = ?", [ASSISTANT_ID]);
+        if (row && typeof row.json === "string") {
+          try {
+            const parsed = JSON.parse(row.json) as { policy?: { maxConcurrent?: unknown } };
+            if (parsed?.policy && parsed.policy.maxConcurrent === 1) {
+              parsed.policy.maxConcurrent = DEFAULT_PROFILE.policy.maxConcurrent;
+              this.run("UPDATE assistant_profile SET json = ? WHERE id = ?", [JSON.stringify(parsed), ASSISTANT_ID]);
+            }
+          } catch {
+            /* normalizeProfile handles malformed JSON on read */
+          }
+        }
+        this.run("INSERT INTO assistant_meta (key, value) VALUES ('concurrent_default_v2', '1')");
+      }
     });
     this.salt = String(this.getMeta("salt"));
   }

@@ -9,6 +9,7 @@ import { ActivityDrawerHost } from "../components/crew/ActivityDrawer.js";
 import { AssistantPage } from "../components/assistant/AssistantPage.js";
 import { SettingsPage } from "../components/settings/SettingsPage.js";
 import { DeviceLoginModal } from "../components/settings/MuseSignIn.js";
+import { ProviderLoginModal } from "../components/settings/ProvidersSettings.js";
 import { Sidebar } from "../components/sidebar/Sidebar.js";
 import { ThreadView } from "../components/thread/ThreadView.js";
 import { UsagePage } from "../components/usage/UsagePage.js";
@@ -70,6 +71,7 @@ export function AncillaApp(props: AncillaAppProps) {
           <PlanSync />
           <Shell />
           <DeviceLoginModal />
+          <ProviderLoginModal />
           <ActivityDrawerHost />
           <CommandPalette />
           <AddProjectDialog />
@@ -263,11 +265,18 @@ function Shell() {
   const env = useApp((s) => s.env);
   const linuxInstall = useApp((s) => s.linuxSetup?.installation);
   const collapsed = useApp((s) => s.prefs.sidebarCollapsed);
+  const hasAltProvider = useApp(
+    (s) =>
+      s.skipMuseOnboarding ||
+      (s.providers ?? []).some(
+        (p) => p.id !== "muse" && (p.id === "api" ? p.accounts.length > 0 : p.binary.available || p.accounts.length > 0),
+      ),
+  );
   // Boot, setup and error screens fill the window with no header, so they get a bare drag strip.
   let screen: ReactElement | null = null;
   if (!env) {
     screen = boot === "error" ? <BootError /> : <BootScreen />;
-  } else if (!env.museFound || env.platform === "linux" && (linuxInstall?.status === "installing" || linuxInstall?.status === "error" || linuxInstall?.status === "cancelled")) {
+  } else if ((!env.museFound && !hasAltProvider) || env.platform === "linux" && (linuxInstall?.status === "installing" || linuxInstall?.status === "error" || linuxInstall?.status === "cancelled")) {
     screen = <Onboarding />;
   } else if (boot === "error") {
     screen = <BootError />;

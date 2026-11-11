@@ -23,6 +23,8 @@ export interface WatchOptions {
   onChange: (view: WatchView) => void;
   /** A picture to draw; `done` says it was drawn (or could not be) so the server may send the next. */
   onFrame: (frame: Frame, done: () => void) => void;
+  /** Optional handshake (such as setting an auth cookie) to finish before opening the socket. */
+  prepare?: () => Promise<void> | void;
   /** Milliseconds before looking again after the connection ends; 0 or absent does not try again. */
   retryMs?: number;
   /** For tests. */
@@ -36,6 +38,7 @@ export class AssistantWatch {
   private socket: SocketLike | null = null;
   private view: WatchView = EMPTY_WATCH;
   private wanted = false;
+  private epoch = 0;
   private timer: unknown = null;
 
   constructor(private readonly options: WatchOptions) {}
@@ -56,6 +59,7 @@ export class AssistantWatch {
 
   disconnect(): void {
     this.wanted = false;
+    this.epoch += 1;
     if (this.timer !== null) (this.options.cancel ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.timer);
     this.timer = null;
     const socket = this.socket;
@@ -80,6 +84,28 @@ export class AssistantWatch {
       return;
     }
     this.set({ status: "connecting" });
+    const epoch = ++this.epoch;
+    let prep: Promise<void> | void;
+    try {
+      prep = this.options.prepare?.();
+    } catch {
+      prep = undefined;
+    }
+    if (prep && typeof (prep as Promise<void>).then === "function") {
+      void (prep as Promise<void>).then(
+        () => {
+          if (this.wanted && this.epoch === epoch) this.openSocket(url);
+        },
+        () => {
+          if (this.wanted && this.epoch === epoch) this.openSocket(url);
+        },
+      );
+      return;
+    }
+    this.openSocket(url);
+  }
+
+  private openSocket(url: string): void {
     let socket: SocketLike;
     try {
       socket = this.options.open(url);

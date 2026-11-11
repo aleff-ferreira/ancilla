@@ -1,10 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { CdpConnection, CdpError } from "./cdp.js";
-import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
+import { findBrowsers, type FindAllResult, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
 import { bodyText } from "./commit.js";
 import { isRestrictedAssistantHost, isRestrictedAssistantOrigin, isRestrictedAssistantUrl, originOf } from "./sites.js";
@@ -165,7 +165,10 @@ export interface BrowserServiceOptions {
   idleMs?: number;
   maxTabs?: number;
   find?: () => FindResult;
+  findAll?: () => FindAllResult;
   launch?: (options: LaunchOptions) => BrowserProcess;
+  /** Extra attempts for each candidate browser when startup exits immediately (defaults to 1 for real launches, 0 for injected `launch`). */
+  startupRetries?: number;
   /** How long a graceful Browser.close may take before the process tree is killed. */
   gracefulMs?: number;
   /** Version lookup for a browser that is not running (the real one reads the install folder or asks `--version`). */
@@ -588,6 +591,89 @@ async function within(promise: Promise<unknown>, ms: number): Promise<void> {
   }
 }
 
+async function withinValue<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([promise, new Promise<T>((resolve) => (timer = setTimeout(() => resolve(fallback), ms)))]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+class StartupExitedError extends Error {
+  constructor(readonly code: number | null) {
+    super("exited");
+  }
+}
+
+function compactStderr(raw: string | undefined): string {
+  if (!raw) return "";
+  const flat = raw.replace(/\s+/g, " ").trim();
+  return flat.length > 240 ? `…${flat.slice(-240)}` : flat;
+}
+
+const SANDBOX_HINT =
+  "Ancilla never turns the browser's sandbox off; if it cannot start sandboxed here (running as root, or in a container without user namespaces) it has to run as a normal user, or ANCILLA_BROWSER can name a browser that can.";
+
+function startupFailureMessage(kind: string, code: number | null | undefined, stderr: string, cause?: string): string {
+  if (code !== undefined) {
+    return `${kind} exited while starting (code ${code ?? "none"})${stderr ? `: ${stderr}` : ""}. ${SANDBOX_HINT}`;
+  }
+  return `${kind} did not answer while starting${cause ? ` (${cause})` : ""}${stderr ? `: ${stderr}` : ""}. ${SANDBOX_HINT}`;
+}
+
+export interface ProfileHygieneOptions {
+  platform?: NodeJS.Platform;
+  host?: string;
+  isAlive?: (pid: number) => boolean;
+}
+
+function defaultProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ESRCH";
+  }
+}
+
+/**
+ * Cleans stale pre-launch artifacts in a browser profile directory without touching established user state:
+ * - On POSIX, removes `SingletonLock` / `SingletonCookie` / `SingletonSocket` when `SingletonLock` points at a dead PID on this host.
+ * - Removes an orphaned `Crashpad`-only stub left behind when a previous launch exited before creating `Default` or `Local State`.
+ */
+export function prepareProfileDir(dir: string, options: ProfileHygieneOptions = {}): void {
+  mkdirSync(dir, { recursive: true });
+  const platform = options.platform ?? process.platform;
+  if (platform !== "win32") {
+    try {
+      const target = readlinkSync(join(dir, "SingletonLock"));
+      const dash = target.lastIndexOf("-");
+      if (dash > 0) {
+        const lockHost = target.slice(0, dash);
+        const pid = Number(target.slice(dash + 1));
+        const currentHost = options.host ?? hostname();
+        const isAlive = options.isAlive ?? defaultProcessAlive;
+        if (lockHost === currentHost && Number.isInteger(pid) && pid > 0 && !isAlive(pid)) {
+          for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+            rmSync(join(dir, name), { force: true });
+          }
+        }
+      }
+    } catch {
+      // no symlink lock or unreadable
+    }
+  }
+  try {
+    const entries = readdirSync(dir);
+    if (!entries.includes("Default") && !entries.includes("Local State") && entries.includes("Crashpad")) {
+      rmSync(join(dir, "Crashpad"), { recursive: true, force: true });
+    }
+  } catch {
+    // best-effort cleanup
+  }
+}
+
 const defaultVersionOf = (browser: FoundBrowser): Promise<string | null> => {
   if (process.platform === "win32") {
     // The install keeps a folder named for its version next to the exe: no process needs to run to read it.
@@ -612,6 +698,7 @@ export class BrowserService {
   private disposed = false;
   private readonly listeners = new Set<(event: BrowserEvent) => void>();
   private readonly profileDir: string;
+  private workingBrowser: FoundBrowser | null = null;
   private versionCache: { path: string; version: string | null } | null = null;
   private readonly options: BrowserServiceOptions;
   readonly downloads: DownloadDesk;
@@ -633,6 +720,15 @@ export class BrowserService {
     return this.profileDir;
   }
 
+  private discoverBrowsers(): FindAllResult {
+    if (this.options.findAll) return this.options.findAll();
+    if (this.options.find) {
+      const one = this.options.find();
+      return one.browser ? { browsers: [one.browser] } : { browsers: [], ...(one.reason !== undefined ? { reason: one.reason } : {}) };
+    }
+    return findBrowsers();
+  }
+
   on(listener: (event: BrowserEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -649,21 +745,24 @@ export class BrowserService {
   }
 
   async status(): Promise<BrowserStatus> {
-    const found = (this.options.find ?? (() => findBrowser()))();
-    if (!found.browser) {
+    const found = this.discoverBrowsers();
+    if (found.browsers.length === 0) {
       return { available: false, browser: null, reason: found.reason ?? "No browser was found.", running: false, tabs: 0 };
     }
     const running = this.runtime;
-    let version = running ? running.version : null;
+    const chosen =
+      running?.browser ??
+      (this.workingBrowser && found.browsers.some((b) => b.path === this.workingBrowser!.path) ? this.workingBrowser : found.browsers[0]!);
+    let version = running && running.browser.path === chosen.path ? running.version : null;
     if (version === null) {
-      if (this.versionCache?.path !== found.browser.path) {
-        this.versionCache = { path: found.browser.path, version: await (this.options.versionOf ?? defaultVersionOf)(found.browser) };
+      if (this.versionCache?.path !== chosen.path) {
+        this.versionCache = { path: chosen.path, version: await (this.options.versionOf ?? defaultVersionOf)(chosen) };
       }
       version = this.versionCache.version;
     }
     return {
       available: true,
-      browser: { kind: found.browser.kind, path: found.browser.path, version },
+      browser: { kind: chosen.kind, path: chosen.path, version },
       running: running !== null,
       tabs: running ? running.tabs.size : 0,
     };
@@ -706,48 +805,136 @@ export class BrowserService {
     return this.starting;
   }
 
+  private profileDirFor(browser: FoundBrowser, primaryKind: FoundBrowser["kind"]): string {
+    return browser.kind === primaryKind ? this.profileDir : join(dirname(this.profileDir), `profile-${browser.kind}`);
+  }
+
   private async start(): Promise<Runtime> {
-    const found = (this.options.find ?? (() => findBrowser()))();
-    if (!found.browser) throw new BrowserError("unavailable", found.reason ?? "No browser was found.");
-    const browser = found.browser;
+    const found = this.discoverBrowsers();
+    if (found.browsers.length === 0) throw new BrowserError("unavailable", found.reason ?? "No browser was found.");
+    const primaryKind = found.browsers[0]!.kind;
     mkdirSync(this.profileDir, { recursive: true });
+
+    const candidates = [...found.browsers];
+    if (this.workingBrowser) {
+      const idx = candidates.findIndex((b) => b.path === this.workingBrowser!.path);
+      if (idx > 0) {
+        const [preferred] = candidates.splice(idx, 1);
+        candidates.unshift(preferred!);
+      }
+    }
+
+    const retries = Math.max(0, this.options.startupRetries ?? (this.options.launch ? 0 : 1));
+    const failures: Array<{ browser: FoundBrowser; error: unknown }> = [];
+
+    for (const browser of candidates) {
+      if (this.disposed) throw new BrowserError("closed", "The browser service has been shut down.");
+      const profileDir = this.profileDirFor(browser, primaryKind);
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        if (this.disposed) throw new BrowserError("closed", "The browser service has been shut down.");
+        if (attempt > 0) await sleep(150);
+        try {
+          const rt = await this.startOne(browser, profileDir);
+          this.workingBrowser = browser;
+          this.runtime = rt;
+          if (failures.length > 0) {
+            this.options.log?.(`browser: started ${browser.kind} ${rt.version} after ${failures.map((f) => f.browser.kind).join(", ")} failed`);
+          } else {
+            this.options.log?.(`browser: started ${browser.kind} ${rt.version}`);
+          }
+          return rt;
+        } catch (error) {
+          if (this.disposed || (error instanceof BrowserError && error.code === "closed")) throw error;
+          const msg = error instanceof Error ? error.message : String(error);
+          this.options.log?.(`browser: failed to start ${browser.kind} (${browser.path}, attempt ${attempt + 1}/${retries + 1}): ${msg}`);
+          if (attempt === retries) failures.push({ browser, error });
+        }
+      }
+    }
+
+    const last = failures.at(-1)?.error;
+    if (failures.length <= 1) {
+      throw last instanceof Error ? last : new BrowserError("unavailable", String(last ?? "The browser could not start."));
+    }
+    const tried = failures.map(({ browser, error }) => `${browser.kind} (${error instanceof Error ? error.message.split(".")[0] : String(error)})`).join("; ");
+    throw new BrowserError("unavailable", `Could not start any installed browser (${tried}). ${SANDBOX_HINT}`);
+  }
+
+  private async startOne(browser: FoundBrowser, profileDir: string): Promise<Runtime> {
+    prepareProfileDir(profileDir);
     const launch = this.options.launch ?? launchBrowser;
-    const proc = launch({ path: browser.path, profileDir: this.profileDir });
+    const proc = launch({ path: browser.path, profileDir });
     const conn = new CdpConnection(proc.toBrowser, proc.fromBrowser);
     const tabs = new Map<string, Tab>();
-    const rt: Runtime = { proc, conn, version: "", browser, tabs, bySession: new Map(), assistantContextId: null, sharedOrigins: new Set(), activeId: null, stopping: false };
+    const rt: Runtime = {
+      proc,
+      conn,
+      version: "",
+      browser,
+      tabs,
+      bySession: new Map(),
+      assistantContextId: null,
+      sharedOrigins: new Set(),
+      activeId: null,
+      stopping: false,
+    };
 
-    const died = proc.exited.then((code) => {
-      throw new BrowserError(
-        "unavailable",
-        `${browser.kind} exited while starting (code ${code ?? "none"}). Ancilla never turns the browser's sandbox off; if it cannot start sandboxed here (running as root, or in a container without user namespaces) it has to run as a normal user, or ANCILLA_BROWSER can name a browser that can.`,
-      );
+    const died = proc.exited.then((code): never => {
+      throw new StartupExitedError(code);
     });
     died.catch(() => undefined);
+
     try {
-      const info = await Promise.race([conn.send("Browser.getVersion", {}, undefined, 20_000), died]);
-      rt.version = String(info.product ?? "").replace(/^[^/]*\//, "") || "unknown";
-      conn.onEvent((method, params, sessionId) => this.onCdp(rt, method, params, sessionId));
+      await Promise.race([
+        (async () => {
+          const info = await conn.send("Browser.getVersion", {}, undefined, 20_000);
+          rt.version = String(info.product ?? "").replace(/^[^/]*\//, "") || "unknown";
+          conn.onEvent((method, params, sessionId) => this.onCdp(rt, method, params, sessionId));
+          await conn.send("Target.setDiscoverTargets", { discover: true });
+          this.downloads.reset();
+          this.flights.clear();
+          await conn.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: this.downloads.dir, eventsEnabled: true }).catch(() => undefined);
+          await this.denyPermissions(rt, undefined);
+          // The blank page the browser opens with becomes the first tab of `you`.
+          const targets = await conn.send<{ targetInfos: Array<{ targetId: string; type: string; url: string; title: string }> }>("Target.getTargets");
+          for (const target of targets.targetInfos.filter((t) => t.type === "page")) await this.adopt(rt, target.targetId, "you", undefined, target);
+        })(),
+        died,
+      ]);
+      if (proc.hasExited()) throw new StartupExitedError(await proc.exited);
       const teardown = () => this.teardown(rt);
       conn.onClose(teardown);
       void proc.exited.then(teardown);
-      await conn.send("Target.setDiscoverTargets", { discover: true });
-      this.downloads.reset();
-      this.flights.clear();
-      await conn.send("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: this.downloads.dir, eventsEnabled: true }).catch(() => undefined);
-      await this.denyPermissions(rt, undefined);
-      // The blank page the browser opens with becomes the first tab of `you`.
-      const targets = await conn.send<{ targetInfos: Array<{ targetId: string; type: string; url: string; title: string }> }>("Target.getTargets");
-      for (const target of targets.targetInfos.filter((t) => t.type === "page")) await this.adopt(rt, target.targetId, "you", undefined, target);
+      return rt;
     } catch (error) {
       rt.stopping = true;
       conn.close();
+      for (const tab of rt.tabs.values()) this.endScreencast(tab);
+      rt.tabs.clear();
+      rt.bySession.clear();
+      let exited: { done: true; code: number | null } | { done: false };
+      if (error instanceof StartupExitedError) {
+        exited = { done: true, code: error.code };
+      } else if (proc.hasExited()) {
+        exited = { done: true, code: await proc.exited };
+      } else {
+        exited = await withinValue(
+          proc.exited.then((code) => ({ done: true as const, code })),
+          400,
+          { done: false as const },
+        );
+      }
       await proc.killTree().catch(() => undefined);
-      throw error;
+      const stderr = compactStderr(proc.recentStderr?.());
+      if (exited.done) {
+        throw new BrowserError("unavailable", startupFailureMessage(browser.kind, exited.code, stderr));
+      }
+      if (error instanceof BrowserError) throw error;
+      throw new BrowserError(
+        "unavailable",
+        startupFailureMessage(browser.kind, undefined, stderr, error instanceof Error ? error.message : String(error)),
+      );
     }
-    this.runtime = rt;
-    this.options.log?.(`browser: started ${browser.kind} ${rt.version}`);
-    return rt;
   }
 
   private async denyPermissions(rt: Runtime, browserContextId: string | undefined): Promise<void> {

@@ -291,6 +291,11 @@ export function Onboarding() {
           <h1 className={cn(DISPLAY, "mt-7")}>Set up Ancilla</h1>
           <p className="mt-3 text-md leading-relaxed text-muted">Install Muse, connect your Meta subscription, then choose a project. Ancilla guides you through each step here.</p>
           <div className="mt-7"><LinuxSetupCard firstRun showSubscription /></div>
+          <div className="mt-5">
+            <Button variant="ghost" onClick={() => void controller.openProvidersWithoutMuse()}>
+              Use another AI subscription or API key
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -371,12 +376,15 @@ export function Onboarding() {
             </li>
           ))}
         </ol>
-        <div className="mt-6">
+        <div className="mt-6 flex flex-wrap items-center gap-2.5">
           <Button variant="primary" onClick={() => controller.retryBoot()} loading={checking}>
             <ArrowsClockwiseIcon size={14} /> Check installation
           </Button>
-          <p className="mt-3 text-xs leading-relaxed text-subtle">If Muse is still not found after installation, close and reopen Ancilla so it can pick up the updated command path.</p>
+          <Button variant="ghost" onClick={() => void controller.openProvidersWithoutMuse()}>
+            Use another AI subscription or API key
+          </Button>
         </div>
+        <p className="mt-3 text-xs leading-relaxed text-subtle">If Muse is still not found after installation, close and reopen Ancilla so it can pick up the updated command path.</p>
       </div>
     </div>
   );

@@ -40,7 +40,7 @@ const GB = 1024 ** 3;
 const MB = 1024 ** 2;
 const size = (bytes: number): string => (bytes >= GB ? `${(bytes / GB).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / MB))} MB`);
 
-const PRESETS: { id: string; label: string; kind: "openai" | "anthropic"; baseUrl: string; model: string; local: boolean; apiKeyEnv: string | null }[] = [
+const PRESETS: { id: string; label: string; kind: "openai" | "anthropic" | "google"; baseUrl: string; model: string; local: boolean; apiKeyEnv: string | null }[] = [
   { id: "anthropic", label: "Anthropic", kind: "anthropic", baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", local: false, apiKeyEnv: "ANTHROPIC_API_KEY" },
   { id: "openai", label: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini", local: false, apiKeyEnv: "OPENAI_API_KEY" },
   { id: "gemini", label: "Gemini", kind: "openai", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash", local: false, apiKeyEnv: "GEMINI_API_KEY" },
@@ -388,9 +388,9 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   const controller = useController();
   const { settings } = props;
   const brain = settings.brain;
-  const isCustom = brain.kind === "openai" || brain.kind === "anthropic";
-  const [draft, setDraft] = useState<{ kind: "openai" | "anthropic"; baseUrl: string; model: string; apiKey: string; local: boolean; apiKeyEnv: string }>({
-    kind: brain.kind === "anthropic" ? "anthropic" : "openai",
+  const isCustom = brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google";
+  const [draft, setDraft] = useState<{ kind: "openai" | "anthropic" | "google"; baseUrl: string; model: string; apiKey: string; local: boolean; apiKeyEnv: string }>({
+    kind: brain.kind === "anthropic" || brain.kind === "google" ? brain.kind : "openai",
     baseUrl: isCustom ? brain.baseUrl : "",
     model: isCustom ? brain.model : "",
     apiKey: "",
@@ -398,7 +398,7 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     apiKeyEnv: isCustom ? (brain.apiKeyEnv ?? "") : "",
   });
   useEffect(() => {
-    if (brain.kind === "openai" || brain.kind === "anthropic") {
+    if (brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google") {
       setDraft((d) => ({ ...d, kind: brain.kind, baseUrl: brain.baseUrl, model: brain.model, local: brain.local, apiKeyEnv: brain.apiKeyEnv ?? "" }));
     }
   }, [brain]);
@@ -525,12 +525,13 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
               </Button>
             </div>
           </Row>
-          <Row label="Protocol" description="Most hosted and local servers speak the OpenAI chat protocol; Anthropic uses its own Messages endpoint.">
-            <Pick<"openai" | "anthropic">
+          <Row label="Protocol" description="Most hosted and local servers speak the OpenAI chat protocol; Anthropic uses its own Messages endpoint; Google speaks the Gemini Generative Language API.">
+            <Pick<"openai" | "anthropic" | "google">
               value={draft.kind}
               options={[
                 { value: "openai", label: "OpenAI chat" },
                 { value: "anthropic", label: "Messages API" },
+                { value: "google", label: "Google Gemini" },
               ]}
               onChange={(kind) => void apply({ kind })}
             />

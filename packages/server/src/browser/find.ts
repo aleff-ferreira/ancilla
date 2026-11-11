@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { posix } from "node:path";
 
 /**
@@ -17,6 +17,12 @@ export interface FoundBrowser {
 export interface FindResult {
   browser: FoundBrowser | null;
   /** Why nothing was found, in words the user can act on. Set only when `browser` is null. */
+  reason?: string;
+}
+
+export interface FindAllResult {
+  browsers: FoundBrowser[];
+  /** Why nothing was found, in words the user can act on. Set only when `browsers` is empty. */
   reason?: string;
 }
 
@@ -86,39 +92,65 @@ function candidates(platform: NodeJS.Platform, env: Record<string, string | unde
   return [];
 }
 
-export function findBrowser(options: FindOptions = {}): FindResult {
+export function findBrowsers(options: FindOptions = {}): FindAllResult {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const exists = options.exists ?? existsSync;
+  const resolveReal = options.exists === undefined;
 
   const override = env["ANCILLA_BROWSER"]?.trim();
   if (override) {
-    if (exists(override)) return { browser: { kind: kindOfPath(override), path: override } };
-    return { browser: null, reason: `ANCILLA_BROWSER points at "${override}", which does not exist.` };
+    if (exists(override)) return { browsers: [{ kind: kindOfPath(override), path: override }] };
+    return { browsers: [], reason: `ANCILLA_BROWSER points at "${override}", which does not exist.` };
   }
 
+  const browsers: FoundBrowser[] = [];
+  const seenKeys = new Set<string>();
+  const add = (candidate: FoundBrowser): void => {
+    let canonical = candidate.path;
+    if (resolveReal) {
+      try {
+        canonical = realpathSync(candidate.path);
+      } catch {
+        canonical = candidate.path;
+      }
+    }
+    const key = platform === "win32" ? canonical.toLowerCase() : canonical;
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+    browsers.push(candidate);
+  };
+
   for (const candidate of candidates(platform, env)) {
-    if (exists(candidate.path)) return { browser: candidate };
+    if (exists(candidate.path)) add(candidate);
   }
+  if (browsers.length > 0) return { browsers };
 
   if (platform === "linux") {
     const dirs = (env["PATH"] ?? "").split(posix.delimiter).filter(Boolean);
     for (const [name, kind] of LINUX_NAMES) {
       for (const dir of dirs) {
         const path = posix.join(dir, name);
-        if (exists(path)) return { browser: { kind, path } };
+        if (exists(path)) add({ kind, path });
       }
     }
+    if (browsers.length > 0) return { browsers };
     const wsl = options.isWsl ?? Boolean(env["WSL_DISTRO_NAME"]);
     return {
-      browser: null,
+      browsers: [],
       reason: wsl
         ? "This server runs inside WSL and no Linux browser is installed there (looked for google-chrome, chromium, microsoft-edge, brave-browser on PATH). Install one in the distro, or set ANCILLA_BROWSER to its path. A Windows browser is not used through WSL interop."
         : "No Chromium-family browser was found on PATH (looked for google-chrome, google-chrome-stable, chromium, chromium-browser, microsoft-edge, brave-browser). Install one, or set ANCILLA_BROWSER to its path.",
     };
   }
   return {
-    browser: null,
+    browsers: [],
     reason: `No Edge, Chrome, Chromium or Brave was found in the usual places on this ${platform === "win32" ? "Windows" : "macOS"} machine. Install one, or set ANCILLA_BROWSER to its path.`,
   };
+}
+
+export function findBrowser(options: FindOptions = {}): FindResult {
+  const found = findBrowsers(options);
+  if (found.browsers[0]) return { browser: found.browsers[0] };
+  return { browser: null, ...(found.reason !== undefined ? { reason: found.reason } : {}) };
 }

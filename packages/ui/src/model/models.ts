@@ -1,8 +1,49 @@
-import type { AccountView, ModelCatalogInfo, ModelOption, ModelsStatus, ReasoningEffort, ResearchRunView } from "../types.js";
+import type {
+  AccountView,
+  DefaultLoginIdentity,
+  ModelCatalogInfo,
+  ModelOption,
+  ModelsStatus,
+  PlanAccountUsage,
+  ProviderAccountView,
+  ProviderId,
+  ProviderView,
+  ReasoningEffort,
+  ResearchRunView,
+} from "../types.js";
 import { crewBusy } from "./crew.js";
 import type { ThreadFold } from "./fold.js";
 import { formatTokens, modelDisplayName } from "./format.js";
 import { publishedModelIds } from "./pricing.js";
+
+export function providerBadgeName(providerId: ProviderId | string | null | undefined): string {
+  switch (providerId ?? "muse") {
+    case "muse":
+      return "Muse";
+    case "codex":
+      return "Codex";
+    case "claude":
+      return "Claude";
+    case "gemini":
+      return "Gemini";
+    case "copilot":
+      return "Copilot";
+    case "kimi":
+      return "Kimi";
+    case "qwen":
+      return "Qwen";
+    case "opencode":
+      return "OpenCode";
+    case "api":
+      return "API";
+    case "acp-custom":
+      return "ACP";
+    default:
+      return typeof providerId === "string" && providerId.startsWith("acp:")
+        ? providerId.slice("acp:".length)
+        : String(providerId);
+  }
+}
 
 /**
  * The model picker's vocabulary: which catalog a list came from, how a menu reads its load, the rows it shows, how
@@ -12,16 +53,20 @@ import { publishedModelIds } from "./pricing.js";
 
 // ---------------------------------------------------------------- catalog scopes
 
-/** The catalog a list belongs to: the default login's, a named account's, or an open thread's own host's. */
+/** The catalog a list belongs to: the default login's, a named account's, a provider's, or an open thread's own host's. */
 export interface ModelsScope {
+  providerId?: ProviderId | null;
   accountId?: string | null;
   sessionId?: string | null;
 }
 
-/** `default`, `acct:<accountId>` or `thread:<sessionId>`. A thread's host decides, so its id wins over the account. */
+/** `default`, `acct:<accountId>`, `prov:<providerId>:<accountId>` or `thread:<sessionId>`. A thread's host decides, so its id wins. */
 export function modelsKey(scope: ModelsScope = {}): string {
   if (scope.sessionId) {
     return `thread:${scope.sessionId}`;
+  }
+  if (scope.providerId && scope.providerId !== "muse") {
+    return `prov:${scope.providerId}:${scope.accountId ?? "default"}`;
   }
   return scope.accountId ? `acct:${scope.accountId}` : "default";
 }
@@ -53,7 +98,7 @@ export function modelsShown(
 ): { models: readonly ModelOption[]; fallback: boolean } {
   const key = typeof scope === "string" ? scope : modelsKey(scope);
   const own = modelsFor(state, key);
-  if (own.length > 0 || key === "default" || state.modelsStatus[key]?.status !== "error") {
+  if (own.length > 0 || key === "default" || key.startsWith("prov:") || state.modelsStatus[key]?.status !== "error") {
     return { models: own, fallback: false };
   }
   const base = modelsFor(state, "default");
@@ -175,16 +220,20 @@ export function isLimitedCatalog(info: ModelCatalogInfo | null | undefined): boo
   return !!info && info.source !== null && info.source !== "providerCatalog";
 }
 
-/** A named account with no login yet is never asked for models; the menu offers to sign in instead. */
+/** A named Muse account with no login yet is never asked for models; the menu offers to sign in instead. */
 export function modelsNeedSignIn(
   accounts: readonly Pick<AccountView, "id" | "hasLogin">[] | null | undefined,
   accountId: string | null | undefined,
+  providerId?: ProviderId | null,
 ): boolean {
+  if (providerId && providerId !== "muse") {
+    return false;
+  }
   return !!accountId && !!accounts?.some((account) => account.id === accountId && !account.hasLogin);
 }
 
-/** What a typed model id looks like: letters, digits and `. _ : -`, no longer than a hundred characters. */
-export const MODEL_ID_PATTERN = /^[A-Za-z0-9][\w.:-]*$/;
+/** What a typed model id looks like: letters, digits and `. _ : / - [ ]`, no longer than a hundred characters. */
+export const MODEL_ID_PATTERN = /^[A-Za-z0-9][\w.:/\-[\]]*$/;
 
 /** Whether text is shaped like a model id, so it can be tried as one. */
 export function isModelId(text: string): boolean {
@@ -231,7 +280,7 @@ export function literalModelId(text: string, models: readonly ModelOption[]): st
   if (known) {
     return known;
   }
-  return /[-.:_0-9]/.test(id) ? id : null;
+  return /[-.:_/[\]0-9]/.test(id) ? id : null;
 }
 
 /** How long a failed or empty answer is left alone by a navigation: moving around the app does not retry it at once. */
@@ -313,6 +362,8 @@ export interface PinContext {
   tried?: boolean;
   /** Another account's list offers the pinned model, so this list's silence about it is not a verdict. */
   elsewhere?: boolean;
+  /** Display name of the active provider (`"Muse"`, `"Codex"`, `"Claude"`, etc.); defaults to `"Muse"`. */
+  providerName?: string;
 }
 
 export interface ModelChoice {
@@ -389,17 +440,18 @@ export function modelChoices(
   const fallback = models.find((m) => m.isDefault) ?? null;
   const rows: ModelChoice[] = [];
   const followed = fallback ? modelDisplayName(fallback.modelId) : null;
+  const providerName = context.providerName && context.providerName !== "Muse" ? context.providerName : "Muse";
   // On a thread the row switches nothing: it only sets what new threads start on, and says so.
-  const lead = onThread ? "New threads follow Muse's default, currently" : "Currently";
+  const lead = onThread ? `New threads follow ${providerName}'s default, currently` : "Currently";
   rows.push({
     kind: "default",
     id: null,
-    label: "Muse default",
+    label: `${providerName} default`,
     displayLabel: null,
     description: !followed
       ? onThread
-        ? "New threads follow Muse's default"
-        : "Muse chooses the model"
+        ? `New threads follow ${providerName}'s default`
+        : `${providerName} chooses the model`
       : fallback?.contributor
         ? `${lead} ${followed}, a Contributor model. ${CONTRIBUTOR_NOTE}`
         : `${lead} ${followed}`,
@@ -468,7 +520,8 @@ export function modelTrigger(
         ? "not offered"
         : "unavailable"
       : null;
-  const name = modelDisplayName(id);
+  const rawName = modelDisplayName(id);
+  const name = !id && context.providerName && context.providerName !== "Muse" ? `${context.providerName} default` : rawName;
   return {
     id,
     name,
@@ -518,6 +571,9 @@ export type ModelMenuMode = ModelsMenuState | "signin";
 /** The slice of the app state a model menu reads; `AppState` satisfies it. */
 export interface ModelMenuSource extends ModelsState {
   accounts: readonly Pick<AccountView, "id" | "name" | "hasLogin">[] | null;
+  defaultLogin?: DefaultLoginIdentity | null;
+  planUsageAccounts?: readonly Pick<PlanAccountUsage, "accountId" | "status">[];
+  providers?: readonly ProviderView[] | null;
 }
 
 export interface ModelMenuOptions {
@@ -549,8 +605,8 @@ export interface PublishedChoice {
 export interface ModelMenu {
   key: string;
   mode: ModelMenuMode;
-  /** The account to offer a sign-in for, in `signin` mode. */
-  signIn: { id: string; name: string } | null;
+  /** The account or provider profile to offer a sign-in for. */
+  signIn: { id: string | null; name: string; providerId?: ProviderId; actionLabel?: string } | null;
   /** The status line: why there are no rows, or why the load failed. Null when there is nothing to say. */
   message: string | null;
   /** Muted lines under the status: a stand-in list, a kept list, a built-in list. */
@@ -586,23 +642,72 @@ export function modelMenu(source: ModelMenuSource, options: ModelMenuOptions): M
   const own = modelsFor(source, key);
   // A stand-in list is the default login's, so what it says about itself is that list's, not this scope's.
   const { models, fallback, limited, judged } = modelsStanding(source, key);
-  const account = options.accountId ? source.accounts?.find((a) => a.id === options.accountId) : undefined;
-  const signIn = modelsNeedSignIn(source.accounts, options.accountId) && account ? { id: account.id, name: account.name } : null;
-  const mode: ModelMenuMode = signIn ? "signin" : modelsMenuState(status, own);
+  const scopeProvider = options.scope.providerId ?? "muse";
+  const isMuse = scopeProvider === "muse";
+  const providerName = isMuse ? "Muse" : providerBadgeName(scopeProvider);
+  const providerView = !isMuse ? source.providers?.find((p) => p.id === scopeProvider) : undefined;
+  const providerAccount = !isMuse && options.accountId
+    ? providerView?.accounts.find((a): a is ProviderAccountView => "providerId" in a && a.id === options.accountId)
+    : undefined;
+  const providerAuth = !isMuse ? (options.accountId ? providerAccount?.auth : providerView?.defaultAuth) : undefined;
+  const providerUnauthed = Boolean(
+    !isMuse &&
+    scopeProvider !== "api" &&
+    providerView?.binary.available &&
+    providerView.loginArgs &&
+    providerAuth?.state === "unauthenticated",
+  );
+  const account = isMuse && options.accountId
+    ? source.accounts?.find((a) => a.id === options.accountId)
+    : undefined;
+  const namedMuseSignIn = modelsNeedSignIn(source.accounts, options.accountId, options.scope.providerId) && account
+    ? { id: account.id, name: account.name }
+    : null;
+  const defaultMuseNeedsSignIn =
+    isMuse &&
+    !options.accountId &&
+    (own.length === 0 || limited) &&
+    (source.defaultLogin?.hasLogin === false ||
+      source.planUsageAccounts?.some((entry) => entry.accountId === null && entry.status === "login-required") === true);
+  const signIn: ModelMenu["signIn"] = namedMuseSignIn
+    ? namedMuseSignIn
+    : defaultMuseNeedsSignIn
+      ? { id: null, name: "Muse" }
+      : providerUnauthed && (own.length === 0 || limited)
+        ? {
+            id: options.accountId,
+            name: providerAccount ? `${providerName} · ${providerAccount.name}` : (providerView?.displayName ?? providerName),
+            providerId: scopeProvider,
+            actionLabel: `Sign in to ${providerView?.displayName ?? providerName}`,
+          }
+        : null;
+  const mode: ModelMenuMode = namedMuseSignIn ? "signin" : modelsMenuState(status, own);
   const pinned = options.current ?? options.pref;
   const offeredElsewhere = options.elsewhere === true && offeredByAnother(source, models, pinned);
-  const rows = modelChoices(models, options.current, options.pref, judged, { tried: options.tried === true, elsewhere: offeredElsewhere });
+  const pinCtx: PinContext = {
+    tried: options.tried === true,
+    elsewhere: offeredElsewhere,
+    ...(isMuse ? {} : { providerName }),
+  };
+  const rows = modelChoices(models, options.current, options.pref, judged, pinCtx);
   const picked = rows.find((row) => row.kind === "pin")?.id ?? null;
   const notes: string[] = [];
   if (fallback) {
     notes.push(MODEL_COPY.fallback);
   } else if (mode === "error" && own.length > 0) {
-    notes.push(MODEL_COPY.kept);
+    notes.push(isMuse ? MODEL_COPY.kept : `Showing the last list ${providerName} sent`);
   }
   if (limited) {
-    notes.push(MODEL_COPY.limited);
+    if (isMuse) {
+      notes.push(MODEL_COPY.limited);
+    } else if (providerUnauthed) {
+      notes.push(`Sign in to ${providerView?.displayName ?? providerName} to load your subscription's live model list.`);
+    } else {
+      notes.push(`${providerName} sent its built-in fallback model list. Refresh after signing in to load live models.`);
+    }
   }
   const version = fallback ? null : status?.catalog?.hostVersion;
+  const nonMuseVersion = !isMuse ? (version ?? providerView?.binary.version ?? null) : null;
   return {
     key,
     mode,
@@ -610,28 +715,36 @@ export function modelMenu(source: ModelMenuSource, options: ModelMenuOptions): M
     message:
       mode === "signin" && signIn ? MODEL_COPY.signIn(signIn.name)
       : mode === "loading" ? MODEL_COPY.loading
-      : mode === "empty" ? MODEL_COPY.empty
       : mode === "error" ? MODEL_COPY.failed(status?.error ?? null)
+      : defaultMuseNeedsSignIn ? "Sign in with Meta to load your plan's models."
+      : mode === "empty" && limited ? null
+      : mode === "empty" ? (isMuse ? MODEL_COPY.empty : signIn ? MODEL_COPY.signIn(signIn.name) : `${providerName} listed no models. Refresh to ask again.`)
       : null,
     notes,
     rows,
     showRows: mode !== "loading",
-    published: limited
+    published: isMuse && limited
       ? publishedModelIds()
           .filter((id) => id !== picked && !models.some((m) => m.modelId === id))
           .map((id) => ({ id, label: modelDisplayName(id) }))
       : [],
-    trigger: modelTrigger(models, options.current, options.pref, judged, { tried: options.tried === true, elsewhere: offeredElsewhere }),
+    trigger: modelTrigger(models, options.current, options.pref, judged, pinCtx),
     refreshing: status?.status === "loading",
     models,
     fallback,
     limited,
     offeredElsewhere,
-    footer: {
-      line: [version ? `Muse ${version}` : null, options.plan].filter(Boolean).join(" · ") || null,
-      builtIn: limited ? MODEL_COPY.builtIn : null,
-      hint: limited ? null : MODEL_COPY.missing,
-    },
+    footer: isMuse
+      ? {
+          line: [version ? `Muse ${version}` : null, options.plan].filter(Boolean).join(" · ") || null,
+          builtIn: limited ? MODEL_COPY.builtIn : null,
+          hint: limited ? null : MODEL_COPY.missing,
+        }
+      : {
+          line: [nonMuseVersion ? `${providerName} ${nonMuseVersion}` : null, options.plan].filter(Boolean).join(" · ") || null,
+          builtIn: null,
+          hint: null,
+        },
   };
 }
 
@@ -737,7 +850,7 @@ export function modelIdError(text: string): string | null {
   if (id.length > 100) {
     return "A model id is at most 100 characters.";
   }
-  return MODEL_ID_PATTERN.test(id) ? null : "A model id starts with a letter or digit and has letters, digits and . _ : - only.";
+  return MODEL_ID_PATTERN.test(id) ? null : "A model id starts with a letter or digit and has letters, digits and . _ : / - [ ] only.";
 }
 
 /**
@@ -957,7 +1070,8 @@ function effortList(value: unknown): ReasoningEffort[] {
   }
   const found = new Set<ReasoningEffort>();
   for (const entry of value) {
-    const tier = typeof entry === "string" ? entry : (entry as { tier?: unknown } | null)?.tier;
+    const rawObj = entry && typeof entry === "object" ? (entry as { tier?: unknown; reasoningEffort?: unknown }) : null;
+    const tier = typeof entry === "string" ? entry : (rawObj?.tier ?? rawObj?.reasoningEffort);
     const level = EFFORT_TIERS.find((candidate) => candidate === tier);
     if (level) {
       found.add(level);

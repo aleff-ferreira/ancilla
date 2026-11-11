@@ -515,6 +515,220 @@ export class AnthropicProvider implements BrainProvider {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Any server that speaks the Google Generative Language REST API (`/v1beta/models/{model}:streamGenerateContent?alt=sse`
+// with `x-goog-api-key`): Google AI Studio / Gemini API keys and compatible proxies.
+
+export interface GoogleGenAiOptions {
+  baseUrl?: string;
+  model: string;
+  apiKey?: string | null;
+  label?: string;
+  local?: boolean;
+  headers?: Record<string, string>;
+  /** For tests. */
+  fetchImpl?: typeof fetch;
+  temperature?: number;
+  defaultMaxTokens?: number;
+}
+
+type GeminiPart =
+  | { text: string }
+  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | { functionResponse: { name: string; response: Record<string, unknown> } };
+
+function geminiMessages(messages: ChatMessage[]): {
+  systemInstruction: { parts: Array<{ text: string }> } | null;
+  contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }>;
+} {
+  const systems: string[] = [];
+  const contents: Array<{ role: "user" | "model"; parts: GeminiPart[] }> = [];
+  const push = (role: "user" | "model", parts: GeminiPart[]): void => {
+    if (parts.length === 0) return;
+    const prev = contents[contents.length - 1];
+    if (prev && prev.role === role) prev.parts.push(...parts);
+    else contents.push({ role, parts: [...parts] });
+  };
+  for (const m of messages) {
+    if (m.role === "system") {
+      if (m.content.trim() !== "") systems.push(m.content);
+    } else if (m.role === "user") {
+      if (m.content !== "") push("user", [{ text: m.content }]);
+    } else if (m.role === "assistant") {
+      const parts: GeminiPart[] = [];
+      if (m.content !== "") parts.push({ text: m.content });
+      for (const tc of m.toolCalls ?? []) {
+        parts.push({ functionCall: { name: tc.name, args: parseObjectArgs(tc.arguments) } });
+      }
+      push("model", parts);
+    } else if (m.role === "tool") {
+      push("user", [{ functionResponse: { name: m.name, response: { output: m.content } } }]);
+    }
+  }
+  if (contents.length === 0 || contents[0]?.role !== "user") {
+    contents.unshift({ role: "user", parts: [{ text: "Continue." }] });
+  }
+  return {
+    systemInstruction: systems.length > 0 ? { parts: [{ text: systems.join("\n\n") }] } : null,
+    contents,
+  };
+}
+
+export class GoogleGenAiProvider implements BrainProvider {
+  readonly id: string;
+  readonly label: string;
+  readonly capabilities: BrainCapabilities;
+
+  constructor(private readonly options: GoogleGenAiOptions) {
+    this.id = `google:${options.model}`;
+    this.label = options.label ?? options.model;
+    this.capabilities = { tools: true, speculative: options.local === true, local: options.local === true };
+  }
+
+  async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
+    const o = this.options;
+    const doFetch = o.fetchImpl ?? fetch;
+    const base = (o.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
+    const modelPath = o.model.startsWith("models/") ? o.model : `models/${o.model}`;
+    const shaped = geminiMessages(request.messages);
+
+    const body: Record<string, unknown> = {
+      contents: shaped.contents,
+      generationConfig: {
+        temperature: request.temperature ?? o.temperature ?? 0.7,
+        ...(request.maxTokens || o.defaultMaxTokens ? { maxOutputTokens: request.maxTokens ?? o.defaultMaxTokens } : {}),
+      },
+    };
+    if (shaped.systemInstruction) body["systemInstruction"] = shaped.systemInstruction;
+    if (request.tools.length > 0) {
+      body["tools"] = [
+        {
+          functionDeclarations: request.tools.map((t) => ({
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters,
+          })),
+        },
+      ];
+    }
+
+    let response: Response;
+    try {
+      response = await doFetch(`${base}/${modelPath}:streamGenerateContent?alt=sse`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          ...(o.apiKey ? { "x-goog-api-key": o.apiKey } : {}),
+          ...(o.headers ?? {}),
+        },
+        body: JSON.stringify(body),
+        signal: request.signal,
+      });
+    } catch (error) {
+      if (request.signal.aborted) return;
+      yield {
+        type: "error",
+        message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`,
+        retryable: true,
+      };
+      return;
+    }
+
+    if (!response.ok || !response.body) {
+      let detail = "";
+      try {
+        detail = (await response.text()).slice(0, 300);
+      } catch {
+        /* the body is only for the message */
+      }
+      const toolsRefused = request.tools.length > 0 && TOOL_REFUSAL_STATUS.has(response.status) && TOOLS_NOT_TAKEN.test(detail);
+      yield {
+        type: "error",
+        message: `The model answered ${response.status}${detail ? `: ${detail}` : ""}`,
+        retryable: response.status === 408 || response.status === 429 || response.status >= 500,
+        ...(toolsRefused ? { code: "tools-unsupported" as const } : {}),
+      };
+      return;
+    }
+
+    const calls: ToolCall[] = [];
+    let finishReason: string | null = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let sawUsage = false;
+    const think = new ThinkTagFilter();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let callIdx = 0;
+
+    try {
+      for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "" || data === "[DONE]") continue;
+          let evt: Record<string, unknown>;
+          try {
+            evt = JSON.parse(data) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          const usageMeta = evt["usageMetadata"] as { promptTokenCount?: number; candidatesTokenCount?: number } | undefined;
+          if (usageMeta) {
+            if (typeof usageMeta.promptTokenCount === "number") inputTokens = usageMeta.promptTokenCount;
+            if (typeof usageMeta.candidatesTokenCount === "number") outputTokens = usageMeta.candidatesTokenCount;
+            sawUsage = true;
+          }
+          const candidates = Array.isArray(evt["candidates"]) ? evt["candidates"] : [];
+          const first = candidates[0] as {
+            content?: { parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }> };
+            finishReason?: string;
+          } | undefined;
+          if (!first) continue;
+          if (first.finishReason) finishReason = first.finishReason;
+          for (const part of first.content?.parts ?? []) {
+            if (typeof part.text === "string" && part.text !== "") {
+              const visible = think.push(part.text);
+              if (visible !== "") yield { type: "text", delta: visible };
+            } else if (part.functionCall?.name) {
+              calls.push({
+                id: `gcall_${++callIdx}_${Math.random().toString(36).slice(2, 8)}`,
+                name: part.functionCall.name,
+                arguments: JSON.stringify(part.functionCall.args ?? {}),
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      if (request.signal.aborted) return;
+      yield {
+        type: "error",
+        message: `The model stopped answering: ${error instanceof Error ? error.message : String(error)}`,
+        retryable: true,
+      };
+      return;
+    }
+
+    if (request.signal.aborted) return;
+    const tail = think.finish();
+    if (tail !== "") yield { type: "text", delta: tail };
+    for (const c of calls) {
+      yield { type: "tool", call: c };
+    }
+    if (sawUsage) yield { type: "usage", inputTokens, outputTokens };
+    yield {
+      type: "done",
+      reason: calls.length > 0 ? "tool" : finishReason === "MAX_TOKENS" ? "length" : "stop",
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Tools for a model that has none: a convention in the text.
 
 const MARKER_OPEN = "[[";

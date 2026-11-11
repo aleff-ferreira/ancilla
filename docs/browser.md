@@ -71,9 +71,11 @@ Not covered: a download started from a frame the browser cannot place counts as 
 ## Choosing the browser
 
 Order: Edge (on every Windows), Chrome, Chromium, Brave on Windows and macOS (Chrome first on macOS); on Linux the
-first of `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, `microsoft-edge`, `brave-browser`
-on `PATH`. Set `ANCILLA_BROWSER` to a browser's full path to override; a path that does not exist is an error, not a
-silent fallback.
+names `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, `microsoft-edge`, `brave-browser`
+on `PATH`. Each candidate is retried once on immediate startup failure, and if the first installed browser cannot start
+(for instance during a broken side-by-side update), Ancilla falls back to the next installed browser in order with its
+own `<data dir>/browser/profile-<kind>` directory so profiles never collide. Set `ANCILLA_BROWSER` to a browser's full
+path to override; a path that does not exist is an error, not a silent fallback.
 
 A server running inside WSL looks for a Linux browser only; it does not reach for the Windows Edge through interop.
 Without any browser, `GET /api/browser/status` says `available: false` with the reason.

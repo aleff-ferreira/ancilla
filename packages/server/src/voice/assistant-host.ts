@@ -1,12 +1,12 @@
 import type { AuthorizationHub, PendingAuthorizationView } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
-import { awaitsApproval, type Task } from "../assistant/tasks.js";
+import { awaitsApproval, TERMINAL_TASK, type Task } from "../assistant/tasks.js";
 import { waitingCause } from "../assistant/waiting.js";
 import { VOICES } from "../assistant/context.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
 import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
-import { openingPhrase, taskPhrase, type TaskNotice } from "./prompt.js";
+import { openingPhrase, sayable, spokenTaskGist, taskMilestonePhrase, taskUpdatePhrase, type TaskNotice } from "./prompt.js";
 import type { CallApproval } from "./protocol.js";
 import type { VoiceSettings } from "./settings.js";
 import { guessLanguage, type Lang } from "./text.js";
@@ -47,9 +47,9 @@ export class TaskHub {
 }
 
 /** What is worth saying about a task now, or null when its state is not news. */
-export function noticeOf(task: Task): TaskNotice | null {
+export function noticeOf(task: Task, needsUser: ((sessionId: string) => boolean) | null = null): TaskNotice | null {
   // Whether a task waits on the person is `waitingCause`'s to say: here, on the screens and in the notifications alike.
-  if (waitingCause(task, null)) return "needs";
+  if (waitingCause(task, null, needsUser)) return "needs";
   switch (task.status) {
     case "completed":
       return "done";
@@ -80,6 +80,8 @@ export interface AssistantVoiceHostDeps {
   connectors?: VoiceConnectors;
   /** Workspace inspection, authorized process/URL launching, and live page/animation diagnostics. */
   workspace?: WorkspaceVoiceDeps | null;
+  /** True when global user pre-authorization (such as YOLO mode) permits immediate execution of proposals. */
+  isPreAuthorized?: () => boolean;
   /** Shared user authorization hub for inline call-card prompts. */
   authorizations?: AuthorizationHub | null;
   log: (line: string) => void;
@@ -99,8 +101,10 @@ function toCallApproval(view: PendingAuthorizationView | null): CallApproval | n
 
 export class AssistantVoiceHost implements VoiceHost {
   private userLang: Lang = "unknown";
-  /** The last state each task was told in, so a state is said once and never twice. */
+  /** The last spoken notice/milestone each task announced, so a milestone or outcome is said once and never twice. */
   private readonly told = new Map<string, string>();
+  /** The last visual status + note pushed to the call card for each task. */
+  private readonly shown = new Map<string, string>();
   private readonly voiceTools: VoiceTools;
   private readonly harnessTools: HarnessTools | null;
   private readonly workspaceTools: WorkspaceVoiceTools | null;
@@ -113,7 +117,11 @@ export class AssistantVoiceHost implements VoiceHost {
       assistant: deps.assistant,
       project: deps.project,
       ...(this.workspaceTools ? { resolveProject: (name?: string | null) => this.workspaceTools?.resolveProject(name)?.cwd ?? null } : {}),
-      ...(deps.workspace ? { isPreAuthorized: deps.workspace.isPreAuthorized } : {}),
+      ...(deps.isPreAuthorized
+        ? { isPreAuthorized: deps.isPreAuthorized }
+        : deps.workspace
+          ? { isPreAuthorized: deps.workspace.isPreAuthorized }
+          : {}),
       ...(this.authHub ? { authorizations: this.authHub } : {}),
       lang: () => this.lang(),
       conversationId: deps.conversationId,
@@ -156,9 +164,68 @@ export class AssistantVoiceHost implements VoiceHost {
     }
   }
 
+  private readonly needsSessionUser = (sessionId: string): boolean => this.deps.assistant.sessionNeedsUser(sessionId);
+
   private taskCounts(): { active: number; waiting: number } {
     const active = this.deps.assistant.tasks.list("active", 50);
-    return { active: active.length, waiting: active.filter((t) => noticeOf(t) === "needs").length };
+    return { active: active.length, waiting: active.filter((t) => noticeOf(t, this.needsSessionUser) === "needs").length };
+  }
+
+  private taskView(task: Task): {
+    status: string;
+    note: string | null;
+    needsUser: boolean;
+    notice: TaskNotice | null;
+    causeCode: string | null;
+    causeReason: string | null;
+  } {
+    const cause = waitingCause(task, null, this.needsSessionUser);
+    const notice = cause ? "needs" : noticeOf(task, this.needsSessionUser);
+    const needsUser = notice === "needs";
+    const status = needsUser && task.status === "running" ? "paused" : task.status;
+    const causeReason = cause
+      ? task.status === "running" && cause === "approval"
+        ? "Waiting for your approval in the task thread."
+        : task.reason
+      : null;
+    let note: string | null = null;
+    if (causeReason) {
+      note = causeReason.slice(0, 140);
+    } else if (task.status === "completed" || task.status === "unverified") {
+      note = spokenTaskGist(task.result, 120) ?? (task.status === "completed" ? "Done" : "Finished");
+    } else if (task.reason) {
+      note = task.reason.slice(0, 140);
+    }
+    return {
+      status,
+      note,
+      needsUser,
+      notice,
+      causeCode: cause,
+      causeReason,
+    };
+  }
+
+  private tasksDigest(): string | null {
+    const all = this.deps.assistant.tasks.list("all", 12);
+    if (all.length === 0) return null;
+    const now = this.deps.assistant.store.now();
+    const active = all.filter((t) => !TERMINAL_TASK.has(t.status));
+    const recentDone = all
+      .filter((t) => TERMINAL_TASK.has(t.status) && t.status !== "cancelled" && now - t.updatedAt <= 5 * 60_000)
+      .slice(0, 3);
+    if (active.length === 0 && recentDone.length === 0) return null;
+    const lines: string[] = ["Background tasks:"];
+    for (const t of active.slice(0, 5)) {
+      const v = this.taskView(t);
+      lines.push(`- ${t.id} "${sayable(t.title, 60)}" [${v.status}]${v.note ? `: ${v.note}` : ""}`);
+    }
+    if (active.length > 5) lines.push(`- and ${active.length - 5} more active tasks.`);
+    for (const t of recentDone) {
+      const gist = spokenTaskGist(t.result, 100);
+      lines.push(`- ${t.id} "${sayable(t.title, 60)}" [${t.status}]${gist ? `: ${gist}` : ""}`);
+    }
+    return lines.join("\n");
   }
 
   /** The "Right now" block joined to the notes of a turn, so a question about what is going on needs no tool call. */
@@ -169,7 +236,13 @@ export class AssistantVoiceHost implements VoiceHost {
     } catch (error) {
       this.deps.log(`voice: the harness digest could not be built: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const parts = [prefix, block].filter((p): p is string => typeof p === "string" && p !== "");
+    let tasksBlock: string | null = null;
+    try {
+      tasksBlock = this.tasksDigest();
+    } catch (error) {
+      this.deps.log(`voice: the tasks digest could not be built: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const parts = [prefix, block, tasksBlock].filter((p): p is string => typeof p === "string" && p !== "");
     return parts.length === 0 ? null : parts.join("\n\n");
   }
 
@@ -209,25 +282,92 @@ export class AssistantVoiceHost implements VoiceHost {
     return this.authHub.subscribe((current) => handler(toCallApproval(current)));
   }
 
+  activeTasks(): HostEvent[] {
+    return this.deps.assistant.tasks.list("active", 12).map((task) => {
+      const v = this.taskView(task);
+      this.shown.set(task.id, `${v.status}|${v.note ?? ""}`);
+      return {
+        id: task.id,
+        kind: "task",
+        title: task.title,
+        status: v.status,
+        note: v.note,
+        say: null,
+        needsUser: v.needsUser,
+      };
+    });
+  }
+
   subscribe(handler: (event: HostEvent) => void): () => void {
     return this.deps.hub.subscribe(({ taskId }) => {
       const task = this.deps.assistant.tasks.get(taskId);
       if (!task) return;
-      const notice = noticeOf(task);
-      const key = `${task.status}:${task.updatedAt}`;
-      if (notice === null) return;
-      if (this.told.get(task.id)?.startsWith(`${task.status}:`)) return;
-      this.told.set(task.id, key);
-      const needsUser = notice === "needs";
-      // A proposal made in this call was said by the tool that made it, so its event goes out without saying it again.
-      const said = awaitsApproval(task) && task.updatedAt === task.createdAt;
+      const v = this.taskView(task);
+      const proactive = this.deps.settings().proactive;
+      let say: string | null = null;
+
+      if (v.notice !== null) {
+        const sayKey = v.notice === "needs" ? `needs:${v.causeCode ?? task.status}` : v.notice;
+        const justProposed = awaitsApproval(task) && task.updatedAt === task.createdAt;
+        if (justProposed) {
+          this.told.set(task.id, sayKey);
+        } else if (this.told.get(task.id) !== sayKey) {
+          this.told.set(task.id, sayKey);
+          if (proactive) {
+            say = taskUpdatePhrase(this.lang(), v.notice, task.title, {
+              result: task.result,
+              reason: v.causeReason ?? task.reason,
+            });
+          }
+        }
+      } else {
+        const prevTold = this.told.get(task.id);
+        if (prevTold?.startsWith("needs:") || prevTold === "paused") {
+          this.told.delete(task.id);
+        }
+        if (task.status === "running") {
+          if (task.progress.total > 1 && task.progress.done > 0 && task.progress.done < task.progress.total) {
+            const stepKey = `step:${task.progress.done}/${task.progress.total}`;
+            if (this.told.get(task.id) !== stepKey) {
+              this.told.set(task.id, stepKey);
+              if (proactive) {
+                const stepMatch = /^Step \d+ of \d+:\s*(.+)$/.exec(task.reason);
+                const nextTitle = stepMatch?.[1]?.trim();
+                say = taskMilestonePhrase(this.lang(), task.title, {
+                  kind: "step",
+                  done: task.progress.done,
+                  total: task.progress.total,
+                  ...(nextTitle ? { nextTitle } : {}),
+                });
+              }
+            }
+          } else {
+            const goalMatch = /^(\d{1,3})%\s*[—-]\s*(.+)$/.exec(task.reason);
+            if (goalMatch) {
+              const pct = Number(goalMatch[1]);
+              const detail = goalMatch[2]?.trim() ?? "";
+              if (pct >= 50 && pct < 100 && detail !== "" && !this.told.get(task.id)?.startsWith("goal:")) {
+                this.told.set(task.id, "goal:50");
+                if (proactive) {
+                  say = taskMilestonePhrase(this.lang(), task.title, { kind: "progress", percent: pct, detail });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const visualKey = `${v.status}|${v.note ?? ""}`;
+      if (say === null && this.shown.get(task.id) === visualKey) return;
+      this.shown.set(task.id, visualKey);
       handler({
         id: task.id,
         kind: "task",
         title: task.title,
-        status: task.status,
-        say: this.deps.settings().proactive && !said ? taskPhrase(this.lang(), notice, task.title) : null,
-        needsUser,
+        status: v.status,
+        note: v.note,
+        say,
+        needsUser: v.needsUser,
       });
     });
   }
@@ -256,7 +396,7 @@ export class AssistantVoiceHost implements VoiceHost {
     const rank: Record<string, number> = { needs: 0, failed: 1, unverified: 2, done: 3 };
     const news = assistant.tasks
       .list("all", 50)
-      .map((task) => ({ task, notice: noticeOf(task) }))
+      .map((task) => ({ task, notice: noticeOf(task, this.needsSessionUser) }))
       .filter((n): n is { task: Task; notice: TaskNotice } => n.notice !== null && n.notice in rank && (last === null ? n.notice === "needs" : n.task.updatedAt > last))
       .sort((a, b) => (rank[a.notice] as number) - (rank[b.notice] as number) || b.task.updatedAt - a.task.updatedAt);
     if (news.length === 0) return null;

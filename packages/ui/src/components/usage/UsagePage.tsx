@@ -1,10 +1,11 @@
-import { ArrowLeftIcon } from "../ui/icons.js";
+import { ArrowLeftIcon, ArrowSquareOutIcon } from "../ui/icons.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { basename, formatDuration, formatTokens, modelDisplayName, relativeTime } from "../../model/format.js";
 import { formatCost } from "../../model/pricing.js";
 import { dayBasis, emptyRangeTitle, USAGE_RANGES } from "../../model/usage-range.js";
+import type { ProviderQuotaView } from "../../types.js";
 import {
   ACCOUNTS_NOTE,
   costBound,
@@ -137,6 +138,7 @@ export function UsagePage() {
           <PlanMeter />
         </div>
         <AccountMeters />
+        <ProviderQuotasSection />
         <div className="mb-4 flex flex-wrap items-center gap-3 border-t border-line pt-5">
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-medium text-fg">Thread activity</h2>
@@ -488,6 +490,99 @@ function EmptyUsage(props: { days: number; view: UsageView }) {
         This fills in as threads run. Opening an older thread also backfills what it spent, so its calls show up here too.
       </p>
       {note ? <p className="max-w-[48ch] text-xs text-subtle">{note}</p> : null}
+    </div>
+  );
+}
+
+export function ProviderQuotasSection() {
+  const quotas = useApp((s) => s.providerQuotas ?? []);
+  if (quotas.length === 0) {
+    return null;
+  }
+  return (
+    <section aria-label="Other AI subscriptions and endpoints" className="mb-6 border-t border-line pt-5">
+      <div className="mb-3">
+        <h2 className="text-sm font-medium text-fg">Other AI subscriptions &amp; endpoints</h2>
+        <p className="mt-1 text-xs text-muted">
+          Allowance readings reported directly by official CLIs over stdio, alongside official dashboard links where numeric percentages are not exposed.
+        </p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        {quotas.map((quota) => (
+          <ProviderQuotaCard key={`${quota.providerId}:${quota.accountId ?? "default"}`} quota={quota} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ProviderQuotaCard(props: { quota: ProviderQuotaView }) {
+  const { quota } = props;
+  const label = quota.accountName ? `${quota.displayName} · ${quota.accountName}` : quota.displayName;
+  const tier = quota.usage?.tier ?? null;
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl bg-raised px-4 py-3.5 shadow-panel">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-sm font-medium text-fg">{label}</span>
+          {tier ? (
+            <span className="shrink-0 rounded bg-active px-1.5 py-0.5 text-2xs font-medium text-muted uppercase">{tier}</span>
+          ) : null}
+        </div>
+        {quota.usageDashboardUrl ? (
+          <a
+            href={quota.usageDashboardUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-brand-text underline-offset-2 hover:underline"
+          >
+            Usage dashboard <ArrowSquareOutIcon size={11} />
+          </a>
+        ) : null}
+      </div>
+
+      {quota.quotaSupport === "windows" ? (
+        quota.usage ? (
+          <div className="flex flex-col gap-2">
+            <QuotaWindowBar label="5-hour window" usedPercent={quota.usage.window.usedPercent} />
+            <QuotaWindowBar label="Weekly limit" usedPercent={quota.usage.weekly.usedPercent} />
+          </div>
+        ) : (
+          <p className="text-xs leading-relaxed text-muted">
+            No live rate-limit window reported yet. Send a message in a thread using this login to observe its current 5-hour and weekly limits.
+          </p>
+        )
+      ) : quota.quotaSupport === "tier-only" ? (
+        <p className="text-xs leading-relaxed text-muted">
+          This CLI does not expose numeric remaining percentages over stdio. Check the official usage dashboard for current subscription limits.
+        </p>
+      ) : (
+        <p className="text-xs leading-relaxed text-muted">
+          Pay-as-you-go API or local endpoint. Token counts and list-price estimates are included in the thread activity report below.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function QuotaWindowBar(props: { label: string; usedPercent: number }) {
+  const used = Math.max(0, Math.round(props.usedPercent));
+  const remaining = Math.max(0, 100 - used);
+  const barWidth = Math.min(100, used);
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2 text-2xs tabular-nums">
+        <span className="text-muted">{props.label}</span>
+        <span className="text-fg">
+          {used}% used · {remaining}% left
+        </span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-sunken">
+        <div
+          className={cn("h-full rounded-full", used >= 90 ? "bg-danger" : used >= 75 ? "bg-warn" : "bg-accent")}
+          style={{ width: `${barWidth}%` }}
+        />
+      </div>
     </div>
   );
 }

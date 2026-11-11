@@ -9,6 +9,9 @@ export interface FakeBrowser {
   calls: Array<{ method: string; params: Record<string, any>; sessionId?: string }>;
   emit(method: string, params: Record<string, any>, sessionId?: string): void;
   exit(code?: number): void;
+  /** Closes the CDP pipe first and resolves `exited` after `delayMs` (as OS pipes do when a real browser exits). */
+  closePipeThenExit(code?: number, delayMs?: number): void;
+  stderr(text: string): void;
   killed: () => number;
   /** Raw bytes into the CDP pipe, to test framing. */
   raw(chunk: Buffer): void;
@@ -20,6 +23,7 @@ export function fakeBrowser(handle: Handler, options: { exitsOnClose?: boolean }
   const calls: FakeBrowser["calls"] = [];
   let exited = false;
   let kills = 0;
+  let stderrText = "";
   let resolveExit: (code: number | null) => void = () => undefined;
   const done = new Promise<number | null>((resolve) => (resolveExit = resolve));
   const send = (message: unknown) => fromBrowser.write(`${JSON.stringify(message)}\0`);
@@ -28,6 +32,15 @@ export function fakeBrowser(handle: Handler, options: { exitsOnClose?: boolean }
     exited = true;
     fromBrowser.end();
     resolveExit(code);
+  };
+  const closePipeThenExit = (code = 0, delayMs = 35) => {
+    if (exited) return;
+    fromBrowser.end();
+    setTimeout(() => {
+      if (exited) return;
+      exited = true;
+      resolveExit(code);
+    }, delayMs).unref?.();
   };
   let buffer = "";
   toBrowser.on("data", (chunk: Buffer) => {
@@ -56,6 +69,7 @@ export function fakeBrowser(handle: Handler, options: { exitsOnClose?: boolean }
     fromBrowser,
     exited: done,
     hasExited: () => exited,
+    recentStderr: () => stderrText.trim(),
     killTree: async () => {
       kills += 1;
       exit(null as unknown as number);
@@ -66,6 +80,10 @@ export function fakeBrowser(handle: Handler, options: { exitsOnClose?: boolean }
     calls,
     emit: (method, params, sessionId) => send({ method, params, ...(sessionId ? { sessionId } : {}) }),
     exit,
+    closePipeThenExit,
+    stderr: (text) => {
+      stderrText += text;
+    },
     killed: () => kills,
     raw: (chunk) => void fromBrowser.write(chunk),
   };

@@ -1,3 +1,10 @@
+import {
+  MUSE_CAPABILITIES,
+  UnsupportedCapabilityError,
+  type ProviderCapabilities,
+  type ProviderId,
+} from "./providers/types.js";
+
 export type ApprovalMode = "allowAll" | "denyUnmatched" | "onRequest" | "promptUnmatched";
 
 export const APPROVAL_MODES: readonly ApprovalMode[] = [
@@ -186,7 +193,16 @@ export interface PendingRequests {
 }
 
 export class SessionManager {
-  constructor(private readonly connection: CommandConnection) {}
+  readonly providerId: ProviderId;
+  readonly capabilities: ProviderCapabilities;
+
+  constructor(
+    private readonly connection: CommandConnection,
+    options: { providerId?: ProviderId; capabilities?: ProviderCapabilities } = {},
+  ) {
+    this.providerId = options.providerId ?? "muse";
+    this.capabilities = options.capabilities ?? MUSE_CAPABILITIES;
+  }
 
   onNotification(handler: NotificationHandler): void {
     this.connection.onNotification(handler);
@@ -320,6 +336,9 @@ export class SessionManager {
     expectedTurnId: string,
     text: string,
   ): Promise<unknown> {
+    if (!this.capabilities.supportsSteer) {
+      throw new UnsupportedCapabilityError(this.providerId, "mid-turn steering");
+    }
     return this.connection.command("turn/steer", {
       sessionId,
       expectedTurnId,
@@ -348,6 +367,9 @@ export class SessionManager {
   }
 
   async compactSession(sessionId: string): Promise<unknown> {
+    if (!this.capabilities.supportsCompact) {
+      throw new UnsupportedCapabilityError(this.providerId, "context compaction");
+    }
     return this.connection.command("session/compact", { sessionId });
   }
 
@@ -358,6 +380,9 @@ export class SessionManager {
 
   /** Branches a session into a new one that carries every completed turn. */
   async forkSession(sessionId: string): Promise<StartedSession> {
+    if (!this.capabilities.supportsFork) {
+      throw new UnsupportedCapabilityError(this.providerId, "session forking");
+    }
     const result = await this.connection.command("session/fork", { sessionId, excludeItems: true });
     return { sessionId: sessionIdOf(result), raw: result };
   }
@@ -424,6 +449,9 @@ export class SessionManager {
    * sent with `turn/start` is accepted and then dropped before the provider call (muse-code-sdk#6).
    */
   async setReasoningEffort(sessionId: string, reasoningEffort: ReasoningEffort): Promise<unknown> {
+    if (!this.capabilities.supportsReasoningEffort) {
+      throw new UnsupportedCapabilityError(this.providerId, "reasoning effort");
+    }
     return this.connection.command("session/setReasoningEffort", { sessionId, reasoningEffort });
   }
 
@@ -440,6 +468,9 @@ export class SessionManager {
 
   /** Every goal verb answers the same admission ack; `set` and `edit` carry the objective, the rest must not. */
   async goal(sessionId: string, action: GoalAction, objective?: string): Promise<GoalAck> {
+    if (!this.capabilities.supportsGoals) {
+      throw new UnsupportedCapabilityError(this.providerId, "autonomous goals");
+    }
     const params: Record<string, unknown> = { sessionId };
     if (action === "set" || action === "edit") {
       const text = objective?.trim();
@@ -459,6 +490,9 @@ export class SessionManager {
     subagentId: string,
     options: { reason?: string; body?: string } = {},
   ): Promise<unknown> {
+    if (!this.capabilities.supportsSubagents) {
+      throw new UnsupportedCapabilityError(this.providerId, "subagent controls");
+    }
     const params: Record<string, unknown> = { sessionId, subagentId };
     if (action === "sendMessage" || action === "followupTask") {
       const body = options.body?.trim();

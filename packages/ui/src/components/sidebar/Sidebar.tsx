@@ -16,8 +16,9 @@ import {
   type SidebarEntry,
 } from "../../model/status.js";
 import { CODE_THEMES, DEFAULT_SIDEBAR_WIDTH, type CodeTheme } from "../../model/store.js";
+import { providerBadgeName } from "../../model/models.js";
 import type { UpdateState } from "../../model/updates.js";
-import type { ProjectView, SessionSummary } from "../../types.js";
+import type { ProjectView, ProviderId, SessionSummary } from "../../types.js";
 import { Menu, MenuCheck, MenuContent, MenuItem, MenuOption, MenuRadioGroup, MenuSeparator, MenuSub, MenuSubContent, MenuSubTrigger, MenuTrigger, Tip } from "../ui/overlays.js";
 import { IconButton, Logo, MOD, Shortcut, Spinner, cn, isMac } from "../ui/primitives.js";
 import { StatusGlyph } from "../ui/StatusGlyph.js";
@@ -587,15 +588,25 @@ function RowMeta(props: { session: SessionSummary; showProject?: boolean; crew?:
   );
 }
 
-function AccountBadge({ accountId }: { accountId: string | null }) {
-  const account = useApp((s) => s.accounts?.find((a) => a.id === accountId) ?? null);
-  if (!accountId || !account) return null;
+function AccountBadge({ accountId, providerId }: { accountId: string | null; providerId?: ProviderId }) {
+  const badge = useApp((s) => {
+    if (!providerId || providerId === "muse") {
+      if (!accountId) return null;
+      const account = s.accounts?.find((a) => a.id === accountId) ?? null;
+      return account ? { title: `Account: ${account.name}`, text: account.name } : null;
+    }
+    const acct = accountId ? ((s.providerAccounts ?? []).find((a) => a.id === accountId) ?? null) : null;
+    const short = providerBadgeName(providerId);
+    const text = providerId === "api" ? (acct ? `API · ${acct.name}` : "API") : acct ? `${short} · ${acct.name}` : short;
+    return { title: `Provider: ${text}`, text };
+  }, shallowEqual);
+  if (!badge) return null;
   return (
     <span
-      title={`Account: ${account.name}`}
+      title={badge.title}
       className="max-w-[7rem] shrink-0 truncate rounded bg-active px-1 py-px text-2xs font-medium text-muted"
     >
-      {account.name}
+      {badge.text}
     </span>
   );
 }
@@ -652,7 +663,7 @@ export const ThreadRow = memo(
                     <ShieldSlashIcon size={12} aria-hidden="true" />
                   </span>
                 ) : null}
-                <AccountBadge accountId={session.accountId} />
+                <AccountBadge accountId={session.accountId} providerId={session.providerId} />
                 <span className="min-w-0 flex-1 truncate">{session.title}</span>
               </span>
               {props.settled ? null : <RowMeta session={session} showProject={props.showProject} crew={crew} />}
@@ -876,11 +887,21 @@ function SidebarFooter() {
   const connection = useApp((s) => s.connection);
   const discovering = useApp((s) => s.discovering);
   const hostError = useApp((s) => s.hostError);
+  const hasAltProvider = useApp((s) => {
+    if ((s.providerAccounts ?? []).some((a) => a.providerId === "api" || a.providerId === "acp-custom" || a.providerId.startsWith("acp:"))) {
+      return true;
+    }
+    return (s.providers ?? []).some(
+      (p) => p.id !== "muse" && p.id !== "api" && (p.defaultAuth.state === "authenticated" || p.defaultAuth.state === "ready" || p.binary.available),
+    );
+  });
   const status =
     connection === "lost"
       ? { dot: "bg-warn", text: "Reconnecting to Ancilla" }
       : hostError
-        ? { dot: "bg-danger", text: "Muse needs attention" }
+        ? hasAltProvider
+          ? { dot: "bg-ok", text: "Providers ready" }
+          : { dot: "bg-danger", text: "Muse needs attention" }
         : env?.platform === "win32" && env.runtime !== "native"
           ? { dot: "bg-ok", text: `Muse in WSL (${env.defaultDistro ?? "Ubuntu"})` }
           : { dot: "bg-ok", text: "Muse ready" };

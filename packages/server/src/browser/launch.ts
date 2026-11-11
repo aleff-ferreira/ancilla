@@ -6,6 +6,28 @@ import type { Readable, Writable } from "node:stream";
  * off: a browser that cannot start sandboxed is reported as that and left alone.
  */
 
+const MAX_STDERR_CHARS = 4096;
+
+const STRIPPED_ENV_NAMES = new Set([
+  "chrome_crashpad_pipe_name",
+  "chrome_headless",
+  "breakpad_dump_location",
+  "electron_run_as_node",
+  "electron_no_attach_console",
+]);
+
+/** Clean environment for the child browser: removes host Chromium/WebView2/Electron variables that can hijack startup. */
+export function browserEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    const lower = key.toLowerCase();
+    if (STRIPPED_ENV_NAMES.has(lower) || lower.startsWith("webview2_") || lower.startsWith("corewebview2_")) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
 /** Each flag and why. Anything not here is the browser's default. */
 export function launchArgs(profileDir: string, platform: NodeJS.Platform = process.platform): string[] {
   return [
@@ -19,7 +41,7 @@ export function launchArgs(profileDir: string, platform: NodeJS.Platform = proce
     "--disable-sync",
     "--disable-default-apps",
     "--disable-breakpad", // no crash uploads
-    "--disable-features=Translate,MediaRouter,OptimizationHints",
+    "--disable-features=Translate,MediaRouter,OptimizationHints,msEdgeStartupBoost",
     "--mute-audio",
     ...(platform === "linux" ? ["--password-store=basic"] : []), // no keyring prompt
     ...(platform === "darwin" ? ["--use-mock-keychain"] : []),
@@ -39,7 +61,7 @@ export interface ChildLike {
 export type SpawnFn = (
   path: string,
   args: string[],
-  options: { stdio: Array<"ignore" | "pipe">; detached: boolean; windowsHide: boolean },
+  options: { stdio: Array<"ignore" | "pipe">; detached: boolean; windowsHide: boolean; env?: NodeJS.ProcessEnv },
 ) => ChildLike;
 export type TaskkillFn = (pid: number) => Promise<void>;
 
@@ -52,6 +74,8 @@ export interface BrowserProcess {
   /** Resolves once with the exit code (null when killed by a signal). */
   exited: Promise<number | null>;
   hasExited(): boolean;
+  /** Recent stderr lines emitted by the browser, bounded and continuously drained. */
+  recentStderr?(): string;
   /** Ends the whole process tree: the browser, its renderers and helpers. */
   killTree(): Promise<void>;
 }
@@ -65,6 +89,7 @@ export interface LaunchOptions {
   path: string;
   profileDir: string;
   platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
   spawnFn?: SpawnFn;
   taskkill?: TaskkillFn;
 }
@@ -74,12 +99,25 @@ export function launchBrowser(options: LaunchOptions): BrowserProcess {
   const spawnFn: SpawnFn = options.spawnFn ?? ((path, args, o) => nodeSpawn(path, args, o) as unknown as ChildLike);
   const taskkill = options.taskkill ?? defaultTaskkill;
   const child = spawnFn(options.path, launchArgs(options.profileDir, platform), {
-    // fd 0-2 ignored (so a stray log line can never block the browser), 3 and 4 are the CDP pipe
-    stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+    // fd 0-1 ignored, fd 2 drained into a bounded buffer for startup diagnostics, 3 and 4 are the CDP pipe
+    stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
     // on POSIX its own process group, so one signal reaches every helper; on Windows taskkill /T does the tree
     detached: platform !== "win32",
     windowsHide: true,
+    env: browserEnv(options.env ?? process.env),
   });
+  let stderrBuf = "";
+  const errStream = child.stdio[2] as Readable | null | undefined;
+  if (errStream && typeof errStream.on === "function") {
+    errStream.on("data", (chunk: Buffer | string) => {
+      const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      stderrBuf += text;
+      if (stderrBuf.length > MAX_STDERR_CHARS) {
+        stderrBuf = stderrBuf.slice(-MAX_STDERR_CHARS);
+      }
+    });
+    errStream.on("error", () => undefined);
+  }
   let exited = false;
   const done = new Promise<number | null>((resolve) => {
     child.on("exit", (code) => {
@@ -97,6 +135,7 @@ export function launchBrowser(options: LaunchOptions): BrowserProcess {
     fromBrowser: child.stdio[4] as Readable,
     exited: done,
     hasExited: () => exited,
+    recentStderr: () => stderrBuf.trim(),
     async killTree() {
       if (child.pid === undefined) return;
       if (platform === "win32") {
