@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNow } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
 import type { AssistantConnectorActivity, AssistantConnectorView, AssistantConnectorsView, AssistantWriteCard, AssistantWriteClass } from "../../types.js";
@@ -13,7 +13,7 @@ const INPUT = "h-8 w-full min-w-0 rounded-md bg-sunken px-2.5 text-sm text-fg ou
 const SELECT = "h-7 rounded-md bg-sunken px-2 text-xs text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50";
 const LINK = "text-accent-text underline-offset-2 hover:underline";
 
-type Busy = "connect" | "test" | "mode" | "policy" | "disconnect" | "ask";
+type Busy = "connect" | "test" | "mode" | "policy" | "disconnect" | "ask" | "oauth-client" | "oauth-start" | "oauth-callback";
 
 export interface CardState {
   token: string;
@@ -21,6 +21,10 @@ export interface CardState {
   busy: Busy | null;
   error: string | null;
   note: string | null;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthCallback?: string;
+  oauthPendingUrl?: string | null;
 }
 
 export interface CardHandlers {
@@ -32,6 +36,13 @@ export interface CardHandlers {
   policy(kind: AssistantWriteClass, value: "off" | "ask" | "always"): void;
   disconnect(): void;
   ask(): void;
+  oauthClientId?(value: string): void;
+  oauthClientSecret?(value: string): void;
+  oauthCallback?(value: string): void;
+  saveOAuthClient?(): void;
+  clearOAuthClient?(): void;
+  startOAuth?(): void;
+  completeOAuth?(): void;
 }
 
 /**
@@ -101,8 +112,30 @@ export function ProposalList(props: { cards: AssistantWriteCard[]; changed: () =
 function ConnectorCard(props: { view: AssistantConnectorView; changed: () => void }) {
   const call = useAssistantCall();
   const { view } = props;
-  const [state, setState] = useState<CardState>({ token: "", goal: "", busy: null, error: null, note: null });
+  const [state, setState] = useState<CardState>({
+    token: "",
+    goal: "",
+    busy: null,
+    error: null,
+    note: null,
+    oauthClientId: "",
+    oauthClientSecret: "",
+    oauthCallback: "",
+    oauthPendingUrl: null,
+  });
   const patch = (next: Partial<CardState>): void => setState((s) => ({ ...s, ...next }));
+  const oauthWaiting = !view.connected && Boolean(view.oauth?.pending || state.oauthPendingUrl);
+  useEffect(() => {
+    if (!oauthWaiting || typeof window === "undefined") return;
+    const refresh = (): void => props.changed();
+    window.addEventListener("focus", refresh);
+    const timer = window.setInterval(refresh, 2500);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      window.clearInterval(timer);
+    };
+  }, [oauthWaiting, props]);
+
   const run = async (busy: Busy, work: () => Promise<Partial<CardState> | void>): Promise<void> => {
     patch({ busy, error: null, note: null });
     try {
@@ -115,18 +148,56 @@ function ConnectorCard(props: { view: AssistantConnectorView; changed: () => voi
   const on: CardHandlers = {
     token: (token) => patch({ token }),
     goal: (goal) => patch({ goal }),
+    oauthClientId: (oauthClientId) => patch({ oauthClientId }),
+    oauthClientSecret: (oauthClientSecret) => patch({ oauthClientSecret }),
+    oauthCallback: (oauthCallback) => patch({ oauthCallback }),
     connect: () =>
       void run("connect", async () => {
         await call("POST", `/connectors/${view.id}/connect`, { token: state.token.trim() });
-        return { token: "" };
+        return { token: "", oauthPendingUrl: null };
+      }),
+    saveOAuthClient: () =>
+      void run("oauth-client", async () => {
+        await call("POST", `/connectors/${view.id}/oauth/client`, {
+          clientId: (state.oauthClientId ?? "").trim(),
+          clientSecret: (state.oauthClientSecret ?? "").trim(),
+        });
+        return { oauthClientId: "", oauthClientSecret: "", note: "Saved OAuth client. You can now sign in in your browser." };
+      }),
+    clearOAuthClient: () =>
+      void run("oauth-client", async () => {
+        await call("POST", `/connectors/${view.id}/oauth/client`, { clear: true });
+        return { oauthPendingUrl: null };
+      }),
+    startOAuth: () =>
+      void run("oauth-start", async () => {
+        const started = await call<{ authorizeUrl: string }>(`POST`, `/connectors/${view.id}/oauth/start`, {});
+        if (typeof window !== "undefined") {
+          window.open(started.authorizeUrl, "_blank", "noopener,noreferrer");
+        }
+        return {
+          oauthPendingUrl: started.authorizeUrl,
+          note: "Opened sign-in in your browser. Finish there and return to Ancilla, or paste the callback URL below if signing in on another device.",
+        };
+      }),
+    completeOAuth: () =>
+      void run("oauth-callback", async () => {
+        const raw = (state.oauthCallback ?? "").trim();
+        await call("POST", `/connectors/${view.id}/oauth/callback`, raw.includes("://") ? { callbackUrl: raw } : { code: raw });
+        return { oauthCallback: "", oauthPendingUrl: null, note: null };
       }),
     test: () => void run("test", async () => void (await call("POST", `/connectors/${view.id}/test`))),
     mode: (enabled) => void run("mode", async () => void (await call("PATCH", `/connectors/${view.id}`, { mode: enabled ? "read" : "off" }))),
     policy: (kind, value) => void run("policy", async () => void (await call("PATCH", `/connectors/${view.id}`, { policy: { [kind]: value } }))),
     disconnect: () =>
       void run("disconnect", async () => {
-        await call("DELETE", `/connectors/${view.id}`);
-        return { note: `Removed from Ancilla. ${view.revoke.text}` };
+        const reply = await call<{ revoked?: boolean }>("DELETE", `/connectors/${view.id}`);
+        return {
+          oauthPendingUrl: null,
+          note: reply.revoked
+            ? "Removed from Ancilla, and access was revoked with the provider."
+            : `Removed from Ancilla. ${view.revoke.text}`,
+        };
       }),
     ask: () =>
       void run("ask", async () => {
@@ -164,6 +235,109 @@ export function ConnectorCardView(props: { view: AssistantConnectorView; state: 
           </div>
         ) : null}
       </Row>
+
+      {!view.connected && view.oauth ? (
+        <Row label="Sign in with OAuth" description={view.oauth.recipe}>
+          {!view.oauth.clientConfigured ? (
+            <form
+              className="flex w-full min-w-0 flex-col gap-2 @min-[520px]:w-80"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if ((state.oauthClientId ?? "").trim().length >= 4 && !busy) on.saveOAuthClient?.();
+              }}
+            >
+              <input
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={`${view.name}: OAuth Client ID`}
+                placeholder="OAuth Client ID"
+                value={state.oauthClientId ?? ""}
+                onChange={(event) => on.oauthClientId?.(event.currentTarget.value)}
+                className={INPUT}
+              />
+              <input
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                aria-label={`${view.name}: OAuth Client Secret (optional for PKCE)`}
+                placeholder="Client Secret (if issued)"
+                value={state.oauthClientSecret ?? ""}
+                onChange={(event) => on.oauthClientSecret?.(event.currentTarget.value)}
+                className={INPUT}
+              />
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant="secondary"
+                  loading={state.busy === "oauth-client"}
+                  disabled={busy || (state.oauthClientId ?? "").trim().length < 4}
+                >
+                  Save OAuth client
+                </Button>
+                <a className={`text-xs ${LINK}`} href={view.oauth.helpUrl} target="_blank" rel="noreferrer">
+                  Create OAuth client
+                </a>
+              </div>
+            </form>
+          ) : (
+            <div className="flex w-full min-w-0 flex-col gap-2 @min-[520px]:w-80">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="accent"
+                  loading={state.busy === "oauth-start"}
+                  disabled={busy}
+                  onClick={() => on.startOAuth?.()}
+                >
+                  Sign in in browser
+                </Button>
+                {!view.oauth.clientFromEnv ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={state.busy === "oauth-client"}
+                    disabled={busy}
+                    onClick={() => on.clearOAuthClient?.()}
+                  >
+                    Change client
+                  </Button>
+                ) : null}
+              </div>
+              {view.oauth.pending || state.oauthPendingUrl ? (
+                <form
+                  className="flex flex-wrap items-center gap-2 pt-1"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if ((state.oauthCallback ?? "").trim() !== "" && !busy) on.completeOAuth?.();
+                  }}
+                >
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    aria-label={`${view.name}: Paste callback URL`}
+                    placeholder="Paste redirect URL if on another device"
+                    value={state.oauthCallback ?? ""}
+                    onChange={(event) => on.oauthCallback?.(event.currentTarget.value)}
+                    className={`${INPUT} flex-1`}
+                  />
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="secondary"
+                    loading={state.busy === "oauth-callback"}
+                    disabled={busy || (state.oauthCallback ?? "").trim() === ""}
+                  >
+                    Finish
+                  </Button>
+                </form>
+              ) : null}
+            </div>
+          )}
+        </Row>
+      ) : null}
 
       {!view.connected ? (
         <Row label="Connect with a token" description={view.token.recipe}>

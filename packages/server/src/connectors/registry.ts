@@ -6,7 +6,8 @@ import { CATALOG } from "./catalog.js";
 import { ConnectorError, type LiveConnection, type Opener } from "./connection.js";
 import { argsProblem, computeFlags, detach, Permit, ReadLog, reasonOf, WriteGate, type Approval, type HoldInput, type Trigger, type Verdict, type WriteCard } from "./gate.js";
 import { classOf, cleanPolicy, cut, DEFAULT_POLICY, offerTools, redact, RESULT_MAX, WRITE_CLASSES, type ConnectorManifest, type OfferedTool, type ToolClass, type ToolEntry, type WriteClass, type WritePolicy, type WriteSetting } from "./manifest.js";
-import type { SecretStore } from "./secrets.js";
+import { OAuthFlowManager, refreshOAuthToken, revokeOAuthToken, type StartedOAuthFlow } from "./oauth.js";
+import type { OAuthClientConfig, OAuthCredentials, SecretStore } from "./secrets.js";
 
 /**
  * Which accounts are connected, how each may be used, and the only door to a connection: `open`. A connector is connected when
@@ -40,6 +41,17 @@ interface Saved {
   policy?: unknown;
   /** How many reversible changes the person has said yes to here: "always" is offered after the first. */
   yes?: number;
+  authMethod?: "token" | "oauth";
+}
+
+export interface ConnectorOAuthView {
+  scopes: readonly string[];
+  helpUrl: string;
+  recipe: string;
+  clientConfigured: boolean;
+  clientFromEnv: boolean;
+  pending: boolean;
+  canRevoke: boolean;
 }
 
 /** What a screen is told about a connector. Never the token, nor anything made from it. */
@@ -50,6 +62,8 @@ export interface ConnectorView {
   connected: boolean;
   mode: ConnectorMode;
   connectedAt: number | null;
+  authMethod?: "token" | "oauth" | null;
+  oauth?: ConnectorOAuthView | null;
   token: { label: string; helpUrl: string; recipe: string };
   revoke: { url: string; text: string };
   caution: string | null;
@@ -69,6 +83,7 @@ export interface RegistryDeps {
   /** Where changes wait for the person: made here when not given. */
   gate?: WriteGate;
   manifests?: readonly ConnectorManifest[];
+  fetchImpl?: typeof fetch;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -113,13 +128,22 @@ const NOT_DONE: Record<"dont" | "expired" | "ended", string> = {
 
 const PROPOSED = "Not done: this task was not started by the person, so it may not change anything. The change was saved as a proposal that the person can approve or refuse later. Say so in your answer.";
 
+const CLIENT_ID_SHAPE = /^[!-~]{4,400}$/;
+const REFRESH_MARGIN_MS = 60_000;
+
 export class ConnectorRegistry {
   private saved: Record<string, Saved> | null = null;
+  private readonly oauthFlows: OAuthFlowManager;
+  private readonly refreshing = new Map<string, Promise<string>>();
   /** Where changes wait for the person. */
   readonly gate: WriteGate;
 
   constructor(private readonly deps: RegistryDeps) {
     this.gate = deps.gate ?? new WriteGate({ audit: deps.audit, ...(deps.now ? { now: deps.now } : {}) });
+    this.oauthFlows = new OAuthFlowManager({
+      ...(deps.fetchImpl ? { fetchImpl: deps.fetchImpl } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
   }
 
   private now(): number {
@@ -139,6 +163,27 @@ export class ConnectorRegistry {
   /** Where the tokens are kept, in words. */
   storage(): string {
     return this.deps.secrets.where;
+  }
+
+  private knownSecretsFor(id: string, liveToken: string): string[] {
+    const extra = this.deps.secrets.knownSecrets?.(id) ?? [];
+    return extra.includes(liveToken) ? extra : [liveToken, ...extra];
+  }
+
+  private oauthClientFor(id: string, manifest: ConnectorManifest): { config: OAuthClientConfig | null; fromEnv: boolean } {
+    const stored = this.deps.secrets.getOAuthClient?.(id) ?? null;
+    if (stored) return { config: stored, fromEnv: false };
+    const idEnv = manifest.oauth?.clientIdEnv;
+    const envClientId = idEnv ? process.env[idEnv]?.trim() : "";
+    if (envClientId) {
+      const secretEnv = manifest.oauth?.clientSecretEnv;
+      const envSecret = secretEnv ? process.env[secretEnv]?.trim() : "";
+      return {
+        config: { clientId: envClientId, ...(envSecret ? { clientSecret: envSecret } : {}) },
+        fromEnv: true,
+      };
+    }
+    return { config: null, fromEnv: false };
   }
 
   // ------------------------------------------------------------------------------------------------------------ what is saved
@@ -184,6 +229,8 @@ export class ConnectorRegistry {
     const entry = this.connectedEntry(id);
     const test = entry?.test ?? null;
     const classOfName = (name: string): ToolClass => manifest.tools[name]?.class ?? "read";
+    const oauthClient = manifest.oauth ? this.oauthClientFor(id, manifest) : { config: null, fromEnv: false };
+    const isOAuth = entry ? (entry.authMethod === "oauth" || Boolean(this.deps.secrets.getOAuth?.(id))) : false;
     return {
       id: manifest.id,
       name: manifest.name,
@@ -191,6 +238,18 @@ export class ConnectorRegistry {
       connected: entry !== null,
       mode: entry?.mode ?? "off",
       connectedAt: entry?.connectedAt ?? null,
+      authMethod: entry ? (isOAuth ? "oauth" : "token") : null,
+      oauth: manifest.oauth
+        ? {
+            scopes: manifest.oauth.scopes,
+            helpUrl: manifest.oauth.helpUrl,
+            recipe: manifest.oauth.recipe,
+            clientConfigured: oauthClient.config !== null,
+            clientFromEnv: oauthClient.fromEnv,
+            pending: this.oauthFlows.hasPending(id),
+            canRevoke: Boolean(manifest.oauth.revokeUrl),
+          }
+        : null,
       token: manifest.token,
       revoke: manifest.revoke,
       caution: manifest.caution ?? null,
@@ -236,7 +295,118 @@ export class ConnectorRegistry {
     }
   }
 
+  /** Returns a fresh access token, refreshing an expiring OAuth credential automatically when a refresh token is stored. */
+  private async ensureFreshToken(id: string, manifest: ConnectorManifest): Promise<string | null> {
+    const oauth = this.deps.secrets.getOAuth?.(id) ?? null;
+    if (!oauth || !oauth.refreshToken || !manifest.oauth) {
+      return this.deps.secrets.get(id);
+    }
+    if (oauth.expiresAt === undefined || oauth.expiresAt - this.now() > REFRESH_MARGIN_MS) {
+      return oauth.accessToken;
+    }
+    const existing = this.refreshing.get(id);
+    if (existing) return existing;
+
+    const { config: client } = this.oauthClientFor(id, manifest);
+    if (!client) return oauth.accessToken;
+
+    const job = (async () => {
+      try {
+        const refreshed = await refreshOAuthToken(manifest.oauth!, client, oauth.refreshToken!, {
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+          now: () => this.now(),
+        });
+        if (this.deps.secrets.setOAuth) this.deps.secrets.setOAuth(id, refreshed);
+        else this.deps.secrets.set(id, refreshed.accessToken);
+        return refreshed.accessToken;
+      } finally {
+        this.refreshing.delete(id);
+      }
+    })();
+    this.refreshing.set(id, job);
+    return job;
+  }
+
   // ------------------------------------------------------------------------------------------------------------- what a person does
+
+  /** Saves or clears an OAuth Client ID (and optional Client Secret) in the user-only secrets store. */
+  setOAuthClient(id: string, input: { clientId?: unknown; clientSecret?: unknown } | null): ConnectorView {
+    const manifest = this.manifest(id);
+    if (!manifest.oauth) throw new ValidationError("oauth", `${manifest.name} connects with an API token rather than OAuth.`);
+    if (!this.deps.secrets.setOAuthClient) throw new ConflictError("This secret store does not support OAuth client credentials.");
+    if (input === null || (typeof input.clientId === "string" && input.clientId.trim() === "")) {
+      this.deps.secrets.setOAuthClient(id, null);
+      return this.view(id);
+    }
+    const clientId = typeof input.clientId === "string" ? input.clientId.trim() : "";
+    const clientSecret = typeof input.clientSecret === "string" ? input.clientSecret.trim() : "";
+    if (!CLIENT_ID_SHAPE.test(clientId)) {
+      throw new ValidationError("clientId", "Client ID must be 4 to 400 printable characters without spaces.");
+    }
+    if (clientSecret !== "" && !CLIENT_ID_SHAPE.test(clientSecret)) {
+      throw new ValidationError("clientSecret", "Client Secret must be 4 to 400 printable characters without spaces.");
+    }
+    this.deps.secrets.setOAuthClient(id, { clientId, ...(clientSecret !== "" ? { clientSecret } : {}) });
+    return this.view(id);
+  }
+
+  /** Starts an OAuth 2.0 + PKCE sign-in flow, binding a temporary 127.0.0.1 callback listener unless `redirectUri` is provided. */
+  async startOAuth(id: string, options: { redirectUri?: unknown } = {}): Promise<StartedOAuthFlow> {
+    const manifest = this.manifest(id);
+    if (!manifest.oauth) throw new ValidationError("oauth", `${manifest.name} does not use OAuth sign-in.`);
+    const { config: client } = this.oauthClientFor(id, manifest);
+    if (!client) {
+      throw new ValidationError("clientId", `Save an OAuth Client ID for ${manifest.name} first.`);
+    }
+    const redirectUri = typeof options.redirectUri === "string" && options.redirectUri.trim() !== "" ? options.redirectUri.trim() : undefined;
+    return this.oauthFlows.start(id, manifest.name, manifest.oauth, client, {
+      ...(redirectUri ? { redirectUri } : {}),
+      onComplete: async (creds) => {
+        await this.finishOAuthConnect(id, manifest, creds);
+      },
+    });
+  }
+
+  /** Finishes an OAuth sign-in from `{ code, state }` or `{ callbackUrl }`, probes the account, and stores access + refresh tokens. */
+  async completeOAuth(id: string, input: { code?: unknown; state?: unknown; callbackUrl?: unknown }): Promise<ConnectorView> {
+    const manifest = this.manifest(id);
+    if (!manifest.oauth) throw new ValidationError("oauth", `${manifest.name} does not use OAuth sign-in.`);
+    const { config: client } = this.oauthClientFor(id, manifest);
+    if (!client) throw new ValidationError("clientId", `Save an OAuth Client ID for ${manifest.name} first.`);
+    const creds = await this.oauthFlows.complete(id, manifest.oauth, client, input);
+    return this.finishOAuthConnect(id, manifest, creds);
+  }
+
+  private async finishOAuthConnect(id: string, manifest: ConnectorManifest, creds: OAuthCredentials): Promise<ConnectorView> {
+    let report: TestReport;
+    try {
+      report = await this.check(manifest, creds.accessToken, DEFAULT_POLICY);
+    } catch (error) {
+      const message = error instanceof ConnectorError ? error.message : "The server could not be used.";
+      this.deps.audit.add({ at: this.now(), kind: "connect", connector: id, ok: false, note: message });
+      if (manifest.oauth?.revokeUrl) {
+        void revokeOAuthToken(manifest.oauth, this.oauthClientFor(id, manifest).config, creds, {
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+        });
+      }
+      throw new ConnectorError(message);
+    }
+    if (!report.ok) {
+      this.deps.audit.add({ at: this.now(), kind: "connect", connector: id, ok: false, note: report.message });
+      if (manifest.oauth?.revokeUrl) {
+        void revokeOAuthToken(manifest.oauth, this.oauthClientFor(id, manifest).config, creds, {
+          ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+        });
+      }
+      throw new ConnectorError(report.message);
+    }
+    if (this.deps.secrets.setOAuth) this.deps.secrets.setOAuth(id, creds);
+    else this.deps.secrets.set(id, creds.accessToken);
+    this.load()[id] = { mode: "read", connectedAt: this.now(), test: report, policy: { ...DEFAULT_POLICY }, yes: 0, authMethod: "oauth" };
+    this.persist();
+    this.deps.audit.add({ at: this.now(), kind: "connect", connector: id, ok: true, note: report.message });
+    return this.view(id);
+  }
 
   /** Connects with a token: it is kept only when the server accepts it and the check passes. Every kind of change starts off. */
   async connect(id: string, rawToken: unknown): Promise<ConnectorView> {
@@ -255,23 +425,26 @@ export class ConnectorRegistry {
       this.deps.audit.add({ at: this.now(), kind: "connect", connector: id, ok: false, note: report.message });
       throw new ConnectorError(report.message);
     }
+    this.oauthFlows.cancelFor(id);
     this.deps.secrets.set(id, token);
-    this.load()[id] = { mode: "read", connectedAt: this.now(), test: report, policy: { ...DEFAULT_POLICY }, yes: 0 };
+    this.load()[id] = { mode: "read", connectedAt: this.now(), test: report, policy: { ...DEFAULT_POLICY }, yes: 0, authMethod: "token" };
     this.persist();
     this.deps.audit.add({ at: this.now(), kind: "connect", connector: id, ok: true, note: report.message });
     return this.view(id);
   }
 
-  /** Checks a connected connector again with its saved token, and remembers what was found. */
+  /** Checks a connected connector again with its saved token (refreshing OAuth tokens when due), and remembers what was found. */
   async test(id: string): Promise<ConnectorView> {
     const manifest = this.manifest(id);
     const entry = this.connectedEntry(id);
-    const token = this.deps.secrets.get(id);
-    if (!entry || token === null) throw new ConflictError(`${manifest.name} is not connected.`);
+    if (!entry || !this.deps.secrets.has(id)) throw new ConflictError(`${manifest.name} is not connected.`);
     let report: TestReport;
     try {
+      const token = await this.ensureFreshToken(id, manifest);
+      if (token === null) throw new ConflictError(`${manifest.name} is not connected.`);
       report = await this.check(manifest, token, cleanPolicy(entry.policy));
     } catch (error) {
+      if (error instanceof ConflictError) throw error;
       const message = error instanceof ConnectorError ? error.message : "The server could not be used.";
       report = { at: this.now(), ok: false, message, offered: [], hidden: 0, missing: [] };
     }
@@ -318,15 +491,53 @@ export class ConnectorRegistry {
     return this.view(id);
   }
 
-  /** Forgets the token and the settings. It does not, and cannot, revoke the token at the provider: the view says where that is done. */
+  /** Forgets the token and the settings synchronously; triggers best-effort OAuth revocation when applicable. */
   disconnect(id: string): ConnectorView {
-    this.manifest(id);
+    const manifest = this.manifest(id);
+    this.oauthFlows.cancelFor(id);
+    const oauth = this.deps.secrets.getOAuth?.(id) ?? null;
+    if (oauth && manifest.oauth?.revokeUrl) {
+      void revokeOAuthToken(manifest.oauth, this.oauthClientFor(id, manifest).config, oauth, {
+        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+      });
+    }
     const had = this.deps.secrets.delete(id);
     const entry = Object.hasOwn(this.load(), id);
     delete this.load()[id];
     this.persist();
     if (had || entry) this.deps.audit.add({ at: this.now(), kind: "disconnect", connector: id, ok: true });
     return this.view(id);
+  }
+
+  /** Disconnects the account and awaits provider OAuth token revocation when supported. */
+  async disconnectAndRevoke(id: string): Promise<{ connector: ConnectorView; revoked: boolean }> {
+    const manifest = this.manifest(id);
+    this.oauthFlows.cancelFor(id);
+    const oauth = this.deps.secrets.getOAuth?.(id) ?? null;
+    let revoked = false;
+    if (oauth && manifest.oauth?.revokeUrl) {
+      revoked = await revokeOAuthToken(manifest.oauth, this.oauthClientFor(id, manifest).config, oauth, {
+        ...(this.deps.fetchImpl ? { fetchImpl: this.deps.fetchImpl } : {}),
+      });
+    }
+    const had = this.deps.secrets.delete(id);
+    const entry = Object.hasOwn(this.load(), id);
+    delete this.load()[id];
+    this.persist();
+    if (had || entry) {
+      this.deps.audit.add({
+        at: this.now(),
+        kind: "disconnect",
+        connector: id,
+        ok: true,
+        ...(revoked ? { note: "revoked at provider" } : {}),
+      });
+    }
+    return { connector: this.view(id), revoked };
+  }
+
+  close(): void {
+    this.oauthFlows.closeAll();
   }
 
   // ---------------------------------------------------------------------------------------------------------------------- use
@@ -345,12 +556,14 @@ export class ConnectorRegistry {
     return this.manifests().filter((m) => this.ready(m.id).ok).map((m) => m.id);
   }
 
-  /** Opens a connection for one task, with the tool list laid over the server's. The caller closes it. */
+  /** Opens a connection for one task, refreshing an expiring OAuth token first and laying our tool list over the server's. */
   async open(id: string, run: SessionRun = UNATTENDED): Promise<ConnectorSession> {
     const manifest = this.manifest(id);
     const ready = this.ready(id);
-    const token = this.deps.secrets.get(id);
-    if (!ready.ok || token === null) throw new ConflictError(ready.reason ?? `${manifest.name} is not connected.`);
+    if (!ready.ok) throw new ConflictError(ready.reason ?? `${manifest.name} is not connected.`);
+    const token = await this.ensureFreshToken(id, manifest);
+    if (token === null) throw new ConflictError(`${manifest.name} is not connected.`);
+    const knownSecrets = this.knownSecretsFor(id, token);
     const connection = await this.deps.open(manifest, token);
     let offering;
     try {
@@ -364,6 +577,7 @@ export class ConnectorRegistry {
       offered: offering.offered,
       connection,
       token,
+      knownSecrets,
       audit: this.deps.audit,
       gate: this.gate,
       now: () => this.now(),
@@ -418,6 +632,7 @@ interface SessionDeps {
   offered: readonly OfferedTool[];
   connection: LiveConnection;
   token: string;
+  knownSecrets: readonly string[];
   audit: AuditLog;
   gate: WriteGate;
   now: () => number;
@@ -450,7 +665,7 @@ class Session implements ConnectorSession {
     const entry = Object.hasOwn(manifest.tools, name) ? manifest.tools[name] : undefined;
     if (!entry || !this.byName.has(name)) {
       const off = entry !== undefined && entry.class !== "read" && this.deps.policy()[entry.class] === "off";
-      this.deps.audit.add({ at: this.deps.now(), kind: "call", connector: manifest.id, task: ctx.task, tool: name.slice(0, 80), args: maskArgs(args, [this.deps.token]), ok: false, note: off ? "refused: switched off" : "refused: not on the list" });
+      this.deps.audit.add({ at: this.deps.now(), kind: "call", connector: manifest.id, task: ctx.task, tool: name.slice(0, 80), args: maskArgs(args, this.deps.knownSecrets), ok: false, note: off ? "refused: switched off" : "refused: not on the list" });
       return off && entry ? this.switchedOff(entry.class as WriteClass) : `There is no tool called ${name.slice(0, 60)}. The tools are: ${[...this.byName.keys()].join(", ")}.`;
     }
     return entry.class === "read" ? this.read(name, entry, args, ctx) : this.write(name, entry, args, ctx);
@@ -463,12 +678,12 @@ class Session implements ConnectorSession {
   // ------------------------------------------------------------------------------------------------------------------ looking
 
   private async read(name: string, entry: ToolEntry, args: Record<string, unknown>, ctx: { task: string | null; signal: AbortSignal }): Promise<string> {
-    const { audit, manifest, token } = this.deps;
+    const { audit, manifest, knownSecrets } = this.deps;
     const started = this.deps.now();
-    const masked = maskArgs(args, [token]);
+    const masked = maskArgs(args, knownSecrets);
     try {
       const result = await this.deps.connection.call(name, args, ctx.signal);
-      const text = redact(result.text, [token]);
+      const text = redact(result.text, knownSecrets);
       audit.add({ at: started, kind: "call", connector: manifest.id, task: ctx.task, tool: name, args: masked, ok: !result.isError, size: text.length, ms: this.deps.now() - started });
       if (!result.isError) this.reads.record(entry.own === true, entry.target?.(args)?.item ?? null, text);
       const shown = cut(text, RESULT_MAX);
@@ -489,11 +704,11 @@ class Session implements ConnectorSession {
    * never gets that far: its change becomes a proposal.
    */
   private async write(name: string, entry: ToolEntry, rawArgs: Record<string, unknown>, ctx: { task: string | null; signal: AbortSignal }): Promise<string> {
-    const { audit, gate, manifest, run, token } = this.deps;
+    const { audit, gate, manifest, run, knownSecrets } = this.deps;
     const args = detach(rawArgs);
     const cls = classOf(entry, args) as WriteClass;
     const policy = this.deps.policy();
-    const refused = (note: string): void => audit.add({ at: this.deps.now(), kind: "write", connector: manifest.id, task: ctx.task, tool: name, args: maskArgs(args, [token]), phase: "refused", ok: false, note });
+    const refused = (note: string): void => audit.add({ at: this.deps.now(), kind: "write", connector: manifest.id, task: ctx.task, tool: name, args: maskArgs(args, knownSecrets), phase: "refused", ok: false, note });
     const problem = argsProblem(args);
     if (problem !== null) {
       refused(problem);
@@ -504,7 +719,7 @@ class Session implements ConnectorSession {
       return this.switchedOff(cls);
     }
     const target = entry.target?.(args) ?? null;
-    const flags = computeFlags({ args, target, goal: run.goal, reads: this.reads, known: [token] });
+    const flags = computeFlags({ args, target, goal: run.goal, reads: this.reads, known: knownSecrets });
     const input: HoldInput = {
       taskId: ctx.task,
       connector: manifest.id,
@@ -546,7 +761,7 @@ class Session implements ConnectorSession {
 
   /** Sends a change with its approval. The gate refuses an approval that is used, lapsed, or for other arguments, and then nothing is sent. */
   async sendApproved(name: string, rawArgs: Record<string, unknown>, approval: Approval, ctx: { task: string | null; signal: AbortSignal }): Promise<string> {
-    const { gate, manifest, token } = this.deps;
+    const { gate, manifest, knownSecrets } = this.deps;
     const args = detach(rawArgs);
     const call = { connector: manifest.id, tool: name, args, task: ctx.task };
     const redeemed = gate.redeem(approval, call);
@@ -554,7 +769,7 @@ class Session implements ConnectorSession {
     const started = this.deps.now();
     try {
       const result = await this.send(redeemed.permit, name, args, ctx.signal);
-      const text = redact(result.text, [token]);
+      const text = redact(result.text, knownSecrets);
       gate.executed(call, { ok: !result.isError, size: text.length, ms: this.deps.now() - started });
       const shown = cut(text, RESULT_MAX);
       if (result.isError) return `The tool reported an error: ${shown === "" ? "(no details)" : shown}`;

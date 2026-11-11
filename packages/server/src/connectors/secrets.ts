@@ -9,6 +9,19 @@ import { dirname } from "node:path";
  * here, but the desktop build is one bundled file and a keychain module is a native one, so it waits for that packaging.
  */
 
+export interface OAuthCredentials {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scope?: string;
+  tokenType?: string;
+}
+
+export interface OAuthClientConfig {
+  clientId: string;
+  clientSecret?: string;
+}
+
 export interface SecretStore {
   /** Where the secrets live, in words for the person ("a file on this computer that only your user can read"). */
   readonly where: string;
@@ -16,11 +29,28 @@ export interface SecretStore {
   set(id: string, value: string): void;
   delete(id: string): boolean;
   has(id: string): boolean;
+  getOAuth?(id: string): OAuthCredentials | null;
+  setOAuth?(id: string, creds: OAuthCredentials): void;
+  getOAuthClient?(id: string): OAuthClientConfig | null;
+  setOAuthClient?(id: string, client: OAuthClientConfig | null): void;
+  knownSecrets?(id: string): string[];
+}
+
+interface StoredSecret {
+  value: string;
+  at: number;
+  oauth?: {
+    refreshToken?: string;
+    expiresAt?: number;
+    scope?: string;
+    tokenType?: string;
+  };
 }
 
 interface Stored {
   version: 1;
-  secrets: Record<string, { value: string; at: number }>;
+  secrets: Record<string, StoredSecret>;
+  oauthClients?: Record<string, { clientId: string; clientSecret?: string; at: number }>;
 }
 
 export class FileSecretStore implements SecretStore {
@@ -38,11 +68,17 @@ export class FileSecretStore implements SecretStore {
 
   private load(): Stored {
     if (this.data) return this.data;
-    let loaded: Stored = { version: 1, secrets: {} };
+    let loaded: Stored = { version: 1, secrets: {}, oauthClients: {} };
     if (this.path && existsSync(this.path)) {
       try {
         const raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<Stored>;
-        if (raw && raw.version === 1 && typeof raw.secrets === "object" && raw.secrets !== null) loaded = { version: 1, secrets: { ...raw.secrets } };
+        if (raw && raw.version === 1 && typeof raw.secrets === "object" && raw.secrets !== null) {
+          loaded = {
+            version: 1,
+            secrets: { ...raw.secrets },
+            oauthClients: typeof raw.oauthClients === "object" && raw.oauthClients !== null ? { ...raw.oauthClients } : {},
+          };
+        }
       } catch {
         this.log("connectors: the secrets file could not be read, so no connector has a token");
       }
@@ -75,6 +111,75 @@ export class FileSecretStore implements SecretStore {
   set(id: string, value: string): void {
     this.load().secrets[id] = { value, at: this.now() };
     this.save();
+  }
+
+  getOAuth(id: string): OAuthCredentials | null {
+    const data = this.load();
+    if (!Object.hasOwn(data.secrets, id)) return null;
+    const entry = data.secrets[id];
+    if (!entry?.oauth) return null;
+    return {
+      accessToken: entry.value,
+      ...(entry.oauth.refreshToken !== undefined ? { refreshToken: entry.oauth.refreshToken } : {}),
+      ...(entry.oauth.expiresAt !== undefined ? { expiresAt: entry.oauth.expiresAt } : {}),
+      ...(entry.oauth.scope !== undefined ? { scope: entry.oauth.scope } : {}),
+      ...(entry.oauth.tokenType !== undefined ? { tokenType: entry.oauth.tokenType } : {}),
+    };
+  }
+
+  setOAuth(id: string, creds: OAuthCredentials): void {
+    this.load().secrets[id] = {
+      value: creds.accessToken,
+      at: this.now(),
+      oauth: {
+        ...(creds.refreshToken !== undefined ? { refreshToken: creds.refreshToken } : {}),
+        ...(creds.expiresAt !== undefined ? { expiresAt: creds.expiresAt } : {}),
+        ...(creds.scope !== undefined ? { scope: creds.scope } : {}),
+        ...(creds.tokenType !== undefined ? { tokenType: creds.tokenType } : {}),
+      },
+    };
+    this.save();
+  }
+
+  getOAuthClient(id: string): OAuthClientConfig | null {
+    const clients = this.load().oauthClients ?? {};
+    if (!Object.hasOwn(clients, id)) return null;
+    const entry = clients[id];
+    if (!entry || typeof entry.clientId !== "string" || entry.clientId === "") return null;
+    return {
+      clientId: entry.clientId,
+      ...(typeof entry.clientSecret === "string" && entry.clientSecret !== "" ? { clientSecret: entry.clientSecret } : {}),
+    };
+  }
+
+  setOAuthClient(id: string, client: OAuthClientConfig | null): void {
+    const data = this.load();
+    data.oauthClients ??= {};
+    if (client === null) {
+      delete data.oauthClients[id];
+    } else {
+      data.oauthClients[id] = {
+        clientId: client.clientId,
+        ...(client.clientSecret ? { clientSecret: client.clientSecret } : {}),
+        at: this.now(),
+      };
+    }
+    this.save();
+  }
+
+  knownSecrets(id: string): string[] {
+    const out: string[] = [];
+    const data = this.load();
+    if (Object.hasOwn(data.secrets, id)) {
+      const entry = data.secrets[id];
+      if (entry?.value) out.push(entry.value);
+      if (entry?.oauth?.refreshToken) out.push(entry.oauth.refreshToken);
+    }
+    const clients = data.oauthClients ?? {};
+    if (Object.hasOwn(clients, id) && clients[id]?.clientSecret) {
+      out.push(clients[id]!.clientSecret!);
+    }
+    return out;
   }
 
   delete(id: string): boolean {

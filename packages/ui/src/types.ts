@@ -991,6 +991,16 @@ export interface AssistantConnectorTest {
   missing: string[];
 }
 
+export interface AssistantConnectorOAuthView {
+  scopes: readonly string[];
+  helpUrl: string;
+  recipe: string;
+  clientConfigured: boolean;
+  clientFromEnv: boolean;
+  pending: boolean;
+  canRevoke: boolean;
+}
+
 /** A connected account (or one that can be): never the token, nor anything made from it. */
 export interface AssistantConnectorView {
   id: string;
@@ -1000,6 +1010,8 @@ export interface AssistantConnectorView {
   /** `read`: the assistant may look things up in it. `off`: it may not, and stays connected. */
   mode: "off" | "read";
   connectedAt: number | null;
+  authMethod?: "token" | "oauth" | null;
+  oauth?: AssistantConnectorOAuthView | null;
   token: { label: string; helpUrl: string; recipe: string };
   /** Removing a connection does not revoke the token at the provider: this says where that is done. */
   revoke: { url: string; text: string };

@@ -52,9 +52,21 @@ describe("the tool list that is ours", () => {
       assert.ok(Object.keys(manifest.tools).length - readNames(manifest).length <= 8, `${manifest.id}: and so does every tool that changes something`);
     }
     assert.deepEqual(Object.entries(GITHUB.tools).filter(([, e]) => e.class !== "read").map(([n, e]) => [n, e.class]), [["create_branch", "reversible"], ["add_issue_comment", "communicates"], ["issue_write", "communicates"], ["create_pull_request", "communicates"], ["merge_pull_request", "destructive"]]);
-    assert.ok(Object.entries(GITHUB.tools).filter(([, e]) => e.class !== "read").every(([, e]) => e.target !== undefined), "a change to GitHub names the repository it is about");
-    assert.deepEqual(Object.entries(SUPABASE.tools).concat(Object.entries(BREVO.tools)).filter(([, e]) => e.class !== "read"), [], "the writes of Supabase and Brevo come later");
-    assert.deepEqual(CATALOG.map((m) => m.id), ["github", "supabase", "brevo"]);
+    for (const manifest of CATALOG) {
+      assert.ok(
+        Object.entries(manifest.tools).filter(([, e]) => e.class !== "read").every(([, e]) => e.target !== undefined),
+        `${manifest.id}: every tool that changes something names the target it is about`,
+      );
+    }
+    assert.deepEqual(
+      Object.entries(SUPABASE.tools).filter(([, e]) => e.class !== "read").map(([n, e]) => [n, e.class]),
+      [["create_branch", "reversible"], ["apply_migration", "destructive"]],
+    );
+    assert.deepEqual(
+      Object.entries(BREVO.tools).filter(([, e]) => e.class !== "read").map(([n, e]) => [n, e.class]),
+      [["contacts_create_contact", "reversible"], ["transactional_emails_send_transac_email", "communicates"]],
+    );
+    assert.deepEqual(CATALOG.map((m) => m.id), ["github", "gmail", "google_drive", "supabase", "brevo", "hostinger"]);
     assert.ok(!Object.hasOwn(SUPABASE.tools, "execute_sql"), "arbitrary SQL waits for the gate that reads the statement");
     assert.ok(BREVO.caution && SUPABASE.caution, "a provider that cannot limit the token says so before the token is given");
   });

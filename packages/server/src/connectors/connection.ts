@@ -1,6 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { openRestDriver } from "./drivers.js";
 import { flattenResult, redact, type ConnectorManifest, type ServerTool } from "./manifest.js";
 
 /**
@@ -44,8 +45,11 @@ export function explainError(error: unknown, token: string): string {
 }
 
 /** The opener that talks to a real server. `version` is what Ancilla says it is to the server. */
-export function makeOpener(version: string): Opener {
+export function makeOpener(version: string, fetchImpl: typeof fetch = fetch): Opener {
   return async (manifest, token, signal) => {
+    if (manifest.transport.kind === "rest") {
+      return openRestDriver(manifest.transport.driver, manifest.transport.baseUrl, token, fetchImpl);
+    }
     const client = new Client({ name: "ancilla", version }, { capabilities: {} });
     const transport =
       manifest.transport.kind === "http"

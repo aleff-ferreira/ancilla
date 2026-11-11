@@ -1,21 +1,29 @@
 # Connectors
 
-A connector is an account the assistant can work in: GitHub, Supabase and Brevo today. You connect one with a token you make
-yourself, under **Assistant, Connectors**, and then ask by voice ("what is open on my GitHub?") or in the box on that page. The
-assistant answers in a task under **Assistant, Tasks**, and says where the answer came from.
+A connector is an account the assistant can work in: **GitHub, Gmail, Google Drive, Supabase, Brevo and Hostinger**. You connect
+one with **OAuth 2.0 + PKCE** (where supported) or a token you make yourself, under **Assistant, Connectors**, and then ask by
+voice ("what is open on my GitHub?" or "any unread emails from Ana?") or in the box on that page. The assistant answers in a task
+under **Assistant, Tasks**, and says where the answer came from.
 
-A connected account starts **read only**. For GitHub you can also switch on kinds of change (a comment, an issue, a pull request,
-a merge). The assistant may then ask for one, and **nothing happens until you say yes to that exact change**: you are shown the
-account, the tool and every argument, and an approval is good for those arguments only, once, for ten minutes. Supabase and
-Brevo have no changes yet; they come after this one, through the same gate.
+A connected account starts **read only**. Under each account you can switch on kinds of change (`reversible`, `communicates`,
+`destructive`). The assistant may then ask for one, and **nothing happens until you say yes to that exact change**: you are shown
+the account, the tool and every argument, and an approval is good for those arguments only, once, for ten minutes.
 
 ## Connecting an account
 
-| Account | What to make | Where |
+| Account | Auth options | Where |
 | --- | --- | --- |
-| GitHub | A fine-grained personal access token, with the repositories it may see and **Read-only** on Contents, Issues, Pull requests and Metadata. To let the assistant ask for changes too, **Read and write** on Issues and Pull requests (and Contents, for branches) | github.com/settings/personal-access-tokens |
-| Supabase | A personal access token | supabase.com/dashboard/account/tokens |
-| Brevo | An **MCP API key** (an ordinary API key does not work) | Brevo, SMTP & API, API Keys |
+| GitHub | Fine-grained personal access token or OAuth 2.0 App (`GITHUB_CLIENT_ID` / saved client) | github.com/settings/personal-access-tokens |
+| Gmail | Google OAuth 2.0 + PKCE (`gmail.readonly`, `gmail.compose`, `gmail.send`) with offline refresh token, or access token | console.cloud.google.com/apis/credentials |
+| Google Drive | Google OAuth 2.0 + PKCE (`drive.readonly`, `drive.file`) with offline refresh token, or access token | console.cloud.google.com/apis/credentials |
+| Supabase | Personal access token | supabase.com/dashboard/account/tokens |
+| Brevo | MCP API key | Brevo, SMTP & API, API Keys |
+| Hostinger | Hostinger API personal access token | hpanel.hostinger.com/profile/api |
+
+For OAuth accounts (Gmail, Google Drive, GitHub), Ancilla runs an RFC 8252 loopback flow (`127.0.0.1:<port>/oauth/callback`) with
+PKCE `S256` and CSRF state verification (or accepts a pasted redirect URL when signing in from another device), stores the refresh
+token in `0600` `connectors/secrets.json`, refreshes expiring access tokens automatically before tasks or checks, and revokes OAuth
+tokens with the provider on **Disconnect** when the provider exposes a revocation endpoint.
 
 The page says the same, with a link, next to each account. Paste the token and press **Connect**. Ancilla keeps it only if the
 account's server accepts it and one harmless read (who you are, or your projects) works, so a wrong token is refused at once and

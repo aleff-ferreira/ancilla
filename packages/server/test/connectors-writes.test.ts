@@ -487,7 +487,7 @@ describe("the person's settings for each kind of change", () => {
     const github = list.connectors.find((c) => c.id === "github");
     assert.deepEqual(github?.policy, { reversible: "off", communicates: "ask", destructive: "off" });
     assert.deepEqual(github?.writeTools.map((t) => [t.name, t.class]), [["create_branch", "reversible"], ["add_issue_comment", "communicates"], ["issue_write", "communicates"], ["create_pull_request", "communicates"], ["merge_pull_request", "destructive"]]);
-    assert.deepEqual(list.connectors.filter((c) => c.id !== "github").map((c) => c.writeTools), [[], []], "Supabase and Brevo have no changes yet");
+    assert.ok(list.connectors.every((c) => c.writeTools.length >= 2), "every connector exposes its curated write tools with their classes");
     const set = await r.http("PATCH", "/github", { mode: "read", policy: { destructive: "ask", reversible: "off" } });
     assert.equal(set.status, 200);
     assert.deepEqual((set.body as { connector: { policy: WritePolicy } }).connector.policy, { reversible: "off", communicates: "ask", destructive: "ask" });

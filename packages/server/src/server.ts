@@ -1839,6 +1839,7 @@ export class AncillaServer {
     this.browseSites = null;
     this.connectorRunner?.stop();
     this.connectorRunner = null;
+    this.connectorState?.registry.close();
     this.connectorState = null;
     await this.browserService?.dispose().catch(() => undefined);
     this.browserService = null;

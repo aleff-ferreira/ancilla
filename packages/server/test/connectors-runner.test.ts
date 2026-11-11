@@ -216,7 +216,10 @@ describe("the HTTP surface of the connectors", () => {
     const list = await send("GET", "");
     assert.equal(list.status, 200);
     const body = list.body as { connectors: Array<{ id: string; connected: boolean }>; storage: string };
-    assert.deepEqual(body.connectors.map((c) => [c.id, c.connected]), [["github", false], ["supabase", false], ["brevo", false]]);
+    assert.deepEqual(
+      body.connectors.map((c) => [c.id, c.connected]),
+      [["github", false], ["gmail", false], ["google_drive", false], ["supabase", false], ["brevo", false], ["hostinger", false]],
+    );
     assert.match(body.storage, /only your user account can read|memory/);
 
     assert.equal((await send("POST", "/github/connect", { token: "short" })).status, 400);

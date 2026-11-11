@@ -61,14 +61,35 @@ export function cleanPolicy(raw: unknown): WritePolicy {
   return out;
 }
 
+export type RestDriverId = "gmail" | "google_drive" | "hostinger";
+
+export interface OAuthSpec {
+  authUrl: string;
+  tokenUrl: string;
+  revokeUrl?: string;
+  scopes: readonly string[];
+  /** Extra authorization parameters (such as requesting offline refresh tokens). */
+  authParams?: Readonly<Record<string, string>>;
+  /** Optional environment variables supplying clientId / clientSecret when none is saved in Settings. */
+  clientIdEnv?: string;
+  clientSecretEnv?: string;
+  helpUrl: string;
+  recipe: string;
+}
+
 export interface ConnectorManifest {
   id: string;
   name: string;
   summary: string;
-  transport: { kind: "http"; url: string } | { kind: "stdio"; command: string; args: string[]; tokenEnv: string };
+  transport:
+    | { kind: "http"; url: string }
+    | { kind: "stdio"; command: string; args: string[]; tokenEnv: string }
+    | { kind: "rest"; driver: RestDriverId; baseUrl: string };
   /** How the person makes the token: the page, and what to tick on it so that it can do as little as possible. */
   token: { label: string; helpUrl: string; recipe: string };
-  /** Removing a connection here does not revoke the token at the provider: this says where it is done. */
+  /** Optional OAuth 2.0 + PKCE sign-in flow with refresh token persistence and revocation. */
+  oauth?: OAuthSpec;
+  /** Removing a connection here does not revoke a manual token at the provider: this says where it is done. */
   revoke: { url: string; text: string };
   /** Said before connecting when the provider cannot limit the token, so that the list below is the only wall. */
   caution?: string;
@@ -183,6 +204,9 @@ const SECRET_SHAPES: readonly RegExp[] = [
   /\bsk-(?:ant-)?[A-Za-z0-9_-]{16,}\b/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g,
   /\bAIza[0-9A-Za-z_-]{30,}\b/g,
+  /\bya29\.[0-9A-Za-z._-]{20,}\b/g,
+  /\b1\/\/[0-9A-Za-z._-]{20,}\b/g,
+  /\bGOCSPX-[0-9A-Za-z_-]{16,}\b/g,
   /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/g,

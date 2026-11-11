@@ -81,7 +81,38 @@ export async function handleConnectors(deps: ConnectorRouteDeps, req: AssistantR
       if (body["mode"] !== undefined) registry.setMode(one[1] as string, body["mode"]);
       return { status: 200, body: { connector: body["policy"] !== undefined ? registry.setPolicy(one[1] as string, body["policy"]) : registry.view(one[1] as string) } };
     }
-    if (one && req.method === "DELETE") return { status: 200, body: { connector: registry.disconnect(one[1] as string) } };
+    if (one && req.method === "DELETE") {
+      const { connector, revoked } = await registry.disconnectAndRevoke(one[1] as string);
+      return { status: 200, body: { connector, revoked } };
+    }
+    const oauthAct = sub.match(/^\/([A-Za-z0-9_-]{1,40})\/oauth\/(client|start|callback)$/);
+    if (oauthAct && req.method === "POST") {
+      const id = oauthAct[1] as string;
+      const step = oauthAct[2];
+      const body = await req.body();
+      if (step === "client") {
+        const clear = body["clear"] === true;
+        return {
+          status: 200,
+          body: {
+            connector: registry.setOAuthClient(id, clear ? null : { clientId: body["clientId"], clientSecret: body["clientSecret"] }),
+          },
+        };
+      }
+      if (step === "start") {
+        return { status: 200, body: await registry.startOAuth(id, { redirectUri: body["redirectUri"] }) };
+      }
+      return {
+        status: 200,
+        body: {
+          connector: await registry.completeOAuth(id, {
+            code: body["code"],
+            state: body["state"],
+            callbackUrl: body["callbackUrl"],
+          }),
+        },
+      };
+    }
     const act = sub.match(/^\/([A-Za-z0-9_-]{1,40})\/(connect|test)$/);
     if (act && req.method === "POST") {
       const id = act[1] as string;
