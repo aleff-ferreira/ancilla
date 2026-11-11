@@ -4458,6 +4458,54 @@
   opacity: 0.55;
 }
 
+/*
+ * Floating companion stage: keeps the character frameless in view with soft depth over any workspace surface, and swells
+ * a diffused audio aura behind it when a voice call is live.
+ */
+.assistant-float-aura {
+  --mic: 0;
+  --voice: 0;
+  position: relative;
+  isolation: isolate;
+}
+.assistant-float-aura::before,
+.assistant-float-aura::after {
+  content: "";
+  position: absolute;
+  inset: -12%;
+  z-index: -1;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 200ms ease-out, transform 120ms ease-out;
+}
+.assistant-float-aura[data-live]::before {
+  opacity: calc(0.28 + var(--mic) * 0.65);
+  transform: scale(calc(0.92 + var(--mic) * 0.28));
+  background: radial-gradient(circle, color-mix(in oklch, oklch(0.76 0.14 215) 48%, transparent) 0%, transparent 68%);
+}
+.assistant-float-aura[data-live]::after {
+  opacity: calc(0.32 + var(--voice) * 0.68);
+  transform: scale(calc(0.94 + var(--voice) * 0.34));
+  background: radial-gradient(circle, color-mix(in oklch, var(--accent) 56%, transparent) 0%, transparent 70%);
+}
+.assistant-float-aura[data-live][data-who="none"]::before,
+.assistant-float-aura[data-live][data-who="none"]::after {
+  opacity: 0.2;
+}
+.assistant-float-avatar {
+  filter:
+    drop-shadow(0 10px 22px oklch(0 0 0 / 0.42))
+    drop-shadow(0 2px 6px oklch(0 0 0 / 0.28));
+  transition: transform 180ms var(--ease-out);
+}
+.assistant-float-handle:hover .assistant-float-avatar {
+  transform: translateY(-2px);
+}
+.assistant-float-handle[data-dragging="true"] .assistant-float-avatar {
+  transform: scale(1.03);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .spin-ring,
   .attention-pulse,

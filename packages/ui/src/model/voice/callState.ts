@@ -1,5 +1,7 @@
 import type { CallApproval, CallMode, CallPhase, ServerMessage, TurnMetrics } from "./protocol.js";
 
+export type { CallApproval } from "./protocol.js";
+
 /**
  * What the call screen shows, as a pure function of what the server said: the words so far, who is speaking, the tasks
  * running behind the conversation. Nothing here touches the network or the speakers, so the whole of it is tested without

@@ -1,5 +1,5 @@
 import { useApp, useController } from "../../../app/context.js";
-import { MicrophoneIcon, PhoneDisconnectIcon, XIcon } from "../../ui/icons.js";
+import { MicrophoneIcon, PhoneDisconnectIcon, PictureInPictureIcon, XIcon } from "../../ui/icons.js";
 import { useTalk } from "../../voice/talk.js";
 import { Tip } from "../../ui/overlays.js";
 import { cn } from "../../ui/primitives.js";
@@ -27,6 +27,7 @@ export function CompanionChip() {
   const glance = useApp((s) => s.assistantGlance);
   const reaction = useApp((s) => s.assistantReaction);
   const invite = useApp((s) => s.prefs.assistantInvite);
+  const floating = useApp((s) => s.prefs.assistantFloat);
   const active = useApp((s) => s.route.kind === "assistant");
   const face = useFaceMood(glance, reaction);
   const voice = useTalk();
@@ -55,21 +56,40 @@ export function CompanionChip() {
         {state === "needs" ? <span className="cc-badge" aria-hidden="true">{glance.needsYou}</span> : null}
         {asking ? <span className="cc-go" aria-hidden="true">Set up</span> : null}
       </button>
-      {!asking && glance.enabled && controller.hasVoice ? (
-        <Tip label={voice.live ? "End the call" : `Talk to ${glance.name}`}>
-          <button
-            type="button"
-            aria-label={voice.live ? "End the call" : `Talk to ${glance.name}`}
-            onClick={voice.talk}
-            onFocus={voice.warm}
-            className={cn(
-              "absolute top-1/2 right-2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-lg transition-colors",
-              voice.live ? "bg-danger-soft text-danger-text" : "text-subtle opacity-0 hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/cc:opacity-100",
-            )}
-          >
-            {voice.live ? <PhoneDisconnectIcon size={14} /> : <MicrophoneIcon size={14} />}
-          </button>
-        </Tip>
+      {!asking && glance.enabled ? (
+        <div className="absolute top-1/2 right-2 flex -translate-y-1/2 items-center gap-0.5">
+          <Tip label={floating ? `Stop floating ${glance.name}` : `Float ${glance.name} on screen`}>
+            <button
+              type="button"
+              aria-label={floating ? `Stop floating ${glance.name}` : `Float ${glance.name} on screen`}
+              onClick={() => controller.setPrefs({ assistantFloat: !floating })}
+              className={cn(
+                "inline-flex size-7 items-center justify-center rounded-lg transition-colors",
+                floating
+                  ? "bg-accent-soft/40 text-accent-text"
+                  : "text-subtle opacity-0 hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/cc:opacity-100",
+              )}
+            >
+              <PictureInPictureIcon size={14} />
+            </button>
+          </Tip>
+          {controller.hasVoice ? (
+            <Tip label={voice.live ? "End the call" : `Talk to ${glance.name}`}>
+              <button
+                type="button"
+                aria-label={voice.live ? "End the call" : `Talk to ${glance.name}`}
+                onClick={voice.talk}
+                onFocus={voice.warm}
+                className={cn(
+                  "inline-flex size-7 items-center justify-center rounded-lg transition-colors",
+                  voice.live ? "bg-danger-soft text-danger-text" : "text-subtle opacity-0 hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/cc:opacity-100",
+                )}
+              >
+                {voice.live ? <PhoneDisconnectIcon size={14} /> : <MicrophoneIcon size={14} />}
+              </button>
+            </Tip>
+          ) : null}
+        </div>
       ) : null}
       {asking && invite === "pulse" ? (
         <Tip label="Not now">

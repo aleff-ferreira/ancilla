@@ -21,6 +21,15 @@ import type {
 import type { EchoAttachment, ThreadFold } from "./fold.js";
 import type { ResearchStopAction, ResearchTyped } from "./research.js";
 import type { UpdateState } from "./updates.js";
+import {
+  ASSISTANT_AVATAR_DEFAULT,
+  ASSISTANT_AVATAR_MAX,
+  ASSISTANT_AVATAR_MIN,
+  clampAvatarSize,
+  isValidAnchor,
+  type AssistantAnchor,
+  type AssistantWindowMode,
+} from "./voice/floatingWindow.js";
 
 /** A tiny external store: immutable snapshots plus change listeners, read through useSyncExternalStore-style hooks. */
 export class Store<T> {
@@ -146,6 +155,14 @@ export interface Prefs {
   assistantInvite: "pulse" | "calm" | "hidden";
   /** Show the assistant's face beside the composer, where it reacts to the thread: working, waiting on you, done. */
   assistantPresence: boolean;
+  /** Keep the companion avatar floating over the workspace even when no voice call is active. */
+  assistantFloat: boolean;
+  /** Presentation of the movable assistant window: frameless floating avatar or full transcript card. */
+  assistantWindowMode: AssistantWindowMode;
+  /** Pixel size of the floating companion avatar (clamped between 56 and 224). */
+  assistantAvatarSize: number;
+  /** Saved normalized center anchor (`xRatio`, `yRatio` in 0..1) of the movable assistant window, or null for default corner. */
+  assistantPosition: AssistantAnchor | null;
   /**
    * Approval modes from before YOLO was armed, survived across a reload so switching YOLO off still
    * restores them instead of falling back to onRequest. Null when YOLO has never been armed here.
@@ -249,6 +266,10 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     showTelemetry: false,
     assistantInvite: "pulse",
     assistantPresence: true,
+    assistantFloat: false,
+    assistantWindowMode: "float",
+    assistantAvatarSize: ASSISTANT_AVATAR_DEFAULT,
+    assistantPosition: null,
     preYolo: null,
   };
 }
@@ -564,6 +585,15 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     showTelemetry: pick("showTelemetry", (v) => typeof v === "boolean"),
     assistantInvite: pick("assistantInvite", (v) => v === "pulse" || v === "calm" || v === "hidden"),
     assistantPresence: pick("assistantPresence", (v) => typeof v === "boolean"),
+    assistantFloat: pick("assistantFloat", (v) => typeof v === "boolean"),
+    assistantWindowMode: pick("assistantWindowMode", (v) => v === "float" || v === "card"),
+    assistantAvatarSize:
+      typeof r["assistantAvatarSize"] === "number" && Number.isFinite(r["assistantAvatarSize"])
+        ? clampAvatarSize(r["assistantAvatarSize"], fallback.assistantAvatarSize)
+        : r["assistantAvatarSize"] === undefined
+          ? fallback.assistantAvatarSize
+          : pick("assistantAvatarSize", (v) => typeof v === "number" && Number.isFinite(v) && v >= ASSISTANT_AVATAR_MIN && v <= ASSISTANT_AVATAR_MAX),
+    assistantPosition: pick("assistantPosition", (v) => v === null || isValidAnchor(v)),
     preYolo: pick("preYolo", isPreYolo),
   };
 }

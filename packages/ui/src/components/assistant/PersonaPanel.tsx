@@ -1,6 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useApp, useController } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
+import {
+  ASSISTANT_AVATAR_MAX,
+  ASSISTANT_AVATAR_MIN,
+  AVATAR_SIZE_PRESETS,
+  clampAvatarSize,
+  type AssistantWindowMode,
+} from "../../model/voice/floatingWindow.js";
 import type { AssistantCharacterView, AssistantProfileView, CharacterPresence } from "../../types.js";
 import { Section, Pick, Row } from "../settings/SettingsPage.js";
 import { Toggle } from "../ui/primitives.js";
@@ -98,6 +105,10 @@ function useSettings(profile: AssistantProfileView, changed: () => void) {
 export function PersonaPanel(props: { profile: AssistantProfileView; changed: () => void }) {
   const controller = useController();
   const presence = useApp((s) => s.prefs.assistantPresence);
+  const floating = useApp((s) => s.prefs.assistantFloat);
+  const windowMode = useApp((s) => s.prefs.assistantWindowMode);
+  const avatarSize = clampAvatarSize(useApp((s) => s.prefs.assistantAvatarSize));
+  const hasCustomSpot = useApp((s) => s.prefs.assistantPosition !== null);
   const invite = useApp((s) => s.prefs.assistantInvite);
   const { draft, update, saving, error } = useSettings(props.profile, props.changed);
   const c = draft.character;
@@ -157,6 +168,61 @@ export function PersonaPanel(props: { profile: AssistantProfileView; changed: ()
         </Row>
         <Row label="Its face beside the composer" description="It works while a turn runs, wants you when something waits, and is pleased when it finishes.">
           <Toggle checked={presence} label="Show its face beside the composer" onChange={(on) => controller.setPrefs({ assistantPresence: on })} />
+        </Row>
+        <Row label="Floating in view" description="Keeps its avatar floating on screen between calls so you can drag it anywhere, resize it, and start a call in one click.">
+          <Toggle checked={floating} label="Float its avatar over the workspace" onChange={(on) => controller.setPrefs({ assistantFloat: on })} />
+        </Row>
+        <Row label="Call and floating style" description="Choose whether voice calls float the companion framelessly with a speech bubble or open the full transcript card.">
+          <Pick<AssistantWindowMode>
+            value={windowMode}
+            options={[
+              { value: "float", label: "Floating avatar", hint: "Frameless with bubble" },
+              { value: "card", label: "Transcript card", hint: "Movable panel" },
+            ]}
+            onChange={(value) => controller.setPrefs({ assistantWindowMode: value })}
+          />
+        </Row>
+        <Row label="Floating avatar size" description="Adjust the companion's scale in floating view and on the movable call card (or hold Alt and scroll over the avatar).">
+          <div className="flex w-full max-w-xs flex-col gap-2">
+            <div className="flex items-center gap-1">
+              {AVATAR_SIZE_PRESETS.map((preset) => {
+                const active = Math.abs(avatarSize - preset.size) <= 6;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => controller.setPrefs({ assistantAvatarSize: preset.size })}
+                    className={`h-6 flex-1 rounded-lg text-xs font-semibold transition-colors ${active ? "bg-accent text-accent-fg" : "bg-sunken text-muted hover:bg-hover hover:text-fg"}`}
+                  >
+                    {preset.label}
+                  </button>
+                );
+              })}
+              <span className="ml-1.5 w-12 text-right tabular-nums text-xs text-subtle">{avatarSize} px</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={ASSISTANT_AVATAR_MIN}
+                max={ASSISTANT_AVATAR_MAX}
+                step={4}
+                value={avatarSize}
+                aria-label="Floating avatar size in pixels"
+                style={{ "--v": `${(((avatarSize - ASSISTANT_AVATAR_MIN) / (ASSISTANT_AVATAR_MAX - ASSISTANT_AVATAR_MIN)) * 100).toFixed(1)}%` } as CSSProperties}
+                onChange={(e) => controller.setPrefs({ assistantAvatarSize: clampAvatarSize(Number(e.target.value)) })}
+                className="companion-range flex-1"
+              />
+              {hasCustomSpot ? (
+                <button
+                  type="button"
+                  onClick={() => controller.setPrefs({ assistantPosition: null })}
+                  className="shrink-0 rounded-md px-2 py-0.5 text-2xs font-medium text-muted hover:bg-hover hover:text-fg"
+                >
+                  Reset spot
+                </button>
+              ) : null}
+            </div>
+          </div>
         </Row>
         <Row label="Our history" description="Days together, what it remembers, what you finished together. Nothing counts days you were away.">
           <Toggle checked={c.showBond} label="Show our history" onChange={(on) => update({ character: { showBond: on } })} />
