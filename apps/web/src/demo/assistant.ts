@@ -213,7 +213,7 @@ export class DemoAssistant {
     { origin: "https://ads.example.net", decision: "block", at: Date.now() - 2 * DAY },
   ];
 
-  /** The connected accounts, as the page shows them: one connected and on, two that can be (what the real catalog says of each). */
+  /** The connected accounts, as the page shows them: GitHub connected and on, and the rest of the catalog ready to connect. */
   private connectors: AssistantConnectorView[] = [
     {
       id: "github",
@@ -223,7 +223,16 @@ export class DemoAssistant {
       mode: "read",
       connectedAt: Date.now() - 2 * HOUR,
       token: { label: "Fine-grained personal access token", helpUrl: "https://github.com/settings/personal-access-tokens/new", recipe: "Choose the repositories it may see, then under Repository permissions set Contents, Issues, Pull requests and Metadata to Read-only and leave every other permission off. Give it an expiry." },
-      revoke: { url: "https://github.com/settings/personal-access-tokens", text: "Open Settings, Developer settings, Personal access tokens, and delete the token." },
+      oauth: {
+        clientConfigured: false,
+        clientFromEnv: false,
+        pending: false,
+        scopes: ["read:user", "repo"],
+        canRevoke: false,
+        helpUrl: "https://github.com/settings/developers",
+        recipe: "Create a GitHub OAuth App with http://127.0.0.1/oauth/callback as the Authorization callback URL, then enter its Client ID and Client Secret.",
+      },
+      revoke: { url: "https://github.com/settings/personal-access-tokens", text: "Open Settings, Developer settings, Personal access tokens, and delete the token (or revoke Authorized OAuth Apps)." },
       caution: null,
       policy: { reversible: "off", communicates: "ask", destructive: "off" },
       writeTools: [
@@ -259,6 +268,75 @@ export class DemoAssistant {
       },
     },
     {
+      id: "gmail",
+      name: "Gmail",
+      summary: "Your emails, threads, labels and drafts.",
+      connected: false,
+      mode: "off",
+      connectedAt: null,
+      token: {
+        label: "Google OAuth access token",
+        helpUrl: "https://console.cloud.google.com/apis/credentials",
+        recipe: "Sign in with OAuth above (recommended, so Ancilla refreshes access automatically), or paste a Google OAuth token with gmail.readonly scope.",
+      },
+      oauth: {
+        clientConfigured: false,
+        clientFromEnv: false,
+        pending: false,
+        scopes: [
+          "https://www.googleapis.com/auth/gmail.readonly",
+          "https://www.googleapis.com/auth/gmail.compose",
+          "https://www.googleapis.com/auth/gmail.send",
+        ],
+        canRevoke: true,
+        helpUrl: "https://console.cloud.google.com/apis/credentials",
+        recipe: "In Google Cloud Console, enable the Gmail API and create an OAuth 2.0 Client ID of type Desktop app. Paste its Client ID (and Client Secret if given), then sign in.",
+      },
+      revoke: { url: "https://myaccount.google.com/permissions", text: "Open your Google Account third-party access page to review or remove access." },
+      caution: null,
+      policy: { reversible: "off", communicates: "off", destructive: "off" },
+      writeTools: [
+        { name: "create_draft", class: "reversible", text: "Create a draft email without sending it." },
+        { name: "send_message", class: "communicates", text: "Send an email from the user's mailbox." },
+        { name: "send_reply", class: "communicates", text: "Send a reply in an existing email thread." },
+      ],
+      test: null,
+    },
+    {
+      id: "google_drive",
+      name: "Google Drive",
+      summary: "Your Drive folders, documents, spreadsheets and text files.",
+      connected: false,
+      mode: "off",
+      connectedAt: null,
+      token: {
+        label: "Google OAuth access token",
+        helpUrl: "https://console.cloud.google.com/apis/credentials",
+        recipe: "Sign in with OAuth above (recommended, so Ancilla refreshes access automatically), or paste a Google OAuth token with drive.readonly scope.",
+      },
+      oauth: {
+        clientConfigured: false,
+        clientFromEnv: false,
+        pending: false,
+        scopes: [
+          "https://www.googleapis.com/auth/drive.readonly",
+          "https://www.googleapis.com/auth/drive.file",
+        ],
+        canRevoke: true,
+        helpUrl: "https://console.cloud.google.com/apis/credentials",
+        recipe: "In Google Cloud Console, enable the Google Drive API and create an OAuth 2.0 Client ID of type Desktop app. Paste its Client ID (and Client Secret if given), then sign in.",
+      },
+      revoke: { url: "https://myaccount.google.com/permissions", text: "Open your Google Account third-party access page to review or remove access." },
+      caution: null,
+      policy: { reversible: "off", communicates: "off", destructive: "off" },
+      writeTools: [
+        { name: "create_folder", class: "reversible", text: "Create a folder in Google Drive." },
+        { name: "create_file", class: "reversible", text: "Create a new text, markdown or CSV file in Google Drive." },
+        { name: "update_file", class: "communicates", text: "Update the text content or name of an existing Drive file." },
+      ],
+      test: null,
+    },
+    {
       id: "supabase",
       name: "Supabase",
       summary: "Your projects, their tables, logs and functions.",
@@ -267,9 +345,12 @@ export class DemoAssistant {
       connectedAt: null,
       token: { label: "Personal access token", helpUrl: "https://supabase.com/dashboard/account/tokens", recipe: "Create an access token with a name you will recognise and an expiry." },
       revoke: { url: "https://supabase.com/dashboard/account/tokens", text: "Open Account, Access Tokens, and revoke the token." },
-      caution: "A Supabase access token cannot be limited to one project or to reading, so it can do everything your account can. Ancilla asks the server for read-only mode and offers only its read tools.",
+      caution: "A Supabase access token cannot be limited to one project or to reading, so it can do everything your account can. Ancilla starts read only and holds every migration or branch creation for your approval.",
       policy: { reversible: "off", communicates: "off", destructive: "off" },
-      writeTools: [],
+      writeTools: [
+        { name: "create_branch", class: "reversible", text: "Create a preview branch of a Supabase project." },
+        { name: "apply_migration", class: "destructive", text: "Apply a database migration to a Supabase project." },
+      ],
       test: null,
     },
     {
@@ -281,9 +362,30 @@ export class DemoAssistant {
       connectedAt: null,
       token: { label: "MCP API key", helpUrl: "https://app.brevo.com/settings/keys/api", recipe: "Under SMTP & API, API Keys, generate a new API key and switch on the option that makes it an MCP server key. An ordinary API key does not work here." },
       revoke: { url: "https://app.brevo.com/settings/keys/api", text: "Open SMTP & API, API Keys, and delete the key." },
-      caution: "A Brevo MCP key cannot be limited to reading: it can do everything your account can, sending campaigns included. Ancilla offers its read tools only, and that list is the only wall, so make the key just for Ancilla and delete it if you stop using it.",
+      caution: "A Brevo MCP key cannot be limited to reading: it can do everything your account can, sending campaigns included. Ancilla starts read only and asks before creating contacts or sending transactional email, so make the key just for Ancilla and delete it if you stop using it.",
       policy: { reversible: "off", communicates: "off", destructive: "off" },
-      writeTools: [],
+      writeTools: [
+        { name: "contacts_create_contact", class: "reversible", text: "Create or update a contact in Brevo." },
+        { name: "transactional_emails_send_transac_email", class: "communicates", text: "Send one transactional email through Brevo." },
+      ],
+      test: null,
+    },
+    {
+      id: "hostinger",
+      name: "Hostinger",
+      summary: "Your domains, DNS zones, virtual machines and subscriptions.",
+      connected: false,
+      mode: "off",
+      connectedAt: null,
+      token: { label: "Hostinger API token", helpUrl: "https://hpanel.hostinger.com/profile/api", recipe: "In hPanel, open Account Information > API, generate a new API token with an expiration date, and paste it here." },
+      revoke: { url: "https://hpanel.hostinger.com/profile/api", text: "Open hPanel > Account Information > API and delete the token." },
+      caution: "A Hostinger API token has full access to your hPanel domains, DNS and virtual machines. Ancilla starts read only and asks for your approval before creating snapshots, updating DNS records, or restarting a VPS.",
+      policy: { reversible: "off", communicates: "off", destructive: "off" },
+      writeTools: [
+        { name: "create_vps_snapshot", class: "reversible", text: "Create a snapshot of a virtual machine." },
+        { name: "update_dns_records", class: "communicates", text: "Add or update DNS records in a domain's zone." },
+        { name: "reset_vps", class: "destructive", text: "Restart a virtual machine." },
+      ],
       test: null,
     },
   ];
@@ -347,13 +449,38 @@ export class DemoAssistant {
       return { ok: true };
     }
     if (method === "GET" && sub === "/proposals") return { proposals: [] };
-    const act = sub.match(/^\/([a-z]+)\/(connect|test)$/);
+    const oauth = sub.match(/^\/([a-z_]+)\/oauth\/(client|start|callback)$/);
+    if (oauth && method === "POST") {
+      const c = find(oauth[1] as string);
+      if (oauth[2] === "client") {
+        if (body["clear"]) {
+          if (c.oauth) Object.assign(c.oauth, { clientConfigured: false, pending: false });
+          return { connector: c };
+        }
+        if (c.oauth) c.oauth.clientConfigured = true;
+        return { connector: c };
+      }
+      if (oauth[2] === "start") {
+        if (c.oauth) c.oauth.pending = true;
+        return { authorizeUrl: c.oauth?.helpUrl ?? "https://example.com/oauth" };
+      }
+      Object.assign(c, {
+        connected: true,
+        mode: "read",
+        connectedAt: Date.now(),
+        ...(c.oauth ? { oauth: { ...c.oauth, pending: false } } : {}),
+        test: { at: Date.now(), ok: true, message: "Works. Read tools are offered.", offered: [], hidden: 0, missing: [] },
+      });
+      note("connect", c.id, "Works. Signed in with OAuth.");
+      return { connector: c };
+    }
+    const act = sub.match(/^\/([a-z_]+)\/(connect|test)$/);
     if (act && method === "POST") {
       const c = find(act[1] as string);
       if (act[2] === "connect") {
         const token = typeof body["token"] === "string" ? body["token"].trim() : "";
         if (!/^[!-~]{8,2000}$/.test(token)) throw Object.assign(new Error("That does not look like a token: it is too short or too long, or has spaces or characters a token does not have."), { kind: "invalid" });
-        Object.assign(c, { connected: true, mode: "read", connectedAt: Date.now(), test: { at: Date.now(), ok: true, message: "Works. 3 read tools are offered.", offered: [{ name: "list_projects", text: "List the user's projects." }, { name: "list_tables", text: "List the tables of a project's database." }, { name: "search_docs", text: "Search the documentation." }], hidden: 6, missing: [] } });
+        Object.assign(c, { connected: true, mode: "read", connectedAt: Date.now(), test: { at: Date.now(), ok: true, message: "Works. 3 read tools are offered.", offered: [{ name: "list_projects", text: "List the user's projects.", class: "read" }, { name: "list_tables", text: "List the tables of a project's database.", class: "read" }, { name: "search_docs", text: "Search the documentation.", class: "read" }], hidden: 6, missing: [] } });
         note("connect", c.id, "Works. 3 read tools are offered.");
       } else {
         c.test = { ...(c.test ?? { offered: [], hidden: 0, missing: [], message: "" }), at: Date.now(), ok: true, message: "Works." };
@@ -361,7 +488,7 @@ export class DemoAssistant {
       }
       return { connector: c };
     }
-    const one = sub.match(/^\/([a-z]+)$/);
+    const one = sub.match(/^\/([a-z_]+)$/);
     if (one && method === "PATCH") {
       const c = find(one[1] as string);
       const policy = body["policy"];

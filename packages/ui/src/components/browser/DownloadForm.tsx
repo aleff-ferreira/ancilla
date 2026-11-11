@@ -77,21 +77,23 @@ export function DownloadForm(props: DownloadFormProps) {
   };
 
   return (
-    <div role="group" aria-label="Save a download" className="w-full space-y-1.5 text-xs">
-      <p className="font-medium text-fg [overflow-wrap:anywhere]">{props.name}</p>
-      <p className="text-muted [overflow-wrap:anywhere]">
-        {formatSize(props.size)}
-        {props.origin ? ` from ${props.origin}` : ""}
-        {props.fromAssistant ? ", started by the assistant" : ""}
-      </p>
+    <div role="group" aria-label="Save a download" className="w-full space-y-2 text-xs">
+      <div className="space-y-0.5">
+        <p className="text-sm font-medium text-fg [overflow-wrap:anywhere]">{props.name}</p>
+        <p className="text-muted [overflow-wrap:anywhere]">
+          {formatSize(props.size)}
+          {props.origin ? ` from ${props.origin}` : ""}
+          {props.fromAssistant ? ", started by the assistant" : ""}
+        </p>
+      </div>
       {props.warning ? (
-        <p role="alert" className="rounded bg-sunken px-2 py-1 text-fg">
+        <p role="alert" className="rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-1.5 text-warn-text">
           {props.warning}
         </p>
       ) : null}
       <p className="text-muted">Save in a folder on the computer that runs Ancilla:</p>
       <div className="flex items-center gap-1.5">
-        <span title={folder} className="min-w-0 flex-1 truncate rounded bg-sunken px-2 py-1 text-fg">
+        <span title={folder} className="min-w-0 flex-1 truncate rounded-lg border border-line bg-sunken px-2.5 py-1.5 font-mono text-[11px] text-fg">
           {folder}
         </span>
         {props.onPickNative && !nativeUnsupported ? (
@@ -114,17 +116,17 @@ export function DownloadForm(props: DownloadFormProps) {
         />
       ) : null}
       {canRemember ? (
-        <label className="flex items-center gap-1.5 text-muted">
+        <label className="flex items-center gap-2 text-muted">
           <input type="checkbox" checked={remember} disabled={props.busy} onChange={(e) => setRemember(e.currentTarget.checked)} />
           <span>Always save downloads in this folder</span>
         </label>
       ) : null}
       <p className="text-subtle">Nothing is saved until you press Save.</p>
-      <div className="flex flex-wrap gap-1.5">
-        <Button size="xs" variant="accent" disabled={props.busy || nativeBusy} onClick={() => props.onSave(folder, canRemember ? remember : undefined)}>
+      <div className="flex flex-wrap gap-2 pt-0.5">
+        <Button size="sm" variant="accent" disabled={props.busy || nativeBusy} onClick={() => props.onSave(folder, canRemember ? remember : undefined)}>
           Save
         </Button>
-        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onDont}>
+        <Button size="sm" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onDont}>
           Don&apos;t save
         </Button>
       </div>
@@ -199,9 +201,9 @@ export function DownloadBox(props: {
 }) {
   const { download } = props;
   return (
-    <div role="dialog" aria-modal="true" aria-label="Save this file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/60 p-4">
-      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border border-line bg-raised p-4 shadow-pop">
-        <h2 className="mb-2 text-xs font-semibold text-muted">Save this file?</h2>
+    <div role="dialog" aria-modal="true" aria-label="Save this file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/65 p-4 backdrop-blur-[2px]">
+      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-xl border border-line-strong/80 bg-raised p-4 shadow-panel">
+        <h2 className="mb-2 text-xs font-semibold tracking-[0.02em] text-muted uppercase">Save this file?</h2>
         <DownloadForm
           key={download.id}
           name={download.name}
@@ -279,19 +281,21 @@ export function UploadForm(props: UploadFormProps) {
   };
 
   return (
-    <div role="group" aria-label="Choose files to upload" className="w-full space-y-1.5 text-xs">
-      <p className="font-medium text-fg [overflow-wrap:anywhere]">
-        {props.multiple ? "Choose files to upload" : "Choose a file to upload"}
-      </p>
-      <p className="text-muted [overflow-wrap:anywhere]">
-        {props.origin ? `To ${props.origin}` : "To this page"}
-        {props.page ? ` (“${props.page}”)` : ""}
-        {props.fromAssistant ? ", opened by the assistant" : ""}
-      </p>
+    <div role="group" aria-label="Choose files to upload" className="w-full space-y-2 text-xs">
+      <div className="space-y-0.5">
+        <p className="text-sm font-medium text-fg [overflow-wrap:anywhere]">
+          {props.multiple ? "Choose files to upload" : "Choose a file to upload"}
+        </p>
+        <p className="text-muted [overflow-wrap:anywhere]">
+          {props.origin ? `To ${props.origin}` : "To this page"}
+          {props.page ? ` (“${props.page}”)` : ""}
+          {props.fromAssistant ? ", opened by the assistant" : ""}
+        </p>
+      </div>
       <div className="flex items-center gap-1.5">
         <span
           title={files.length > 0 ? files.join(", ") : "No file chosen"}
-          className="min-w-0 flex-1 truncate rounded bg-sunken px-2 py-1 text-fg"
+          className="min-w-0 flex-1 truncate rounded-lg border border-line bg-sunken px-2.5 py-1.5 font-mono text-[11px] text-fg"
         >
           {files.length === 0 ? "No file chosen" : files.map((f) => f.split(/[\\/]/).pop() ?? f).join(", ")}
         </span>
@@ -315,11 +319,11 @@ export function UploadForm(props: UploadFormProps) {
         />
       ) : null}
       <p className="text-subtle">Nothing leaves your computer until you press Upload.</p>
-      <div className="flex flex-wrap gap-1.5">
-        <Button size="xs" variant="accent" disabled={props.busy || nativeBusy || files.length === 0} onClick={() => props.onUpload(files)}>
+      <div className="flex flex-wrap gap-2 pt-0.5">
+        <Button size="sm" variant="accent" disabled={props.busy || nativeBusy || files.length === 0} onClick={() => props.onUpload(files)}>
           Upload
         </Button>
-        <Button size="xs" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onCancel}>
+        <Button size="sm" variant="secondary" disabled={props.busy || nativeBusy} onClick={props.onCancel}>
           {props.fromAssistant ? "Don't" : "Cancel"}
         </Button>
       </div>
@@ -459,9 +463,9 @@ export function UploadBox(props: {
 }) {
   const { upload } = props;
   return (
-    <div role="dialog" aria-modal="true" aria-label="Upload a file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/60 p-4">
-      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-lg border border-line bg-raised p-4 shadow-pop">
-        <h2 className="mb-2 text-xs font-semibold text-muted">{upload.multiple ? "Upload files?" : "Upload a file?"}</h2>
+    <div role="dialog" aria-modal="true" aria-label="Upload a file" className="absolute inset-0 z-30 flex items-center justify-center bg-bg/65 p-4 backdrop-blur-[2px]">
+      <div className="max-h-full w-full max-w-sm overflow-y-auto rounded-xl border border-line-strong/80 bg-raised p-4 shadow-panel">
+        <h2 className="mb-2 text-xs font-semibold tracking-[0.02em] text-muted uppercase">{upload.multiple ? "Upload files?" : "Upload a file?"}</h2>
         <UploadForm
           key={upload.id}
           multiple={upload.multiple}

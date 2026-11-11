@@ -3,15 +3,78 @@ import { useNow } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
 import type { AssistantConnectorActivity, AssistantConnectorView, AssistantConnectorsView, AssistantWriteCard, AssistantWriteClass } from "../../types.js";
 import { Row, Section } from "../settings/SettingsPage.js";
-import { Button, Toggle } from "../ui/primitives.js";
+import { Button, Toggle, cn } from "../ui/primitives.js";
 import { ago, useAssistantCall, useAssistantData } from "./api.js";
 import { activityLine, mayChange, reachNote, statusOf, tokenLooksUsable, WRITE_CLASSES } from "./connectors.js";
 import { Chip, Notice } from "./parts.js";
 import { WriteCardView } from "./WriteCard.js";
 
-const INPUT = "h-8 w-full min-w-0 rounded-md bg-sunken px-2.5 text-sm text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus";
-const SELECT = "h-7 rounded-md bg-sunken px-2 text-xs text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50";
+const INPUT = "h-8 w-full min-w-0 rounded-lg border border-line bg-sunken px-2.5 text-sm text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus";
+const SELECT = "h-7 rounded-lg border border-line bg-sunken px-2 text-xs text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50";
 const LINK = "text-accent-text underline-offset-2 hover:underline";
+
+function ConnectorMark(props: { id: string; name: string }) {
+  switch (props.id) {
+    case "github":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line-strong/70 bg-sunken text-fg">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0.5a7.5 7.5 0 0 0-2.37 14.62c.37.07.5-.16.5-.36v-1.3c-2.09.46-2.53-.9-2.53-.9-.34-.87-.84-1.1-.84-1.1-.68-.47.05-.46.05-.46.76.05 1.16.78 1.16.78.67 1.15 1.76.82 2.2.63.07-.49.26-.82.48-1.01-1.67-.19-3.42-.83-3.42-3.71 0-.82.29-1.49.77-2.02-.08-.19-.33-.96.07-2 0 0 .63-.2 2.06.77a7.15 7.15 0 0 1 3.76 0c1.43-.97 2.06-.77 2.06-.77.4 1.04.15 1.81.07 2 .48.53.77 1.2.77 2.02 0 2.89-1.76 3.52-3.43 3.7.27.24.51.7.51 1.42v2.1c0 .2.13.44.51.36A7.5 7.5 0 0 0 8 0.5Z" />
+          </svg>
+        </span>
+      );
+    case "gmail":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[oklch(0.68_0.18_25)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="1.75" y="3" width="12.5" height="10" rx="1.75" />
+            <path d="m2.25 4.25 5.75 4.5 5.75-4.5" />
+          </svg>
+        </span>
+      );
+    case "google_drive":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[oklch(0.72_0.15_155)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M5.6 2.2h4.8l4.1 7.1-2.4 4.3H3.9L1.5 9.3 5.6 2.2Z" />
+            <path d="M5.6 2.2 10.4 9.3H1.5" />
+            <path d="m10.4 9.3-2.5 4.3" />
+          </svg>
+        </span>
+      );
+    case "supabase":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[oklch(0.75_0.17_158)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M9.1 1.4c.4-.5 1.2-.2 1.2.4v5.1h3.6c.6 0 .9.7.5 1.2l-5.5 6.5c-.4.5-1.2.2-1.2-.4V9.1H4.1c-.6 0-.9-.7-.5-1.2l5.5-6.5Z" />
+          </svg>
+        </span>
+      );
+    case "brevo":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[oklch(0.72_0.14_175)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 2.5h4.5a2.75 2.75 0 0 1 0 5.5H4V2.5Z" />
+            <path d="M4 8h5.25a2.75 2.75 0 0 1 0 5.5H4V8Z" />
+          </svg>
+        </span>
+      );
+    case "hostinger":
+      return (
+        <span aria-hidden="true" className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[oklch(0.7_0.17_292)]">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3.5 2.5v11M12.5 2.5v11M3.5 8h9" />
+          </svg>
+        </span>
+      );
+    default:
+      return (
+        <span aria-hidden="true" className={cn("inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-line bg-sunken text-[10px] font-semibold text-fg")}>
+          {props.name.slice(0, 1).toUpperCase()}
+        </span>
+      );
+  }
+}
 
 type Busy = "connect" | "test" | "mode" | "policy" | "disconnect" | "ask" | "oauth-client" | "oauth-start" | "oauth-callback";
 
@@ -214,7 +277,14 @@ export function ConnectorCardView(props: { view: AssistantConnectorView; state: 
   const busy = state.busy !== null;
   const reach = reachNote(view);
   return (
-    <Section title={view.name}>
+    <Section
+      title={
+        <>
+          <ConnectorMark id={view.id} name={view.name} />
+          <span>{view.name}</span>
+        </>
+      }
+    >
       <Row
         label={
           <span className="flex flex-wrap items-center gap-2">
@@ -379,10 +449,10 @@ export function ConnectorCardView(props: { view: AssistantConnectorView; state: 
         <Row label="What it can read" description={reach ?? view.test?.message ?? "Press Test to see what the assistant is given."}>
           {view.test && view.test.offered.length > 0 ? (
             <details className="w-full min-w-0 text-xs text-muted @min-[520px]:w-80">
-              <summary className="cursor-pointer text-fg">
+              <summary className="cursor-pointer font-medium text-fg">
                 {view.test.offered.length} tools, {view.test.offered.some((t) => t.class !== "read") ? `${view.test.offered.filter((t) => t.class !== "read").length} of them ask first` : "read only"}
               </summary>
-              <ul className="mt-1.5 space-y-1">
+              <ul className="mt-2 space-y-1.5 border-l-2 border-line pl-3">
                 {view.test.offered.map((tool) => (
                   <li key={tool.name}>
                     <span className="font-mono text-fg">{tool.name}</span>: {tool.text}
@@ -416,8 +486,8 @@ export function ConnectorCardView(props: { view: AssistantConnectorView; state: 
               </label>
             ))}
             <details className="text-xs text-muted">
-              <summary className="cursor-pointer text-fg">What each can do</summary>
-              <ul className="mt-1.5 space-y-1">
+              <summary className="cursor-pointer font-medium text-fg">What each can do</summary>
+              <ul className="mt-2 space-y-1.5 border-l-2 border-line pl-3">
                 {view.writeTools.map((tool) => (
                   <li key={tool.name}>
                     <span className="font-mono text-fg">{tool.name}</span>: {tool.text}

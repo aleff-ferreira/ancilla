@@ -132,10 +132,10 @@ export function ModelPick(props: {
   );
 }
 
-export function Section(props: { title: string; children: ReactNode }) {
+export function Section(props: { title: ReactNode; children: ReactNode }) {
   return (
     <section className="mt-6">
-      <h2 className="mb-2 text-xs leading-4 font-medium tracking-[0.04em] text-muted uppercase">{props.title}</h2>
+      <h2 className="mb-2 flex items-center gap-2 text-xs leading-4 font-medium tracking-[0.04em] text-muted uppercase">{props.title}</h2>
       <div className="overflow-hidden rounded-xl bg-raised shadow-panel">{props.children}</div>
     </section>
   );

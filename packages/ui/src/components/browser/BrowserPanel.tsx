@@ -362,18 +362,28 @@ export function BrowserPanel() {
 
 export function TabStrip(props: { tabs: PaneTab[]; active: string | null; onNew(): void; onSwitch(id: string): void; onClose(id: string): void; onHide(): void }) {
   return (
-    <div role="tablist" aria-label="Browser tabs" className="flex h-10 shrink-0 items-center gap-1 border-b border-line px-2">
-      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-        {props.tabs.map((tab) => (
-          <div key={tab.id} className={cn("group flex h-7 max-w-44 min-w-24 items-center gap-1 rounded-md pr-1 pl-2 text-xs", tab.id === props.active ? "bg-active text-fg" : "text-muted hover:bg-hover")}>
-            <button type="button" role="tab" aria-selected={tab.id === props.active} title={tabLabel(tab)} onClick={() => props.onSwitch(tab.id)} className="min-w-0 flex-1 truncate text-left">
-              {tabLabel(tab)}
-            </button>
-            <button type="button" aria-label={`Close ${tabLabel(tab)}`} onClick={() => props.onClose(tab.id)} className="rounded p-0.5 opacity-60 hover:bg-hover hover:opacity-100">
-              <XIcon size={11} />
-            </button>
-          </div>
-        ))}
+    <div role="tablist" aria-label="Browser tabs" className="flex h-10 shrink-0 items-center gap-1 border-b border-line bg-sunken/45 px-2">
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none]">
+        {props.tabs.map((tab) => {
+          const selected = tab.id === props.active;
+          return (
+            <div
+              key={tab.id}
+              className={cn(
+                "group flex h-7 max-w-44 min-w-24 items-center gap-1.5 rounded-lg pr-1 pl-2.5 text-xs transition-colors",
+                selected ? "bg-raised font-medium text-fg shadow-btn" : "text-muted hover:bg-hover/70 hover:text-fg",
+              )}
+            >
+              {tab.loading ? <span aria-hidden="true" className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent" /> : null}
+              <button type="button" role="tab" aria-selected={selected} title={tabLabel(tab)} onClick={() => props.onSwitch(tab.id)} className="min-w-0 flex-1 truncate text-left">
+                {tabLabel(tab)}
+              </button>
+              <button type="button" aria-label={`Close ${tabLabel(tab)}`} onClick={() => props.onClose(tab.id)} className="rounded p-0.5 opacity-55 transition-opacity hover:bg-hover hover:opacity-100">
+                <XIcon size={11} />
+              </button>
+            </div>
+          );
+        })}
       </div>
       <Tip label="New tab">
         <IconButton label="New tab" onClick={props.onNew}>
@@ -397,7 +407,7 @@ export function Toolbar(props: { tab: PaneTab | undefined; disabled: boolean; on
     if (!editing) setText(shown);
   }, [shown, editing]);
   return (
-    <div className="relative flex h-10 shrink-0 items-center gap-1 border-b border-line px-2">
+    <div className="relative flex h-10 shrink-0 items-center gap-1 border-b border-line bg-raised/60 px-2">
       <IconButton label="Back" disabled={props.disabled} onClick={props.onBack}>
         <ArrowLeftIcon size={14} />
       </IconButton>
@@ -408,7 +418,7 @@ export function Toolbar(props: { tab: PaneTab | undefined; disabled: boolean; on
         <ArrowClockwiseIcon size={14} />
       </IconButton>
       <form
-        className="min-w-0 flex-1"
+        className="min-w-0 flex-1 px-0.5"
         onSubmit={(e) => {
           e.preventDefault();
           props.onGo(text);
@@ -434,7 +444,7 @@ export function Toolbar(props: { tab: PaneTab | undefined; disabled: boolean; on
               e.currentTarget.blur();
             }
           }}
-          className="h-7 w-full rounded-md border border-line bg-sunken px-2 text-xs text-fg outline-none focus:border-focus"
+          className="h-7 w-full rounded-lg border border-line bg-sunken px-2.5 text-xs text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50"
         />
       </form>
       <Tip label="Open in my browser">
@@ -442,7 +452,7 @@ export function Toolbar(props: { tab: PaneTab | undefined; disabled: boolean; on
           <ArrowSquareOutIcon size={14} />
         </IconButton>
       </Tip>
-      {props.tab?.loading ? <div role="progressbar" aria-label="Loading" className="absolute right-0 bottom-0 left-0 h-0.5 animate-pulse bg-brand" /> : null}
+      {props.tab?.loading ? <div role="progressbar" aria-label="Loading" className="absolute right-0 bottom-0 left-0 h-0.5 animate-pulse bg-accent" /> : null}
     </div>
   );
 }
@@ -452,11 +462,13 @@ export function Status(props: { view: SessionView; onConnect(takeover: boolean):
   const text = status === "connecting" ? "Opening the browser…" : (message ?? "The browser is not connected.");
   const action = status === "busy" || status === "taken" ? { label: "Use it here", takeover: true } : status === "closed" ? { label: "Reconnect", takeover: false } : null;
   return (
-    <div role="status" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-bg/90 p-6 text-center text-sm text-muted">
-      <GlobeIcon size={22} />
-      <p className="max-w-64">{text}</p>
+    <div role="status" className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-bg/92 p-6 text-center text-sm text-muted backdrop-blur-[2px]">
+      <span aria-hidden="true" className="flex size-10 items-center justify-center rounded-full border border-line bg-raised text-muted shadow-sm">
+        <GlobeIcon size={20} />
+      </span>
+      <p className="max-w-64 leading-relaxed">{text}</p>
       {action ? (
-        <button type="button" onClick={() => props.onConnect(action.takeover)} className="rounded-md border border-line px-3 py-1.5 text-xs text-fg hover:bg-hover">
+        <button type="button" onClick={() => props.onConnect(action.takeover)} className="rounded-lg bg-raised px-3.5 py-1.5 text-xs font-medium text-fg shadow-btn transition-colors hover:bg-hover">
           {action.label}
         </button>
       ) : null}
@@ -470,9 +482,9 @@ function Toast(props: { text: string; onDismiss(): void }) {
     return () => clearTimeout(timer);
   }, [props.text, props.onDismiss]);
   return (
-    <div role="alert" className="absolute right-3 bottom-3 left-3 z-20 flex items-start gap-2 rounded-md border border-line bg-raised px-3 py-2 text-xs text-fg shadow-pop">
-      <span className="min-w-0 flex-1">{props.text}</span>
-      <button type="button" aria-label="Dismiss" onClick={props.onDismiss} className="text-muted hover:text-fg">
+    <div role="alert" className="absolute right-3 bottom-3 left-3 z-20 flex items-start gap-2.5 rounded-xl border border-line-strong/80 bg-raised px-3.5 py-2.5 text-xs text-fg shadow-pop">
+      <span className="min-w-0 flex-1 leading-relaxed">{props.text}</span>
+      <button type="button" aria-label="Dismiss" onClick={props.onDismiss} className="rounded p-0.5 text-muted hover:bg-hover hover:text-fg">
         <XIcon size={11} />
       </button>
     </div>
@@ -486,20 +498,20 @@ export function DialogBox(props: { dialog: PaneDialog; onAnswer(accept: boolean,
   const [value, setValue] = useState(dialog.defaultPrompt ?? "");
   const leave = dialog.kind === "beforeunload";
   return (
-    <div role="alertdialog" aria-modal="true" aria-label={DIALOG_TITLE[dialog.kind] ?? "This page says"} className="absolute inset-0 z-30 flex items-center justify-center bg-bg/60 p-4">
-      <div className="w-full max-w-sm rounded-lg border border-line bg-raised p-4 text-sm shadow-pop">
-        <h2 className="mb-1 text-xs font-semibold text-muted">{DIALOG_TITLE[dialog.kind] ?? "This page says"}</h2>
+    <div role="alertdialog" aria-modal="true" aria-label={DIALOG_TITLE[dialog.kind] ?? "This page says"} className="absolute inset-0 z-30 flex items-center justify-center bg-bg/65 p-4 backdrop-blur-[2px]">
+      <div className="w-full max-w-sm rounded-xl border border-line-strong/80 bg-raised p-4 text-sm shadow-panel">
+        <h2 className="mb-1 text-xs font-semibold tracking-[0.02em] text-muted uppercase">{DIALOG_TITLE[dialog.kind] ?? "This page says"}</h2>
         <p className="mb-3 break-words whitespace-pre-wrap text-fg">{dialog.message || (leave ? "Changes you made may not be saved." : "")}</p>
         {dialog.kind === "prompt" ? (
-          <input autoFocus aria-label="Answer" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && props.onAnswer(true, value)} className="mb-3 h-8 w-full rounded-md border border-line bg-sunken px-2 text-xs outline-none focus:border-focus" />
+          <input autoFocus aria-label="Answer" value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && props.onAnswer(true, value)} className="mb-3 h-8 w-full rounded-lg border border-line bg-sunken px-2.5 text-xs text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
         ) : null}
         <div className="flex justify-end gap-2">
           {dialog.kind !== "alert" ? (
-            <button type="button" onClick={() => props.onAnswer(false)} className="rounded-md border border-line px-3 py-1.5 text-xs hover:bg-hover">
+            <button type="button" onClick={() => props.onAnswer(false)} className="rounded-lg bg-raised px-3 py-1.5 text-xs font-medium text-fg shadow-btn hover:bg-hover">
               {leave ? "Stay" : "Cancel"}
             </button>
           ) : null}
-          <button type="button" autoFocus={dialog.kind !== "prompt"} onClick={() => props.onAnswer(true, dialog.kind === "prompt" ? value : undefined)} className="rounded-md bg-brand px-3 py-1.5 text-xs text-white hover:opacity-90">
+          <button type="button" autoFocus={dialog.kind !== "prompt"} onClick={() => props.onAnswer(true, dialog.kind === "prompt" ? value : undefined)} className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-accent-fg hover:bg-accent-hover">
             {leave ? "Leave" : "OK"}
           </button>
         </div>

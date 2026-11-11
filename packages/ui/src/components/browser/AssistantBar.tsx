@@ -58,11 +58,14 @@ export function AssistantBarView(props: AssistantBarViewProps) {
   return (
     <section aria-label="The assistant's browsing" className="shrink-0 border-t border-line bg-raised">
       {job ? (
-        <div className="space-y-2 px-3 py-2">
-          <div className="flex items-start gap-2">
+        <div className="space-y-2.5 px-3 py-2.5">
+          <div className="flex items-start gap-2.5">
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-medium text-fg">The assistant is browsing</p>
-              <p className="truncate text-xs text-muted" title={job.goal}>
+              <div className="flex items-center gap-1.5">
+                <span aria-hidden="true" className="size-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
+                <p className="text-xs font-semibold text-fg">The assistant is browsing</p>
+              </div>
+              <p className="mt-0.5 truncate text-xs text-muted" title={job.goal}>
                 {job.goal}
               </p>
             </div>
@@ -70,9 +73,9 @@ export function AssistantBarView(props: AssistantBarViewProps) {
               Stop
             </Button>
           </div>
-          {watch.tab ? <canvas ref={props.canvasRef} role="img" aria-label="What the assistant sees" className="aspect-[16/10] max-h-52 w-full rounded border border-line bg-sunken object-contain" /> : null}
+          {watch.tab ? <canvas ref={props.canvasRef} role="img" aria-label="What the assistant sees" className="aspect-[16/10] max-h-52 w-full rounded-lg border border-line bg-sunken object-contain shadow-sm" /> : null}
           {job.steps.length > 0 ? (
-            <ol aria-label="What it did" className="space-y-0.5 text-xs text-muted">
+            <ol aria-label="What it did" className="space-y-0.5 rounded-lg bg-sunken/55 px-2.5 py-1.5 text-xs text-muted">
               {job.steps.slice(-4).map((step, i) => (
                 <li key={`${i}-${step}`} className="truncate">
                   {step}
@@ -82,16 +85,16 @@ export function AssistantBarView(props: AssistantBarViewProps) {
           ) : null}
           {job.question && isActionQuestion(job.question) ? <ActionQuestionCard question={job.question} busy={props.busy} onPickNative={props.onPickNative} onPickNativeFiles={props.onPickNativeFiles} onAnswer={props.onAction} /> : null}
           {job.question && !isActionQuestion(job.question) ? (
-            <div role="group" aria-label="A site the assistant wants to open" className="space-y-1.5 rounded border border-line bg-bg p-2">
-              <p className="text-xs text-fg [overflow-wrap:anywhere]">
-                It wants to open <span className="font-medium">{job.question.origin}</span>
+            <div role="group" aria-label="A site the assistant wants to open" className="space-y-2 rounded-xl border border-line-strong/80 bg-bg p-3 shadow-sm">
+              <p className="text-xs leading-relaxed text-fg [overflow-wrap:anywhere]">
+                It wants to open <span className="font-semibold">{job.question.origin}</span>
                 {job.question.kind === "local" ? " (a page on this computer or your network)" : ""}. Allow it?
               </p>
-              <label className="flex items-center gap-1.5 text-xs text-muted">
+              <label className="flex items-center gap-2 text-xs text-muted">
                 <input type="checkbox" checked={shareSignIn} disabled={props.busy} onChange={(e) => setShareSignIn(e.currentTarget.checked)} />
                 <span>Use my Browser sign-in on this site</span>
               </label>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1.5 pt-0.5">
                 <Button size="xs" variant="accent" disabled={props.busy} onClick={() => props.onAnswer(shareSignIn ? "task-signed-in" : "task")}>
                   Allow for this task
                 </Button>
@@ -121,7 +124,7 @@ export function AssistantBarView(props: AssistantBarViewProps) {
             placeholder="Ask the assistant to look something up…"
             value={props.draft}
             onChange={(event) => props.onDraft(event.target.value)}
-            className="min-w-0 flex-1 rounded border border-line bg-bg px-2 py-1 text-xs text-fg outline-none placeholder:text-subtle focus:border-accent"
+            className="h-7 min-w-0 flex-1 rounded-lg border border-line bg-sunken px-2.5 text-xs text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus"
           />
           <Button size="xs" variant="accent" type="submit" disabled={props.busy || props.draft.trim().length < 3}>
             Ask
@@ -134,19 +137,19 @@ export function AssistantBarView(props: AssistantBarViewProps) {
         </div>
       ) : null}
       {!job ? (
-        <div className="border-t border-line px-3 py-1.5">
-          <button type="button" aria-expanded={props.sitesOpen} onClick={props.onToggleSites} className="text-xs text-muted hover:text-fg">
+        <div className="border-t border-line px-3 py-2">
+          <button type="button" aria-expanded={props.sitesOpen} onClick={props.onToggleSites} className="text-xs font-medium text-muted transition-colors hover:text-fg">
             Sites it may open{sites ? ` (${sites.length})` : ""}
           </button>
           {props.sitesOpen ? (
             sites === null ? (
-              <p className="mt-1 text-xs text-subtle">Loading…</p>
+              <p className="mt-1.5 text-xs text-subtle">Loading…</p>
             ) : sites.length === 0 ? (
-              <p className="mt-1 text-xs text-subtle">None saved. It asks before each new site.</p>
+              <p className="mt-1.5 text-xs text-subtle">None saved. It asks before each new site.</p>
             ) : (
-              <ul className="mt-1 space-y-1">
+              <ul className="mt-2 space-y-1.5">
                 {sites.map((rule) => (
-                  <li key={rule.origin} className="flex items-center gap-2 text-xs">
+                  <li key={rule.origin} className="flex items-center gap-2 rounded-lg bg-sunken/55 px-2 py-1 text-xs">
                     <Chip tone={rule.decision === "block" ? "warn" : undefined}>{rule.decision === "allow" ? "Always allowed" : "Blocked"}</Chip>
                     {rule.decision === "allow" && rule.useSignIn ? <Chip>Sign-in shared</Chip> : null}
                     <span className="min-w-0 flex-1 truncate text-fg" title={rule.origin}>

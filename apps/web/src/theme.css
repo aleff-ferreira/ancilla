@@ -3364,9 +3364,8 @@
   animation-play-state: paused;
 }
 .av-stage {
-  fill: oklch(0.2 0.03 var(--h));
-  stroke: color-mix(in oklab, var(--av-2) 38%, transparent);
-  stroke-width: 1;
+  stroke: color-mix(in oklab, var(--av-1) 34%, oklch(1 0 0 / 0.14));
+  stroke-width: 1.4;
 }
 .av-o {
   transform-box: view-box;
@@ -4444,11 +4443,15 @@
 }
 .call-ring[data-live]::before {
   opacity: 1;
-  box-shadow: 0 0 0 calc(1px + var(--mic) * 9px) color-mix(in oklch, oklch(0.72 0.12 215) 42%, transparent);
+  box-shadow:
+    0 0 0 calc(1.5px + var(--mic) * 7px) color-mix(in oklch, oklch(0.74 0.13 215) 46%, transparent),
+    0 0 calc(6px + var(--mic) * 18px) color-mix(in oklch, oklch(0.74 0.13 215) 32%, transparent);
 }
 .call-ring[data-live]::after {
   opacity: 1;
-  box-shadow: 0 0 0 calc(1px + var(--voice) * 11px) color-mix(in oklch, var(--accent) 50%, transparent);
+  box-shadow:
+    0 0 0 calc(1.5px + var(--voice) * 9px) color-mix(in oklch, var(--accent) 54%, transparent),
+    0 0 calc(8px + var(--voice) * 22px) color-mix(in oklch, var(--accent) 36%, transparent);
 }
 .call-ring[data-live][data-who="none"]::before,
 .call-ring[data-live][data-who="none"]::after {

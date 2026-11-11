@@ -94,9 +94,20 @@ export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, siz
       data-finish={wears.kind === "figure" ? wears.figure.finish : undefined}
       style={style}
     >
-      {stage ? <circle cx="80" cy="80" r="78" className="av-stage" /> : null}
+      {stage ? (
+        <>
+          <defs>
+            <radialGradient id={`${id}stg`} cx="50%" cy="22%" r="82%">
+              <stop offset="0%" style={{ stopColor: "oklch(0.3 0.065 var(--h))" }} />
+              <stop offset="56%" style={{ stopColor: "oklch(0.19 0.032 var(--h))" }} />
+              <stop offset="100%" style={{ stopColor: "oklch(0.13 0.02 var(--h))" }} />
+            </radialGradient>
+          </defs>
+          <circle cx="80" cy="80" r="78" fill={`url(#${id}stg)`} className="av-stage" />
+        </>
+      ) : null}
       {wears.kind === "sigil" ? <Sigil id={id} spec={spec} /> : null}
-      {wears.kind === "companion" ? <CompanionSprite id={id} companion={wears.companion} mood={mood} /> : null}
+      {wears.kind === "companion" ? <CompanionSprite id={id} companion={wears.companion} mood={mood} stage={stage} /> : null}
       {wears.kind === "figure" ? <Figure id={id} figure={wears.figure} seed={spec.seed} /> : null}
       {wears.kind === "image" ? (
         <>

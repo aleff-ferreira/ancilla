@@ -71,15 +71,24 @@ function Card(props: { session: CallSession; view: CallView }) {
         expanded ? "h-[min(640px,calc(100vh-32px))] w-[min(440px,calc(100vw-32px))]" : "w-[min(360px,calc(100vw-32px))]",
       )}
     >
-      <header className="flex items-center gap-3 px-4 pt-4 pb-2">
+      <header className="flex items-center gap-3.5 border-b border-line/60 px-4 py-3.5">
         <div ref={ring} className="call-ring relative shrink-0" data-live={live ? "" : undefined} data-who={view.phase === "speaking" && !view.ducked ? "voice" : view.heard ? "mic" : "none"}>
-          {glance ? <Avatar spec={glance.character.avatar} name={name} mood={moodOf(view)} size={64} stage /> : <span className="block size-16 rounded-full bg-sunken" />}
+          {glance ? <Avatar spec={glance.character.avatar} name={name} mood={moodOf(view)} size={64} stage look /> : <span className="block size-16 rounded-full bg-sunken" />}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-fg">{name}</div>
-          <div className="truncate text-xs text-muted" role="status" aria-live="polite">
-            {phaseLabel(view)}
-            {live && view.status === "ready" && last?.firstAudioMs != null ? <span className="text-subtle"> · replied in {(last.firstAudioMs / 1000).toFixed(1)} s</span> : null}
+          <div className="truncate text-sm font-semibold tracking-[-0.01em] text-fg">{name}</div>
+          <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted" role="status" aria-live="polite">
+            {live ? (
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 shrink-0 rounded-full",
+                  view.muted || view.micProblem ? "bg-warn" : view.phase === "speaking" ? "bg-accent" : "bg-ok-text",
+                )}
+              />
+            ) : null}
+            <span className="truncate">{phaseLabel(view)}</span>
+            {live && view.status === "ready" && last?.firstAudioMs != null ? <span className="shrink-0 text-subtle">· {(last.firstAudioMs / 1000).toFixed(1)} s</span> : null}
           </div>
           {taskLine ? <div className="mt-0.5 truncate text-2xs text-subtle">Working on: {taskLine.title}</div> : null}
         </div>
@@ -93,16 +102,16 @@ function Card(props: { session: CallSession; view: CallView }) {
         ) : null}
       </header>
 
-      {status ? <p className={cn("mx-4 mb-1 rounded-md px-2 py-1.5 text-xs", view.error || view.notice?.level === "warn" ? "bg-warn-soft text-warn-text" : "bg-sunken text-muted")}>{status}</p> : null}
-      {view.micProblem ? <p className="mx-4 mb-1 rounded-md bg-warn-soft px-2 py-1.5 text-xs text-warn-text">{view.micProblem}</p> : null}
-      {view.status === "failed" && view.error?.includes("not installed") ? <p className="mx-4 mb-1 text-xs text-muted">Open Assistant, then Voice, to install it.</p> : null}
+      {status ? <p className={cn("mx-4 mt-2.5 rounded-lg px-2.5 py-1.5 text-xs", view.error || view.notice?.level === "warn" ? "bg-warn-soft text-warn-text" : "bg-sunken text-muted")}>{status}</p> : null}
+      {view.micProblem ? <p className="mx-4 mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">{view.micProblem}</p> : null}
+      {view.status === "failed" && view.error?.includes("not installed") ? <p className="mx-4 mt-1.5 text-xs text-muted">Open Assistant, then Voice, to install it.</p> : null}
 
-      <Transcript view={view} tall={expanded} />
+      <Transcript view={view} tall={expanded} name={name} />
 
       {view.tasks.length > 0 ? (
-        <ul className="mx-4 mb-2 flex flex-wrap gap-1.5">
+        <ul className="mx-4 mb-2.5 flex flex-wrap gap-1.5">
           {view.tasks.slice(0, 4).map((t) => (
-            <li key={t.id} title={t.note ?? t.title} className="inline-flex max-w-full items-center gap-1 rounded-md bg-sunken px-1.5 py-0.5 text-2xs text-muted">
+            <li key={t.id} title={t.note ?? t.title} className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-line/70 bg-sunken/70 px-2 py-0.5 text-2xs text-muted">
               <span className={cn("size-1.5 shrink-0 rounded-full", t.status === "completed" ? "bg-ok-text" : t.status === "failed" ? "bg-danger-text" : t.status === "blocked" || t.status === "paused" ? "bg-warn-text" : "bg-accent")} />
               <span className="truncate">{t.title}</span>
             </li>
@@ -128,7 +137,7 @@ function Card(props: { session: CallSession; view: CallView }) {
 }
 
 /** The lines of the conversation, newest at the bottom, and the words being said now. */
-function Transcript(props: { view: CallView; tall: boolean }) {
+function Transcript(props: { view: CallView; tall: boolean; name: string }) {
   const { view } = props;
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -137,22 +146,26 @@ function Transcript(props: { view: CallView; tall: boolean }) {
   }, [view.lines, view.partial]);
   const lines = props.tall ? view.lines : view.lines.slice(-4);
   return (
-    <div ref={box} className={cn("mx-4 mb-2 min-h-[56px] flex-1 space-y-1.5 overflow-y-auto text-sm", props.tall ? "" : "max-h-[200px]")}>
-      {lines.length === 0 && view.partial === "" ? <p className="text-xs text-subtle">{emptyLine(view)}</p> : null}
+    <div ref={box} className={cn("mx-4 my-2.5 min-h-[56px] flex-1 space-y-2 overflow-y-auto text-sm [scrollbar-width:thin]", props.tall ? "" : "max-h-[216px]")}>
+      {lines.length === 0 && view.partial === "" ? <p className="py-1 text-xs text-subtle">{emptyLine(view)}</p> : null}
       {lines.map((line, i) => (
-        <Line key={`${line.turn}-${line.role}-${i}`} line={line} />
+        <Line key={`${line.turn}-${line.role}-${i}`} line={line} name={props.name} />
       ))}
-      {view.partial !== "" ? <p className="text-fg/70 italic">{view.partial}</p> : null}
+      {view.partial !== "" ? (
+        <p className="rounded-lg border border-dashed border-line bg-sunken/45 px-2.5 py-1.5 text-xs leading-snug text-fg/80 italic">
+          {view.partial}
+        </p>
+      ) : null}
     </div>
   );
 }
 
-function Line(props: { line: CallLine }) {
+function Line(props: { line: CallLine; name: string }) {
   const { line } = props;
   const mine = line.role === "user";
   return (
-    <p className={cn("leading-snug", mine ? "text-muted" : "text-fg")}>
-      <span className="mr-1.5 text-2xs font-medium tracking-wide text-subtle uppercase">{mine ? "You" : "It"}</span>
+    <div className={cn("rounded-lg px-2.5 py-1.5 text-xs leading-relaxed", mine ? "bg-sunken/70 text-muted" : "bg-accent-soft/35 text-fg")}>
+      <span className="mr-1.5 text-[10px] font-semibold tracking-wider text-subtle uppercase">{mine ? "You" : props.name}</span>
       {line.interrupted && line.heard !== null ? (
         <>
           {line.heard.trim() === "" ? <span className="text-subtle">(cut off)</span> : line.heard}
@@ -162,7 +175,7 @@ function Line(props: { line: CallLine }) {
         line.text
       )}
       {!line.done ? <span className="text-subtle"> …</span> : null}
-    </p>
+    </div>
   );
 }
 
