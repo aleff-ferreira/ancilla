@@ -15,9 +15,10 @@ on Windows, macOS and Linux.
 [See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.26.1:** a voice call that goes on from an earlier conversation answers again after you reopen Ancilla (it used to say
-> "Sorry, I lost my train of thought" to everything), and a call that cannot change the Muse model you chose answers anyway and
-> says so. [Read the release notes](docs/CHANGELOG.md#0261).
+> **New in 0.27.0:** an integrated Browser panel (`Ctrl/Cmd+Shift+B`) and controlled assistant web browsing with native folder-picker
+> downloads, controlled uploads and per-site sign-in sharing; official connectors for Gmail, Google Drive, Hostinger, GitHub, Supabase
+> and Brevo with OAuth 2.0 PKCE and write approvals; provider-independent tasks across Muse, hosted APIs and local model servers; and
+> zero-download HTTP speech, faster context pre-warming and echo/duplicate protection in Voice. [Read the release notes](docs/CHANGELOG.md#0270).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"

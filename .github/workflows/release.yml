@@ -41,9 +41,11 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.26.1**
-    - **A call that goes on from an earlier conversation answers again.** After you reopened Ancilla, the first call that went on from a conversation of the day before could not answer: it said "Sorry, I lost my train of thought" to everything, with Muse's "session ... is not loaded on this host" on its card. The call now loads its Muse thread before it uses it, loads it again if Muse lets it go in the middle of the call, and starts a new thread, told what was said before, when the old one is gone.
-    - **A call that cannot change the Muse model still answers.** When Muse will not put the thread on the model you chose, the call answers on the model the thread has and says so once on its card, with Muse's reason, instead of failing every turn.
+    **New in 0.27.0**
+    - **An integrated Browser panel and controlled assistant web browsing.** Open websites beside your threads (`Ctrl/Cmd+Shift+B`) with persistent sign-ins, controlled file uploads, and desktop downloads with a native folder picker and optional remembered destination. Ask the assistant to browse or act on the web with per-site permission, optional per-site sign-in sharing, and explicit confirmation before any form submission, upload or purchase.
+    - **Connectors for Gmail, Google Drive, Hostinger, GitHub, Supabase and Brevo.** Sign in to Gmail and Google Drive with OAuth 2.0 PKCE (with automatic token refresh and revocation on disconnect), or connect Hostinger, GitHub, Supabase and Brevo with verified tokens stored only for your user account. Accounts start read-only, and any write proposal waits for your approval of the exact payload.
+    - **Provider-independent models and tasks, with or without Muse.** Use Muse CLI, `/v1/chat/completions`, `/v1/messages`, or auto-detected local servers (`Ollama`, `LM Studio`, `llama.cpp`, `vLLM`) with automatic text-tool fallback. When Muse is unavailable, assistant read, write and check tasks run directly with workspace-confined tools.
+    - **Faster, more reliable voice conversations.** Run speech locally on your machine or through any `/audio/transcriptions` and `/audio/speech` server with zero model download, pre-warm memory notes while you speak, inspect live threads and usage by voice, propose changes for screen approval, suppress short speaker echo, and prevent retried turns from duplicating actions.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
