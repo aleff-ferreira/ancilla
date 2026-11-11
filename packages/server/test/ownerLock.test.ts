@@ -605,6 +605,38 @@ describe("a record that changes hands while a launcher waits on it", () => {
     assert.equal(readOwner(dir)?.port, 4200);
   });
 
+  it("gives a newcomer that is still writing its record its own wait when the old budget ends, and refuses once it binds", async () => {
+    const dir = tmpDir("ancilla-lock-");
+    const theirs = ownerRecord({ port: 4100, startedAt: "2026-10-14T18:00:00.000Z" });
+    writeOwner(dir, theirs);
+    const deps = fakeOwnerDeps({ alive: new Set([theirs.pid]) });
+    const newcomer = ownerRecord({ port: null, startedAt: new Date(deps.clock.now() + OWNER_LOCK_WAIT_MS).toISOString() });
+    const whole = JSON.stringify(newcomer) + "\n";
+    const inner = deps.wait;
+    deps.wait = async (ms, signal) => {
+      const slept = await inner(ms, signal);
+      if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS) {
+        // The budget on the previous owner just ran out, and a second launcher that won `wx` has not finished writing yet.
+        writeOwnerText(dir, "");
+      } else if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 1) {
+        writeOwnerText(dir, whole);
+      } else if (deps.waits.length === OWNER_LOCK_WAIT_MS / OWNER_POLL_MS + 3) {
+        binds(dir, deps, newcomer, 4200);
+      }
+      return slept;
+    };
+    const lock = claimOwnerLock(dir, identity(), deps);
+    await assert.rejects(lock.resolve(), (error: unknown) => {
+      assert.ok(error instanceof DataDirOwnedError);
+      assert.equal(error.owner.instanceId, newcomer.instanceId);
+      assert.equal(error.owner.port, 4200);
+      return true;
+    });
+    assert.equal(lock.state, "contended");
+    assert.deepEqual(deps.lines, [], "the newcomer's half-written record was not unlinked on the old budget");
+    assert.equal(readOwner(dir)?.instanceId, newcomer.instanceId);
+  });
+
   it("leaves a record that appeared between reading a torn one and removing it", async () => {
     const dir = tmpDir("ancilla-lock-");
     writeOwnerText(dir, "{\"format\":1,\"instanceId\":\"x\"");

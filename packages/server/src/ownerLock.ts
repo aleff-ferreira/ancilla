@@ -16,7 +16,7 @@
  * data, it must never keep the data from opening. Servers in one process over one folder share one lock (tests,
  * embedders).
  */
-import { closeSync, fsyncSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, ftruncateSync, openSync, readFileSync, realpathSync, unlinkSync, writeSync } from "node:fs";
 import { get as httpGet } from "node:http";
 import { join, resolve } from "node:path";
 import { EXIT_DATA_DIR_OWNED } from "./exitCodes.js";
@@ -517,11 +517,28 @@ export class OwnerLock {
         if (claimed === "settled" || (claimed === "again" && this.refusedAgain())) {
           return;
         }
+        if (claimed === "exists") {
+          judged = null;
+          started = this.deps.now();
+        }
       } else if (read.kind === "torn") {
-        // An owner rewriting its record in place (its port, its closing time), or one that was stopped mid-write:
-        // re-read until the budget ends, and only then take the folder.
-        if (spent() && this.takeOver("torn", "its record could not be read")) {
-          return;
+        // An owner rewriting its record in place (its port, its closing time), a newcomer mid-write, or one that was
+        // stopped mid-write: re-read until its own budget ends, and only then take the folder.
+        if (judged !== "torn") {
+          if (judged !== null) {
+            started = this.deps.now();
+          }
+          judged = "torn";
+        }
+        if (spent()) {
+          const outcome = this.takeOver("torn", "its record could not be read");
+          if (outcome === "done") {
+            return;
+          }
+          if (outcome === "raced") {
+            judged = null;
+            started = this.deps.now();
+          }
         }
       } else {
         const record = read.record;
@@ -538,17 +555,27 @@ export class OwnerLock {
           throw new DataDirOwnedError(record, this.dataDir, file, true);
         }
         if (verdict === "stale") {
-          if (this.takeOver(record, `the Ancilla it named (pid ${record.pid}) is gone`)) {
+          const outcome = this.takeOver(record, `the Ancilla it named (pid ${record.pid}) is gone`);
+          if (outcome === "done") {
             return;
+          }
+          if (outcome === "raced") {
+            judged = null;
+            started = this.deps.now();
           }
         } else if (spent()) {
           const why =
             verdict === "closing"
               ? `the Ancilla closing there (pid ${record.pid}) did not finish within ${Math.round(budgetMs / 1000)} s`
               : `the Ancilla it named (pid ${record.pid}) did not answer within ${Math.round(budgetMs / 1000)} s`;
-          if (this.takeOver(record, why)) {
+          const outcome = this.takeOver(record, why);
+          if (outcome === "done") {
             this.tookOverFromClosing = verdict === "closing" && (this.state as OwnerLockState) === "held";
             return;
+          }
+          if (outcome === "raced") {
+            judged = null;
+            started = this.deps.now();
           }
         }
       }
@@ -593,24 +620,24 @@ export class OwnerLock {
    * Removes the record that was judged and claims the folder. The file is read again first and removed only while it
    * still holds that record (`torn`: still no record): a launcher that took the folder in the meantime, or an owner
    * that wrote its port, is judged afresh on the next pass, never removed on the strength of the old judgement. A
-   * record that reappears after the removal belongs to a launcher that won. True when the pass is over, the lock
-   * being held, given up or lost to another; false to go on waiting.
+   * record that reappears after the removal belongs to a launcher that won (`raced`). `done` when the pass is over,
+   * the lock being held or given up; `wait` or `raced` to go on waiting.
    */
-  private takeOver(judged: OwnerRecord | "torn", why: string): boolean {
+  private takeOver(judged: OwnerRecord | "torn", why: string): "done" | "wait" | "raced" {
     const file = this.file as string;
     const now = readRecord(file);
     if (now.kind === "unreadable") {
       if (!this.refusalMayPass(now.code)) {
         this.unavailable(now.code, "read");
-        return true;
+        return "done";
       }
       this.refusal = { code: now.code, what: "read" };
-      return this.refusedAgain();
+      return this.refusedAgain() ? "done" : "wait";
     }
     if (now.kind !== "gone") {
       const unchanged = judged === "torn" ? now.kind === "torn" : now.kind === "record" && recordText(now.record) === recordText(judged);
       if (!unchanged) {
-        return false;
+        return "wait";
       }
       try {
         (this.deps.files?.remove ?? unlinkSync)(file);
@@ -619,19 +646,22 @@ export class OwnerLock {
         if (code !== "ENOENT") {
           if (this.refusalMayPass(code)) {
             this.refusal = { code, what: "replaced" };
-            return this.refusedAgain();
+            return this.refusedAgain() ? "done" : "wait";
           }
           this.unavailable(code, "replaced");
-          return true;
+          return "done";
         }
       }
       this.deps.log(`taking over the data folder ${this.dataDir}: ${why}.`);
     }
     const claimed = this.tryClaim();
     if (claimed === "again") {
-      return this.refusedAgain();
+      return this.refusedAgain() ? "done" : "wait";
     }
-    return this.state !== "contended";
+    if (claimed === "exists") {
+      return "raced";
+    }
+    return this.state !== "contended" ? "done" : "wait";
   }
 
   /** Whether this lock's record is the one in the file. */
@@ -642,8 +672,9 @@ export class OwnerLock {
   /**
    * Rewrites the record in place, and only while the file still names `expected`: this server's own id, or the id of
    * the holder that is handing the file over. A server that was taken over (its owner wait spent while it was blocked,
-   * or asleep) must not write over, and so not later delete, the record of the one that took the folder. A reader that
-   * catches the write half done re-reads. Best effort: the lock is not the data.
+   * or asleep) must not write over, and so not later delete, the record of the one that took the folder. Opening `r+`
+   * overwrites at byte zero before truncating any tail so the file never passes through zero bytes. Best effort: the
+   * lock is not the data.
    */
   private rewrite(expected: string): void {
     const file = this.file as string;
@@ -653,7 +684,14 @@ export class OwnerLock {
         this.changedHands(read);
         return;
       }
-      writeFileSync(file, recordText(this.record));
+      const bytes = Buffer.from(recordText(this.record), "utf8");
+      const fd = openSync(file, "r+");
+      try {
+        writeSync(fd, bytes, 0, bytes.length, 0);
+        ftruncateSync(fd, bytes.length);
+      } finally {
+        closeSync(fd);
+      }
     } catch (error) {
       this.deps.log(`the data folder lock could not be updated (${(error as NodeJS.ErrnoException).code ?? String(error)}).`);
     }
