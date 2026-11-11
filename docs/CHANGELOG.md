@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.28.0
+
+### New
+
+- **Multi-subscription harnesses, Agent Client Protocol (`acp`) agents, and Direct API / local model endpoints.** Configure subscriptions, isolated named profiles (`Work`, `Personal`), API keys, and local servers under **Settings, AI subscriptions** or switch per project from the **Provider & Account** menu beside the model picker. Alongside Meta's Muse Code (`muse`), Ancilla now delegates directly over `stdio` to official installed CLIs for OpenAI Codex (`codex app-server`), Anthropic Claude Code (`claude -p --input-format stream-json`), Google Gemini CLI (`gemini --acp`), GitHub Copilot CLI (`copilot --acp --stdio`), Kimi (`kimi acp`), Qwen (`qwen --acp`), OpenCode (`opencode acp`), and custom ACP binaries, plus built-in HTTP streaming with approval-gated workspace tools for OpenRouter, Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, `llama.cpp`, and `vLLM`. Subscription profiles never read or proxy third-party OAuth tokens or OS keychains, automatically strip inherited pay-as-you-go API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and peers) so flat-rate plans are not billed per token by accident, and separate live subscription rate-limit windows and plan tiers from pay-as-you-go token ledgers on the **Usage** page.
+- **Live native subscription model catalogs and instant post-login refresh.** Signing into any subscription surfaces the exact models, display names, descriptions, subscription default (`isDefault`), context windows (`[1m]`), and reasoning effort levels exposed by the underlying CLI or API—paginating `codex app-server` `model/list` while filtering internal hidden entries, probing Claude Code's `control_request` `initialize` catalog, running pre-session `session/new` discovery and `configOptions` parsing for ACP agents, and querying `/models`, `/v1/models`, and `/v1beta/models` on HTTP endpoints. Completing a login recycles idle pre-login hosts immediately, probes a fresh one-shot host when an existing host is busy running a turn, and pushes a `login-completed` event so open model menus update right away.
+- **Simultaneous voice conversation and concurrent background task delegation.** The assistant now runs up to three background tasks concurrently (`maxConcurrent: 3`), adds `delegate_task` so multi-step coding, shell, web, or verification work runs asynchronously while live voice calls stay responsive for new questions, announces task milestones and completions aloud between turns, and keeps active background tasks running uninterrupted when you barge in to speak.
+
+### Fixed
+
+- **Model menu sign-in prompts and Muse 1.4.15+ empty built-in catalogs.** When Muse 1.4.15+ returns an empty `bundledCatalog` before sign-in, the model menu no longer shows contradictory *"listed no models"* and *"sent its built-in model list"* banners together, offers one-click sign-in directly inside the model menu for both default Muse logins and unauthenticated subscription CLIs, accepts `[1m]` and `vendor/model` IDs, and keeps Meta's published fallback stubs scoped to Muse.
+- **Managed Browser startup fallbacks and live stream recovery.** Browser launch now retries immediate startup failures and falls back in order across installed Chromium-family browsers with isolated `profile-<kind>` directories so a broken browser update does not take down the Browser panel, while Browser and Assistant Watch sockets reconnect automatically with backoff without blanking active tabs or duplicating status toasts.
+
 ## 0.27.3
 
 ### New

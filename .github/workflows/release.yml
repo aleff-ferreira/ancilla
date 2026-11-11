@@ -41,9 +41,9 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.27.3**
-    - **Movable assistant window and frameless floating avatar mode.** Drag your companion anywhere in the workspace (clear of bottom composer and Browser bars), let 3D companions and imported sprite sheets float framelessly in view with a live audio aura and directional speech/approval bubble, switch to the movable transcript card in one click, or pin your companion on screen between calls.
-    - **Direct avatar size controls (`56 px` to `224 px`) and `muse usage --json` quota checks.** Scale the avatar via `S / M / L / XL` presets, a pixel slider, or `Alt+scroll` right over the companion, while subscription usage now queries `muse usage --json` directly without reading raw tokens.
+    **New in 0.28.0**
+    - **Multi-subscription harnesses, ACP agents, Direct APIs and live model catalogs.** Run threads across Meta's Muse Code (`muse`), OpenAI Codex (`codex`), Anthropic Claude Code (`claude`), Google Gemini CLI (`gemini`), GitHub Copilot CLI (`copilot`), Kimi, Qwen, OpenCode, custom Agent Client Protocol (`acp`) agents, and Direct API / local servers (OpenRouter, Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM), with isolated multi-account profiles, ambient API-key stripping, live subscription model and reasoning-effort discovery, and instant post-login catalog refresh.
+    - **Concurrent background tasks during live voice calls, plus resilient Browser sessions.** Delegate up to three multi-step background tasks (`delegate_task`) while continuing to talk freely without spoken barge-in cancelling running work, and keep the integrated Browser panel connected across ordered browser fallbacks and WebSocket reconnects.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
