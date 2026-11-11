@@ -98,7 +98,7 @@ jobs:
       # Tauri links WebKitGTK and friends, which the Ubuntu runner does not ship.
       - name: Install Tauri Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+        run: bash scripts/apt-install-ubuntu.sh libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - run: npm ci
       - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
       - run: npm run build --workspace @ancilla/web
