@@ -15,10 +15,10 @@ on Windows, macOS and Linux.
 [See it in action](#see-it-in-action) · [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.27.2:** authorized launching of `localhost` dev servers, commands, web URLs, folders and editors from voice and chat
-> (instant in **YOLO** mode, or one click / spoken *"go ahead"* on the call card), live web animation and `<canvas>` DPI diagnostics
-> in the Browser panel, and faster tool-enabled voice turns on Muse threads.
-> [Read the release notes](docs/CHANGELOG.md#0272).
+> **New in 0.27.3:** a movable assistant window with frameless floating avatar mode, directional speech and authorization bubbles,
+> direct avatar size controls (`56 px`–`224 px` presets, slider and `Alt+scroll`), optional screen pinning between calls, and
+> `muse usage --json` subscription allowance checks.
+> [Read the release notes](docs/CHANGELOG.md#0273).
 
 > **Unofficial community project.** Ancilla is not made, endorsed, or supported by Meta, and is not affiliated with Meta.
 > It is a client for the **Muse Code CLI** and is unrelated to the Muse assistant app for Mac. "Muse" and "Muse Code"

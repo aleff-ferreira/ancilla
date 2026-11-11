@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.27.3
+
+### New
+
+- **Movable assistant window and frameless floating avatar mode.** Drag your companion anywhere in the workspace instead of having a fixed card cover bottom composer or Browser bars; the chosen spot is remembered across window resizes and calls, clamps automatically inside the visible viewport, and resets with a double-click or **Reset spot**. In **Floating avatar** mode (the new default), 3D companions, geometric forms and imported sprite sheets float framelessly in view with a live audio aura, a compact control pill, and a directional speech and authorization bubble that opens toward whichever side of the screen has room. Switch to the movable **Transcript card** anytime in one click, or pin your companion floating on screen between calls from the floating controls, the sidebar companion card, or **Assistant, Persona**.
+- **Direct avatar size controls (`56 px` to `224 px`).** Resize your companion with `S`, `M`, `L` and `XL` presets, `-` / `+` buttons, a smooth pixel slider, or `Alt` + mouse-wheel directly over the floating avatar, both in the assistant window's **Avatar size** popover and under **Assistant, Persona, Where it shows up**.
+
+### Changed
+
+- **Subscription allowance checks run via `muse usage --json`, with stronger browser and call boundaries.** Plan usage now invokes the official `muse usage --json` CLI snapshot without reading raw access tokens, automated assistant browsing and cookie sharing fence off Meta consumer social domains while leaving your own Browser tabs unrestricted, and spoken next-turn approval confirmations require active microphone echo cancellation.
+
 ## 0.27.2
 
 ### New

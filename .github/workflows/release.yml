@@ -41,9 +41,9 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.27.2**
-    - **Authorized launching from voice and chat across every model backend.** Ask the assistant to inspect project files, start `localhost` dev servers, run commands, or open URLs, folders and editors: actions run immediately when **YOLO** mode is on, or show an inline **Allow / Deny** card on the call dock that you can click or confirm aloud (*"go ahead"*).
-    - **Live web page and animation diagnostics in the Browser panel.** The assistant can open your running `localhost` app in Ancilla's Browser panel and measure live FPS, frame drops, `<canvas>` DPI buffer mismatches, layout-thrashing animations, build overlays and console errors, while voice calls on Muse threads now use tools at responsive `medium` reasoning effort without filler-word duplication.
+    **New in 0.27.3**
+    - **Movable assistant window and frameless floating avatar mode.** Drag your companion anywhere in the workspace (clear of bottom composer and Browser bars), let 3D companions and imported sprite sheets float framelessly in view with a live audio aura and directional speech/approval bubble, switch to the movable transcript card in one click, or pin your companion on screen between calls.
+    - **Direct avatar size controls (`56 px` to `224 px`) and `muse usage --json` quota checks.** Scale the avatar via `S / M / L / XL` presets, a pixel slider, or `Alt+scroll` right over the companion, while subscription usage now queries `muse usage --json` directly without reading raw tokens.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 
