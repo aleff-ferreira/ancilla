@@ -103,12 +103,12 @@ import type { MuseBrainHost } from "./voice/muse-brain.js";
 import { VoiceService } from "./voice/service.js";
 import type { WorkspaceProjectRef, WorkspaceVoiceDeps } from "./voice/workspace-tools.js";
 import { handleBrowser, isBrowserPath } from "./browser/routes.js";
-import { BrowserService } from "./browser/service.js";
+import { BrowserError, BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
 import { BrowserWatchServer, BROWSER_WATCH_PATH } from "./browser/watch.js";
 import { BrowseRunner } from "./browser/runner.js";
-import { BrowseSites, hostKind } from "./browser/sites.js";
+import { BrowseSites, hostKind, isRestrictedAssistantUrl } from "./browser/sites.js";
 import { AuditLog } from "./connectors/audit.js";
 import { makeOpener } from "./connectors/connection.js";
 import { ConnectorRegistry } from "./connectors/registry.js";
@@ -120,7 +120,15 @@ import { AmbiguousStartError, type ExecutiveHost, type FallbackReadRunner, type 
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
 import { AoniaError, createAonia, parseLoginOutput, type Aonia, type Profile } from "@harjjotsinghh/aonia";
 import { LinuxMuseInstaller } from "./linuxMuseInstaller.js";
-import { loginIdentity, MuseSubscriptionReader, subscriptionIdentity, type PlanAccountUsage, type SubscriptionReading } from "./subscriptionQuota.js";
+import {
+  loginIdentity,
+  MuseSubscriptionReader,
+  subscriptionIdentity,
+  type MuseUsageCliRequest,
+  type MuseUsageCliResult,
+  type PlanAccountUsage,
+  type SubscriptionReading,
+} from "./subscriptionQuota.js";
 import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
 export const ANCILLA_VERSION = "0.27.2";
@@ -1112,7 +1120,11 @@ export class AncillaServer {
       platform: this.options.platform === "win32" ? "win32" : this.options.platform === "darwin" ? "darwin" : "linux",
       ...(this.options.musePath ? { musePath: this.options.musePath } : {}) });
     this.linuxInstaller = options.linuxInstaller ?? new LinuxMuseInstaller({ platform: this.options.platform, home: this.options.home });
-    this.subscriptionReader = options.subscriptionReader ?? new MuseSubscriptionReader();
+    this.subscriptionReader =
+      options.subscriptionReader ??
+      new MuseSubscriptionReader({
+        runUsage: (request) => this.runMuseUsage(request),
+      });
     this.wslQuota = options.wslQuota ?? {};
     this.wslHomes = new WslHomes({
       run: (distro) => this.askWslHome(distro),
@@ -1261,6 +1273,9 @@ export class AncillaServer {
     const parsed = new URL(url);
     const local = hostKind(parsed.hostname) === "local";
     const preferred = local ? "you" : "assistant";
+    if (preferred === "assistant" && isRestrictedAssistantUrl(url)) {
+      throw new BrowserError("blocked", "Automated assistant browsing is disabled on Meta consumer sites; open it in your own Browser tab instead.");
+    }
     const browser = this.browserFor();
     const sameAddress = (a: string, b: string): boolean => {
       try {
@@ -5339,6 +5354,19 @@ export class AncillaServer {
     });
   }
 
+  /** One `muse usage --json` check (no model turn and no persistent `muse serve` host). */
+  private async runMuseUsage(request: MuseUsageCliRequest): Promise<MuseUsageCliResult> {
+    const plan = await this.planMuseExec(["usage", "--json"], request.accountId);
+    let env = plan.env;
+    if (request.accountId === null && (await this.museRuntime()) !== "wsl") {
+      env = { ...(env ?? { ...process.env, HOME: this.options.home }), MUSE_AUTH_PATH: request.authPath };
+    }
+    return this.options.exec(plan.command, plan.args, {
+      ...(env ? { env } : {}),
+      signal: request.signal,
+    });
+  }
+
   /** Delivers one session's host notifications to a listener until the returned function is called. */
   private onSessionNotification(sessionId: string, handler: SessionNotificationHandler): () => void {
     let listeners = this.sessionListeners.get(sessionId);
@@ -6883,7 +6911,7 @@ export class AncillaServer {
       const direct = async () => {
         try {
           const path = await this.quotaAuthPath(accountId);
-          const reading = path ? await this.subscriptionReader.read(path) : null;
+          const reading = path ? await this.subscriptionReader.read(path, accountId) : null;
           if (revision !== this.planUsageReadRevision || this.closed || (accountId && this.removedQuotaAccounts.has(accountId))) return;
           // Login can change while Meta answers, even if no other quota request has noticed it yet.
           const scope = await this.quotaCacheScope(accountId);

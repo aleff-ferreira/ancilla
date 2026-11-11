@@ -226,6 +226,15 @@ describe("WorkspaceVoiceTools inspection and page diagnostics", () => {
       assert.match(inspected?.text ?? "", /DPI-MISMATCH/);
       assert.match(inspected?.text ?? "", /top, width/);
       assert.match(formatPageDiagnostics(sampleDiag), /WebGL warning/);
+
+      // Meta consumer/social sites are fenced off from automated inspect_page and Ancilla browser launches.
+      const blockedInspect = await tools.run({ id: "c5", name: "inspect_page", arguments: JSON.stringify({ url: "https://www.instagram.com/" }) }, 3);
+      assert.equal(blockedInspect?.ok, false);
+      assert.match(blockedInspect?.text ?? "", /disabled on Meta consumer sites/);
+
+      const blockedLaunch = await tools.run({ id: "c6", name: "launch", arguments: JSON.stringify({ url: "https://web.whatsapp.com/" }) }, 3);
+      assert.equal(blockedLaunch?.ok, false);
+      assert.match(blockedLaunch?.text ?? "", /disabled on Meta consumer sites/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -317,5 +326,78 @@ describe("VoiceSession filler streaming and subsequent-turn spoken authorization
     );
     assert.equal(executed, true);
     assert.equal(rig.client.of("approval").at(-1)?.msg.request, null, "approval banner cleared after execution");
+  });
+
+  it("refuses spoken allow when microphone echo cancellation is off while still allowing spoken cancel and button clicks", async () => {
+    const hub = new AuthorizationHub();
+    const decisions: boolean[] = [];
+    const rig = await makeRig({
+      open: false,
+      sentences: { 1: "Go ahead.", 2: "Cancel that." },
+      script: (messages) => {
+        const last = messages.at(-1)?.content ?? "";
+        if (last.includes("Spoken approval") && last.includes("echo cancellation is off")) {
+          return { ttftMs: 30, text: "Please click Launch on the call card." };
+        }
+        return { ttftMs: 30, text: "Okay." };
+      },
+    });
+
+    rig.host.pendingApproval = () => hub.current();
+    rig.host.decideApproval = (id, allow) => hub.decide(id, allow);
+    rig.host.subscribeApprovals = (fn) => hub.subscribe(fn);
+
+    await rig.session.start({ type: "hello", v: 1, mode: "hands-free", lang: null, echoCancelled: false, resume: null, thread: null });
+    await rig.sched.advance(0);
+
+    const first = hub.request({
+      kind: "launch",
+      title: "Launch dev server",
+      detail: "npm run dev",
+      allowLabel: "Launch",
+      createdTurn: 0,
+      onDecide: async (allow) => {
+        decisions.push(allow);
+        return { ok: true, message: allow ? "Launched" : "Declined" };
+      },
+    });
+
+    // Spoken "Go ahead." over non-echo-cancelled mic MUST NOT approve!
+    await rig.client.speak(1, 700);
+    assert.ok(
+      await rig.client.until(() => rig.client.of("speak_end").length >= 1 && rig.session.snapshot().agent === "idle", 20_000),
+      "spoken turn finished",
+    );
+    assert.equal(decisions.length, 0, "spoken allow blocked when echoCancelled is false");
+    assert.equal(hub.current()?.id, first.id, "approval remains pending on screen");
+    assert.ok(
+      rig.client.of("notice").some((n) => /Echo cancellation is off/.test(n.msg.text)),
+      "client received acoustic warning notice",
+    );
+
+    // Spoken "Cancel that." STILL declines immediately even without echo cancellation (fail-safe).
+    await rig.client.speak(2, 700);
+    assert.ok(
+      await rig.client.until(() => decisions.length === 1 && rig.session.snapshot().agent === "idle", 20_000),
+      "spoken cancel honored",
+    );
+    assert.deepEqual(decisions, [false]);
+    assert.equal(hub.current(), null);
+
+    // Explicit UI button click ("decide") approves even when echoCancelled is false.
+    const second = hub.request({
+      kind: "launch",
+      title: "Launch preview",
+      detail: "npm run preview",
+      allowLabel: "Launch",
+      createdTurn: 0,
+      onDecide: async (allow) => {
+        decisions.push(allow);
+        return { ok: true, message: "Preview started" };
+      },
+    });
+    rig.client.send({ type: "decide", id: second.id, allow: true });
+    assert.ok(await rig.client.until(() => decisions.length === 2, 5_000));
+    assert.deepEqual(decisions, [false, true]);
   });
 });

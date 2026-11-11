@@ -116,6 +116,48 @@ export function kindOfOrigin(origin: string): SiteKind {
   }
 }
 
+/**
+ * Consumer and social Meta domains fenced off from automated `assistant` browsing and `you` -> `assistant` cookie sharing.
+ * The user's own `you` Browser panel never consults this gate and remains unrestricted.
+ */
+export const RESTRICTED_ASSISTANT_DOMAINS: readonly string[] = [
+  "facebook.com",
+  "fb.com",
+  "fbsbx.com",
+  "messenger.com",
+  "instagram.com",
+  "cdninstagram.com",
+  "whatsapp.com",
+  "whatsapp.net",
+  "threads.net",
+  "threads.com",
+  "meta.ai",
+];
+
+export function isRestrictedAssistantHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (host === "") return false;
+  return RESTRICTED_ASSISTANT_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+export function isRestrictedAssistantOrigin(origin: string): boolean {
+  const normalized = originOf(origin);
+  if (!normalized) return false;
+  try {
+    return isRestrictedAssistantHost(new URL(normalized).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isRestrictedAssistantUrl(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (trimmed === "") return false;
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const origin = originOf(candidate);
+  return origin !== null && isRestrictedAssistantOrigin(origin);
+}
+
 const MAX_RULES = 500;
 
 /** The saved rules: Always allow and Block. One small file; a file that is missing or unreadable means no rules. */
@@ -136,6 +178,7 @@ export class SiteRules {
       for (const item of Array.isArray(parsed.rules) ? parsed.rules : []) {
         const rule = item as Partial<SiteRule>;
         if (typeof rule.origin === "string" && originOf(rule.origin) === rule.origin && (rule.decision === "allow" || rule.decision === "block")) {
+          if (rule.decision === "allow" && isRestrictedAssistantOrigin(rule.origin)) continue;
           this.rules.set(rule.origin, {
             origin: rule.origin,
             decision: rule.decision,
@@ -171,6 +214,7 @@ export class SiteRules {
 
   set(origin: string, decision: SiteDecision, useSignIn = false): void {
     if (originOf(origin) !== origin) return;
+    if (decision === "allow" && isRestrictedAssistantOrigin(origin)) return;
     if (!this.rules.has(origin) && this.rules.size >= MAX_RULES) {
       const oldest = [...this.rules.values()].sort((a, b) => a.at - b.at)[0];
       if (oldest) this.rules.delete(oldest.origin);
@@ -186,6 +230,7 @@ export class SiteRules {
 
   /** Switches persistent signed-in cookie sharing on or off for an already-allowed origin. */
   setSignIn(origin: string, useSignIn: boolean): boolean {
+    if (isRestrictedAssistantOrigin(origin)) return false;
     const existing = this.rules.get(origin);
     if (!existing || existing.decision !== "allow") return false;
     this.rules.set(origin, {
@@ -236,6 +281,7 @@ export class SiteGate {
 
   /** What the rules and this task's answers say about an origin, without asking anyone. */
   check(taskId: string, origin: string): SiteCheck {
+    if (isRestrictedAssistantOrigin(origin)) return "block";
     const rule = this.rules.get(origin);
     if (rule?.decision === "block") return "block";
     if (this.refusals.get(taskId)?.has(origin)) return "block";
@@ -246,7 +292,7 @@ export class SiteGate {
 
   /** Whether `origin` is both allowed for `taskId` and explicitly approved to use cookies from the user's persistent Browser sign-in. */
   usesSignIn(taskId: string, origin: string): boolean {
-    if (this.check(taskId, origin) !== "allow") return false;
+    if (isRestrictedAssistantOrigin(origin) || this.check(taskId, origin) !== "allow") return false;
     if (this.rules.get(origin)?.useSignIn === true) return true;
     return this.signedInGrants.get(taskId)?.has(origin) === true;
   }
@@ -469,14 +515,18 @@ export class BrowseSites {
 
   /** Grants `origin` for this server run after explicit user authorization (or standing YOLO authorization). */
   grantSessionOrigin(origin: string): void {
-    this.sessionGrants.add(origin);
+    const normalized = originOf(origin);
+    if (!normalized || isRestrictedAssistantOrigin(normalized)) return;
+    this.sessionGrants.add(normalized);
   }
 
   isAllowedNow(origin: string): boolean {
+    if (isRestrictedAssistantOrigin(origin)) return false;
     return this.sessionGrants.has(origin) || this.rules.get(origin)?.decision === "allow";
   }
 
   async decide(request: { url: string; origin: string; tabId: string; mainFrame: boolean }): Promise<boolean> {
+    if (isRestrictedAssistantOrigin(request.origin) || isRestrictedAssistantUrl(request.url)) return false;
     if (this.sessionGrants.has(request.origin)) return true;
     const taskId = this.source().taskId();
     if (!request.mainFrame) {
@@ -491,6 +541,7 @@ export class BrowseSites {
 
   /** Whether `request.origin` was explicitly granted signed-in cookie sharing for the active web task. */
   shouldShareSignIn(request: { url: string; origin: string; tabId: string; mainFrame: boolean }): boolean {
+    if (isRestrictedAssistantOrigin(request.origin) || isRestrictedAssistantUrl(request.url)) return false;
     const taskId = this.source().taskId();
     if (taskId === null) return false;
     return this.gate.usesSignIn(taskId, request.origin);

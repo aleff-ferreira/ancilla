@@ -4,6 +4,7 @@ import type { AssistantService } from "../assistant/service.js";
 import type { Task } from "../assistant/tasks.js";
 import { awaitsApproval, parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks.js";
 import { ConflictError, NotFoundError, ValidationError } from "../assistant/store.js";
+import { isRestrictedAssistantUrl } from "../browser/sites.js";
 import type { ToolCall, ToolSpec } from "./brain.js";
 import type { ToolResult } from "./host.js";
 import { sayable, taskPhrase } from "./prompt.js";
@@ -11,14 +12,13 @@ import type { Lang } from "./text.js";
 
 /**
  * What the voice can do beyond talking: start work in the background, look at it, and change its course while it goes on.
- * Every tool is a small, checked operation on the task executive or on the notes. None of them can approve anything or
- * change a file: a task started by voice reads and researches only, so a spoken sentence (which may have been misheard,
- * or may not have been the user's at all) can never be what lets something be altered. Work that would change something
- * is proposed (`propose_change`): it waits, paused and never started, and the approval is a click on the screen. No tool
- * here approves, and resuming a proposal is refused, so nothing said aloud can start one. `browse` starts a web task in the
- * assistant's own browser: it reads pages and changes nothing, and every site it wants is asked about on the screen, so a
- * spoken sentence cannot open one either. `use_connector` starts a task that reads one connected account (GitHub, Brevo, Supabase)
- * with the read tools Ancilla lists for it and nothing else, so it too can change nothing.
+ * Every tool is a small, checked operation on the task executive or on the notes. None of these tools can approve anything on
+ * its own: `delegate_task` reads and researches only. Work that would change files is proposed (`propose_change`): unless the
+ * user explicitly pre-authorized writes (such as YOLO mode), it waits paused on the user's screen (in Tasks and on the call
+ * card), where the user clicks Approve/Decline or confirms on a subsequent turn when microphone echo cancellation is active.
+ * Resuming an unapproved proposal via `resume_task` is refused. `browse` starts a web task in the assistant's isolated browser
+ * context: new origins and actions that submit/commit ask first on the screen, and Meta consumer/social domains are fenced off.
+ * `use_connector` starts a task on one connected account (GitHub, Brevo, Supabase) where any write action asks on the screen.
  */
 
 /** The connected accounts, as the call needs them: which can be used now, and whether one can be used for a task. */
@@ -243,7 +243,7 @@ export class VoiceTools {
             if (awaitsApproval(existing)) {
               return {
                 ok: true,
-                text: `Proposed task ${existing.id}, "${sayable(existing.title, 80)}", is already waiting on the user's screen, and only they can approve or decline it there. Do not say it is under way; say that it waits for their approval.`,
+                text: `Proposed task ${existing.id}, "${sayable(existing.title, 80)}", is already waiting on the user's screen for approval. Do not say it is under way; say that it waits for their approval.`,
               };
             }
             return {
@@ -279,7 +279,7 @@ export class VoiceTools {
           });
           return {
             ok: true,
-            text: `Proposed task ${task.id}, "${sayable(task.title, 80)}". Nothing has started: it waits on the user's screen, and only they can approve or decline it there. Say that it waits for their approval; do not say it is under way.`,
+            text: `Proposed task ${task.id}, "${sayable(task.title, 80)}". Nothing has started: it waits on the user's screen for approval (click Approve or confirm on the next turn). Say that it waits for their approval; do not say it is under way.`,
             narration: taskPhrase(lang, "proposed", task.title),
           };
         }
@@ -289,6 +289,12 @@ export class VoiceTools {
           const goal = str(args["goal"], 1500);
           if (goal === "") return { ok: false, text: "A web task needs a goal: say what to find out." };
           const url = str(args["url"], 500);
+          if (url !== "" && isRestrictedAssistantUrl(url)) {
+            return {
+              ok: false,
+              text: "Automated assistant browsing is disabled on Meta consumer sites; ask the user to open it in their own Browser tab instead.",
+            };
+          }
           const ready = await browse.available();
           if (!ready.ok) return { ok: false, text: `The browser cannot be used right now: ${ready.reason ?? "it is not available"}` };
           // A web task belongs to no project, but a task row names a folder: the project of the call, or the home folder.

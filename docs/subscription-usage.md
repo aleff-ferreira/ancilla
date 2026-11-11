@@ -7,29 +7,19 @@ cannot establish a subscription percentage: Meta owns the allowance and its acco
 
 | Source | What Ancilla reads | Freshness |
 | --- | --- | --- |
-| Meta | The subscription snapshot returned by Muse's device-login exchange | Fetched when Usage opens or Refresh is selected; while Ancilla is visible it re-reads in the background, once a minute on the Usage page and every five minutes elsewhere (after a failed read, every minute until one succeeds) |
+| Muse CLI (`muse usage --json`) | The official CLI allowance snapshot (`allowance`, `reason`, `hint`) | Checked when Usage opens or Refresh is selected; while Ancilla is visible it re-reads in the background, once a minute on the Usage page and every five minutes elsewhere (after a failed read, every minute until one succeeds) |
 | Muse runtime | MSP `usage/read` and `usage/changed` | The host's last observation, not a request for fresh account limits |
 | Saved reading | A previous observation scoped to the same login and runtime | Keeps its original observation time |
 
-The direct reader uses the CLI's `oauth` device credential from `auth.json` and sends it only to
-`https://api.meta.ai/muse-code/key`, with redirects disabled. It reads the default login's `MUSE_AUTH_PATH` override
-or XDG config root, and each named account's isolated config root. For Muse running in WSL on Windows, the default
-login is read from the distro's own `auth.json` through the `\\wsl.localhost\` share: the absolute `MUSE_AUTH_PATH` or
-else `XDG_CONFIG_HOME` that `runtime.json`'s `wslEnv` gives Muse, else `.config/muse/auth.json` under the distro user's
-home folder (asked of the distro once it answers, and remembered). Never the login on the Windows side. Opening the
-share may start a stopped distro. It does not start a Muse session or model turn. Returned inference keys and payment
-details are discarded. Credentials never enter the browser, local quota database, or error messages, and the reader
-never rewrites the CLI's login file.
+The CLI reader checks locally that `auth.json` holds an inline `oauth` device login (so Keychain-only or API-key configurations never trigger OS credential prompts) without extracting or transmitting `access_token`, and invokes `muse usage --json` directly via the configured Muse CLI (`MUSE_AUTH_PATH` natively for the default login, isolated XDG roots for named Aonia profiles, and `wsl -d <distro> -e <musePath> usage --json` for the default login under WSL). For Muse running in WSL on Windows, login identity is verified from the distro's own `auth.json` through the `\\wsl.localhost\` share: the absolute `MUSE_AUTH_PATH` or else `XDG_CONFIG_HOME` that `runtime.json`'s `wslEnv` gives Muse, else `.config/muse/auth.json` under the distro user's home folder (asked of the distro once it answers, and remembered). Never the login on the Windows side. `muse usage --json` performs no model turn and spawns no persistent `muse serve` host. Credentials never enter the browser, CLI argv, local quota database, or error messages, and Ancilla never rewrites the CLI's login file.
 
-Requests share a short 15-second cache per credential, concurrent requests are combined, and rate-limit responses
-delay retries. Changing or removing a login invalidates an in-flight response. A runtime observation newer than an
-HTTP request wins; the HTTP response's arrival does not artificially make its older data newer.
+Requests share a short 15-second cache per login fingerprint, concurrent requests are combined, and rate-limited CLI responses delay retries. Changing or removing a login invalidates an in-flight read. A runtime observation newer than a CLI invocation wins; a slow CLI exit does not artificially make its older data newer.
 
 ## Meaning of the numbers
 
 - The five-hour class window uses Meta's reported duration; a missing duration is not guessed.
 - Percentages above 100 are retained. Only the drawn progress bar is capped at 100.
-- Meta's HTTP reset stamps are epoch seconds; MSP reset stamps are epoch milliseconds.
+- MSP and `muse usage --json` reset stamps are epoch milliseconds.
 - The last report is kept for as long as the login stays the same, however old: in memory and, once Ancilla can
   verify the login's identity, in the local database, so it survives a restart with its original age. It is never
   dropped for being old and never passes for the current allowance. Only a reading under 30 minutes old, of a window
@@ -54,23 +44,12 @@ HTTP request wins; the HTTP response's arrival does not artificially make its ol
   accounts" hint on the new-thread screen compares accounts by the current figures only.
 - Reset countdowns count whole minutes below an hour and never show seconds, because the clock ticks once a minute.
   The pill tooltip and the Usage page describe a reading's age in the same short form, such as `28h` or `36d`.
-- A missing `subs_usage` field is not a zero. Meta can omit it while the short window is idle, even if weekly usage
-  exists, and before the first use in a new usage window. That is Meta's reply, not a fault in Ancilla: Muse's own
-  `muse usage --json` reports the same for such an account, `allowance: null` with the reason `server_sent_no_usage`.
-  The panel keeps the reported plan name and says that Meta confirms the plan but has sent no usage numbers yet; sending
-  a message in a thread that uses that account and then choosing Refresh checks again; if no numbers appear after that,
-  Meta has not sent any for the account. When a last report is kept, the line says that Meta is not sending numbers
-  right now. Without a plan name it keeps the plainer line that Meta did not report limits. Either way a missing value
-  is unknown, never zero usage.
+- An `allowance: null` response with `reason: "server_sent_no_usage"` is not a zero. Meta can omit usage while the short window is idle, even if weekly usage exists, and before the first use in a new usage window. That is Meta's reply, not a fault in Ancilla: `muse usage --json` reports `allowance: null` with the reason `server_sent_no_usage`. The panel keeps any reported plan name and says that Meta confirms the plan but has sent no usage numbers yet; sending a message in a thread that uses that account and then choosing Refresh checks again; if no numbers appear after that, Meta has not sent any for the account. When a last report is kept, the line says that Meta is not sending numbers right now. Without a plan name it keeps the plainer line that Meta did not report limits. Either way a missing value is unknown, never zero usage.
 - Account selection is explicit. Readings from a different account cannot take over the selected meter.
 
 ## Plan name and source labels
 
-`accounts[].planName` comes only from Meta's direct read (`subs_tier_name`). It is therefore null wherever that read
-does not happen: for named accounts under WSL, for the default login under WSL when an API key is set (here or in
-`wslEnv`) or `MUSE_AUTH_PATH` is set in the server's own environment, for Keychain-only logins, with `META_API_KEY`,
-and for named accounts while `MUSE_AUTH_PATH` is set. Nothing else supplies it, and the numeric `usage.tier` is an
-opaque id, not a plan name.
+`accounts[].planName` is populated only when the CLI output includes a plan label (`tierName`); when `muse usage --json` omits a human-readable tier name (returning only the opaque `allowance.tier` identifier), `planName` is `null` and the UI displays the generic account label cleanly. It is also `null` wherever a CLI usage check does not run: for named accounts under WSL, for the default login under WSL when an API key is set (here or in `wslEnv`) or `MUSE_AUTH_PATH` is set in the server's own environment, for Keychain-only logins, with `META_API_KEY`, and for named accounts while `MUSE_AUTH_PATH` is set. Nothing else supplies it, and `usage.tier` is an opaque id, not a display name.
 
 - When Meta does not answer with a plan, the account keeps the name it last gave, so the badge does not flicker. That
   covers a failed direct check (a timeout, a server error, a rate limit), a login Meta rejected (`login-required`), and
@@ -115,23 +94,19 @@ Only the e-mail leaves the server, never the token, the path or the person's nam
 or shows no login, or the distro does not answer in time, Settings does not say the user is signed out, since another
 credential store could hold the login: it keeps the line that some credential stores cannot report it. The same
 conditions as for the meter apply (an API key or a `MUSE_AUTH_PATH` in the server's environment leaves it unknown), and
-this look has its own bound and its own hold, so a stalled distro cannot hold the page. Meta refusing the login (HTTP
-401 or 403) is reported as `login-required`. An inherited `META_API_KEY` overrides subscription sign-in, so that process
+this look has its own bound and its own hold, so a stalled distro cannot hold the page. `muse usage --json` reporting a rejected or missing login (`credential_rejected` or `not logged in`) is surfaced as `login-required`. An inherited `META_API_KEY` overrides subscription sign-in, so that process
 does not query the browser login's allowance. A global `MUSE_AUTH_PATH` override also prevents assigning that credential
 to every named profile. Readings with no verified login identity are never saved, so they do not survive a restart.
 
-Rejected logins, timeouts, unavailable service responses and malformed payloads never produce a fabricated allowance.
+Rejected logins, timeouts, unavailable CLI responses and malformed payloads never produce a fabricated allowance.
 The panel distinguishes these from an inactive subscription and a subscription whose current quota was omitted.
-The device-login exchange is provider-owned and may change; parsing failures fall back to clearly labelled observations.
+CLI output schemas are owned by Muse; parsing failures fall back to clearly labelled runtime observations.
 
 ## Implementation
 
-- `packages/server/src/subscriptionQuota.ts`: bounded credential reads, fixed-origin request, response projection,
-  credential-scoped cache, timeout and retry handling.
+- `packages/server/src/subscriptionQuota.ts`: bounded auth-metadata checks (without extracting tokens), `muse usage --json` CLI execution and output projection, login-scoped cache, timeout and rate-limit cooldown handling.
 - `packages/server/src/wslLogin.ts`: where the distro's login file is, its Windows path, and the bounds on asking.
-- `packages/server/src/server.ts`: account isolation, runtime observations, saved readings and `/api/plan-usage`.
+- `packages/server/src/server.ts`: account isolation, CLI runner wiring, runtime observations, saved readings and `/api/plan-usage`.
 - `packages/ui/src/model/plan.ts` and `components/usage/PlanMeter.tsx`: account selection, freshness and presentation.
 
-The Muse 1.4.0 schema exported by `muse schema generate-json-schema` specifies that `usage/read` is last-observed data
-and `usage/changed` may omit timestamp-only refreshes. The direct exchange was also checked against Meta with a signed-in
-account without any session or inference call. Regression tests use injected HTTP responses and temporary login files.
+The Muse schema exported by `muse schema generate-ts` specifies that `usage/read` is last-observed data and `usage/changed` may omit timestamp-only refreshes, while `muse usage --json` refreshes subscription allowance without starting a model turn. Regression tests use injected CLI runners and temporary login files.

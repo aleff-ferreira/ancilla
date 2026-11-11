@@ -97,34 +97,38 @@ Muting it yourself, with the card's own microphone button, is not a problem and 
 
 ## What it will and will not do by voice
 
-A spoken sentence may have been misheard, or may not have been yours. So voice can **read, research and propose, and
-nothing else**:
+A spoken sentence may have been misheard, or echoed back from a speaker when echo cancellation is off. Voice separates
+immediate read/research tools from consequential actions, which pause behind an explicit authorization card unless you
+have enabled standing pre-authorization (such as YOLO mode):
 
-- A task started by voice can read and research. It **cannot change files**, whatever was said.
-- For a change, the call can only **propose** one (`propose_change`). It appears on the Assistant page, under Tasks, as
-  *Needs your approval*: paused and never started, with the goal in full. **Approve** starts it as an ordinary task that
-  may change files; **Decline** drops it; one nobody answers is dropped after a day. Resuming it by voice is refused,
-  no voice tool approves, and at most three wait at once. It needs project writes switched on in the assistant's
-  settings, and approving checks that again.
-- For something on the web, the call can start a **web task** (`browse`): the assistant's own browser looks at pages and
-  changes nothing. Every site it wants is asked about on the screen (Assistant, Tasks, *Needs your OK*), so a spoken
-  sentence cannot open one either; see [the internal browser](browser.md#the-assistant-browsing-web-tasks). What it
-  found comes back as untrusted text, labelled so, and it can start nothing by itself.
-- No approval is ever given by voice. An approval, or a change to a file, or a site opened, is a click on the screen.
-- A Muse turn that asks to use a tool is stopped, and the call says it is waiting on the screen.
+- Background research (`delegate_task`) and workspace reads (`inspect_project`, `launch_status` list/logs) **cannot
+  change files**.
+- For a project change (`propose_change`), launching a command or URL (`launch`), stopping a launched process, inspecting
+  an unapproved web origin (`inspect_page`), or a live Muse tool approval during a call, Ancilla queues a pending
+  request on `AuthorizationHub` (`packages/server/src/assistant/launcher.ts`) and displays it on the call card (and in
+  Assistant, Tasks for task proposals). Nothing executes on the same turn that proposed it unless YOLO pre-authorization
+  is enabled.
+- You resolve a pending call-card request either by **clicking Allow/Decline on the screen**, by **typing** a short
+  confirmation (`"go ahead"` / `"cancel"`), or by **speaking** a short confirmation on a **subsequent turn** (`turn >
+  createdTurn`) when browser microphone **echo cancellation is active** (`hello.echoCancelled === true`). Questions,
+  long sentences (> 80 characters), and negated phrases (`"don't go ahead"`) never count as `"allow"`. When echo
+  cancellation is off on the microphone, spoken `"allow"` phrases are refused with a warning notice so speaker bleed can
+  never self-approve an action, while spoken `"cancel"` / `"no"` still declines immediately.
+- For something on the web, the call can start a **web task** (`browse`): the assistant's isolated browser context
+  asks on the screen before opening unapproved sites or sending forms/commits, and Meta consumer/social domains are
+  always fenced off; see [the internal browser](browser.md#the-assistant-browsing-web-tasks). What it found comes back
+  as untrusted text, labelled so, and it can start nothing by itself.
 - What it hears is kept as what you said, with the words as the recogniser wrote them; the memory treats a spoken
   statement like a typed one but records that it was spoken.
 
-### Looking at the rest of Ancilla
+### Looking at the rest of Ancilla and your workspace
 
-The call can also **look** at your threads, read only. Each turn's context carries a short "Right now" block (threads
+The call can also **look** at your threads and registered project files, read only. Each turn's context carries a short "Right now" block (threads
 running, threads or tasks waiting on you, plan usage only above 80%), so "what is going on?" needs no tool at all. Five
-small tools cover the rest: `harness_overview`, `list_threads`, `read_thread` (the last few messages of one, clipped),
-`usage` and `list_projects`. They are in-process tools offered like the task tools, so they work with any model that
-answers the call (Muse, a hosted model, or a local server, with the text convention when it cannot take tools). They
-show project names, never folders, and cannot start, change or approve anything. The code is
-`packages/server/src/voice/harness.ts` (the tools and the `HarnessReader` they read through) and a small adapter in
-`server.ts`.
+small harness tools cover threads and usage (`harness_overview`, `list_threads`, `read_thread`, `usage` and `list_projects` in
+`packages/server/src/voice/harness.ts`), and four workspace tools (`inspect_project`, `launch`, `launch_status`, `inspect_page` in
+`packages/server/src/voice/workspace-tools.ts`) cover registered project files, dev-server launches, and page/FPS diagnostics
+across any voice model (Muse, a hosted model, or a local server).
 
 ## What is kept, and where
 

@@ -159,6 +159,7 @@ export class VoiceSession {
   private pttDown = false;
   private closed = false;
   private started = false;
+  private echoCancelled = false;
   private lang: string | null = null;
   private userLang: Lang = "unknown";
 
@@ -219,6 +220,7 @@ export class VoiceSession {
       }
     }
     this.mode = hello.mode;
+    this.echoCancelled = hello.echoCancelled;
     this.lang = hello.lang;
     this.userLang = hello.lang ? (hello.lang.toLowerCase().startsWith("pt") ? "pt" : hello.lang.toLowerCase().startsWith("en") ? "en" : "unknown") : "unknown";
     const { engines, host } = this.deps;
@@ -691,6 +693,14 @@ export class VoiceSession {
     if (pending?.inFlightMuse && this.reply && !this.reply.aborted) {
       const intent = parseUserAuthorizationIntent(said);
       if (intent !== null && this.deps.host.decideApproval) {
+        if (intent === "allow" && source === "voice" && !this.echoCancelled) {
+          this.send({
+            type: "notice",
+            level: "warn",
+            text: "Echo cancellation is off on this microphone: click the button on the call card (or type) to approve.",
+          });
+          return;
+        }
         this.history.push({ role: "user", content: said });
         void this.deps.host
           .decideApproval(pending.id, intent === "allow")
@@ -829,10 +839,19 @@ export class VoiceSession {
     if (pending && !pending.inFlightMuse && reply.turn > pending.createdTurn && host.decideApproval) {
       const intent = parseUserAuthorizationIntent(text);
       if (intent !== null) {
-        const res = await host.decideApproval(pending.id, intent === "allow");
-        if (reply.aborted) return;
-        this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
-        approvalOutcomeNote = `[The user ${intent === "allow" ? "authorized" : "declined"} the pending request "${pending.title}". Outcome: ${res.message}]`;
+        if (intent === "allow" && source === "voice" && !this.echoCancelled) {
+          this.send({
+            type: "notice",
+            level: "warn",
+            text: "Echo cancellation is off on this microphone: click the button on the call card (or type) to approve.",
+          });
+          approvalOutcomeNote = `[Spoken approval for "${pending.title}" was not executed because browser echo cancellation is off on this microphone. Tell the user to click ${pending.allowLabel} on the call card (or type "go ahead") to approve it.]`;
+        } else {
+          const res = await host.decideApproval(pending.id, intent === "allow");
+          if (reply.aborted) return;
+          this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
+          approvalOutcomeNote = `[The user ${intent === "allow" ? "authorized" : "declined"} the pending request "${pending.title}". Outcome: ${res.message}]`;
+        }
       }
     }
     const context = await (prewarmedContext ?? host.context(text, source));

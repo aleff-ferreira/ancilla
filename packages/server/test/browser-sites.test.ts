@@ -4,7 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BrowserError, BrowserService, cookieMatchesOrigin, type BrowserEvent, type CdpCookie } from "../src/browser/service.js";
-import { BrowseSites, hostKind, kindOfOrigin, originOf, SiteGate, SiteRules, type SiteQuestion } from "../src/browser/sites.js";
+import {
+  BrowseSites,
+  hostKind,
+  isRestrictedAssistantHost,
+  isRestrictedAssistantOrigin,
+  isRestrictedAssistantUrl,
+  kindOfOrigin,
+  originOf,
+  SiteGate,
+  SiteRules,
+  type SiteQuestion,
+} from "../src/browser/sites.js";
 import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
 
 /**
@@ -425,6 +436,122 @@ test("service: hydrates only matching origin cookies one-way from you -> assista
   await svc.shareOriginSignIn("https://app.example.com");
   assert.equal(sent(fake, "Storage.setCookies").length, 2);
   void tab2;
+
+  await svc.dispose();
+});
+
+test("restricted Meta consumer domains: blocked in assistant browsing and sign-in cookie sharing while leaving the user's own you tabs unrestricted", async () => {
+  for (const host of [
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com.",
+    "fb.com",
+    "lookaside.fbsbx.com",
+    "messenger.com",
+    "www.messenger.com",
+    "instagram.com",
+    "www.instagram.com",
+    "scontent.cdninstagram.com",
+    "whatsapp.com",
+    "web.whatsapp.com",
+    "mmg.whatsapp.net",
+    "threads.net",
+    "www.threads.com",
+    "meta.ai",
+    "api.meta.ai",
+  ]) {
+    assert.equal(isRestrictedAssistantHost(host), true, host);
+    assert.equal(isRestrictedAssistantOrigin(`https://${host.replace(/\.+$/, "")}`), true, host);
+    assert.equal(isRestrictedAssistantUrl(`https://${host}/path`), true, host);
+  }
+  for (const allowed of ["notfacebook.com", "myinstagram.org", "example.com", "localhost"]) {
+    assert.equal(isRestrictedAssistantHost(allowed), false, allowed);
+    assert.equal(isRestrictedAssistantOrigin(`https://${allowed}`), false, allowed);
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "ancilla-meta-fence-"));
+  try {
+    const file = join(dir, "sites.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        rules: [
+          { origin: "https://www.instagram.com", decision: "allow", at: 1, useSignIn: true },
+          { origin: "https://docs.example.com", decision: "allow", at: 2, useSignIn: true },
+        ],
+      }),
+      "utf8",
+    );
+    const sites = new BrowseSites(file, () => ({ taskId: () => "t1", gateChanged: () => undefined }));
+    assert.equal(sites.rules.get("https://www.instagram.com"), null, "persisted allow rule for restricted origin is ignored on load");
+    assert.equal(sites.rules.get("https://docs.example.com")?.decision, "allow");
+
+    sites.rules.set("https://www.facebook.com", "allow", true);
+    assert.equal(sites.rules.get("https://www.facebook.com"), null, "cannot save Always allow for restricted origin");
+    assert.equal(sites.rules.setSignIn("https://www.facebook.com", true), false);
+
+    // YOLO / session grant cannot bypass the fence
+    sites.grantSessionOrigin("https://web.whatsapp.com");
+    assert.equal(sites.isAllowedNow("https://web.whatsapp.com"), false);
+    assert.equal(sites.gate.check("t1", "https://web.whatsapp.com"), "block");
+    assert.equal(await sites.gate.request("t1", "https://web.whatsapp.com/"), false);
+    assert.equal(sites.gate.pending(), null, "never prompts the user to allow a restricted origin");
+    assert.equal(await sites.decide({ url: "https://www.threads.net/@u", origin: "https://www.threads.net", tabId: "tab1", mainFrame: true }), false);
+    assert.equal(await sites.decide({ url: "https://www.facebook.com/plugins/like.php", origin: "https://www.facebook.com", tabId: "tab1", mainFrame: false }), false, "subframes blocked too");
+    assert.equal(sites.shouldShareSignIn({ url: "https://meta.ai/", origin: "https://meta.ai", tabId: "tab1", mainFrame: true }), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const fake = fakeBrowser(
+    healthy((method) => {
+      if (method === "Storage.getCookies") {
+        return {
+          cookies: [{ name: "c_user", value: "123", domain: ".facebook.com", hostOnly: false, path: "/", secure: true, session: true }],
+        };
+      }
+      if (method === "Page.navigate") return {};
+      return undefined;
+    }),
+  );
+  const svc = new BrowserService({
+    dataDir: ":memory:",
+    find: () => FOUND,
+    launch: () => fake.proc,
+    gracefulMs: 200,
+    siteGate: async () => true,
+    signInGate: () => true,
+  });
+
+  // Assistant tab creation, navigation, request interception, and sign-in hydration are all blocked
+  await assert.rejects(
+    svc.openTab("assistant", "https://www.instagram.com/"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+  const assistantTab = await svc.openTab("assistant");
+  await assert.rejects(
+    svc.navigate(assistantTab.id, "https://web.whatsapp.com/"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+  await assert.rejects(
+    svc.shareOriginSignIn("https://www.facebook.com"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+
+  fake.emit(
+    "Fetch.requestPaused",
+    { requestId: "R-META", frameId: assistantTab.id, resourceType: "Document", request: { url: "https://www.facebook.com/home", method: "GET" } },
+    `S-${assistantTab.id}`,
+  );
+  await tick();
+  assert.ok(sent(fake, "Fetch.failRequest").some((c) => c.params["requestId"] === "R-META"));
+  assert.equal(sent(fake, "Storage.setCookies").length, 0, "no cookies copied for restricted origin even if gates return true");
+  assert.match(svc.takeNotes(assistantTab.id)[0] ?? "", /disabled on Meta consumer sites/);
+
+  // Meanwhile, the user's own `you` context remains completely unrestricted
+  const youTab = await svc.openTab("you", "https://www.instagram.com/");
+  assert.equal(youTab.context, "you");
 
   await svc.dispose();
 });

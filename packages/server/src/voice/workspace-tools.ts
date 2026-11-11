@@ -1,7 +1,7 @@
 import type { AuthorizationHub, LaunchManager, LaunchSpec } from "../assistant/launcher.js";
 import { isLikelyServerCommand } from "../assistant/launcher.js";
 import { formatPageDiagnostics, type PageDiagnostics } from "../browser/service.js";
-import { originOf } from "../browser/sites.js";
+import { isRestrictedAssistantOrigin, isRestrictedAssistantUrl, originOf } from "../browser/sites.js";
 import { FileError, listFolder, readProjectFile, resolveInRoot, searchProjectFiles } from "../files.js";
 import type { ToolCall, ToolSpec } from "./brain.js";
 import { resolveByFuzzyName } from "./harness.js";
@@ -240,6 +240,12 @@ export class WorkspaceVoiceTools {
           } else if (rawUrl) {
             const url = normalizeWebUrl(rawUrl);
             const inAncillaBrowser = typeof args["openInBrowser"] === "boolean" ? args["openInBrowser"] : true;
+            if (inAncillaBrowser && isRestrictedAssistantUrl(url)) {
+              return {
+                ok: false,
+                text: "Automated assistant browsing is disabled on Meta consumer sites; ask the user to open it in their own Browser tab or pass openInBrowser: false for the system browser.",
+              };
+            }
             spec = { kind: "url", url, inAncillaBrowser };
           } else if (openTarget) {
             const proj = this.resolveProject(named);
@@ -313,6 +319,12 @@ export class WorkspaceVoiceTools {
           const url = normalizeWebUrl(rawUrl);
           const origin = originOf(url);
           if (!origin) return { ok: false, text: `"${rawUrl}" is not a valid http:// or https:// address.` };
+          if (isRestrictedAssistantOrigin(origin)) {
+            return {
+              ok: false,
+              text: "Automated assistant page inspection is disabled on Meta consumer sites; ask the user to inspect it in their own Browser tab.",
+            };
+          }
 
           const ready = await inspector.available();
           if (!ready.ok) return { ok: false, text: `Browser is not available: ${ready.reason ?? "no Chromium/Edge/Brave binary found"}.` };

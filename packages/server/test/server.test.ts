@@ -21,7 +21,7 @@ import {
   type OpenTarget,
 } from "../src/server.js";
 import type { ExecFn, ServeTarget } from "@ancilla/daemon";
-import { MuseSubscriptionReader } from "../src/subscriptionQuota.js";
+import { MuseSubscriptionReader, type MuseUsageCliResult } from "../src/subscriptionQuota.js";
 
 /** Test credentials must stay inside their fixture even when the runner defines an XDG root or API key. */
 function quotaEnvironment(t: TestContext, home: string): void {
@@ -1527,12 +1527,26 @@ describe("AncillaServer", () => {
     await saveLogin(profile.roots.config, "dca:work");
     let requests = 0;
     const observed = Date.now();
-    const subscriptionReader = new MuseSubscriptionReader({ now: () => observed, fetch: async (_url, init) => {
+    const subscriptionReader = new MuseSubscriptionReader({ now: () => observed, runUsage: async (req) => {
       requests++;
-      const work = new Headers(init?.headers).get("Authorization") === "Bearer dca:work";
-      return Response.json({ is_subs_active: true, subs_tier_name: "Muse Code Power Usage", api_key: "LLM|discard-me",
-        subs_usage: { tier: "123", window: { used_percent: work ? 84 : 12, resets_at: observed / 1000 + 3600, window_duration_mins: 300 },
-          weekly: { used_percent: work ? 55 : 25, resets_at: observed / 1000 + 86400 } } });
+      const work = req.accountId === "work";
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          schemaVersion: 1,
+          tierName: "Muse Code Power Usage",
+          api_key: "LLM|discard-me",
+          reason: null,
+          hint: null,
+          allowance: {
+            tier: "123",
+            observedAtMs: observed,
+            window: { usedPercent: work ? 84 : 12, resetsAtMs: observed + 3_600_000, windowDurationMins: 300 },
+            weekly: { usedPercent: work ? 55 : 25, resetsAtMs: observed + 86_400_000 },
+          },
+        }),
+        stderr: "",
+      };
     } });
     const probe: FactoryProbe = { targets: [], exits: [] };
     const connection = new FakeConnection();
@@ -1565,8 +1579,9 @@ describe("AncillaServer", () => {
     } } }));
     let stamp = Date.now();
     let active = true;
-    const subscriptionReader = new MuseSubscriptionReader({ now: () => stamp, cacheMs: 0, fetch: async () => active
-      ? new Response("private failure", { status: 503 }) : Response.json({ is_subs_active: false }) });
+    const subscriptionReader = new MuseSubscriptionReader({ now: () => stamp, cacheMs: 0, runUsage: async () => active
+      ? { exitCode: 1, stdout: "", stderr: "private failure" }
+      : { exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, allowance: null, reason: "no_subscription", hint: null }), stderr: "" } });
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const { base } = await start(connection, { home, subscriptionReader });
@@ -1614,9 +1629,13 @@ describe("AncillaServer", () => {
     try {
       process.env["MUSE_AUTH_PATH"] = path;
       delete process.env["META_API_KEY"];
-      const subscriptionReader = new MuseSubscriptionReader({ cacheMs: 0, fetch: async () => {
+      const subscriptionReader = new MuseSubscriptionReader({ cacheMs: 0, runUsage: async () => {
         calls++;
-        return Response.json({ is_subs_active: true, subs_usage: null, subs_tier_name: "Muse Code Power Usage" });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ schemaVersion: 1, allowance: null, reason: "server_sent_no_usage", hint: null, tierName: "Muse Code Power Usage" }),
+          stderr: "",
+        };
       } });
       const { base } = await start(new FakeConnection(), { home, subscriptionReader });
       assert.equal((await get(base, "/api/plan-usage")).accounts[0].status, "not-reported");
@@ -1641,14 +1660,18 @@ describe("AncillaServer", () => {
       mechanism: "oauth", access_token: "dca:default", user_email: "person@example.test",
     } } }));
     let stamp = Date.now();
-    let finish: ((response: Response) => void) | null = null;
+    let finish: ((response: MuseUsageCliResult) => void) | null = null;
     const subscriptionReader = new MuseSubscriptionReader({ now: () => stamp, cacheMs: 0,
-      fetch: async () => new Promise((resolve) => { finish = resolve; }) });
+      runUsage: async () => new Promise((resolve) => { finish = resolve; }) });
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const { base } = await start(connection, { home, subscriptionReader });
     await send(base, "/api/sessions", { cwd: "/work" });
-    for (const response of [Response.json({ is_subs_active: false }), Response.json({ is_subs_active: true, subs_usage: null }), new Response(null, { status: 503 })]) {
+    for (const response of [
+      { exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, allowance: null, reason: "no_subscription", hint: null }), stderr: "" },
+      { exitCode: 0, stdout: JSON.stringify({ schemaVersion: 1, allowance: null, reason: "server_sent_no_usage", hint: null, tierName: "Muse Code Power Usage" }), stderr: "" },
+      { exitCode: 1, stdout: "", stderr: "unavailable" },
+    ] satisfies MuseUsageCliResult[]) {
       finish = null;
       const pending = get(base, "/api/plan-usage");
       await waitFor(() => finish !== null, "direct quota request");
@@ -1656,11 +1679,11 @@ describe("AncillaServer", () => {
         window: { usedPercent: 37, resetsAtMs: stamp + 60000, windowDurationMins: 300 },
         weekly: { usedPercent: 21, resetsAtMs: stamp + 86400000 } };
       connection.notify("usage/changed", reading);
-      (finish as unknown as (response: Response) => void)(response);
+      (finish as unknown as (response: MuseUsageCliResult) => void)(response);
       const report = await pending;
       assert.equal(report.accounts[0].usage.window.usedPercent, 37);
       assert.equal(report.accounts[0].source, "runtime");
-      assert.equal(report.accounts[0].status, "runtime-only", "an earlier HTTP result cannot hide a newer runtime reading");
+      assert.equal(report.accounts[0].status, "runtime-only", "an earlier CLI result cannot hide a newer runtime reading");
       assert.equal(report.accounts[0].checkedAtMs, stamp, "checking time remains distinct from the newer observation");
       stamp += 2000;
     }

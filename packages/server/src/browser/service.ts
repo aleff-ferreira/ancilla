@@ -7,7 +7,7 @@ import { CdpConnection, CdpError } from "./cdp.js";
 import { findBrowser, type FindResult, type FoundBrowser } from "./find.js";
 import { launchBrowser, type BrowserProcess, type LaunchOptions } from "./launch.js";
 import { bodyText } from "./commit.js";
-import { originOf } from "./sites.js";
+import { isRestrictedAssistantHost, isRestrictedAssistantOrigin, isRestrictedAssistantUrl, originOf } from "./sites.js";
 import {
   DownloadDesk,
   DownloadError,
@@ -1111,6 +1111,9 @@ export class BrowserService {
 
   async openTab(context: BrowserContextName, url?: string): Promise<TabInfo> {
     const target = url === undefined ? undefined : checkUrl(url);
+    if (context === "assistant" && target && isRestrictedAssistantUrl(target)) {
+      throw new BrowserError("blocked", "Automated assistant browsing is disabled on Meta consumer sites; open it in your own Browser tab instead.");
+    }
     const rt = await this.ensure();
     if (rt.tabs.size >= (this.options.maxTabs ?? 8)) throw new BrowserError("limit", `At most ${this.options.maxTabs ?? 8} tabs can be open; close one first.`);
     let browserContextId: string | undefined;
@@ -1171,16 +1174,19 @@ export class BrowserService {
    */
   async shareOriginSignIn(origin: string): Promise<number> {
     if (originOf(origin) !== origin) throw new BrowserError("invalid", "A full http:// or https:// origin is required.");
+    if (isRestrictedAssistantOrigin(origin)) {
+      throw new BrowserError("blocked", "Sign-in cookie sharing to the assistant is disabled on Meta consumer sites.");
+    }
     const rt = await this.ensure();
     return this.ensureOriginSignIn(rt, origin, true);
   }
 
   private async ensureOriginSignIn(rt: Runtime, origin: string, force = false): Promise<number> {
-    if (!rt.assistantContextId) return 0;
+    if (!rt.assistantContextId || isRestrictedAssistantOrigin(origin)) return 0;
     if (!force && rt.sharedOrigins.has(origin)) return 0;
     const reply = await rt.conn.send<{ cookies?: CdpCookie[] }>("Storage.getCookies", {}).catch(() => ({ cookies: [] as CdpCookie[] }));
     const cookies = (Array.isArray(reply.cookies) ? reply.cookies : [])
-      .filter((c) => cookieMatchesOrigin(c, origin))
+      .filter((c) => !isRestrictedAssistantHost(String(c.domain ?? "").trim().replace(/^\.+/, "")) && cookieMatchesOrigin(c, origin))
       .map((c) => toCookieParam(c, origin));
     rt.sharedOrigins.add(origin);
     if (cookies.length > 0) {
@@ -1271,6 +1277,9 @@ export class BrowserService {
     const target = checkUrl(url);
     const rt = await this.ensure();
     const tab = this.requireTab(rt, id);
+    if (tab.context === "assistant" && isRestrictedAssistantUrl(target)) {
+      throw new BrowserError("blocked", "Automated assistant browsing is disabled on Meta consumer sites; open it in your own Browser tab instead.");
+    }
     await this.navigateTab(rt, tab, target);
     return this.info(rt, tab);
   }
@@ -1908,10 +1917,11 @@ export class BrowserService {
     const requestId = String(params["requestId"] ?? "");
     const url = String(params["request"]?.url ?? "");
     const origin = originOf(url);
+    const restricted = (origin !== null && isRestrictedAssistantOrigin(origin)) || isRestrictedAssistantUrl(url);
     // For a page target the main frame has the target's own id.
     const mainFrame = params["frameId"] === undefined || params["frameId"] === tab.id;
     let allowed = false;
-    if (origin && this.options.siteGate) {
+    if (!restricted && origin && this.options.siteGate) {
       try {
         allowed = await this.options.siteGate({ url, origin, tabId: tab.id, mainFrame });
       } catch {
@@ -1948,7 +1958,12 @@ export class BrowserService {
       this.note(tab, `A form to ${origin ?? url.slice(0, 80)} was not sent: the person did not allow it. Nothing was changed.`);
     } else if (!allowed && mainFrame) {
       tab.blocked = true;
-      this.note(tab, `${origin ?? url.slice(0, 80)} was not opened: the person did not allow it.`);
+      this.note(
+        tab,
+        restricted
+          ? `${origin ?? url.slice(0, 80)} was not opened: automated assistant browsing is disabled on Meta consumer sites (open it in your own Browser tab instead).`
+          : `${origin ?? url.slice(0, 80)} was not opened: the person did not allow it.`,
+      );
     }
     // Refused, a request is aborted rather than blocked: an aborted navigation leaves the page that had the link where it was,
     // as Stop does, where a blocked one replaces it with the browser's error page.

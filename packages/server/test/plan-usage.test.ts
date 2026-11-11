@@ -9,7 +9,12 @@ import { DatabaseSync } from "node:sqlite";
 import { createAonia } from "@harjjotsinghh/aonia";
 import type { ExecFn, ServeTarget } from "@ancilla/daemon";
 import { DB_FILE } from "../src/legacy.js";
-import { MuseSubscriptionReader, type SubscriptionReading } from "../src/subscriptionQuota.js";
+import {
+  MuseSubscriptionReader,
+  type MuseUsageCliRequest,
+  type MuseUsageCliResult,
+  type SubscriptionReading,
+} from "../src/subscriptionQuota.js";
 import { FakeConnection, fakeFactory, get, send, sseEvents, start, waitFor } from "./harness.js";
 
 const DAY = 86_400_000;
@@ -39,11 +44,40 @@ async function saveLogin(root: string, email: string, token?: string): Promise<s
   return path;
 }
 
-/** What Meta answers for an active plan; its reset stamps are epoch seconds. */
-function snapshot(at: number, percent: number) {
-  return { is_subs_active: true, subs_tier_name: "Muse Code Power Usage",
-    subs_usage: { tier: "123", window: { used_percent: percent, resets_at: at / 1000 + 3600, window_duration_mins: 300 },
-      weekly: { used_percent: 20, resets_at: at / 1000 + 86400 } } };
+/** What `muse usage --json` prints for an active plan. */
+function snapshot(at: number, percent: number, tierName: string | null = "Muse Code Power Usage"): MuseUsageCliResult {
+  return {
+    exitCode: 0,
+    stdout: JSON.stringify({
+      schemaVersion: 1,
+      tierName,
+      reason: null,
+      hint: null,
+      allowance: {
+        tier: "123",
+        observedAtMs: at,
+        window: { usedPercent: percent, resetsAtMs: at + 3_600_000, windowDurationMins: 300 },
+        weekly: { usedPercent: 20, resetsAtMs: at + 86_400_000 },
+      },
+    }),
+    stderr: "",
+  };
+}
+
+function noSubscriptionResult(): MuseUsageCliResult {
+  return {
+    exitCode: 0,
+    stdout: JSON.stringify({ schemaVersion: 1, allowance: null, reason: "no_subscription", hint: null }),
+    stderr: "",
+  };
+}
+
+function unavailableResult(stderr = "muse usage: usage refresh failed (transient)"): MuseUsageCliResult {
+  return { exitCode: 1, stdout: "", stderr };
+}
+
+function rejectedResult(stderr = "muse usage: usage refresh failed (credential_rejected)"): MuseUsageCliResult {
+  return { exitCode: 1, stdout: "", stderr };
 }
 
 /** A usage/changed frame, or the body of a usage/read reply; MSP stamps are milliseconds. */
@@ -56,9 +90,9 @@ function reading(at: number, percent: number) {
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A reader whose answers the test chooses and whose requests it can count. */
-function scriptedReader(options: { now: () => number; answer: () => Response }) {
+function scriptedReader(options: { now: () => number; answer: () => MuseUsageCliResult | Promise<MuseUsageCliResult> }) {
   const probe = { requests: 0 };
-  const reader = new MuseSubscriptionReader({ now: options.now, cacheMs: 0, fetch: async () => {
+  const reader = new MuseSubscriptionReader({ now: options.now, cacheMs: 0, runUsage: async () => {
     probe.requests++;
     return options.answer();
   } });
@@ -71,7 +105,7 @@ describe("plan name and source of a subscription reading", () => {
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
     let stamp = Date.now();
-    let answer: () => Response = () => Response.json(snapshot(stamp, 42));
+    let answer: () => MuseUsageCliResult = () => snapshot(stamp, 42);
     const { reader } = scriptedReader({ now: () => stamp, answer: () => answer() });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
 
@@ -81,7 +115,7 @@ describe("plan name and source of a subscription reading", () => {
     assert.equal(good.source, "meta");
 
     stamp += 1000;
-    answer = () => new Response("private failure", { status: 503 });
+    answer = () => unavailableResult("private failure");
     const failed = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(failed.status, "unavailable");
     assert.equal(failed.planName, "Muse Code Power Usage", "one failed check does not blank the plan");
@@ -100,19 +134,19 @@ describe("plan name and source of a subscription reading", () => {
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
     let stamp = Date.now();
-    let answer: () => Response = () => Response.json(snapshot(stamp, 42));
+    let answer: () => MuseUsageCliResult = () => snapshot(stamp, 42);
     const { reader } = scriptedReader({ now: () => stamp, answer: () => answer() });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
     assert.equal((await get(base, "/api/plan-usage")).accounts[0].planName, "Muse Code Power Usage");
 
     stamp += 1000;
-    answer = () => Response.json({ is_subs_active: false });
+    answer = () => noSubscriptionResult();
     const ended = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(ended.status, "no-subscription");
     assert.equal(ended.planName, null);
 
     stamp += 1000;
-    answer = () => new Response(null, { status: 503 });
+    answer = () => unavailableResult();
     const failed = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(failed.status, "unavailable");
     assert.equal(failed.planName, null, "a plan that ended is not the plan to show after a failed check");
@@ -123,7 +157,7 @@ describe("plan name and source of a subscription reading", () => {
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
     let stamp = Date.now();
-    let answer: () => Response = () => Response.json(snapshot(stamp, 42));
+    let answer: () => MuseUsageCliResult = () => snapshot(stamp, 42);
     const { reader } = scriptedReader({ now: () => stamp, answer: () => answer() });
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
@@ -133,11 +167,11 @@ describe("plan name and source of a subscription reading", () => {
 
     connection.notify("usage/changed", reading(stamp + 5000, 60));
     stamp += 1000;
-    answer = () => Response.json({ is_subs_active: false });
+    answer = () => noSubscriptionResult();
     assert.equal((await get(base, "/api/plan-usage")).accounts[0].planName, null);
 
     stamp += 1000;
-    answer = () => new Response(null, { status: 503 });
+    answer = () => unavailableResult();
     const failed = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(failed.usage.window.usedPercent, 60, "the newer runtime reading is still the one shown");
     assert.equal(failed.planName, null);
@@ -148,22 +182,22 @@ describe("plan name and source of a subscription reading", () => {
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
     let stamp = Date.now();
-    let answer: () => Response = () => Response.json(snapshot(stamp, 42));
+    let answer: () => MuseUsageCliResult = () => snapshot(stamp, 42);
     const { reader } = scriptedReader({ now: () => stamp, answer: () => answer() });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
     assert.equal((await get(base, "/api/plan-usage")).accounts[0].planName, "Muse Code Power Usage");
     stamp += 1000;
-    answer = () => new Response(null, { status: 401 });
+    answer = () => rejectedResult();
     const rejected = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(rejected.status, "login-required");
     assert.equal(rejected.planName, "Muse Code Power Usage", "a rejected token says nothing about which plan the account is on");
     stamp += 1000;
-    answer = () => new Response(null, { status: 503 });
+    answer = () => unavailableResult();
     const failed = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(failed.status, "unavailable");
     assert.equal(failed.planName, "Muse Code Power Usage", "the order of the failures does not matter");
     stamp += 1000;
-    answer = () => Response.json({ ...snapshot(stamp, 50), subs_tier_name: "Muse Code Maximum Usage" });
+    answer = () => snapshot(stamp, 50, "Muse Code Maximum Usage");
     assert.equal((await get(base, "/api/plan-usage")).accounts[0].planName, "Muse Code Maximum Usage", "Meta's next answer replaces it");
   });
 
@@ -173,7 +207,7 @@ describe("plan name and source of a subscription reading", () => {
     const root = join(home, ".config");
     await saveLogin(root, "person@example.test", "dca:default");
     let stamp = Date.now();
-    const { reader, probe } = scriptedReader({ now: () => stamp, answer: () => Response.json(snapshot(stamp, 42)) });
+    const { reader, probe } = scriptedReader({ now: () => stamp, answer: () => snapshot(stamp, 42) });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
     const good = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(good.status, "ready");
@@ -202,9 +236,8 @@ describe("plan name and source of a subscription reading", () => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-plan-tie-"));
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
-    // Whole seconds, so Meta's second-based reset stamps and MSP's millisecond ones agree exactly.
     const stamp = Math.floor(Date.now() / 1000) * 1000;
-    const { reader } = scriptedReader({ now: () => stamp, answer: () => Response.json(snapshot(stamp, 42)) });
+    const { reader } = scriptedReader({ now: () => stamp, answer: () => snapshot(stamp, 42) });
     const connection = new FakeConnection();
     connection.replies.set("session/start", { session: { sessionId: "s1" } });
     const { base } = await start(connection, { home, subscriptionReader: reader });
@@ -357,7 +390,7 @@ describe("logins without a direct Meta read", () => {
     quotaEnvironment(t, home);
     // A login on the Windows side must not be mistaken for the one Muse uses inside the distro, which holds none.
     await saveLogin(join(home, ".config"), "person@example.test", "dca:windows-side");
-    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => Response.json(snapshot(Date.now(), 42)) });
+    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => snapshot(Date.now(), 42) });
     const options = { dataDir, home, platform: "win32" as const, runtime: "wsl" as const, musePath: "/home/u/.local/bin/muse",
       exec: fakeWsl, wslQuota: { localPath: () => join(dataDir, "distro", "home", "u", ".config", "muse", "auth.json") } };
     const connection = new FakeConnection();
@@ -389,7 +422,7 @@ describe("logins without a direct Meta read", () => {
     quotaEnvironment(t, home);
     process.env["META_API_KEY"] = "test-api-key";
     await saveLogin(join(home, ".config"), "person@example.test", "dca:default");
-    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => Response.json(snapshot(Date.now(), 42)) });
+    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => snapshot(Date.now(), 42) });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
     const account = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(account.status, "runtime-only");
@@ -402,7 +435,7 @@ describe("logins without a direct Meta read", () => {
     const home = await mkdtemp(join(tmpdir(), "ancilla-quota-keychain-"));
     quotaEnvironment(t, home);
     await saveLogin(join(home, ".config"), "person@example.test");
-    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => Response.json(snapshot(Date.now(), 42)) });
+    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => snapshot(Date.now(), 42) });
     const { base } = await start(new FakeConnection(), { home, subscriptionReader: reader });
     const account = (await get(base, "/api/plan-usage")).accounts[0];
     assert.equal(account.status, "runtime-only");
@@ -417,7 +450,7 @@ describe("logins without a direct Meta read", () => {
     const profile = await aonia.createProfile("work");
     await saveLogin(profile.roots.config, "work@example.test", "dca:work");
     process.env["MUSE_AUTH_PATH"] = await saveLogin(join(home, "shared"), "person@example.test", "dca:shared");
-    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => Response.json(snapshot(Date.now(), 42)) });
+    const { reader, probe } = scriptedReader({ now: Date.now, answer: () => snapshot(Date.now(), 42) });
     const { base } = await start(new FakeConnection(), { home, aonia, subscriptionReader: reader });
     const accounts = (await get(base, "/api/plan-usage")).accounts;
     const personal = accounts.find((account: { accountId: string | null }) => account.accountId === null);
@@ -439,7 +472,7 @@ describe("a login read from inside the WSL distro", () => {
    */
   async function rig(t: TestContext, o: {
     distro?: string; home?: () => Promise<HomeAnswer>; wslEnv?: Record<string, string>; dataDir?: string;
-    answer?: (init: RequestInit | undefined) => Response | Promise<Response>; bounds?: Bounds;
+    answer?: (req: MuseUsageCliRequest) => MuseUsageCliResult | Promise<MuseUsageCliResult>; bounds?: Bounds;
   } = {}) {
     const root = await mkdtemp(join(tmpdir(), "ancilla-quota-distro-"));
     const winHome = join(root, "windows-home");
@@ -447,7 +480,7 @@ describe("a login read from inside the WSL distro", () => {
     // A login on the Windows side, which nothing under WSL may read or send whatever becomes of the distro's own.
     await saveLogin(join(winHome, ".config"), "windows@example.test", "dca:windows-side");
     const distro = o.distro ?? "Ubuntu";
-    const probe = { homeCalls: 0, homeTimeouts: [] as (number | undefined)[], requests: 0, bearers: [] as string[], mapped: [] as [string, string][] };
+    const probe = { homeCalls: 0, homeTimeouts: [] as (number | undefined)[], requests: 0, authPaths: [] as string[], mapped: [] as [string, string][] };
     const exec: ExecFn = async (command, args, options) => {
       if (command !== "wsl") return { stdout: "", exitCode: 127 };
       if (args[0] === "-l") return { stdout: "  NAME  STATE  VERSION\n* Ubuntu  Running  2\n", exitCode: 0 };
@@ -460,10 +493,10 @@ describe("a login read from inside the WSL distro", () => {
       return { stdout: "/home/u/.local/bin/muse\n", exitCode: 0 };
     };
     const inDistro = (linux: string) => join(root, "distro", distro, ...linux.split("/").filter(Boolean));
-    const reader = new MuseSubscriptionReader({ now: Date.now, cacheMs: 0, fetch: async (_url, init) => {
+    const reader = new MuseSubscriptionReader({ now: Date.now, cacheMs: 0, runUsage: async (req) => {
       probe.requests++;
-      probe.bearers.push(new Headers(init?.headers).get("authorization") ?? "");
-      return o.answer ? o.answer(init) : Response.json(snapshot(Date.now(), 42));
+      probe.authPaths.push(req.authPath);
+      return o.answer ? o.answer(req) : snapshot(Date.now(), 42);
     } });
     const options = {
       dataDir: o.dataDir ?? ":memory:", home: winHome, platform: "win32" as const, runtime: "wsl" as const,
@@ -479,7 +512,7 @@ describe("a login read from inside the WSL distro", () => {
   const first = async (base: string) => (await get(base, "/api/plan-usage")).accounts[0];
   const DISTRO_CONFIG = "/home/u/.config";
 
-  it("reads the numbers and the plan name from Meta with the distro's own login", async (t) => {
+  it("reads the numbers and the plan name via Muse CLI for the distro's own login", async (t) => {
     const r = await rig(t);
     await saveLogin(join(r.winHome, ".config"), "windows@example.test", "dca:windows-side");
     await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
@@ -489,7 +522,7 @@ describe("a login read from inside the WSL distro", () => {
     assert.equal(account.planName, "Muse Code Power Usage");
     assert.equal(account.source, "meta");
     assert.equal(account.usage.window.usedPercent, 42);
-    assert.deepEqual(r.probe.bearers, ["Bearer dca:distro-side"], "the Windows-side login never reaches Meta");
+    assert.deepEqual(r.probe.authPaths, [r.inDistro("/home/u/.config/muse/auth.json")], "the Windows-side login is never queried");
     assert.deepEqual(r.probe.mapped.at(-1), ["Ubuntu", "/home/u/.config/muse/auth.json"]);
     await get(base, "/api/plan-usage");
     await get(base, "/api/plan-usage");
@@ -497,13 +530,13 @@ describe("a login read from inside the WSL distro", () => {
     assert.deepEqual(r.probe.homeTimeouts, [2000], "and the child is given a deadline");
   });
 
-  it("says the login is dead when Meta answers 401 or 403", async (t) => {
-    for (const status of [401, 403]) {
-      const r = await rig(t, { answer: () => new Response("secret body", { status }) });
+  it("says the login is dead when Muse CLI reports a rejected or missing login", async (t) => {
+    for (const stderr of ["muse usage: usage refresh failed (credential_rejected) secret body", "muse usage: not logged in: run `muse login` first"]) {
+      const r = await rig(t, { answer: () => rejectedResult(stderr) });
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
       const { base } = await start(new FakeConnection(), r.options);
       const report = await get(base, "/api/plan-usage");
-      assert.equal(report.accounts[0].status, "login-required", String(status));
+      assert.equal(report.accounts[0].status, "login-required", stderr);
       assert.equal(report.accounts[0].usage, null);
       assert.doesNotMatch(JSON.stringify(report), /secret body|dca:/);
     }
@@ -562,8 +595,8 @@ describe("a login read from inside the WSL distro", () => {
   });
 
   it("does not hold the page for a read that never finishes, and lets it go quietly", { timeout: 20_000 }, async (t) => {
-    const r = await rig(t, { answer: (init) => new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+    const r = await rig(t, { answer: (req) => new Promise<MuseUsageCliResult>((_resolve, reject) => {
+      req.signal.addEventListener("abort", () => reject(new Error("aborted")));
     }), bounds: { readTimeoutMs: 150 } });
     await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
     const { base } = await start(new FakeConnection(), r.options);
@@ -587,14 +620,14 @@ describe("a login read from inside the WSL distro", () => {
   });
 
   it("publishes nothing from a read that finished late, after another read has begun", async (t) => {
-    let release: (answer: Response) => void = () => {};
-    const r = await rig(t, { answer: () => new Promise<Response>((resolve) => { release = resolve; }), bounds: { readTimeoutMs: 100 } });
+    let release: (answer: MuseUsageCliResult) => void = () => {};
+    const r = await rig(t, { answer: () => new Promise<MuseUsageCliResult>((resolve) => { release = resolve; }), bounds: { readTimeoutMs: 100 } });
     await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
     const { server, base } = await start(new FakeConnection(), r.options);
     assert.equal((await first(base)).status, "runtime-only");
     // The next poll has begun: the revision has moved past the one the late read belongs to.
     server["planUsageReadRevision"] += 1;
-    release(Response.json(snapshot(Date.now(), 42)));
+    release(snapshot(Date.now(), 42));
     await waitFor(() => server["subscriptionReader"]["cached"].size === 1, "the late answer arriving");
     await pause(100);
     assert.equal(server["defaultPlanUsage"], null);
@@ -678,7 +711,7 @@ describe("a login read from inside the WSL distro", () => {
       assert.equal((await first(initial.base)).status, "ready");
       await initial.server.close();
 
-      const down = scriptedReader({ now: Date.now, answer: () => new Response(null, { status: 503 }) });
+      const down = scriptedReader({ now: Date.now, answer: () => unavailableResult() });
       const other = await start(new FakeConnection(), { ...r.options, wslEnv: { XDG_CONFIG_HOME: "/y/cfg" }, subscriptionReader: down.reader });
       const report = await get(other.base, "/api/plan-usage");
       assert.equal(report.usage, null, "the other file has not been read yet");
@@ -755,7 +788,7 @@ describe("a login read from inside the WSL distro", () => {
       const meta = { down: false };
       // The bound is a second and the slow look three, so that only the order of events is raced, not the speed of the disk.
       const r = await rig(t, { bounds: { readTimeoutMs: 1000 },
-        answer: () => meta.down ? new Response(null, { status: 503 }) : Response.json(snapshot(Date.now(), 42)) });
+        answer: () => meta.down ? unavailableResult() : snapshot(Date.now(), 42) });
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
       const slow = { next: 0 };
       const { base } = await start(new FakeConnection(), { ...r.options, wslQuota: { ...r.options.wslQuota,
@@ -818,8 +851,8 @@ describe("a login read from inside the WSL distro", () => {
       }
       const seen: string[] = [];
       const roots: string[] = [];
-      const modes: { name: string; answer?: () => Response; home?: string }[] = [
-        { name: "ok" }, { name: "refused", answer: () => new Response(`${token} ${email}`, { status: 401 }) },
+      const modes: { name: string; answer?: () => MuseUsageCliResult; home?: string }[] = [
+        { name: "ok" }, { name: "refused", answer: () => rejectedResult(`credential_rejected ${token} ${email}`) },
         { name: "hostile home", home: "/home/../x\n" },
       ];
       for (const mode of modes) {
@@ -852,7 +885,7 @@ describe("a login read from inside the WSL distro", () => {
       await both.login("/srv", "person@example.test", "dca:override");
       await both.login("/x/cfg", "other@example.test", "dca:xdg");
       assert.equal((await first((await start(new FakeConnection(), both.options)).base)).status, "ready");
-      assert.deepEqual(both.probe.bearers, ["Bearer dca:override"]);
+      assert.deepEqual(both.probe.authPaths, [both.inDistro("/srv/muse/auth.json")]);
       assert.deepEqual(both.probe.mapped.at(-1), ["Ubuntu", "/srv/muse/auth.json"]);
       assert.equal(both.probe.homeCalls, 0);
 
@@ -860,7 +893,7 @@ describe("a login read from inside the WSL distro", () => {
       await xdg.login("/x/cfg", "other@example.test", "dca:xdg");
       await xdg.login(DISTRO_CONFIG, "person@example.test", "dca:home");
       assert.equal((await first((await start(new FakeConnection(), xdg.options)).base)).status, "ready");
-      assert.deepEqual(xdg.probe.bearers, ["Bearer dca:xdg"]);
+      assert.deepEqual(xdg.probe.authPaths, [xdg.inDistro("/x/cfg/muse/auth.json")]);
       assert.deepEqual(xdg.probe.mapped.at(-1), ["Ubuntu", "/x/cfg/muse/auth.json"]);
       assert.equal(xdg.probe.homeCalls, 0);
     });
@@ -915,7 +948,7 @@ describe("a login read from inside the WSL distro", () => {
       assert.equal(accounts.find((account: { accountId: string | null }) => account.accountId === null).status, "ready");
       assert.equal(work.status, "runtime-only");
       assert.equal(work.planName, null);
-      assert.deepEqual(r.probe.bearers, ["Bearer dca:distro-side"]);
+      assert.deepEqual(r.probe.authPaths, [r.inDistro("/home/u/.config/muse/auth.json")]);
     });
   });
 
@@ -1202,7 +1235,7 @@ describe("a login read from inside the WSL distro", () => {
       assert.equal((await first(initial.base)).status, "ready");
       await initial.server.close();
 
-      const down = scriptedReader({ now: Date.now, answer: () => new Response(null, { status: 503 }) });
+      const down = scriptedReader({ now: Date.now, answer: () => unavailableResult() });
       const restarted = await start(new FakeConnection(), { ...r.options, subscriptionReader: down.reader });
       const report = await get(restarted.base, "/api/plan-usage");
       assert.equal(report.usage.window.usedPercent, 42);
@@ -1211,14 +1244,14 @@ describe("a login read from inside the WSL distro", () => {
     });
 
     it("forgets it, and its plan name, when the login in the distro is another one", async (t) => {
-      let answer: () => Response = () => Response.json(snapshot(Date.now(), 42));
+      let answer: () => MuseUsageCliResult = () => snapshot(Date.now(), 42);
       const r = await rig(t, { answer: () => answer() });
       await r.login(DISTRO_CONFIG, "person@example.test", "dca:distro-side");
       const { base } = await start(new FakeConnection(), r.options);
       assert.equal((await first(base)).planName, "Muse Code Power Usage");
 
       await r.login(DISTRO_CONFIG, "other@example.test", "dca:other-side");
-      answer = () => new Response(null, { status: 503 });
+      answer = () => unavailableResult();
       const switched = await first(base);
       assert.equal(switched.usage, null, "another login never inherits the previous reading");
       assert.equal(switched.planName, null);
@@ -1272,7 +1305,7 @@ describe("an account removed and created again under the same id", () => {
 
   it("does not hand its plan name to the new account", async (t) => {
     let stamp = Date.now();
-    let answer: () => Response = () => Response.json(snapshot(stamp, 42));
+    let answer: () => MuseUsageCliResult = () => snapshot(stamp, 42);
     const { reader } = scriptedReader({ now: () => stamp, answer: () => answer() });
     const { base, profile, comeBack } = await twoLives(t, { subscriptionReader: reader });
     await saveLogin(profile.roots.config, "work@example.test", "dca:work");
@@ -1282,7 +1315,7 @@ describe("an account removed and created again under the same id", () => {
     const again = await comeBack();
     await saveLogin(again.roots.config, "work@example.test", "dca:work");
     stamp += 1000;
-    answer = () => new Response(null, { status: 503 });
+    answer = () => unavailableResult();
     const fresh = workOf(await get(base, "/api/plan-usage"));
     assert.equal(fresh.status, "unavailable");
     assert.equal(fresh.planName, null, "a failed check is not a reason to name a plan the old account had");
@@ -1300,5 +1333,32 @@ describe("an account removed and created again under the same id", () => {
     second.notify("usage/changed", frame);
     const late = (await get(base, "/api/plan-usage")).byAccount.work.observedAtMs;
     assert.ok(late > early, "the same stamp from the new account arrives when it arrives, not when the old one did");
+  });
+});
+
+describe("default server CLI runner for muse usage --json", () => {
+  it("invokes muse usage --json through options.exec with MUSE_AUTH_PATH and never passes tokens in argv", async (t) => {
+    const home = await mkdtemp(join(tmpdir(), "ancilla-default-cli-usage-"));
+    quotaEnvironment(t, home);
+    const authPath = await saveLogin(join(home, ".config"), "person@example.test", "dca:default-cli");
+    const stamp = Date.now();
+    const calls: Array<{ command: string; args: string[]; museAuthPath: string | undefined }> = [];
+    const exec: ExecFn = async (command, args, opts) => {
+      calls.push({ command, args, museAuthPath: opts?.env?.["MUSE_AUTH_PATH"] });
+      if (args[0] === "usage" && args[1] === "--json") {
+        const cli = snapshot(stamp, 31);
+        return { stdout: cli.stdout, stderr: cli.stderr, exitCode: cli.exitCode ?? 0 };
+      }
+      return { stdout: "", exitCode: 127 };
+    };
+    const { base } = await start(new FakeConnection(), { home, exec });
+    const report = await get(base, "/api/plan-usage");
+    const usageCall = calls.find((c) => c.args[0] === "usage");
+    assert.ok(usageCall, "muse usage --json was invoked");
+    assert.deepEqual(usageCall.args, ["usage", "--json"]);
+    assert.equal(usageCall.museAuthPath, authPath);
+    assert.doesNotMatch(JSON.stringify(calls), /dca:/);
+    assert.equal(report.accounts[0].status, "ready");
+    assert.equal(report.accounts[0].usage.window.usedPercent, 31);
   });
 });

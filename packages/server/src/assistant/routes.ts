@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { isRestrictedAssistantUrl } from "../browser/sites.js";
 import { MAX_AVATAR_BYTES, MAX_AVATARS, MAX_TOTAL_AVATAR_BYTES } from "./avatars.js";
 import { parseEmbeddingSettings, testEmbedding } from "./embed.js";
 import { DEFAULT_PROFILE } from "./profile.js";
@@ -155,6 +156,9 @@ async function handleWork(service: AssistantService, sub: string, req: Assistant
     const goal = typeof body["goal"] === "string" ? body["goal"].trim() : "";
     if (goal.length < 3) bad("goal must say what to find out", "goal");
     const url = typeof body["url"] === "string" ? body["url"].trim() : "";
+    if (url !== "" && isRestrictedAssistantUrl(url)) {
+      bad("Automated assistant browsing is disabled on Meta consumer sites; open it in your own Browser tab instead.", "url");
+    }
     const ready = await exec.browseAvailable();
     if (!ready.ok) return { status: 409, body: { error: ready.reason ?? "The browser cannot be used right now.", kind: "browse_unavailable" } };
     const cwd = typeof body["cwd"] === "string" && body["cwd"] !== "" ? body["cwd"] : homedir();
