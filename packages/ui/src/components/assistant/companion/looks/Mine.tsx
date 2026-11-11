@@ -190,7 +190,7 @@ export function MineTab(props: { draft: Draft; name: string; onWear: (patch: Par
       {lib.error ? <p role="alert" className="mb-2 text-xs text-danger-text">{lib.error}</p> : null}
       {lib.avatars.length === 0 ? (
         <p className="rounded-xl bg-sunken p-4 text-sm text-muted shadow-[0_0_0_1px_var(--border)]">
-          {lib.loading ? "Looking..." : "Nothing here yet. Build a figure, draw pixel art or bring a picture, and it will be kept here."}
+          {lib.loading ? "Looking..." : "Nothing here yet. Bring a picture, sprite sheet or desktop-pet .zip, or draw pixel art, and it will be kept here."}
         </p>
       ) : (
         <ul className="grid grid-cols-2 gap-2 @min-[520px]:grid-cols-3 @min-[760px]:grid-cols-4">

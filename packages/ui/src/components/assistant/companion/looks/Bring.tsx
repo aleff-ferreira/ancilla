@@ -7,7 +7,8 @@ import { Pills } from "../ui.js";
 import { PictureError, encodePicture, loadPicture, pictureData, readPixels, release, type LoadedPicture } from "./bring-io.js";
 import type { Draft } from "./LookStudio.js";
 import { useAvatarLibrary } from "./library.js";
-import { MAX_GRID, MOOD_WORDS, SHEET_MOODS, hasArt, petRows, rowFrames, sequentialRows, sheetOf, suggestGrid, suggestGridFromPixels, type RowPlan } from "./raster.js";
+import { unpackPetArchive } from "./pet-zip.js";
+import { MAX_GRID, MOOD_WORDS, SHEET_MOODS, compactSheet, hasArt, petRows, rowFrames, sequentialRows, sheetOf, suggestGrid, suggestGridFromPixels, type RowPlan } from "./raster.js";
 
 /**
  * Bringing a picture in. One picture becomes a face that moves in its own way for each mood; a sprite sheet (a grid of
@@ -71,6 +72,7 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
   const [mode, setMode] = useState<Mode>("picture");
   const [cols, setCols] = useState(1);
   const [rows, setRows] = useState(1);
+  const [isPetAtlas, setIsPetAtlas] = useState(false);
   const [plan, setPlan] = useState<RowPlan[]>([]);
   const [crisp, setCrisp] = useState(false);
   const [circle, setCircle] = useState(false);
@@ -88,15 +90,16 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
   const counts = useMemo(() => (pixels && picture ? rowFrames(pixels, picture.w, picture.h, cols, rows) : []), [pixels, picture, cols, rows]);
 
   useEffect(() => () => release(picture), [picture]);
-  // A new grid starts a new plan: the rows that have something drawn in them, in order, until the user says otherwise.
+  // A desktop-pet sheet starts on the desktop-pet mood map; any other new grid starts on the occupied rows in order.
   useEffect(() => {
-    if (mode === "sheet" && counts.length === rows) setPlan(sequentialRows(counts));
-  }, [counts, mode, rows]);
+    if (mode === "sheet" && counts.length === rows) setPlan(isPetAtlas ? petRows(counts) : sequentialRows(counts));
+  }, [counts, mode, rows, isPetAtlas]);
   // Choosing "a sprite sheet" for a file that was not taken for one starts from the grid its pixels suggest, if they suggest one.
   useEffect(() => {
     if (mode === "sheet" && cols === 1 && rows === 1 && guess) {
       setCols(guess.cols);
       setRows(guess.rows);
+      setIsPetAtlas(guess.atlas);
     }
   }, [mode, cols, rows, guess]);
 
@@ -107,17 +110,28 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
       return;
     }
     try {
-      const loaded = await loadPicture(file);
+      let targetFile = file;
+      let forcedTitle = "";
+      let fromPetZip = false;
+      if (file.type === "application/zip" || file.type === "application/x-zip-compressed" || /\.zip$/i.test(file.name)) {
+        const unpacked = await unpackPetArchive(new Uint8Array(await file.arrayBuffer()), file.name);
+        targetFile = unpacked.file;
+        forcedTitle = unpacked.title;
+        fromPetZip = unpacked.desktopPet;
+      }
+      const loaded = await loadPicture(targetFile);
       setPicture(loaded);
       setFileName(file.name);
-      setTitle(file.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim().slice(0, 40));
+      setTitle(forcedTitle || file.name.replace(/\.[^.]+$/, "").replace(/[-_]+/g, " ").trim().slice(0, 40));
       setCrisp(Math.max(loaded.w, loaded.h) <= 128);
       setCircle(false);
-      // A sheet with the cell size desktop pets share opens as a sheet; anything else opens as a picture, and offers its guess if asked.
+      // A sheet with the cell size desktop pets share (or unpacked from a pet archive) opens straight in sheet mode.
       const g = suggestGrid(loaded.w, loaded.h);
-      setMode(g?.atlas ? "sheet" : "picture");
-      setCols(g?.atlas ? g.cols : 1);
-      setRows(g?.atlas ? g.rows : 1);
+      const petSheet = Boolean(g?.atlas) || Boolean(fromPetZip && g);
+      setIsPetAtlas(petSheet);
+      setMode(petSheet ? "sheet" : "picture");
+      setCols(petSheet && g ? g.cols : 1);
+      setRows(petSheet && g ? g.rows : 1);
       setMood("idle");
     } catch (e) {
       setError(e instanceof PictureError ? e.message : errorMessage(e));
@@ -127,6 +141,7 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
   const reset = () => {
     setPicture(null);
     setFileName("");
+    setIsPetAtlas(false);
     setPlan([]);
     setError(null);
     if (input.current) input.current.value = "";
@@ -146,8 +161,16 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
     try {
       // Encoding is the slow part (it draws every frame again at its stored size); the page stays still while it runs.
       await new Promise((resolve) => window.setTimeout(resolve, 20));
-      const encoded = encodePicture(picture, { cols: mode === "sheet" ? cols : 1, rows: mode === "sheet" ? rows : 1, maxCell: mode === "sheet" ? 192 : 320, crisp, circle: mode === "picture" && circle });
-      const pack = await lib.create({ name: title.trim() || "My picture", kind: "image", data: pictureData(encoded, mode === "sheet" ? sheet : undefined, crisp) });
+      const compacted = mode === "sheet" && sheet ? compactSheet(sheet) : null;
+      const encoded = encodePicture(picture, {
+        cols: mode === "sheet" ? cols : 1,
+        rows: mode === "sheet" ? rows : 1,
+        ...(compacted ? { sourceRows: compacted.usedRows, keepCols: compacted.cols } : {}),
+        maxCell: mode === "sheet" ? 192 : 320,
+        crisp,
+        circle: mode === "picture" && circle,
+      });
+      const pack = await lib.create({ name: title.trim() || "My picture", kind: "image", data: pictureData(encoded, compacted ? compacted.sheet : undefined, crisp) });
       props.onWear({ look: { kind: "pack", id: pack.id, rev: pack.updatedAt } });
       reset();
       props.onDone();
@@ -177,17 +200,17 @@ export function BringTab(props: { draft: Draft; name: string; onWear: (patch: Pa
           onDrop={drop}
           className={cn("rounded-xl border border-dashed p-6 text-center transition-colors", over ? "border-accent bg-accent-soft" : "border-line-strong bg-sunken")}
         >
-          <p className="text-sm font-medium text-fg">Bring a picture or a sprite sheet</p>
+          <p className="text-sm font-medium text-fg">Bring a picture, sprite sheet, or desktop-pet package</p>
           <p className="mx-auto mt-1 max-w-prose text-xs text-muted text-pretty">
-            A logo, a drawing, a photograph, or a sheet of frames from a sprite or a desktop pet. It is shrunk to fit and kept on this computer. A GIF is used as its first frame. Cut-out pictures on a clear background look best.
+            Drop a desktop-pet <code className="font-mono text-fg">.zip</code> archive, an animated sprite sheet (<code className="font-mono text-fg">.webp</code> or <code className="font-mono text-fg">.png</code>), or any cut-out picture on a clear background. Everything stays on this computer.
           </p>
           <input
             ref={input}
             type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
+            accept="image/png,image/jpeg,image/webp,image/gif,.zip,application/zip"
             className="sr-only"
             tabIndex={-1}
-            aria-label="Choose a picture or sprite sheet"
+            aria-label="Choose a picture, sprite sheet, or desktop-pet zip"
             onChange={(e) => {
               const f = e.currentTarget.files?.[0];
               if (f) void open(f);

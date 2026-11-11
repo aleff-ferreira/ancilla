@@ -3,16 +3,17 @@ import { describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ControllerProvider } from "../src/app/context.js";
-import { rng } from "../src/components/assistant/companion/faces.js";
+import { COMPANIONS, companionById } from "../src/components/assistant/companion/companions/catalog.js";
+import { SIGIL_FORMS, rng } from "../src/components/assistant/companion/faces.js";
 import { DEFAULT_FIGURE, normalizeFigure } from "../src/components/assistant/companion/figure/parts.js";
-import { presetById } from "../src/components/assistant/companion/figure/presets.js";
 import { LookEditor } from "../src/components/assistant/companion/edit.js";
 import { BringTab } from "../src/components/assistant/companion/looks/Bring.js";
 import { DrawTab } from "../src/components/assistant/companion/looks/Draw.js";
 import { BuildTab, ChooseTab, surprise, type Draft } from "../src/components/assistant/companion/looks/LookStudio.js";
 import { MineTab } from "../src/components/assistant/companion/looks/Mine.js";
 import { AVATAR_FILE_FORMAT, MAX_AVATAR_FILE_BYTES, avatarFileName, bytesLabel, parseAvatarFile, toAvatarFile } from "../src/components/assistant/companion/looks/library.js";
-import { MAX_PICTURE_BYTES, MOOD_MS, SHEET_MOODS, cellHasArt, dataUrlBytes, fitScale, hasArt, petRows, planOf, rowFrames, sequentialRows, sheetOf, storedSize, suggestGrid, suggestGridFromPixels } from "../src/components/assistant/companion/looks/raster.js";
+import { unpackPetArchive } from "../src/components/assistant/companion/looks/pet-zip.js";
+import { MAX_PICTURE_BYTES, MOOD_MS, SHEET_MOODS, cellHasArt, compactSheet, dataUrlBytes, fitScale, hasArt, petRows, planOf, rowFrames, sequentialRows, sheetOf, storedSize, suggestGrid, suggestGridFromPixels } from "../src/components/assistant/companion/looks/raster.js";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
 import type { AncillaController } from "../src/model/controller.js";
 import { Store, type AppState } from "../src/model/store.js";
@@ -83,6 +84,7 @@ describe("reading a sprite sheet", () => {
 
   it("guesses the grid of a sheet from its size, and says when it is sure", () => {
     assert.deepEqual(suggestGrid(1536, 1872), { cols: 8, rows: 9, atlas: true });
+    assert.deepEqual(suggestGrid(1536, 2288), { cols: 8, rows: 11, atlas: true }, "v2 desktop-pet atlas with directional rows");
     assert.deepEqual(suggestGrid(512, 256), { cols: 2, rows: 1, atlas: false }, "a guess for the user to accept, not a promise");
     assert.deepEqual(suggestGrid(128, 128), { cols: 2, rows: 2, atlas: false });
     assert.equal(suggestGrid(100, 100), null, "no common cell size divides it");
@@ -111,19 +113,27 @@ describe("reading a sprite sheet", () => {
     assert.deepEqual(gaps.map((p) => p.mood), [null, "idle", null, "working"], "an empty row takes no mood, and the next row with art takes it");
   });
 
-  it("lays the desktop-pet sheet out as well as it is known", () => {
-    const plan = petRows([4, 6, 6, 5, 5, 3, 3, 6, 2]);
-    assert.deepEqual(plan.map((p) => p.mood), ["idle", "working", null, "delight", "attention", "concern", null, null, null]);
-    assert.deepEqual(petRows([4, 0, 6, 0, 5, 3]).map((p) => p.mood), ["idle", null, null, null, "attention", "concern"], "a row with nothing in it plays for nothing");
+  it("lays the desktop-pet sheet out across v1 9-row, v2 11-row, and 6-row sheets", () => {
+    const v1 = petRows([4, 6, 6, 5, 5, 3, 3, 6, 2]);
+    assert.deepEqual(v1.map((p) => p.mood), ["idle", null, null, "delight", null, "concern", "attention", "working", "asleep"]);
+    const v2 = petRows([4, 6, 6, 5, 5, 3, 3, 6, 2, 8, 8]);
+    assert.deepEqual(v2.map((p) => p.mood), ["idle", null, null, "delight", null, "concern", "attention", "working", "asleep", null, null]);
+    assert.deepEqual(petRows([4, 0, 6, 0, 5, 3]).map((p) => p.mood), ["idle", null, null, null, "attention", "concern"], "falls back to earlier rows when rows 6-8 are absent");
   });
 
-  it("makes the sheet a plan describes, with a resting row whatever the plan says", () => {
-    const sheet = sheetOf(8, 9, petRows([4, 6, 6, 5, 5, 3, 3, 6, 2]));
+  it("makes the sheet a plan describes, with a resting row whatever the plan says, and compacts unused rows", () => {
+    const sheet = sheetOf(8, 11, petRows([4, 6, 6, 5, 5, 3, 3, 6, 2, 8, 8]));
     assert.equal(sheet.cols, 8);
-    assert.equal(sheet.rows, 9);
+    assert.equal(sheet.rows, 11);
     assert.deepEqual(sheet.moods.idle, { row: 0, frames: 4, ms: MOOD_MS.idle });
     assert.deepEqual(sheet.moods.delight, { row: 3, frames: 5, ms: MOOD_MS.delight });
-    assert.equal(sheet.moods.asleep, undefined);
+    assert.deepEqual(sheet.moods.working, { row: 7, frames: 6, ms: MOOD_MS.working });
+    assert.deepEqual(sheet.moods.asleep, { row: 8, frames: 2, ms: MOOD_MS.asleep });
+    const compacted = compactSheet(sheet);
+    assert.deepEqual(compacted.usedRows, [0, 3, 5, 6, 7, 8]);
+    assert.equal(compacted.cols, 6);
+    assert.equal(compacted.sheet.rows, 6);
+    assert.deepEqual(compacted.sheet.moods.working, { row: 4, frames: 6, ms: MOOD_MS.working });
     const none = sheetOf(4, 2, [{ mood: null, frames: 3, ms: 90 }, { mood: "working", frames: 2, ms: 90 }]);
     assert.deepEqual(none.moods.idle, { row: 0, frames: 3, ms: 90 }, "the first row rests when nothing else does");
     assert.deepEqual(none.moods.working, { row: 1, frames: 2, ms: 90 });
@@ -250,63 +260,139 @@ describe("an avatar as a file", () => {
   });
 });
 
+describe("unpacking a desktop-pet .zip archive", () => {
+  const u16le = (n: number): number[] => [n & 0xff, (n >>> 8) & 0xff];
+  const u32le = (n: number): number[] => [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff];
+
+  async function deflateRaw(input: Uint8Array): Promise<Uint8Array> {
+    const stream = new Blob([input as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  async function makeZip(files: { name: string; data: Uint8Array; deflate?: boolean }[]): Promise<Uint8Array> {
+    const enc = new TextEncoder();
+    const locals: Uint8Array[] = [];
+    const central: Uint8Array[] = [];
+    let offset = 0;
+    for (const f of files) {
+      const nameBytes = enc.encode(f.name);
+      const method = f.deflate ? 8 : 0;
+      const body = f.deflate ? await deflateRaw(f.data) : f.data;
+      const localHeader = new Uint8Array([
+        0x50, 0x4b, 0x03, 0x04,
+        ...u16le(20), ...u16le(0), ...u16le(method), ...u16le(0), ...u16le(0),
+        ...u32le(0), ...u32le(body.byteLength), ...u32le(f.data.byteLength),
+        ...u16le(nameBytes.byteLength), ...u16le(0),
+      ]);
+      locals.push(localHeader, nameBytes, body);
+      const cdHeader = new Uint8Array([
+        0x50, 0x4b, 0x01, 0x02,
+        ...u16le(20), ...u16le(20), ...u16le(0), ...u16le(method), ...u16le(0), ...u16le(0),
+        ...u32le(0), ...u32le(body.byteLength), ...u32le(f.data.byteLength),
+        ...u16le(nameBytes.byteLength), ...u16le(0), ...u16le(0), ...u16le(0), ...u16le(0),
+        ...u32le(0), ...u32le(offset),
+      ]);
+      central.push(cdHeader, nameBytes);
+      offset += localHeader.byteLength + nameBytes.byteLength + body.byteLength;
+    }
+    const cdSize = central.reduce((s, b) => s + b.byteLength, 0);
+    const eocd = new Uint8Array([
+      0x50, 0x4b, 0x05, 0x06,
+      ...u16le(0), ...u16le(0), ...u16le(files.length), ...u16le(files.length),
+      ...u32le(cdSize), ...u32le(offset), ...u16le(0),
+    ]);
+    const total = offset + cdSize + eocd.byteLength;
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const part of [...locals, ...central, eocd]) {
+      out.set(part, at);
+      at += part.byteLength;
+    }
+    return out;
+  }
+
+  it("extracts pet.json displayName and deflated spritesheet.webp while ignoring macOS junk entries", async () => {
+    const enc = new TextEncoder();
+    const fakeWebp = enc.encode("RIFF\x10\x00\x00\x00WEBPVP8 ");
+    const archive = await makeZip([
+      { name: "__MACOSX/._spritesheet.webp", data: enc.encode("junk") },
+      { name: "chassis-pet/pet.json", data: enc.encode(JSON.stringify({ id: "chassis", displayName: "GlaDOS Core", spritesheetPath: "spritesheet.webp", spriteVersionNumber: 2 })), deflate: true },
+      { name: "chassis-pet/spritesheet.webp", data: fakeWebp, deflate: true },
+    ]);
+    const unpacked = await unpackPetArchive(archive, "chassis-pet.zip");
+    assert.equal(unpacked.title, "GlaDOS Core");
+    assert.equal(unpacked.desktopPet, true);
+    assert.equal(unpacked.file.name, "spritesheet.webp");
+    assert.equal(unpacked.file.type, "image/webp");
+    assert.deepEqual(new Uint8Array(await unpacked.file.arrayBuffer()), fakeWebp);
+  });
+
+  it("rejects archives without pictures or corrupt buffers", async () => {
+    const enc = new TextEncoder();
+    const noImg = await makeZip([{ name: "readme.txt", data: enc.encode("hello") }]);
+    await assert.rejects(() => unpackPetArchive(noImg, "empty.zip"), /No PNG, WebP/);
+    await assert.rejects(() => unpackPetArchive(enc.encode("not a zip at all"), "bad.zip"), /ZIP/);
+  });
+});
+
 describe("a surprise", () => {
-  it("is always something it can wear", () => {
+  it("picks from studio companions and geometric sigils, never low-quality blob figures", () => {
     const random = rng(2024);
-    let figures = 0;
+    let companions = 0;
     let sigils = 0;
     for (let i = 0; i < 200; i += 1) {
       const s = surprise(random);
       assert.ok(s.look, "it says what it wears");
-      if (s.look?.kind === "figure") {
-        figures += 1;
-        assert.deepEqual(normalizeFigure(s.look.figure), s.look.figure);
+      if (s.look?.kind === "companion") {
+        companions += 1;
+        assert.ok(companionById(s.look.id), `known studio companion ${s.look.id}`);
         assert.ok((s.hue ?? 0) >= 0 && (s.hue ?? 0) <= 359);
-      } else if (s.look?.kind === "sigil") sigils += 1;
-      else assert.fail("a surprise never reaches for something that has to be fetched");
+      } else if (s.look?.kind === "sigil") {
+        sigils += 1;
+        assert.ok(SIGIL_FORMS.some((f) => f.form === s.form), `geometric sigil ${String(s.form)}`);
+      } else assert.fail(`unexpected surprise look: ${String(s.look?.kind)}`);
     }
-    assert.ok(figures > 100 && sigils > 5, "mostly characters, now and then a form of light");
+    assert.ok(companions > 120 && sigils > 10, "mostly studio companions, with geometric sigils alongside");
   });
 });
 
 describe("choosing a look", () => {
   const noop = () => undefined;
 
-  it("offers the forms of light and the ready-made characters, and marks the one worn", () => {
+  it("offers the studio companions and minimal geometric sigils, without cartoon presets", () => {
     const sigil = inApp(createElement(ChooseTab, { draft: CHARACTER, onChange: noop }));
-    for (const name of ["Halo", "Optic", "Hologram", "Critter", "Cipher", "Fox", "Robot", "Ghost", "Mage"]) assert.ok(text(sigil).includes(name), `${name} is on offer`);
+    for (const c of COMPANIONS) assert.ok(text(sigil).includes(c.name), `${c.name} is on offer`);
+    for (const name of ["Halo", "Optic", "Cipher"]) assert.ok(text(sigil).includes(name), `${name} is on offer`);
+    for (const removed of ["Tabby", "Bunny", "Slime", "Dragonling", "Critter", "Hologram"]) {
+      assert.ok(!text(sigil).includes(removed), `${removed} low-quality preset was removed`);
+    }
     assert.ok(/aria-label="Optic" aria-pressed="true"/.test(sigil) || /aria-pressed="true"[^>]*aria-label="Optic"/.test(sigil), "the form it wears is marked");
     assert.ok(text(sigil).includes("Lens"), "a form of light has its variants");
-    const fox = presetById("fox");
-    assert.ok(fox);
-    const worn = inApp(createElement(ChooseTab, { draft: wearing({ kind: "figure", figure: fox.figure }, { hue: fox.hue }), onChange: noop }));
-    assert.ok(/aria-label="Fox" aria-pressed="true"/.test(worn) || /aria-pressed="true"[^>]*aria-label="Fox"/.test(worn), "the character it wears is marked");
-    assert.ok(!text(worn).includes("Lens"), "a character has no lens to choose");
-    assert.ok(worn.includes("Accent") && worn.includes("Shade"), "a figure's accent and shade can be changed");
+    const vesper = companionById("vesper")!;
+    const worn = inApp(createElement(ChooseTab, { draft: wearing({ kind: "companion", id: "vesper" }, { hue: vesper.hue, glow: vesper.glow }), onChange: noop }));
+    assert.ok(/aria-label="Vesper" aria-pressed="true"/.test(worn) || /aria-pressed="true"[^>]*aria-label="Vesper"/.test(worn), "the studio companion it wears is marked");
+    assert.ok(!text(worn).includes("Lens"), "a companion has no lens blades selector");
+    assert.ok(text(worn).includes("Stage and aura light") && text(worn).includes("Signature"), "companion stage and aura light can be tuned or reset");
   });
 
-  it("builds a figure from its parts, one slot at a time", () => {
+  it("keeps legacy saved figures editable from Mine while keeping Build out of the main tab bar", () => {
     const start = inApp(createElement(BuildTab, { draft: CHARACTER, onChange: noop, saveable: true }));
     assert.ok(text(start).includes("Start with a plain figure"), "a form of light has no parts yet");
     const build = inApp(createElement(BuildTab, { draft: wearing({ kind: "figure", figure: { ...DEFAULT_FIGURE, body: "ghost" } }), onChange: noop, saveable: true }));
     for (const slot of ["Body", "On top", "Eyes", "Mouth", "Markings", "Wearing", "Around it", "Finish", "Colour"]) assert.ok(text(build).includes(slot), `${slot} can be changed`);
-    assert.ok(/aria-label="Body: Ghost" aria-pressed="true"/.test(build) || /aria-pressed="true"[^>]*aria-label="Body: Ghost"/.test(build), "the part in use is marked");
-    assert.ok(text(build).includes("Keep this one"), "a figure can be kept");
-    assert.ok(text(build).includes("It is a teal ghost figure with oval eyes"));
-    assert.ok(!text(inApp(createElement(BuildTab, { draft: wearing({ kind: "figure", figure: DEFAULT_FIGURE }), onChange: noop, saveable: false }))).includes("Keep this one"), "without a library there is nothing to keep it in");
     const kept: AvatarPackView = { id: "av_9", name: "Bruno", kind: "figure", bytes: 10, createdAt: 1, updatedAt: 2, data: { figure: DEFAULT_FIGURE, hue: 40, glow: 70 } };
     const changing = text(inApp(createElement(BuildTab, { draft: wearing({ kind: "figure", figure: DEFAULT_FIGURE }), onChange: noop, saveable: true, editing: kept })));
-    assert.ok(changing.includes("You are changing Bruno"), "a figure sent from Mine says whose it is");
-    assert.ok(changing.includes("Save changes") && changing.includes("Save as new"), "and can be saved back into it or beside it");
-    assert.ok(!changing.includes("Keep this one"));
+    assert.ok(changing.includes("You are changing Bruno"));
+    assert.ok(changing.includes("Save changes") && changing.includes("Save as new"));
   });
 
-  it("offers a smaller choice where the server may not be reachable yet, and the whole of it on the Persona page", () => {
+  it("shows companions directly in first-run mode and the four clean studio tabs on the Persona page", () => {
     const lite = inApp(createElement(LookEditor, { draft: CHARACTER, onChange: noop }));
-    assert.ok(text(lite).includes("Choose") && text(lite).includes("Build"));
-    assert.ok(!text(lite).includes("Bring your own") && !text(lite).includes("Mine"));
+    assert.ok(text(lite).includes("Vesper") && text(lite).includes("Orbital Core"));
+    assert.ok(!text(lite).includes("Bring your own") && !text(lite).includes("Mine") && !text(lite).includes("Put one together from parts"));
     const full = inApp(createElement(LookEditor, { draft: CHARACTER, onChange: noop, full: true, name: "Vesper" }));
-    for (const tab of ["Choose", "Build", "Draw", "Bring your own", "Mine"]) assert.ok(text(full).includes(tab), `${tab} is a tab`);
+    for (const tab of ["Choose", "Bring your own", "Draw", "Mine"]) assert.ok(text(full).includes(tab), `${tab} is a tab`);
+    assert.ok(!text(full).includes("Put one together from parts"));
     assert.ok(full.includes('role="tablist"') && full.includes('role="tab"'));
   });
 

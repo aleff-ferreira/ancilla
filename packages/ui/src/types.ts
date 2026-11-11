@@ -848,11 +848,11 @@ export interface FigureSpec {
 }
 
 /**
- * What the assistant wears. A sigil is one of the five forms of light above (the form, hue, glow and detail say which);
- * a figure is built from parts and carried right here, because it is small; a pack is something the user drew or brought
- * (pixel art, a picture, a sprite sheet), kept on the server and fetched by its id, at the revision named.
+ * What the assistant wears. A sigil is one of the forms of light above (the form, hue, glow and detail say which);
+ * a companion is one of the built-in studio companions (`companion/companions/catalog.ts`); a figure is a legacy part-built
+ * character; a pack is something the user drew or brought (pixel art, a picture, a sprite sheet), kept on the server.
  */
-export type AvatarLookView = { kind: "sigil" } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
+export type AvatarLookView = { kind: "sigil" } | { kind: "companion"; id: string } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
 
 /** Pixel art: a square or a rectangle of coloured cells with frames for the moods. */
 export interface PixelData {

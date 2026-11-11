@@ -22,6 +22,8 @@ export const MAX_QUIRK = 80;
  * Ancilla must survive an older server, which draws the plain part for an id it does not know.
  */
 export const PART_ID = /^[a-z0-9][a-z0-9-]{0,23}$/;
+/** The id of a built-in companion: checked by shape so a newer interface's companion survives an older server. */
+export const COMPANION_ID = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** The id of a saved avatar, the same shape every assistant entity's id has. */
 export const PACK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 export const FIGURE_PARTS = ["body", "top", "eyes", "mouth", "mark", "gear", "aura", "finish"] as const;
@@ -152,6 +154,9 @@ export function parseFigure(raw: unknown, field: string): FigureSpec {
 export function normalizeLook(raw: unknown): AvatarLook {
   if (!isObj(raw)) return { kind: "sigil" };
   if (raw.kind === "sigil") return { kind: "sigil" };
+  if (raw.kind === "companion") {
+    return typeof raw.id === "string" && COMPANION_ID.test(raw.id) ? { kind: "companion", id: raw.id } : { kind: "sigil" };
+  }
   if (raw.kind === "figure") {
     const figure = normalizeFigure(raw.figure);
     return figure ? { kind: "figure", figure } : { kind: "sigil" };
@@ -175,6 +180,11 @@ function parseLook(raw: unknown, field: string): AvatarLook {
     for (const key of Object.keys(raw)) if (key !== "kind") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
     return { kind: "sigil" };
   }
+  if (kind === "companion") {
+    for (const key of Object.keys(raw)) if (key !== "kind" && key !== "id") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
+    if (typeof raw.id !== "string" || !COMPANION_ID.test(raw.id)) throw new ValidationError(`${field}.id`, `${field}.id must be a companion id: lower-case letters, digits and dashes, up to 32 characters`);
+    return { kind: "companion", id: raw.id };
+  }
   if (kind === "figure") {
     for (const key of Object.keys(raw)) if (key !== "kind" && key !== "figure") throw new ValidationError(`${field}.${key}`, `unknown field ${field}.${key}`);
     return { kind: "figure", figure: parseFigure(raw.figure, `${field}.figure`) };
@@ -184,7 +194,7 @@ function parseLook(raw: unknown, field: string): AvatarLook {
     if (typeof raw.id !== "string" || !PACK_ID.test(raw.id)) throw new ValidationError(`${field}.id`, `${field}.id must be the id of a saved avatar`);
     return { kind: "pack", id: raw.id, rev: 0 };
   }
-  throw new ValidationError(`${field}.kind`, `${field}.kind must be one of sigil, figure, pack`);
+  throw new ValidationError(`${field}.kind`, `${field}.kind must be one of sigil, companion, figure, pack`);
 }
 
 /** The character as stored, completed with defaults and brought inside the limits. Never throws. */

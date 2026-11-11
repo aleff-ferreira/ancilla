@@ -1,8 +1,8 @@
 import type { FigureSpec } from "../../../types.js";
-import { FORMS, HUES, MOODS, type AvatarMood, type AvatarSpec } from "./faces.js";
+import { COMPANIONS, COMPANION_GROUPS } from "./companions/catalog.js";
+import { FORMS, HUES, MOODS, SIGIL_FORMS, type AvatarMood, type AvatarSpec } from "./faces.js";
 import { Avatar } from "./Avatar.js";
 import { CATALOGUE, DEFAULT_FIGURE, SHADES, SLOTS, SLOT_LABEL, type Slot } from "./figure/parts.js";
-import { PRESETS, PRESET_GROUPS } from "./figure/presets.js";
 
 /**
  * Every face on one page. A development view for the browser demo (`demo.html?gallery=avatars&section=...`): it is how the
@@ -15,12 +15,14 @@ type Section = "sigils" | "presets" | "moods" | "parts";
 
 const figureSpec = (figure: FigureSpec, hue: number, glow: number, seed = 12345): AvatarSpec => ({ form: "halo", hue, glow, detail: 1, seed, look: { kind: "figure", figure } });
 
+const companionSpec = (id: string, hue: number, glow: number, seed = 12345): AvatarSpec => ({ form: "halo", hue, glow, detail: 1, seed, look: { kind: "companion", id } });
+
 function Sigils(props: { hue: number; glow: number }) {
   const { hue, glow } = props;
   const spec = (form: (typeof FORMS)[number]["form"], detail = 1, h = hue): AvatarSpec => ({ form, hue: h, glow, detail, seed: 12345 });
   return (
     <>
-      <p className="mb-6 text-sm text-muted">Each form in each mood; then each form's four variants; then each hue on the first form.</p>
+      <p className="mb-6 text-sm text-muted">Each geometric sigil in each mood; then its four variants; then each hue.</p>
       <div className="overflow-x-auto">
         <table className="border-separate border-spacing-x-3 border-spacing-y-3">
           <thead>
@@ -32,7 +34,7 @@ function Sigils(props: { hue: number; glow: number }) {
             </tr>
           </thead>
           <tbody>
-            {FORMS.map((f) => (
+            {SIGIL_FORMS.map((f) => (
               <tr key={f.form}>
                 <th className="pr-3 text-right text-xs font-medium text-muted">{f.name}</th>
                 {MOODS.map((mood: AvatarMood) => (
@@ -47,23 +49,20 @@ function Sigils(props: { hue: number; glow: number }) {
       </div>
       <h2 className="mt-8 mb-2 text-sm font-semibold">Variants</h2>
       <div className="flex flex-wrap gap-4" data-block="variants">
-        {FORMS.flatMap((f) => [0, 1, 2, 3].map((d) => <Avatar key={`${f.form}${d}`} spec={spec(f.form, d)} size={96} stage />))}
+        {SIGIL_FORMS.flatMap((f) => [0, 1, 2, 3].map((d) => <Avatar key={`${f.form}${d}`} spec={spec(f.form, d)} size={96} stage />))}
       </div>
       <h2 className="mt-8 mb-2 text-sm font-semibold">Hues</h2>
       <div className="flex flex-wrap gap-4" data-block="hues">
         {HUES.map((h) => (
           <Avatar key={h.name} spec={spec("optic", 1, h.hue)} size={96} stage />
         ))}
-        {HUES.map((h) => (
-          <Avatar key={`c${h.name}`} spec={spec("critter", 1, h.hue)} size={96} stage />
-        ))}
       </div>
       <h2 className="mt-8 mb-2 text-sm font-semibold">Small</h2>
       <div className="flex items-center gap-4" data-block="small">
-        {FORMS.map((f) => (
+        {SIGIL_FORMS.map((f) => (
           <Avatar key={f.form} spec={spec(f.form)} size={32} stage />
         ))}
-        {FORMS.map((f) => (
+        {SIGIL_FORMS.map((f) => (
           <Avatar key={`m${f.form}`} spec={spec(f.form)} size={48} stage />
         ))}
       </div>
@@ -74,15 +73,17 @@ function Sigils(props: { hue: number; glow: number }) {
 function Presets() {
   return (
     <>
-      <p className="mb-4 text-sm text-muted">The ready-made characters, resting.</p>
-      {PRESET_GROUPS.map((group) => (
+      <p className="mb-4 text-sm text-muted">Studio companions, resting.</p>
+      {COMPANION_GROUPS.map((group) => (
         <div key={group} className="mb-6">
           <h2 className="mb-2 text-sm font-semibold">{group}</h2>
           <div className="flex flex-wrap gap-5" data-block={`presets-${group}`}>
-            {PRESETS.filter((p) => p.group === group).map((p) => (
-              <figure key={p.id} className="flex w-32 flex-col items-center gap-1.5" data-preset={p.id}>
-                <Avatar spec={figureSpec(p.figure, p.hue, p.glow)} name={p.name} size={128} stage look />
-                <figcaption className="text-xs font-medium text-fg">{p.name}</figcaption>
+            {COMPANIONS.filter((c) => c.group === group).map((c) => (
+              <figure key={c.id} className="flex w-36 flex-col items-center gap-1.5" data-preset={c.id}>
+                <div className="cp-card-stage w-full" style={{ ["--h" as string]: c.hue, ["--g" as string]: (c.glow / 100).toFixed(2) }}>
+                  <Avatar spec={companionSpec(c.id, c.hue, c.glow)} name={c.name} size={120} look />
+                </div>
+                <figcaption className="text-xs font-medium text-fg">{c.name}</figcaption>
               </figure>
             ))}
           </div>
@@ -93,10 +94,10 @@ function Presets() {
 }
 
 function Moods() {
-  const picks = ["fox", "robot", "ghost", "slime", "drone", "mage"].map((id) => PRESETS.find((p) => p.id === id)).filter((p): p is (typeof PRESETS)[number] => p !== undefined);
+  const picks = ["vesper", "atlas", "probe", "astrolabe", "strix", "lantern"].map((id) => COMPANIONS.find((c) => c.id === id)).filter((c): c is (typeof COMPANIONS)[number] => c !== undefined);
   return (
     <>
-      <p className="mb-4 text-sm text-muted">Some characters in every mood.</p>
+      <p className="mb-4 text-sm text-muted">Studio companions in every mood.</p>
       <div className="overflow-x-auto">
         <table className="border-separate border-spacing-x-2 border-spacing-y-2">
           <thead>
@@ -108,12 +109,12 @@ function Moods() {
             </tr>
           </thead>
           <tbody>
-            {picks.map((p) => (
-              <tr key={p.id}>
-                <th className="pr-3 text-right text-xs font-medium text-muted">{p.name}</th>
+            {picks.map((c) => (
+              <tr key={c.id}>
+                <th className="pr-3 text-right text-xs font-medium text-muted">{c.name}</th>
                 {MOODS.map((mood) => (
-                  <td key={mood} data-cell={`${p.id}-${mood}`}>
-                    <Avatar spec={figureSpec(p.figure, p.hue, p.glow)} mood={mood} burst={1} size={112} stage look />
+                  <td key={mood} data-cell={`${c.id}-${mood}`}>
+                    <Avatar spec={companionSpec(c.id, c.hue, c.glow)} mood={mood} burst={1} size={112} stage look />
                   </td>
                 ))}
               </tr>

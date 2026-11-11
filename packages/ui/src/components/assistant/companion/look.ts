@@ -1,16 +1,18 @@
 import type { AvatarPackView, FigureSpec, ImagePackData, PixelData } from "../../../types.js";
+import { companionById, type CompanionInfo } from "./companions/catalog.js";
 import { describeAvatar, hueName, looksLike, moodPhrase, withArticle, type AvatarMood, type AvatarSpec } from "./faces.js";
 import { describeFigure, normalizeFigure, partName, sameParts } from "./figure/parts.js";
 import { PRESETS } from "./figure/presets.js";
 
 /**
- * What the assistant wears, resolved to something that can be drawn. The profile stores a small `look` (a sigil, a figure
- * with its parts, or the id of a saved pack); the pack's own data (pixels, a picture) lives on the server and is read through
- * the cache in `packs.tsx`. This turns the first into the second, and says in words what it is for a screen reader.
+ * What the assistant wears, resolved to something that can be drawn. The profile stores a small `look` (a sigil, a built-in
+ * studio companion, a legacy figure, or the id of a saved pack); the pack's own data (pixels, a picture) lives on the server
+ * and is read through the cache in `packs.tsx`. This turns the first into the second, and says in words what it is.
  */
 
 export type RenderLook =
   | { kind: "sigil" }
+  | { kind: "companion"; companion: CompanionInfo }
   | { kind: "figure"; figure: FigureSpec }
   | { kind: "pixel"; data: PixelData; name?: string }
   | { kind: "image"; data: ImagePackData; name?: string };
@@ -26,6 +28,10 @@ export function lookOfPack(pack: AvatarPackView): RenderLook {
 export function resolveLook(spec: AvatarSpec, pack: AvatarPackView | undefined): RenderLook {
   const look = spec.look;
   if (!look || look.kind === "sigil") return { kind: "sigil" };
+  if (look.kind === "companion") {
+    const companion = companionById(look.id);
+    return companion ? { kind: "companion", companion } : { kind: "sigil" };
+  }
   if (look.kind === "figure") return { kind: "figure", figure: normalizeFigure(look.figure) };
   return pack ? lookOfPack(pack) : { kind: "sigil" };
 }
@@ -33,13 +39,17 @@ export function resolveLook(spec: AvatarSpec, pack: AvatarPackView | undefined):
 /** The pack a spec asks for, if it asks for one. */
 export const packRef = (spec: AvatarSpec): { id: string; rev: number } | null => (spec.look?.kind === "pack" ? { id: spec.look.id, rev: spec.look.rev } : null);
 
-/** The ready-made character a figure is made of, if it is one: the same parts, in whatever colour. */
+/** The legacy preset a figure is made of, if it is one: the same parts, in whatever colour. */
 export const presetOf = (figure: FigureSpec): (typeof PRESETS)[number] | undefined => PRESETS.find((p) => sameParts(p.figure, normalizeFigure(figure)));
 
-/** What it wears, in a few words for the line under its picture: "ice halo", "teal fox", "pixel art called Pip". */
+/** What it wears, in a few words for the line under its picture: "Vesper", "Orbital Core", "ice halo", "pixel art called Pip". */
 export function wornWords(spec: AvatarSpec, pack?: AvatarPackView): string {
   const look = spec.look;
   if (!look || look.kind === "sigil") return looksLike(spec);
+  if (look.kind === "companion") {
+    const companion = companionById(look.id);
+    return companion ? companion.name : looksLike(spec);
+  }
   if (look.kind === "figure") {
     const preset = presetOf(look.figure);
     return `${hueName(spec.hue).toLowerCase()} ${preset ? preset.name.toLowerCase() : `${partName("body", normalizeFigure(look.figure).body).toLowerCase()} figure`}`;
@@ -48,8 +58,12 @@ export function wornWords(spec: AvatarSpec, pack?: AvatarPackView): string {
   return `${pack.kind === "image" ? "a picture" : "pixel art"} called ${pack.name}`;
 }
 
-/** A sentence about what it wears: "An ice halo.", "A teal fox.", "Pixel art called Pip.". */
+/** A sentence about what it wears: "Vesper.", "An ice halo.", "Pixel art called Pip.". */
 export function wornSentence(spec: AvatarSpec, pack?: AvatarPackView): string {
+  if (spec.look?.kind === "companion") {
+    const companion = companionById(spec.look.id);
+    if (companion) return `${companion.name}.`;
+  }
   const words = wornWords(spec, pack);
   const phrase = spec.look?.kind === "pack" ? words : withArticle(words);
   return `${phrase.charAt(0).toUpperCase()}${phrase.slice(1)}.`;
@@ -58,6 +72,8 @@ export function wornSentence(spec: AvatarSpec, pack?: AvatarPackView): string {
 /** What a screen reader says: who it is, what it looks like, and what it is doing. */
 export function describeLook(spec: AvatarSpec, name: string, mood: AvatarMood, look: RenderLook): string {
   switch (look.kind) {
+    case "companion":
+      return `${name}, ${look.companion.name}, ${look.companion.blurb.replace(/\.$/, "").toLowerCase()}, ${moodPhrase(mood)}`;
     case "figure":
       return `${name}, ${describeFigure(look.figure, spec.hue)}, ${moodPhrase(mood)}`;
     case "pixel":

@@ -53,7 +53,7 @@ await scene("assistant-persona", async (b, shot) => {
   await b.goto(`${base}?${q}#/assistant`, 2600);
   await clickTab(b, "Persona");
   await sleep(1100);
-  await clickButton(b, "Fox");
+  await clickButton(b, "Orbital Core");
   await sleep(700);
   await b.eval(`(() => { const el = ${SCROLLER}; const t = Array.from(document.querySelectorAll('[role="tablist"]')).find((x) => x.getAttribute('aria-label') === 'How to choose a look'); if (el && t) el.scrollTop += t.getBoundingClientRect().top - el.getBoundingClientRect().top - 300; })()`);
   await sleep(700);
@@ -66,9 +66,9 @@ await scene("assistant-meeting", async (b, shot) => {
   await b.goto(`${base}?assistant=new&${q}#/assistant`, 2600);
   await clickButton(b, "Let's begin");
   await sleep(900);
-  await clickButton(b, "Ghost");
+  await clickButton(b, "Chronometer");
   await sleep(500);
-  await clickButton(b, "Violet");
+  await clickButton(b, "Amber");
   await sleep(900);
   await shot();
 });

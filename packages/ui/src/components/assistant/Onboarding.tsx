@@ -5,6 +5,7 @@ import { Pick } from "../settings/SettingsPage.js";
 import { Button } from "../ui/primitives.js";
 import { useAssistantCall } from "./api.js";
 import { Avatar } from "./companion/Avatar.js";
+import { DEFAULT_COMPANION_ID, companionById } from "./companion/companions/catalog.js";
 import { mergeCharacter, tidyQuirks, type CharacterChange } from "./companion/draft.js";
 import { LookEditor, Preview, VoiceEditor } from "./companion/edit.js";
 import { greeting, say } from "./companion/voice.js";
@@ -27,7 +28,14 @@ export function Onboarding(props: { profile: AssistantProfileView; onDone: () =>
   const call = useAssistantCall();
   const [step, setStep] = useState(0);
   const [name, setName] = useState(props.profile.name || "Ancilla");
-  const [character, setCharacter] = useState<AssistantCharacterView>(props.profile.character);
+  const [character, setCharacter] = useState<AssistantCharacterView>(() => {
+    const cur = props.profile.character;
+    if (cur.setupAt === null && (!cur.avatar.look || cur.avatar.look.kind === "sigil")) {
+      const def = companionById(DEFAULT_COMPANION_ID);
+      if (def) return { ...cur, avatar: { ...cur.avatar, hue: def.hue, glow: def.glow, look: { kind: "companion", id: def.id } } };
+    }
+    return cur;
+  });
   const [autonomy, setAutonomy] = useState<AssistantAutonomy>(props.profile.autonomy);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

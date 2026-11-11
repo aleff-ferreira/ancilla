@@ -153,16 +153,55 @@ export function sequentialRows(frames: readonly number[]): RowPlan[] {
 }
 
 /**
- * The layout the desktop-pet sheets seem to share, as far as it is known: resting first, then a run, then a wave, a jump
- * and a stumble. It is a starting guess, and each row can be changed, with the preview showing what it will do. A row with
- * nothing drawn in it plays for nothing.
+ * The layout desktop-pet sheets share (both 9-row v1 and 11-row v2 atlases, as well as shorter 6-row sheets):
+ * row 0 rests, row 7 works (falling back to row 1's run), row 6 waits on the user (falling back to row 4), row 3 waves
+ * in delight, row 5 stumbles in concern, and row 8 rests in standby when drawn. Rows 9 and 10 on 11-row sheets hold
+ * static directional poses rather than a loop, so they stay unused. A row with nothing drawn in it plays for nothing.
  */
 export function petRows(frames: readonly number[]): RowPlan[] {
-  const map: Record<number, AvatarMoodId> = { 0: "idle", 1: "working", 3: "delight", 4: "attention", 5: "concern" };
+  const has = (r: number): boolean => (frames[r] ?? 0) > 0;
+  const working = has(7) ? 7 : 1;
+  const attention = has(6) ? 6 : 4;
+  const delight = has(3) ? 3 : 4;
+  const map: Partial<Record<number, AvatarMoodId>> = {
+    0: "idle",
+    [working]: "working",
+    ...(delight !== attention ? { [delight]: "delight" } : {}),
+    [attention]: "attention",
+    5: "concern",
+    ...(has(8) ? { 8: "asleep" } : {}),
+  };
   return frames.map((f, r) => {
     const mood = f > 0 ? (map[r] ?? null) : null;
     return { mood, frames: f, ms: mood ? MOOD_MS[mood] : 140 };
   });
+}
+
+/**
+ * Strips unused rows and trailing empty columns from a sheet before encoding so a large 11-row desktop-pet atlas
+ * spends its pixel and byte budget only on the rows that actually play.
+ */
+export function compactSheet(sheet: NonNullable<ImagePackData["sheet"]>): { usedRows: number[]; cols: number; sheet: NonNullable<ImagePackData["sheet"]> } {
+  const rowSet = new Set<number>();
+  let maxFrames = 1;
+  for (const mood of SHEET_MOODS) {
+    const m = sheet.moods[mood];
+    if (m) {
+      rowSet.add(m.row);
+      if (m.frames > maxFrames) maxFrames = m.frames;
+    }
+  }
+  const usedRows = rowSet.size > 0 ? [...rowSet].sort((a, b) => a - b) : [0];
+  const cols = Math.min(sheet.cols, Math.max(1, maxFrames));
+  const moods: NonNullable<ImagePackData["sheet"]>["moods"] = {};
+  for (const mood of SHEET_MOODS) {
+    const m = sheet.moods[mood];
+    if (m) {
+      const idx = usedRows.indexOf(m.row);
+      if (idx >= 0) moods[mood] = { row: idx, frames: Math.min(cols, m.frames), ms: m.ms };
+    }
+  }
+  return { usedRows, cols, sheet: { cols, rows: usedRows.length, moods } };
 }
 
 /**

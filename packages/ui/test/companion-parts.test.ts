@@ -262,6 +262,8 @@ describe("the first meeting and the preview", () => {
     assert.match(words, /4\. Wake it/);
     assert.equal((markup.match(/aria-current="step"/g) ?? []).length, 1);
     assert.match(markup, /data-step="0"/);
+    assert.match(markup, /data-look="companion"/, "an unconfigured assistant greets with the flagship studio companion");
+    assert.match(markup, /data-form="vesper"/);
     assert.match(words, /What should it be called\?/);
     assert.match(markup, /id="companion-name"[^>]*value="Ancilla"/, "an unnamed assistant starts as Ancilla");
     assert.match(words, /nothing is kept or switched on until the last step/);

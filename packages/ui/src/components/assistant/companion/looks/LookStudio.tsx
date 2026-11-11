@@ -2,9 +2,9 @@ import { useId, useState } from "react";
 import type { AssistantCharacterView, AvatarForm, AvatarPackView, FigureSpec } from "../../../../types.js";
 import { Button, cn } from "../../../ui/primitives.js";
 import { Avatar } from "../Avatar.js";
-import { FORMS, HUES, formInfo, hueName, randomSpec, type AvatarSpec } from "../faces.js";
-import { CATALOGUE, DEFAULT_FIGURE, SHADES, SLOT_LABEL, SLOTS, describeFigure, normalizeFigure, randomFigure, sameParts, type Slot } from "../figure/parts.js";
-import { PRESETS, PRESET_GROUPS, type Preset } from "../figure/presets.js";
+import { COMPANIONS, COMPANION_GROUPS, companionById, type CompanionInfo } from "../companions/catalog.js";
+import { HUES, SIGIL_FORMS, formInfo, hueName, randomSpec, type AvatarSpec } from "../faces.js";
+import { CATALOGUE, DEFAULT_FIGURE, SHADES, SLOT_LABEL, SLOTS, describeFigure, normalizeFigure, type Slot } from "../figure/parts.js";
 import { usePack } from "../packs.js";
 import { Card, Field, Pills, Tabs } from "../ui.js";
 import { BringTab } from "./Bring.js";
@@ -13,32 +13,29 @@ import { MineTab } from "./Mine.js";
 import { SaveFigure } from "./SaveFigure.js";
 
 /**
- * How the user chooses and makes a look for the assistant. Five tabs: choose a ready-made character (or one of the five
- * forms of light), build one from parts, draw one in pixels, bring a picture or a sprite sheet, and the ones already made.
- * Everything edits the draft the caller holds, so the first-run flow can keep it until the assistant wakes and the Persona
- * page can save as the user goes.
+ * How the user chooses and imports a look for the assistant: studio-rendered companions and minimal geometric sigils on
+ * Choose, bringing a picture / sprite sheet / desktop-pet `.zip`, drawing pixel art frame by frame, and managing saved
+ * looks in Mine. Legacy part-built figures saved in Mine remain editable without cluttering the main tabs.
  */
 
 export type Draft = AssistantCharacterView;
 export type AvatarChange = (patch: { avatar?: Partial<Draft["avatar"]> }) => void;
 
-type Tab = "choose" | "build" | "draw" | "bring" | "mine";
+type VisibleTab = "choose" | "bring" | "draw" | "mine";
+type Tab = VisibleTab | "build";
 
-const TABS_FULL = [
-  { value: "choose", label: "Choose", hint: "Ready-made characters" },
-  { value: "build", label: "Build", hint: "Put one together from parts" },
+const TABS_FULL: readonly { value: VisibleTab; label: string; hint: string }[] = [
+  { value: "choose", label: "Choose", hint: "Studio companions and sigils" },
+  { value: "bring", label: "Bring your own", hint: "Picture, sprite sheet or pet .zip" },
   { value: "draw", label: "Draw", hint: "Pixel art, frame by frame" },
-  { value: "bring", label: "Bring your own", hint: "A picture or a sprite sheet" },
-  { value: "mine", label: "Mine", hint: "Everything you made or brought" },
-] as const;
-
-const TABS_LITE = TABS_FULL.slice(0, 2);
+  { value: "mine", label: "Mine", hint: "Everything you brought or made" },
+];
 
 const lookOf = (avatar: Draft["avatar"]) => avatar.look ?? { kind: "sigil" as const };
 
 // ------------------------------------------------------------------------------------------------ colour
 
-/** The colour of what it wears: a main hue, and for a figure its accent and shade; and how much it glows. */
+/** Stage & aura lighting: main hue, glow intensity, and legacy figure accent/shade when editing an old figure. */
 export function ColourControls(props: { draft: Draft; onChange: AvatarChange }) {
   const { draft, onChange } = props;
   const av = draft.avatar;
@@ -46,19 +43,35 @@ export function ColourControls(props: { draft: Draft; onChange: AvatarChange }) 
   const hue = useId();
   const glow = useId();
   const figure = look.kind === "figure" ? normalizeFigure(look.figure) : null;
+  const companion = look.kind === "companion" ? companionById(look.id) : undefined;
   const setFigure = (patch: Partial<FigureSpec>) => figure && onChange({ avatar: { look: { kind: "figure", figure: { ...figure, ...patch } } } });
   if (look.kind === "pack") {
     return (
-      <Field label="Glow" hint="Its colours come from the picture. This is how much light it gives off.">
+      <Field label="Glow" hint="Its colours come from the picture. This sets the stage and rim light around it.">
         <label htmlFor={glow} className="sr-only">Glow</label>
         <input id={glow} type="range" min={0} max={100} step={1} value={av.glow} onChange={(e) => onChange({ avatar: { glow: Number(e.currentTarget.value) } })} className="companion-range" style={{ ["--v" as string]: `${av.glow}%` }} />
       </Field>
     );
   }
+  const colourLabel = companion ? "Stage and aura light" : "Colour";
+  const colourHint = companion
+    ? `${hueName(av.hue)}. Tints the stage, ambient rim halo and telemetry ring around ${companion.name}.`
+    : `${hueName(av.hue)}. Pick one, or slide to any hue.`;
+  const customCompanionLight = Boolean(companion && (av.hue !== companion.hue || av.glow !== companion.glow));
   return (
     <div>
-      <Field label="Colour" hint={`${hueName(av.hue)}. Pick one, or slide to any hue.`}>
+      <Field label={colourLabel} hint={colourHint}>
         <div className="flex flex-wrap items-center gap-2">
+          {companion ? (
+            <button
+              type="button"
+              aria-pressed={!customCompanionLight}
+              onClick={() => onChange({ avatar: { hue: companion.hue, glow: companion.glow } })}
+              className={cn("h-7 rounded-full px-3 text-xs font-medium transition-colors", !customCompanionLight ? "bg-accent-soft text-accent-text shadow-[0_0_0_1.5px_var(--accent)]" : "bg-sunken text-muted shadow-[0_0_0_1px_var(--border)] hover:bg-hover hover:text-fg")}
+            >
+              Signature
+            </button>
+          ) : null}
           {HUES.map((h) => (
             <button
               key={h.name}
@@ -104,7 +117,7 @@ export function ColourControls(props: { draft: Draft; onChange: AvatarChange }) 
           </Field>
         </>
       ) : null}
-      <Field label="Glow" hint="How much light it gives off.">
+      <Field label="Glow" hint="How much light it casts onto the stage and rim.">
         <label htmlFor={glow} className="sr-only">Glow</label>
         <input id={glow} type="range" min={0} max={100} step={1} value={av.glow} onChange={(e) => onChange({ avatar: { glow: Number(e.currentTarget.value) } })} className="companion-range" style={{ ["--v" as string]: `${av.glow}%` }} />
       </Field>
@@ -114,70 +127,81 @@ export function ColourControls(props: { draft: Draft; onChange: AvatarChange }) 
 
 // ------------------------------------------------------------------------------------------------ surprise
 
-/** Something it has not worn: a ready-made character, a figure put together by chance, or a form of light. */
+/** Picks a studio companion or one of the geometric forms of light. */
 export function surprise(random: () => number = Math.random): Partial<Draft["avatar"]> {
   const r = random();
-  if (r < 0.45) {
-    const p = PRESETS[Math.floor(random() * PRESETS.length)] as Preset;
-    return { look: { kind: "figure", figure: p.figure }, hue: p.hue, glow: p.glow, seed: 1 + Math.floor(random() * 2_000_000_000) };
-  }
-  if (r < 0.85) {
-    return { look: { kind: "figure", figure: randomFigure(random) }, hue: (HUES[Math.floor(random() * HUES.length)] as (typeof HUES)[number]).hue, glow: 45 + Math.floor(random() * 45), seed: 1 + Math.floor(random() * 2_000_000_000) };
+  if (r < 0.82) {
+    const c = COMPANIONS[Math.floor(random() * COMPANIONS.length)] as CompanionInfo;
+    return { look: { kind: "companion", id: c.id }, hue: c.hue, glow: c.glow, seed: 1 + Math.floor(random() * 2_000_000_000) };
   }
   return { ...randomSpec(random), look: { kind: "sigil" } };
 }
 
-function Surprises(props: { onChange: AvatarChange }) {
+function Surprises(props: { onChange: AvatarChange; showSeed: boolean }) {
   return (
     <div className="flex flex-wrap gap-2 pt-1">
       <Button size="sm" variant="secondary" onClick={() => props.onChange({ avatar: surprise() })}>
         Surprise me
       </Button>
-      <Button size="sm" variant="ghost" onClick={() => props.onChange({ avatar: { seed: 1 + Math.floor(Math.random() * 2_000_000_000) } })}>
-        Another take
-      </Button>
+      {props.showSeed ? (
+        <Button size="sm" variant="ghost" onClick={() => props.onChange({ avatar: { seed: 1 + Math.floor(Math.random() * 2_000_000_000) } })}>
+          Another take
+        </Button>
+      ) : null}
     </div>
   );
 }
 
 // ------------------------------------------------------------------------------------------------ choose
 
-/** A face on a card, still until it is pointed at, so a page of thirty does not move all at once. */
 const thumb = (avatar: Draft["avatar"], patch: Partial<Draft["avatar"]>): AvatarSpec => ({ ...avatar, ...patch });
 
-export function ChooseTab(props: { draft: Draft; onChange: AvatarChange }) {
+export function ChooseTab(props: { draft: Draft; onChange: AvatarChange; onOpenBring?: () => void }) {
   const { draft, onChange } = props;
   const av = draft.avatar;
   const look = lookOf(av);
   const info = formInfo(av.form);
   return (
     <div>
-      {PRESET_GROUPS.map((group) => (
+      {COMPANION_GROUPS.map((group) => (
         <Field key={group} label={group}>
-          <div className="grid grid-cols-3 gap-2 @min-[480px]:grid-cols-4 @min-[720px]:grid-cols-6">
-            {PRESETS.filter((p) => p.group === group).map((p) => (
-              <Card
-                key={p.id}
-                chosen={look.kind === "figure" && sameParts(normalizeFigure(look.figure), p.figure)}
-                label={p.name}
-                onClick={() => onChange({ avatar: { look: { kind: "figure", figure: p.figure }, hue: p.hue, glow: p.glow } })}
-                className="py-2.5"
-              >
-                <Avatar spec={thumb(av, { look: { kind: "figure", figure: p.figure }, hue: p.hue, glow: p.glow })} name={p.name} size={60} stage className="av-calm" />
-                <span className="text-xs font-medium text-fg">{p.name}</span>
-              </Card>
-            ))}
+          <div className="grid grid-cols-2 gap-2.5 @min-[440px]:grid-cols-3 @min-[680px]:grid-cols-4">
+            {COMPANIONS.filter((c) => c.group === group).map((c) => {
+              const chosen = look.kind === "companion" && look.id === c.id;
+              const h = chosen ? av.hue : c.hue;
+              const g = chosen ? av.glow : c.glow;
+              return (
+                <Card
+                  key={c.id}
+                  chosen={chosen}
+                  label={c.name}
+                  onClick={() => onChange({ avatar: { look: { kind: "companion", id: c.id }, hue: c.hue, glow: c.glow } })}
+                  className="items-stretch gap-2 p-2 text-left"
+                >
+                  <div className="cp-card-stage" style={{ ["--h" as string]: h, ["--g" as string]: (g / 100).toFixed(2) }}>
+                    <Avatar spec={thumb(av, { look: { kind: "companion", id: c.id }, hue: h, glow: g })} name={c.name} size={92} className="av-calm" />
+                  </div>
+                  <div className="px-1 pb-0.5">
+                    <span className="block text-xs font-semibold text-fg">{c.name}</span>
+                    <span className="cp-card-blurb mt-0.5 text-2xs leading-3.5 text-muted">{c.blurb}</span>
+                  </div>
+                </Card>
+              );
+            })}
           </div>
         </Field>
       ))}
-      <Field label="Forms of light" hint="Made of light, not of a body. They glow, turn and watch.">
-        <div className="grid grid-cols-3 gap-2 @min-[560px]:grid-cols-5">
-          {FORMS.map((f) => (
-            <Card key={f.form} chosen={look.kind === "sigil" && av.form === f.form} label={f.name} onClick={() => onChange({ avatar: { look: { kind: "sigil" }, form: f.form as AvatarForm } })}>
-              <Avatar spec={thumb(av, { look: { kind: "sigil" }, form: f.form as AvatarForm })} size={56} stage className="av-calm" />
-              <span className="text-xs font-medium text-fg">{f.name}</span>
-            </Card>
-          ))}
+      <Field label="Forms of light" hint="Minimal geometric instruments made of light. They turn, focus and watch.">
+        <div className="grid grid-cols-3 gap-2.5">
+          {SIGIL_FORMS.map((f) => {
+            const chosen = look.kind === "sigil" && av.form === f.form;
+            return (
+              <Card key={f.form} chosen={chosen} label={f.name} onClick={() => onChange({ avatar: { look: { kind: "sigil" }, form: f.form as AvatarForm } })} className="py-2.5">
+                <Avatar spec={thumb(av, { look: { kind: "sigil" }, form: f.form as AvatarForm })} size={60} stage className="av-calm" />
+                <span className="text-xs font-medium text-fg">{f.name}</span>
+              </Card>
+            );
+          })}
         </div>
       </Field>
       {look.kind === "sigil" ? (
@@ -186,33 +210,38 @@ export function ChooseTab(props: { draft: Draft; onChange: AvatarChange }) {
         </Field>
       ) : null}
       <ColourControls draft={draft} onChange={onChange} />
-      <Surprises onChange={onChange} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Surprises onChange={onChange} showSeed={look.kind === "sigil"} />
+        {props.onOpenBring ? (
+          <Button size="sm" variant="ghost" onClick={props.onOpenBring}>
+            Import desktop-pet .zip or sprite sheet
+          </Button>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-// ------------------------------------------------------------------------------------------------ build
+// ------------------------------------------------------------------------------------------------ legacy figure editor (for Mine)
 
 function StartBuilding(props: { draft: Draft; onChange: AvatarChange }) {
   const { draft, onChange } = props;
-  const worn = lookOf(draft.avatar).kind === "pack" ? "something you drew or brought" : "a form of light";
+  const kind = lookOf(draft.avatar).kind;
+  const worn = kind === "pack" ? "something you drew or brought" : kind === "companion" ? "a studio companion" : "a form of light";
   return (
     <div className="rounded-xl bg-sunken p-4 shadow-[0_0_0_1px_var(--border)]">
       <p className="text-sm font-medium text-fg">Build a figure from parts</p>
-      <p className="mt-1 text-xs text-muted text-pretty">It is wearing {worn} now. Start from a plain figure, or from a surprise, and change anything: the body, ears, eyes, mouth, markings, what it wears, what is around it, and its finish.</p>
+      <p className="mt-1 text-xs text-muted text-pretty">It is wearing {worn} now. Start from a plain figure to edit individual parts.</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <Button size="sm" variant="accent" onClick={() => onChange({ avatar: { look: { kind: "figure", figure: DEFAULT_FIGURE }, hue: 195, glow: 60 } })}>
           Start with a plain figure
-        </Button>
-        <Button size="sm" variant="secondary" onClick={() => onChange({ avatar: surprise(() => 0.5 + Math.random() * 0.3) })}>
-          Start with a surprise
         </Button>
       </div>
     </div>
   );
 }
 
-export function BuildTab(props: { draft: Draft; onChange: AvatarChange; saveable: boolean; /** The saved figure being changed, when Mine sent it here. */ editing?: AvatarPackView | null }) {
+export function BuildTab(props: { draft: Draft; onChange: AvatarChange; saveable: boolean; /** The saved figure being changed, when Mine sent it here. */ editing?: AvatarPackView | null; onBack?: () => void }) {
   const { draft, onChange } = props;
   const av = draft.avatar;
   const look = lookOf(av);
@@ -231,6 +260,13 @@ export function BuildTab(props: { draft: Draft; onChange: AvatarChange; saveable
   };
   return (
     <div>
+      {props.onBack ? (
+        <div className="mb-2">
+          <Button size="xs" variant="ghost" onClick={props.onBack}>
+            Back to Mine
+          </Button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-2">
         <Pills<Slot | "colour"> value={slot} onChange={setSlot} label="Part to change" options={[...SLOTS.map((s) => ({ value: s as Slot | "colour", label: SLOT_LABEL[s] })), { value: "colour", label: "Colour" }]} />
       </div>
@@ -250,9 +286,6 @@ export function BuildTab(props: { draft: Draft; onChange: AvatarChange; saveable
         <Button size="sm" variant="secondary" onClick={shuffle}>
           Shuffle {slot === "colour" ? "colours" : SLOT_LABEL[slot].toLowerCase()}
         </Button>
-        <Button size="sm" variant="ghost" onClick={() => onChange({ avatar: surprise(() => 0.5 + Math.random() * 0.34) })}>
-          Surprise me
-        </Button>
         <Button size="sm" variant="ghost" onClick={() => onChange({ avatar: { seed: 1 + Math.floor(Math.random() * 2_000_000_000) } })}>
           Another take
         </Button>
@@ -265,34 +298,34 @@ export function BuildTab(props: { draft: Draft; onChange: AvatarChange; saveable
 
 // ------------------------------------------------------------------------------------------------ the whole
 
-export function LookStudio(props: { draft: Draft; onChange: AvatarChange; name: string; /** Offers drawing, bringing and the library, which keep things on the server. */ full?: boolean }) {
+export function LookStudio(props: { draft: Draft; onChange: AvatarChange; name: string; /** Offers bringing, drawing and the library, which keep things on the server. */ full?: boolean }) {
   const { draft, onChange } = props;
   const [tab, setTab] = useState<Tab>("choose");
   // Drawing and bringing hold work that is not saved yet (a drawing, a picture being set up), so once they have been opened
   // they stay in place, hidden, while another tab shows, and come back as they were left.
   const [opened, setOpened] = useState({ draw: false, bring: false });
-  // What Mine sent to be changed: a figure goes to Build, which can save back into it; pixel art goes to the studio, which
-  // opens it. `drawKey` starts the studio afresh when it is sent something else, or when what it held has been saved.
   const [buildEditId, setBuildEditId] = useState<string | null>(null);
   const [drawEditId, setDrawEditId] = useState<string | null>(null);
   const [drawKey, setDrawKey] = useState(0);
   const buildEditing = usePack(buildEditId, 0);
   const drawEditing = usePack(drawEditId, 0);
-  const tabs = props.full ? TABS_FULL : TABS_LITE;
   const wear = (patch: Partial<Draft["avatar"]>) => onChange({ avatar: patch });
   const go = (next: Tab) => {
-    // Changing a figure ends when the user leaves Build: coming back with another figure must not save over the old one.
     if (next !== "build") setBuildEditId(null);
     if (next === "draw" || next === "bring") setOpened((o) => ({ ...o, [next]: true }));
     setTab(next);
   };
+  if (!props.full) {
+    return <ChooseTab draft={draft} onChange={onChange} />;
+  }
+  const activeVisible: VisibleTab = tab === "build" ? "mine" : tab;
   return (
     <div>
-      <Tabs<Tab> value={tab} onChange={go} options={tabs} label="How to choose a look" />
+      <Tabs<VisibleTab> value={activeVisible} onChange={go} options={TABS_FULL} label="How to choose a look" />
       <div className="mt-2" role="tabpanel">
-        {tab === "choose" ? <ChooseTab draft={draft} onChange={onChange} /> : null}
-        {tab === "build" ? <BuildTab draft={draft} onChange={onChange} saveable={Boolean(props.full)} editing={buildEditing?.kind === "figure" ? buildEditing : null} /> : null}
-        {props.full && (opened.draw || tab === "draw") ? (
+        {tab === "choose" ? <ChooseTab draft={draft} onChange={onChange} onOpenBring={() => go("bring")} /> : null}
+        {tab === "build" ? <BuildTab draft={draft} onChange={onChange} saveable editing={buildEditing?.kind === "figure" ? buildEditing : null} onBack={() => go("mine")} /> : null}
+        {opened.draw || tab === "draw" ? (
           <div hidden={tab !== "draw"}>
             <DrawTab
               key={drawKey}
@@ -308,12 +341,12 @@ export function LookStudio(props: { draft: Draft; onChange: AvatarChange; name: 
             />
           </div>
         ) : null}
-        {props.full && (opened.bring || tab === "bring") ? (
+        {opened.bring || tab === "bring" ? (
           <div hidden={tab !== "bring"}>
             <BringTab draft={draft} name={props.name} onWear={wear} onDone={() => go("mine")} />
           </div>
         ) : null}
-        {tab === "mine" && props.full ? (
+        {tab === "mine" ? (
           <MineTab
             draft={draft}
             name={props.name}

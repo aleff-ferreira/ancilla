@@ -169,8 +169,8 @@ export interface FigureSpec {
   shade: number;
 }
 
-/** What the assistant wears: one of the five forms of light, a figure built from parts (small, so carried here), or a saved avatar by its id. */
-export type AvatarLook = { kind: "sigil" } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
+/** What the assistant wears: one of the forms of light, a built-in studio companion, a figure built from parts, or a saved avatar by its id. */
+export type AvatarLook = { kind: "sigil" } | { kind: "companion"; id: string } | { kind: "figure"; figure: FigureSpec } | { kind: "pack"; id: string; rev: number };
 
 /** Pixel art: `w` by `h` cells (8 to 64 each) with frames per mood. A cell is 0 (clear) or n, which is `palette[n - 1]`. */
 export interface PixelData {

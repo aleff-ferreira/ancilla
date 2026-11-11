@@ -4,6 +4,7 @@ import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AvatarPackView, FigureSpec, ImagePackData } from "../src/types.js";
 import { Avatar } from "../src/components/assistant/companion/Avatar.js";
+import { COMPANIONS, COMPANION_GROUPS, companionById } from "../src/components/assistant/companion/companions/catalog.js";
 import { MOODS, rng, type AvatarSpec } from "../src/components/assistant/companion/faces.js";
 import { BODIES, CATALOGUE, DEFAULT_FIGURE, SLOTS, describeFigure, knownPart, normalizeFigure, partName, randomFigure, sameFigure, sameParts, touches } from "../src/components/assistant/companion/figure/parts.js";
 import { PRESETS, PRESET_GROUPS, presetById } from "../src/components/assistant/companion/figure/presets.js";
@@ -258,6 +259,38 @@ describe("what the assistant wears", () => {
     assert.equal(describeLook(SPEC, "Ancilla", "idle", { kind: "sigil" }), "Ancilla, a teal halo with a bright glow, resting");
     const pixel = resolveLook({ ...SPEC, look: { kind: "pack", id: "av_1", rev: 5 } }, pixelPack());
     assert.equal(describeLook(SPEC, "Ancilla", "working", pixel), "Ancilla, a pixel art avatar called Pip, working");
+    const vesper = resolveLook({ ...SPEC, look: { kind: "companion", id: "vesper" } }, undefined);
+    assert.equal(vesper.kind, "companion");
+    assert.match(describeLook(SPEC, "Ancilla", "idle", vesper), /^Ancilla, Vesper, .*resting$/);
+  });
+
+  it("includes studio companions with valid WebP cutouts and renders every companion in every mood", () => {
+    assert.equal(COMPANIONS.length, 12);
+    assert.equal(new Set(COMPANIONS.map((c) => c.id)).size, COMPANIONS.length);
+    assert.equal(new Set(COMPANIONS.map((c) => c.name)).size, COMPANIONS.length);
+    for (const group of COMPANION_GROUPS) {
+      assert.ok(COMPANIONS.some((c) => c.group === group), `${group} has companions`);
+    }
+    for (const c of COMPANIONS) {
+      assert.match(c.id, /^[a-z0-9][a-z0-9-]{0,31}$/);
+      assert.ok(c.src.startsWith("data:image/webp;base64,"), `${c.id} embeds WebP`);
+      const bytes = Buffer.from(c.src.slice("data:image/webp;base64,".length), "base64");
+      assert.equal(bytes.toString("latin1", 0, 4), "RIFF", `${c.id} RIFF header`);
+      assert.equal(bytes.toString("latin1", 8, 12), "WEBP", `${c.id} WEBP header`);
+      assert.ok(bytes.length > 2_000 && bytes.length < 40_000, `${c.id} compact cutout (${bytes.length} bytes)`);
+      const cSpec: AvatarSpec = { ...SPEC, hue: c.hue, glow: c.glow, look: { kind: "companion", id: c.id } };
+      assert.equal(wornWords(cSpec), c.name);
+      assert.equal(wornSentence(cSpec), `${c.name}.`);
+      for (const mood of MOODS) {
+        const markup = draw(cSpec, mood, { name: "Ancilla", stage: true, look: true });
+        clean(markup, `${c.id} in ${mood}`);
+        assert.ok(markup.includes('class="av cp"'));
+        assert.ok(markup.includes(`data-form="${c.id}"`));
+        assert.ok(markup.includes('data-look="companion"'));
+      }
+    }
+    assert.equal(companionById("no-such-companion"), undefined);
+    assert.deepEqual(resolveLook({ ...SPEC, look: { kind: "companion", id: "no-such-companion" } }, undefined), { kind: "sigil" });
   });
 });
 

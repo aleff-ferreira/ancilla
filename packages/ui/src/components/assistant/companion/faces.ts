@@ -33,6 +33,9 @@ export const FORMS: readonly FormInfo[] = [
   { form: "cipher", name: "Cipher", blurb: "A sigil that wakes when it has something to tell you.", variantLabel: "Sides", variants: ["Three", "Four", "Five", "Six"] },
 ];
 
+/** Minimal geometric sigils shown in the picker; legacy forms remain in `FORMS` so older profiles still render. */
+export const SIGIL_FORMS: readonly FormInfo[] = FORMS.filter((f) => f.form === "halo" || f.form === "optic" || f.form === "cipher");
+
 export const formInfo = (form: AvatarForm): FormInfo => FORMS.find((f) => f.form === form) ?? (FORMS[0] as FormInfo);
 
 export interface HueInfo {
@@ -98,9 +101,9 @@ export function rng(seed: number): () => number {
   };
 }
 
-/** A face the user has not seen before: a form, a hue from the named ones, and a seed. */
+/** A face the user has not seen before: a geometric sigil, a hue from the named ones, and a seed. */
 export function randomSpec(random: () => number = Math.random): AvatarSpec {
-  const form = (FORMS[Math.floor(random() * FORMS.length)] as FormInfo).form;
+  const form = (SIGIL_FORMS[Math.floor(random() * SIGIL_FORMS.length)] as FormInfo).form;
   const hue = (HUES[Math.floor(random() * HUES.length)] as HueInfo).hue;
   return { form, hue, glow: 45 + Math.floor(random() * 45), detail: Math.floor(random() * 4), seed: 1 + Math.floor(random() * 2_000_000_000) };
 }

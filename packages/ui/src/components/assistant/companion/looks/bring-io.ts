@@ -59,6 +59,10 @@ export function readPixels(picture: LoadedPicture): Uint8ClampedArray {
 export interface EncodeOptions {
   cols: number;
   rows: number;
+  /** Source row indices to keep (defaults to every row `0..rows-1`); used to drop unused atlas rows on save. */
+  sourceRows?: readonly number[];
+  /** Number of columns from the left to keep (defaults to `cols`). */
+  keepCols?: number;
   /** The longest side a single cell is stored at. */
   maxCell: number;
   /** Scale without smoothing, for pixel art. */
@@ -78,9 +82,14 @@ export interface Encoded {
 export function encodePicture(picture: LoadedPicture, opts: EncodeOptions): Encoded {
   const cw0 = picture.w / opts.cols;
   const ch0 = picture.h / opts.rows;
-  let scale = fitScale(picture.w, picture.h, opts.cols, opts.rows, opts.maxCell, 1_200_000);
+  const rowList = opts.sourceRows && opts.sourceRows.length > 0 ? opts.sourceRows : Array.from({ length: opts.rows }, (_, i) => i);
+  const outCols = Math.max(1, Math.min(opts.cols, opts.keepCols ?? opts.cols));
+  const outRows = rowList.length;
+  const subW = cw0 * outCols;
+  const subH = ch0 * outRows;
+  let scale = fitScale(subW, subH, outCols, outRows, opts.maxCell, 1_400_000);
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const size = storedSize(picture.w, picture.h, opts.cols, opts.rows, scale);
+    const size = storedSize(subW, subH, outCols, outRows, scale);
     const canvas = document.createElement("canvas");
     canvas.width = size.w;
     canvas.height = size.h;
@@ -88,15 +97,16 @@ export function encodePicture(picture: LoadedPicture, opts: EncodeOptions): Enco
     if (!ctx) throw new PictureError("This browser cannot write pictures.");
     ctx.imageSmoothingEnabled = !opts.crisp;
     ctx.imageSmoothingQuality = "high";
-    for (let r = 0; r < opts.rows; r += 1) {
-      for (let c = 0; c < opts.cols; c += 1) {
+    for (let r = 0; r < outRows; r += 1) {
+      const srcRow = rowList[r] ?? 0;
+      for (let c = 0; c < outCols; c += 1) {
         ctx.save();
         if (opts.circle) {
           ctx.beginPath();
           ctx.arc(c * size.cw + size.cw / 2, r * size.ch + size.ch / 2, Math.min(size.cw, size.ch) / 2, 0, Math.PI * 2);
           ctx.clip();
         }
-        ctx.drawImage(picture.image, Math.floor(c * cw0), Math.floor(r * ch0), Math.floor(cw0), Math.floor(ch0), c * size.cw, r * size.ch, size.cw, size.ch);
+        ctx.drawImage(picture.image, Math.floor(c * cw0), Math.floor(srcRow * ch0), Math.floor(cw0), Math.floor(ch0), c * size.cw, r * size.ch, size.cw, size.ch);
         ctx.restore();
       }
     }

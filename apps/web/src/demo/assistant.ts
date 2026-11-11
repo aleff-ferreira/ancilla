@@ -66,7 +66,7 @@ export class DemoAssistant {
     character: this.mode === "new"
       ? NEW_CHARACTER
       : {
-          avatar: { form: "optic", hue: 195, glow: 70, detail: 1, seed: 4242 },
+          avatar: { form: "optic", hue: 75, glow: 68, detail: 1, seed: 4242, look: { kind: "companion", id: "vesper" } },
           voice: { archetype: "dry", warmth: 1, humor: 4, directness: 3, curiosity: 1, formality: 2 },
           callsUser: "Alex",
           quirks: ["Signs off with 'Standing by.'"],

@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { CompanionSprite } from "./CompanionSprite.js";
 import { avatarVars, particles, polygon, pointsOf, type AvatarMood, type AvatarSpec } from "./faces.js";
 import { accentHue } from "./figure/parts.js";
 import { Figure, Overlays } from "./figure/Figure.js";
@@ -78,7 +79,7 @@ export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, siz
   if (wears.kind === "figure") vars["--fa"] = accentHue(wears.figure, spec.hue);
   const style = { ...vars, width: size, height: size } as CSSProperties;
   const transient = mood === "delight" || mood === "concern";
-  const root = wears.kind === "figure" ? " fg" : wears.kind === "pixel" || wears.kind === "image" ? " pk" : "";
+  const root = wears.kind === "figure" ? " fg" : wears.kind === "companion" ? " cp" : wears.kind === "pixel" || wears.kind === "image" ? " pk" : "";
   return (
     <svg
       ref={ref}
@@ -86,7 +87,7 @@ export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, siz
       role="img"
       aria-label={describeLook(spec, name, mood, wears)}
       className={`av${root}${className ? ` ${className}` : ""}`}
-      data-form={wears.kind === "sigil" ? spec.form : wears.kind}
+      data-form={wears.kind === "sigil" ? spec.form : wears.kind === "companion" ? wears.companion.id : wears.kind}
       data-look={wears.kind}
       data-mood={mood}
       data-shade={wears.kind === "figure" ? wears.figure.shade : undefined}
@@ -95,6 +96,7 @@ export function Avatar({ spec, name = "Assistant", mood = "idle", burst = 0, siz
     >
       {stage ? <circle cx="80" cy="80" r="78" className="av-stage" /> : null}
       {wears.kind === "sigil" ? <Sigil id={id} spec={spec} /> : null}
+      {wears.kind === "companion" ? <CompanionSprite id={id} companion={wears.companion} mood={mood} /> : null}
       {wears.kind === "figure" ? <Figure id={id} figure={wears.figure} seed={spec.seed} /> : null}
       {wears.kind === "image" ? (
         <>

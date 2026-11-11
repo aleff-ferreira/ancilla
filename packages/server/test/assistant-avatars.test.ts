@@ -351,6 +351,10 @@ describe("what the assistant wears", () => {
     assert.deepEqual(look("figure"), { kind: "sigil" });
     assert.deepEqual(look({ kind: "dragon" }), { kind: "sigil" });
     assert.deepEqual(look({ kind: "sigil", extra: 1 }), { kind: "sigil" });
+    assert.deepEqual(look({ kind: "companion", id: "vesper" }), { kind: "companion", id: "vesper" });
+    assert.deepEqual(look({ kind: "companion", id: "future-companion-v2" }), { kind: "companion", id: "future-companion-v2" }, "an unknown companion id is kept: only its shape is checked");
+    assert.deepEqual(look({ kind: "companion", id: "Bad_ID" }), { kind: "sigil" });
+    assert.deepEqual(look({ kind: "companion" }), { kind: "sigil" });
     assert.deepEqual(look({ kind: "figure", figure: FIGURE }), { kind: "figure", figure: FIGURE });
     assert.deepEqual(look({ kind: "figure", figure: { ...FIGURE, body: "from-a-newer-ancilla" } }), { kind: "figure", figure: { ...FIGURE, body: "from-a-newer-ancilla" } }, "an unknown part id is kept: only its shape is checked");
     assert.deepEqual(look({ kind: "figure", figure: { ...FIGURE, body: "Round" } }), { kind: "sigil" });
@@ -385,13 +389,18 @@ describe("what the assistant wears", () => {
     assert.equal(p1.character.avatar.glow, 60, "a field not mentioned keeps its value");
     const p2 = r.store.saveProfile({ character: { avatar: { glow: 20 } } });
     assert.deepEqual(p2.character.avatar.look, { kind: "figure", figure: FIGURE }, "a change to another field leaves the look alone");
-    const p3 = r.store.saveProfile({ character: { avatar: { look: { kind: "sigil" } } } });
+    const p2b = r.store.saveProfile({ character: { avatar: { look: { kind: "companion", id: "vesper" }, hue: 75, glow: 68 } } });
+    assert.deepEqual(p2b.character.avatar.look, { kind: "companion", id: "vesper" });
+    const p3 = r.store.saveProfile({ character: { avatar: { look: { kind: "sigil" }, glow: 20 } } });
     assert.deepEqual(p3.character.avatar.look, { kind: "sigil" });
     assert.equal(p3.character.avatar.glow, 20);
 
     bad(null, "character.avatar.look", /must be an object/);
-    bad({ kind: "dragon" }, "character.avatar.look.kind", /one of sigil, figure, pack/);
+    bad({ kind: "dragon" }, "character.avatar.look.kind", /one of sigil, companion, figure, pack/);
     bad({ kind: "sigil", extra: 1 }, "character.avatar.look.extra", /unknown field/);
+    bad({ kind: "companion" }, "character.avatar.look.id", /companion id/);
+    bad({ kind: "companion", id: "UpperCase" }, "character.avatar.look.id", /companion id/);
+    bad({ kind: "companion", id: "vesper", extra: 1 }, "character.avatar.look.extra", /unknown field/);
     bad({ kind: "figure" }, "character.avatar.look.figure", /must be an object/);
     bad({ kind: "figure", figure: { ...FIGURE, hat: "cap" } }, "character.avatar.look.figure.hat", /unknown field/);
     bad({ kind: "figure", figure: without(FIGURE, "shade") }, "character.avatar.look.figure.shade", /required/);
