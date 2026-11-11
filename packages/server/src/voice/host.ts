@@ -1,4 +1,6 @@
+import type { PendingAuthorizationView } from "../assistant/launcher.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
+import type { CallApproval } from "./protocol.js";
 
 /**
  * What a call needs of Ancilla around it, as one interface: who the assistant is, what it remembers that bears on what was
@@ -68,4 +70,10 @@ export interface VoiceHost {
    * all if the person speaks first.
    */
   opening?(): string | null;
+  /** Newest pending user authorization on the active call, or null. */
+  pendingApproval?(): PendingAuthorizationView | null;
+  /** Resolves a pending user authorization from a call-card click or verified subsequent-turn user confirmation. */
+  decideApproval?(id: string, allow: boolean): Promise<{ ok: boolean; message: string }>;
+  /** Streams changes to the active call's pending user authorization card. */
+  subscribeApprovals?(handler: (request: CallApproval | null) => void): () => void;
 }

@@ -25,7 +25,7 @@ export function CallDock() {
 function moodOf(view: CallView): AvatarMood {
   if (view.status === "failed") return "concern";
   if (view.status !== "ready") return "idle";
-  if (view.tasks.some((t) => t.status === "blocked" || t.status === "paused")) return "attention";
+  if (view.approval !== null || view.tasks.some((t) => t.status === "blocked" || t.status === "paused")) return "attention";
   return view.phase === "thinking" ? "working" : "idle";
 }
 
@@ -105,6 +105,38 @@ function Card(props: { session: CallSession; view: CallView }) {
       {status ? <p className={cn("mx-4 mt-2.5 rounded-lg px-2.5 py-1.5 text-xs", view.error || view.notice?.level === "warn" ? "bg-warn-soft text-warn-text" : "bg-sunken text-muted")}>{status}</p> : null}
       {view.micProblem ? <p className="mx-4 mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">{view.micProblem}</p> : null}
       {view.status === "failed" && view.error?.includes("not installed") ? <p className="mx-4 mt-1.5 text-xs text-muted">Open Assistant, then Voice, to install it.</p> : null}
+
+      {live && view.approval ? (
+        <div
+          role="region"
+          aria-label="Authorization request"
+          className="mx-4 mt-2.5 rounded-xl border border-accent/35 bg-accent-soft/20 px-3 py-2.5"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="truncate text-xs font-semibold text-fg">{view.approval.title}</span>
+            <span className="shrink-0 text-[10px] text-subtle">Click or say “go ahead”</span>
+          </div>
+          <p className="mt-1 truncate rounded-md bg-sunken/80 px-2 py-1 font-mono text-[11px] text-fg/90" title={view.approval.detail}>
+            {view.approval.detail}
+          </p>
+          <div className="mt-2 flex items-center justify-end gap-1.5">
+            <button
+              type="button"
+              className="h-7 rounded-lg bg-sunken px-2.5 text-xs font-medium text-muted transition-colors hover:bg-hover hover:text-fg"
+              onClick={() => session.decide(view.approval!.id, false)}
+            >
+              {view.approval.denyLabel}
+            </button>
+            <button
+              type="button"
+              className="h-7 rounded-lg bg-accent px-3 text-xs font-semibold text-accent-fg transition-opacity hover:opacity-90"
+              onClick={() => session.decide(view.approval!.id, true)}
+            >
+              {view.approval.allowLabel}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <Transcript view={view} tall={expanded} name={name} />
 

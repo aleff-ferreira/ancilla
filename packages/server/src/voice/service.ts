@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { AuthorizationHub } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner } from "./brains.js";
 import type { BrainProvider } from "./brain.js";
@@ -8,6 +9,7 @@ import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
 import type { VoiceConnectors } from "./tools.js";
 import type { HarnessReader } from "./harness.js";
+import type { WorkspaceVoiceDeps } from "./workspace-tools.js";
 import { ConversationStore } from "./conversations.js";
 import type { Voice } from "./engines.js";
 import { createRemoteEngines, createSherpaEngines, httpSpeechVoices, inspectPack, type PackReport, type SherpaEngineOptions, type SherpaEngineSet, type VoiceEngineSet, type VoicePackLayout } from "./engines/index.js";
@@ -72,6 +74,10 @@ export interface VoiceServiceDeps {
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
   /** The connected accounts, which the `use_connector` tool starts tasks on; without any the tool is not offered. */
   connectors?: VoiceConnectors | null;
+  /** Workspace inspection, authorized process/URL launching, and live page/animation diagnostics. */
+  workspace?: WorkspaceVoiceDeps | null;
+  /** Shared user authorization hub for inline call-card prompts. */
+  authorizations?: AuthorizationHub | null;
   scheduler?: Scheduler;
   /** For tests: the engines, instead of the downloaded ones. */
   engineFactory?: (layout: VoicePackLayout, options: SherpaEngineOptions) => SherpaEngineSet;
@@ -180,7 +186,16 @@ export class VoiceService {
     const layout = this.layout();
     const pack = inspectPack(layout);
     const settings = this.settings.view();
-    const chosen = makeBrain(settings, { project: settings.defaultProject ?? this.deps.lastProject?.() ?? null, name: "Assistant", museSession: null, rememberMuseSession: () => undefined }, this.brainDeps());
+    const chosen = makeBrain(
+      settings,
+      {
+        project: settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null,
+        name: "Assistant",
+        museSession: null,
+        rememberMuseSession: () => undefined,
+      },
+      this.brainDeps(),
+    );
     const asr = this.engines?.engines.asr;
     const tts = this.engines?.engines.tts;
     const remoteReady = settings.speech.kind === "http" && (settings.speech.local || settings.hasSpeechKey);
@@ -359,7 +374,7 @@ export class VoiceService {
     const store = new ConversationStore(assistant.store);
     this.expire(store);
     const settings = this.settings.get();
-    const project = hello.project ?? settings.defaultProject ?? this.deps.lastProject?.() ?? null;
+    const project = hello.project ?? settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
     const latest = store.latest();
     const conversation =
       hello.thread && store.exists(hello.thread) ? hello.thread : latest && Date.now() - latest.updatedAt < RESUME_WITHIN_MS ? latest.id : store.create(project);
@@ -373,6 +388,8 @@ export class VoiceService {
       harness: this.deps.harness ?? null,
       ...(this.deps.browse ? { browse: this.deps.browse } : {}),
       ...(this.deps.connectors ? { connectors: this.deps.connectors } : {}),
+      ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
+      ...(this.deps.authorizations ? { authorizations: this.deps.authorizations } : {}),
       log: (line) => this.deps.log(line),
     });
     const chosen = makeBrain(

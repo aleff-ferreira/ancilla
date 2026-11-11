@@ -1,4 +1,4 @@
-import type { CallMode, CallPhase, ServerMessage, TurnMetrics } from "./protocol.js";
+import type { CallApproval, CallMode, CallPhase, ServerMessage, TurnMetrics } from "./protocol.js";
 
 /**
  * What the call screen shows, as a pure function of what the server said: the words so far, who is speaking, the tasks
@@ -43,6 +43,8 @@ export interface CallView {
   partial: string;
   lines: CallLine[];
   tasks: CallTask[];
+  /** Pending consequential action awaiting the person's click or spoken confirmation. */
+  approval: CallApproval | null;
   notice: { level: "info" | "warn"; text: string } | null;
   metrics: TurnMetrics[];
   engine: string;
@@ -68,6 +70,7 @@ export function initialCall(mode: CallMode = "hands-free"): CallView {
     partial: "",
     lines: [],
     tasks: [],
+    approval: null,
     notice: null,
     metrics: [],
     engine: "",
@@ -130,6 +133,8 @@ export function reduceServer(view: CallView, message: ServerMessage, now: number
       const rest = view.tasks.filter((t) => t.id !== message.id);
       return { ...view, tasks: [{ id: message.id, title: message.title, status: message.status, note: message.note, at: now }, ...rest].slice(0, 8) };
     }
+    case "approval":
+      return { ...view, approval: message.request };
     case "notice":
       return { ...view, notice: { level: message.level, text: message.text } };
     case "metrics":
@@ -139,7 +144,7 @@ export function reduceServer(view: CallView, message: ServerMessage, now: number
       return fatal ? { ...view, status: "failed", error: message.message } : { ...view, notice: { level: "warn", text: message.message } };
     }
     case "ended":
-      return { ...view, status: view.status === "failed" ? "failed" : "ended", endedReason: message.reason, phase: "idle", partial: "", heard: false };
+      return { ...view, status: view.status === "failed" ? "failed" : "ended", endedReason: message.reason, phase: "idle", partial: "", heard: false, approval: null };
   }
 }
 

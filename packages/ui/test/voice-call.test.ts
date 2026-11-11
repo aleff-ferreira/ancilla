@@ -487,6 +487,33 @@ describe("a call, from the page", () => {
     r.session.end();
   });
 
+  it("shows a pending launch authorization on the call view and sends the user's decision", async () => {
+    const r = rig();
+    await r.session.start();
+    r.socket.open();
+    r.socket.say(READY);
+    r.socket.say({
+      type: "approval",
+      request: {
+        id: "auth_1",
+        kind: "launch",
+        title: "Launch in amazonia_river",
+        detail: "npm run dev",
+        allowLabel: "Launch",
+        denyLabel: "Deny",
+      },
+    });
+    assert.equal(r.session.view.approval?.id, "auth_1");
+    assert.equal(r.session.view.approval?.allowLabel, "Launch");
+    r.session.decide("auth_1", true);
+    assert.equal(r.session.view.approval, null, "cleared optimistically on click");
+    assert.deepEqual(
+      r.socket.texts().filter((m) => m.type === "decide"),
+      [{ type: "decide", id: "auth_1", allow: true }],
+    );
+    r.session.end();
+  });
+
   it("tries again when the connection drops, and gives up with a reason when it does not come back", async () => {
     const r = rig();
     await r.session.start();

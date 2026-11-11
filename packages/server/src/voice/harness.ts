@@ -48,6 +48,126 @@ export interface HarnessReader {
   currentProject(): string | null;
 }
 
+const QUERY_NOISE_WORDS = new Set([
+  "project",
+  "projects",
+  "thread",
+  "threads",
+  "trail",
+  "trails",
+  "tread",
+  "treads",
+  "folder",
+  "repo",
+  "repository",
+  "the",
+  "of",
+  "in",
+  "for",
+  "on",
+  "at",
+  "called",
+  "named",
+]);
+
+function tokenizeName(raw: string, stripNoise: boolean): string[] {
+  const normalized = raw
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase();
+  const tokens = normalized.split(/[^a-z0-9]+/).filter(Boolean);
+  if (!stripNoise) return tokens;
+  const filtered = tokens.filter((t) => !QUERY_NOISE_WORDS.has(t));
+  return filtered.length > 0 ? filtered : tokens;
+}
+
+function editDistanceAtMostOne(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    edits += 1;
+    if (edits > 1) return false;
+    if (a.length > b.length) i += 1;
+    else if (b.length > a.length) j += 1;
+    else {
+      i += 1;
+      j += 1;
+    }
+  }
+  if (i < a.length || j < b.length) edits += 1;
+  return edits <= 1;
+}
+
+function tokenSimilarity(cand: string, q: string): number {
+  if (cand === q) return 1;
+  const shorter = cand.length <= q.length ? cand : q;
+  const longer = cand.length <= q.length ? q : cand;
+  if (shorter.length >= 4 && longer.startsWith(shorter)) {
+    return 0.88;
+  }
+  if (shorter.length >= 4 && editDistanceAtMostOne(cand, q)) {
+    return 0.82;
+  }
+  if (shorter.length >= 5 && longer.includes(shorter)) {
+    return 0.72;
+  }
+  return 0;
+}
+
+/**
+ * Scores how well `candidate` (e.g. `"amazonia_river"`) matches spoken/typed `query` (e.g. `"Amazon River"`,
+ * `"trail of Amazonia River"`), returning a number in `[0, 1]`.
+ */
+export function scoreNameMatch(candidate: string, query: string): number {
+  const candClean = candidate.trim().toLowerCase();
+  const queryClean = query.trim().toLowerCase();
+  if (!candClean || !queryClean) return 0;
+  if (candClean === queryClean) return 1;
+
+  const candTokens = tokenizeName(candidate, false);
+  const queryTokens = tokenizeName(query, true);
+  if (candTokens.length === 0 || queryTokens.length === 0) return 0;
+  if (candTokens.join(" ") === queryTokens.join(" ")) return 0.99;
+
+  let matchedSum = 0;
+  for (const qt of queryTokens) {
+    let best = 0;
+    for (const ct of candTokens) {
+      const sim = tokenSimilarity(ct, qt);
+      if (sim > best) best = sim;
+    }
+    matchedSum += best;
+  }
+  const queryCoverage = matchedSum / queryTokens.length;
+  if (queryCoverage < 0.6) return 0;
+  const candCoverage = Math.min(1, matchedSum / candTokens.length);
+  return Number((queryCoverage * 0.78 + candCoverage * 0.22).toFixed(4));
+}
+
+export function resolveByFuzzyName<T>(items: readonly T[], getName: (item: T) => string, query: string, minScore = 0.65): T | null {
+  const q = query.trim();
+  if (!q || items.length === 0) return null;
+  const lower = q.toLowerCase();
+  const exact = items.find((item) => getName(item).trim().toLowerCase() === lower);
+  if (exact) return exact;
+
+  const scored = items
+    .map((item) => ({ item, score: scoreNameMatch(getName(item), q) }))
+    .filter((entry) => entry.score >= minScore)
+    .sort((a, b) => b.score - a.score);
+  if (scored.length === 0) return null;
+  if (scored.length > 1 && scored[0]!.score - scored[1]!.score < 0.08) return null;
+  return scored[0]!.item;
+}
+
 export const HARNESS_TOOLS: readonly ToolSpec[] = [
   { name: "harness_overview", description: "One-call summary of Ancilla now: the project, what is running, what waits on the user, tasks, plan usage.", parameters: { type: "object", properties: {} } },
   {
@@ -147,6 +267,16 @@ export class HarnessTools {
     const matches = byId.length > 0 ? byId : threads.filter((t) => t.title.toLowerCase().includes(needle));
     if (matches.length === 1) return matches[0] as HarnessThread;
     if (matches.length > 1) throw new Error("More than one thread fits that. Use an id from list_threads.");
+
+    const scored = threads
+      .map((t) => ({ thread: t, score: Math.max(scoreNameMatch(t.title, ref), scoreNameMatch(`${t.project} ${t.title}`, ref)) }))
+      .filter((entry) => entry.score >= 0.65)
+      .sort((a, b) => b.score - a.score);
+    if (scored.length === 1) return scored[0]!.thread;
+    if (scored.length > 1) {
+      if (scored[0]!.score - scored[1]!.score >= 0.1) return scored[0]!.thread;
+      throw new Error("More than one thread fits that. Use an id from list_threads.");
+    }
     throw new Error("No thread fits that.");
   }
 
@@ -173,11 +303,16 @@ export class HarnessTools {
         }
         case "list_threads": {
           const filter = a["filter"] === "running" ? "running" : a["filter"] === "waiting" ? "waiting" : "all";
-          const project = typeof a["project"] === "string" ? a["project"].trim().toLowerCase() : "";
+          const rawProject = typeof a["project"] === "string" ? a["project"].trim() : "";
+          const project = rawProject.toLowerCase();
           const limit = count(a["limit"], 8, 20);
           const found = reader
             .threads()
-            .filter((t) => (filter === "all" || t.state === filter) && (project === "" || t.project.toLowerCase().includes(project)))
+            .filter(
+              (t) =>
+                (filter === "all" || t.state === filter) &&
+                (project === "" || t.project.toLowerCase().includes(project) || scoreNameMatch(t.project, rawProject) >= 0.65),
+            )
             .slice(0, limit);
           return { ok: true, text: found.length === 0 ? "No threads fit that." : found.map((t) => threadLine(t, now)).join("\n") };
         }

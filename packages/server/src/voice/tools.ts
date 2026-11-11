@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import type { AuthorizationHub } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import type { Task } from "../assistant/tasks.js";
 import { awaitsApproval, parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks.js";
@@ -30,6 +31,12 @@ export interface VoiceToolDeps {
   assistant: AssistantService;
   /** The folder a spoken task runs in, or null when none is known. */
   project: () => string | null;
+  /** Optional fuzzy resolver when the user names a specific project during the call. */
+  resolveProject?: (name?: string | null) => string | null;
+  /** True when the user's standing posture (such as YOLO mode) pre-authorizes write proposals. */
+  isPreAuthorized?: () => boolean;
+  /** Shared authorization hub so proposals also appear inline on the active voice call card. */
+  authorizations?: AuthorizationHub;
   /** The language of the call, for what is said back. */
   lang: () => Lang;
   /** The conversation, to look notes up in its scope. */
@@ -50,6 +57,7 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
       properties: {
         goal: { type: "string", description: "What the task is to find out or produce, in a sentence or two, complete enough to be understood on its own." },
         title: { type: "string", description: "A short name for it, a few words." },
+        project: { type: "string", description: "Project name when the user named a specific project." },
       },
       required: ["goal"],
     },
@@ -57,12 +65,13 @@ export const VOICE_TOOLS: readonly ToolSpec[] = [
   {
     name: "propose_change",
     description:
-      "Ask for work that would change files in the project: fix a bug, edit code or a document. Nothing starts: it appears on the user's screen and only their click approves it. You cannot approve it, and saying yes aloud does not.",
+      "Ask for work that would change files in the project: fix a bug, edit code or a document. Unless pre-authorized by YOLO mode, nothing starts until the user approves it on the screen or call card.",
     parameters: {
       type: "object",
       properties: {
         goal: { type: "string", description: "What is to be changed and how, in a sentence or two, complete enough to be understood on its own." },
         title: { type: "string", description: "A short name for it, a few words." },
+        project: { type: "string", description: "Project name when the user named a specific project." },
       },
       required: ["goal"],
     },
@@ -180,7 +189,15 @@ export class VoiceTools {
     throw new NotFoundError("That task");
   }
 
-  async run(call: ToolCall): Promise<ToolResult> {
+  private resolveCwd(namedProject: string): string | null {
+    if (namedProject && this.deps.resolveProject) {
+      const found = this.deps.resolveProject(namedProject);
+      if (found) return found;
+    }
+    return this.deps.project();
+  }
+
+  async run(call: ToolCall, turn = 0): Promise<ToolResult> {
     const args = parseArgs(call);
     const { assistant } = this.deps;
     const executive = assistant.executive;
@@ -191,7 +208,7 @@ export class VoiceTools {
           if (!executive) return { ok: false, text: "Background tasks are not available right now." };
           const goal = str(args["goal"], 2000);
           if (goal === "") return { ok: false, text: "A task needs a goal: say what it is to find out or produce." };
-          const cwd = this.deps.project();
+          const cwd = this.resolveCwd(str(args["project"], 120));
           if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
           const spec = parseTaskSpec({ goal, cwd, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
           const wantedGoal = normalizeGoal(spec.goal);
@@ -215,7 +232,7 @@ export class VoiceTools {
           if (!executive) return { ok: false, text: "Background tasks are not available right now." };
           const goal = str(args["goal"], 2000);
           if (goal === "") return { ok: false, text: "A proposal needs a goal: say what is to be changed." };
-          const cwd = this.deps.project();
+          const cwd = this.resolveCwd(str(args["project"], 120));
           if (!cwd) return { ok: false, text: "I do not know which project to work in. Ask the user to open a project in Ancilla, or to name one." };
           const spec = parseTaskSpec({ goal, cwd, allowWrites: true, ...(str(args["title"], 120) ? { title: str(args["title"], 120) } : {}) }, assistant.store.getProfile(), (c) => assistant.projectKey(c));
           const wantedGoal = normalizeGoal(spec.goal);
@@ -235,6 +252,31 @@ export class VoiceTools {
             };
           }
           const task = executive.propose(spec);
+          if (this.deps.isPreAuthorized?.()) {
+            const approved = executive.approve(task.id);
+            return {
+              ok: true,
+              text: `Started task ${approved.id}, "${sayable(approved.title, 80)}" (pre-authorized by YOLO mode). The user is told when it finishes.`,
+              narration: taskPhrase(lang, "started", approved.title),
+            };
+          }
+          this.deps.authorizations?.request({
+            id: `task_${task.id}`,
+            kind: "task-proposal",
+            title: `Approve change: ${sayable(task.title, 80)}`,
+            detail: goal.slice(0, 320),
+            allowLabel: "Approve",
+            denyLabel: "Decline",
+            createdTurn: turn,
+            onDecide: async (allow) => {
+              if (allow) {
+                const approved = executive.approve(task.id);
+                return { ok: true, message: `Approved task "${sayable(approved.title, 80)}" (${approved.status}).` };
+              }
+              await executive.cancel(task.id, "Declined by user.");
+              return { ok: true, message: `Declined proposal "${sayable(task.title, 80)}".` };
+            },
+          });
           return {
             ok: true,
             text: `Proposed task ${task.id}, "${sayable(task.title, 80)}". Nothing has started: it waits on the user's screen, and only they can approve or decline it there. Say that it waits for their approval; do not say it is under way.`,

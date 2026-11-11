@@ -236,12 +236,12 @@ export async function get(base: string, path: string): Promise<any> {
 }
 
 export async function waitFor(cond: () => boolean | Promise<boolean>, what: string, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   for (;;) {
     if (await cond()) {
       return;
     }
-    if (Date.now() > deadline) {
+    if (performance.now() > deadline) {
       throw new Error(`timed out waiting for ${what}`);
     }
     await new Promise((r) => setTimeout(r, 20));

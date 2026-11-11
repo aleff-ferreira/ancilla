@@ -6,6 +6,7 @@
  * it played, and drops what is left when told it was cut off, as a browser would.
  */
 
+import type { PendingAuthorizationView } from "../assistant/launcher.js";
 import type { BrainEvent, BrainProvider, BrainRequest, ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { AsrEngine, AsrResult, AsrStream, Engines, TtsEngine, VadEngine, Voice } from "./engines.js";
 import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
@@ -259,6 +260,9 @@ export class FakeHost implements VoiceHost {
   memory: string | null = null;
   /** What the host would say as a call opens. */
   openingText: string | null = null;
+  pendingApproval?: () => PendingAuthorizationView | null;
+  decideApproval?: (id: string, allow: boolean) => Promise<{ ok: boolean; message: string }>;
+  subscribeApprovals?: (handler: (request: PendingAuthorizationView | null) => void) => () => void;
 
   persona(): Persona {
     return this.persona$;
@@ -273,7 +277,7 @@ export class FakeHost implements VoiceHost {
   tools(): ToolSpec[] {
     return this.toolList;
   }
-  async runTool(call: ToolCall): Promise<ToolResult> {
+  async runTool(call: ToolCall, _ctx?: { turn: number; signal: AbortSignal }): Promise<ToolResult> {
     this.toolCalls.push(call);
     return this.toolResult;
   }

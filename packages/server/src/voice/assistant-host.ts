@@ -1,3 +1,4 @@
+import type { AuthorizationHub, PendingAuthorizationView } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import { awaitsApproval, type Task } from "../assistant/tasks.js";
 import { waitingCause } from "../assistant/waiting.js";
@@ -6,10 +7,12 @@ import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
 import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
 import { openingPhrase, taskPhrase, type TaskNotice } from "./prompt.js";
+import type { CallApproval } from "./protocol.js";
 import type { VoiceSettings } from "./settings.js";
 import { guessLanguage, type Lang } from "./text.js";
 import { ambientDigest, HARNESS_TOOL_NAMES, HarnessTools, type HarnessReader } from "./harness.js";
 import { VoiceTools, type VoiceConnectors } from "./tools.js";
+import { WORKSPACE_TOOL_NAMES, WorkspaceVoiceTools, type WorkspaceVoiceDeps } from "./workspace-tools.js";
 
 /**
  * A call's view of Ancilla, built from the assistant: its character and notes, the conversation it keeps, the tasks it
@@ -75,7 +78,23 @@ export interface AssistantVoiceHostDeps {
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> };
   /** The connected accounts, when the server has any: it is what lets the call offer `use_connector`. */
   connectors?: VoiceConnectors;
+  /** Workspace inspection, authorized process/URL launching, and live page/animation diagnostics. */
+  workspace?: WorkspaceVoiceDeps | null;
+  /** Shared user authorization hub for inline call-card prompts. */
+  authorizations?: AuthorizationHub | null;
   log: (line: string) => void;
+}
+
+function toCallApproval(view: PendingAuthorizationView | null): CallApproval | null {
+  if (!view) return null;
+  return {
+    id: view.id,
+    kind: view.kind,
+    title: view.title,
+    detail: view.detail,
+    allowLabel: view.allowLabel,
+    denyLabel: view.denyLabel,
+  };
 }
 
 export class AssistantVoiceHost implements VoiceHost {
@@ -84,9 +103,23 @@ export class AssistantVoiceHost implements VoiceHost {
   private readonly told = new Map<string, string>();
   private readonly voiceTools: VoiceTools;
   private readonly harnessTools: HarnessTools | null;
+  private readonly workspaceTools: WorkspaceVoiceTools | null;
+  private readonly authHub: AuthorizationHub | null;
 
   constructor(private readonly deps: AssistantVoiceHostDeps) {
-    this.voiceTools = new VoiceTools({ assistant: deps.assistant, project: deps.project, lang: () => this.lang(), conversationId: deps.conversationId, ...(deps.browse ? { browse: deps.browse } : {}), ...(deps.connectors ? { connectors: deps.connectors } : {}) });
+    this.authHub = deps.authorizations ?? deps.workspace?.authorizations ?? null;
+    this.workspaceTools = deps.workspace ? new WorkspaceVoiceTools(deps.workspace) : null;
+    this.voiceTools = new VoiceTools({
+      assistant: deps.assistant,
+      project: deps.project,
+      ...(this.workspaceTools ? { resolveProject: (name?: string | null) => this.workspaceTools?.resolveProject(name)?.cwd ?? null } : {}),
+      ...(deps.workspace ? { isPreAuthorized: deps.workspace.isPreAuthorized } : {}),
+      ...(this.authHub ? { authorizations: this.authHub } : {}),
+      lang: () => this.lang(),
+      conversationId: deps.conversationId,
+      ...(deps.browse ? { browse: deps.browse } : {}),
+      ...(deps.connectors ? { connectors: deps.connectors } : {}),
+    });
     this.harnessTools = deps.harness ? new HarnessTools({ reader: deps.harness, taskCounts: () => this.taskCounts() }) : null;
   }
 
@@ -149,12 +182,31 @@ export class AssistantVoiceHost implements VoiceHost {
   }
 
   tools(): ToolSpec[] {
-    return this.harnessTools ? [...this.voiceTools.specs(), ...this.harnessTools.specs()] : this.voiceTools.specs();
+    return [
+      ...this.voiceTools.specs(),
+      ...(this.harnessTools ? this.harnessTools.specs() : []),
+      ...(this.workspaceTools ? this.workspaceTools.specs() : []),
+    ];
   }
 
-  runTool(call: ToolCall, _context: { turn: number; signal: AbortSignal }): Promise<ToolResult> {
+  runTool(call: ToolCall, context: { turn: number; signal: AbortSignal }): Promise<ToolResult> {
     if (this.harnessTools && HARNESS_TOOL_NAMES.has(call.name)) return this.harnessTools.run(call);
-    return this.voiceTools.run(call);
+    if (this.workspaceTools && WORKSPACE_TOOL_NAMES.has(call.name)) return this.workspaceTools.run(call, context.turn);
+    return this.voiceTools.run(call, context.turn);
+  }
+
+  pendingApproval(): PendingAuthorizationView | null {
+    return this.authHub?.current() ?? null;
+  }
+
+  async decideApproval(id: string, allow: boolean): Promise<{ ok: boolean; message: string }> {
+    if (!this.authHub) return { ok: false, message: "No authorization hub is active." };
+    return await this.authHub.decide(id, allow);
+  }
+
+  subscribeApprovals(handler: (request: CallApproval | null) => void): () => void {
+    if (!this.authHub) return () => undefined;
+    return this.authHub.subscribe((current) => handler(toCallApproval(current)));
   }
 
   subscribe(handler: (event: HostEvent) => void): () => void {

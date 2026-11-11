@@ -1,6 +1,7 @@
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parseUserAuthorizationIntent } from "../assistant/launcher.js";
 import type { BrainEvent, BrainProvider, ChatMessage, ToolCall } from "./brain.js";
 import { pickVoice, toFloat, type AsrStream, type Engines } from "./engines.js";
 import type { HostEvent, VoiceHost } from "./host.js";
@@ -58,7 +59,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   mergeWindowMs: 1200,
   proactiveQuietMs: 2500,
   maxHistory: 40,
-  maxToolRounds: 4,
+  maxToolRounds: 6,
   speed: 1,
   maxBacklogFrames: 160,
   debug: false,
@@ -186,6 +187,7 @@ export class VoiceSession {
   /** The news waiting for the call to open, said once after a moment's quiet; dropped if the person speaks first. */
   private openingSay: string | null = null;
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeApprovals: (() => void) | null = null;
   private cancelTick: (() => void) | null = null;
   /** With `debug` on, the audio the call received, as raw 16 kHz PCM, for listening to what the server heard. */
   private debugAudio: WriteStream | null = null;
@@ -228,8 +230,27 @@ export class VoiceSession {
     }
     this.history = host.history(hello.thread);
     this.unsubscribe = host.subscribe((event) => this.onHostEvent(event));
+    if (host.subscribeApprovals) {
+      this.unsubscribeApprovals = host.subscribeApprovals((request) => {
+        this.send({ type: "approval", request });
+      });
+    }
     const voice = pickVoice(engines.tts.voices, this.langCode(), host.persona().voice);
     this.send({ type: "ready", session: this.id, sampleRate: engines.tts.sampleRate, engine: `${engines.asr.id} + ${engines.tts.id}`, voice: voice?.id ?? "", lang: this.lang, resumed: this.history.length > 0 });
+    const pendingApproval = host.pendingApproval?.() ?? null;
+    if (pendingApproval) {
+      this.send({
+        type: "approval",
+        request: {
+          id: pendingApproval.id,
+          kind: pendingApproval.kind,
+          title: pendingApproval.title,
+          detail: pendingApproval.detail,
+          allowLabel: pendingApproval.allowLabel,
+          denyLabel: pendingApproval.denyLabel,
+        },
+      });
+    }
     this.send({ type: "state", state: "listening" });
     try {
       this.openingSay = host.opening?.() ?? null;
@@ -278,9 +299,25 @@ export class VoiceSession {
         break;
       case "text":
         this.enqueue(async () => {
-          this.interruptReply("typed text");
-          this.cancelPendingReply();
-          this.beginUserTurn(message.text.trim(), "text", null);
+          const trimmed = message.text.trim();
+          const pending = this.deps.host.pendingApproval?.() ?? null;
+          if (!(pending?.inFlightMuse && parseUserAuthorizationIntent(trimmed) !== null)) {
+            this.interruptReply("typed text");
+            this.cancelPendingReply();
+          }
+          this.beginUserTurn(trimmed, "text", null);
+        });
+        break;
+      case "decide":
+        this.enqueue(async () => {
+          const pending = this.deps.host.pendingApproval?.() ?? null;
+          const inFlightMuse = pending?.id === message.id && pending.inFlightMuse === true;
+          const res = await this.deps.host.decideApproval?.(message.id, message.allow);
+          if (!res) return;
+          this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
+          if (!inFlightMuse && !this.reply && this.agent === "idle" && res.ok) {
+            this.sayDirect(res.message, false);
+          }
         });
         break;
       case "mute":
@@ -315,6 +352,7 @@ export class VoiceSession {
     this.closed = true;
     this.cancelTick?.();
     this.unsubscribe?.();
+    this.unsubscribeApprovals?.();
     const r = this.reply;
     if (r) {
       r.aborted = true;
@@ -481,7 +519,8 @@ export class VoiceSession {
   private onSpeechStart(_t: number): void {
     const now = this.deps.scheduler.now();
     const r = this.reply;
-    if (r && !r.speech.started && !r.aborted && r.userText !== null) {
+    const awaitingInFlightMuse = this.deps.host.pendingApproval?.()?.inFlightMuse === true;
+    if (r && !r.speech.started && !r.aborted && r.userText !== null && !awaitingInFlightMuse) {
       // The person is speaking again before they were answered. Soon after the last turn it is the same turn, carried on.
       if (now - this.lastTurnEndAt <= this.cfg.mergeWindowMs) this.pendingMerge = { text: r.userText, turn: r.turn };
       this.cancelPendingReply();
@@ -647,6 +686,26 @@ export class VoiceSession {
     if (lang !== "unknown") this.userLang = lang;
     this.send({ type: "user", turn, text: said, source });
     this.deps.host.record({ turn, role: "user", text: said, source, at: this.deps.scheduler.now() });
+
+    const pending = this.deps.host.pendingApproval?.() ?? null;
+    if (pending?.inFlightMuse && this.reply && !this.reply.aborted) {
+      const intent = parseUserAuthorizationIntent(said);
+      if (intent !== null && this.deps.host.decideApproval) {
+        this.history.push({ role: "user", content: said });
+        void this.deps.host
+          .decideApproval(pending.id, intent === "allow")
+          .then((res) => {
+            this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
+          })
+          .catch((error) => {
+            this.deps.log(`resolving live approval failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        return;
+      }
+      this.interruptReply("new turn over pending approval");
+      this.cancelPendingReply();
+    }
+
     const contextPromise = source === "voice" && prewarmed && prewarmed.text === said ? prewarmed.promise : null;
     this.startReply(turn, said, source, trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null, contextPromise);
   }
@@ -765,13 +824,24 @@ export class VoiceSession {
     prewarmedContext: Promise<string | null> | null = null,
   ): Promise<void> {
     const { brain, host, scheduler } = this.deps;
+    let approvalOutcomeNote: string | null = null;
+    const pending = host.pendingApproval?.() ?? null;
+    if (pending && !pending.inFlightMuse && reply.turn > pending.createdTurn && host.decideApproval) {
+      const intent = parseUserAuthorizationIntent(text);
+      if (intent !== null) {
+        const res = await host.decideApproval(pending.id, intent === "allow");
+        if (reply.aborted) return;
+        this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
+        approvalOutcomeNote = `[The user ${intent === "allow" ? "authorized" : "declined"} the pending request "${pending.title}". Outcome: ${res.message}]`;
+      }
+    }
     const context = await (prewarmedContext ?? host.context(text, source));
     if (reply.aborted) return;
     const priorToolNote =
       this.abortedToolNotes.length > 0
         ? `[Tool actions already completed earlier in this turn before the user continued speaking — do not repeat them: ${this.abortedToolNotes.splice(0).join("; ")}]`
         : null;
-    const fullContext = [priorToolNote, context].filter((part): part is string => Boolean(part && part.trim() !== "")).join("\n\n");
+    const fullContext = [approvalOutcomeNote, priorToolNote, context].filter((part): part is string => Boolean(part && part.trim() !== "")).join("\n\n");
     const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), { codeSwitched: hasCodeSwitch(text) });
     const base: ChatMessage[] = [
       { role: "system", content: system },
@@ -826,7 +896,7 @@ export class VoiceSession {
     this.finishReply(reply);
   }
 
-  private onBrainEvent(reply: Reply, event: BrainEvent, calls: ToolCall[], addText: (t: string) => void): void {
+  private onBrainEvent(reply: Reply, event: BrainEvent, calls: ToolCall[], addText: (t: string) => string): void {
     switch (event.type) {
       case "text": {
         if (!reply.sentFirstToken || !reply.trace?.firstToken) {
@@ -834,10 +904,9 @@ export class VoiceSession {
         }
         reply.sentFirstToken = true;
         reply.cancelFiller?.();
-        addText(event.delta);
-        reply.full += "";
+        const soFar = addText(event.delta);
         for (const piece of reply.chunker.push(event.delta)) reply.speech.enqueue(piece);
-        this.send({ type: "assistant", turn: reply.turn, text: (reply.full + event.delta).trim(), done: false });
+        this.send({ type: "assistant", turn: reply.turn, text: (reply.full + soFar).trim(), done: false });
         break;
       }
       case "tool":

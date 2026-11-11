@@ -360,6 +360,15 @@ export class CallSession {
     if (stopped && stopped.utterance > 0) this.sendMessage({ type: "interrupt", utterance: stopped.utterance, samples: stopped.played });
   }
 
+  /** Allows or denies a pending launch, write, or thread action shown on the call card. */
+  decide(id: string, allow: boolean): void {
+    if (!id || this.state.status !== "ready") return;
+    this.sendMessage({ type: "decide", id, allow });
+    if (this.state.approval?.id === id) {
+      this.set({ ...this.state, approval: null });
+    }
+  }
+
   end(): void {
     if (this.closing) return;
     this.closing = true;

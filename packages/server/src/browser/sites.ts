@@ -457,6 +457,7 @@ export interface BrowseTaskSource {
 export class BrowseSites {
   readonly rules: SiteRules;
   readonly gate: SiteGate;
+  private readonly sessionGrants = new Set<string>();
 
   constructor(
     file: string | null,
@@ -466,7 +467,17 @@ export class BrowseSites {
     this.gate = new SiteGate(this.rules, { onChange: () => this.source().gateChanged() });
   }
 
+  /** Grants `origin` for this server run after explicit user authorization (or standing YOLO authorization). */
+  grantSessionOrigin(origin: string): void {
+    this.sessionGrants.add(origin);
+  }
+
+  isAllowedNow(origin: string): boolean {
+    return this.sessionGrants.has(origin) || this.rules.get(origin)?.decision === "allow";
+  }
+
   async decide(request: { url: string; origin: string; tabId: string; mainFrame: boolean }): Promise<boolean> {
+    if (this.sessionGrants.has(request.origin)) return true;
     const taskId = this.source().taskId();
     if (!request.mainFrame) {
       const rule = this.rules.get(request.origin)?.decision;
@@ -474,7 +485,7 @@ export class BrowseSites {
       if (kindOfOrigin(request.origin) === "public") return true;
       return rule === "allow" || (taskId !== null && this.gate.check(taskId, request.origin) === "allow");
     }
-    if (taskId === null) return false;
+    if (taskId === null) return this.rules.get(request.origin)?.decision === "allow";
     return this.gate.request(taskId, request.url);
   }
 

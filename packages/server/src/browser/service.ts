@@ -291,6 +291,169 @@ export interface ElementFacts {
   form: { action: string; method: string; defaultButton: string; fields: Array<{ name: string; type: string; value: string }> } | null;
 }
 
+export interface CanvasDiagnostic {
+  label: string;
+  cssWidth: number;
+  cssHeight: number;
+  bufferWidth: number;
+  bufferHeight: number;
+  dpiMismatch: boolean;
+  zeroSize: boolean;
+}
+
+export interface PageDiagnostics {
+  url: string;
+  title: string;
+  viewport: { width: number; height: number; dpr: number };
+  fps: { fps: number; frames: number; avgFrameMs: number; maxFrameMs: number; droppedFrames: number };
+  canvases: CanvasDiagnostic[];
+  animations: { total: number; running: number; paused: number; layoutThrashingProps: string[] };
+  svgCount: number;
+  videoCount: number;
+  brokenImages: number;
+  errorOverlay: string | null;
+  consoleErrors: string[];
+}
+
+export function formatPageDiagnostics(diag: PageDiagnostics): string {
+  const lines: string[] = [
+    `Page: ${diag.title || "(untitled)"} (${diag.url})`,
+    `Viewport: ${diag.viewport.width}x${diag.viewport.height} @ ${diag.viewport.dpr}x DPR`,
+    `Frame pacing: ${diag.fps.fps} fps (${diag.fps.frames} frames sampled, avg ${diag.fps.avgFrameMs} ms, max ${diag.fps.maxFrameMs} ms, ${diag.fps.droppedFrames} slow >24 ms frames)`,
+  ];
+  if (diag.canvases.length > 0) {
+    const summary = diag.canvases
+      .map((c) => {
+        const flags: string[] = [];
+        if (c.zeroSize) flags.push("ZERO-SIZE");
+        else if (c.dpiMismatch) flags.push("DPI-MISMATCH (blurry/unscaled buffer)");
+        return `${c.label}: CSS ${c.cssWidth}x${c.cssHeight}, buffer ${c.bufferWidth}x${c.bufferHeight}${flags.length ? ` [${flags.join(", ")}]` : ""}`;
+      })
+      .join("; ");
+    lines.push(`Canvas (${diag.canvases.length}): ${summary}`);
+  }
+  lines.push(
+    `DOM/CSS animations: ${diag.animations.running} running, ${diag.animations.paused} paused (total ${diag.animations.total})${
+      diag.animations.layoutThrashingProps.length > 0
+        ? ` — non-composited/heavy properties animated: ${diag.animations.layoutThrashingProps.join(", ")}`
+        : ""
+    }`,
+  );
+  if (diag.svgCount > 0 || diag.videoCount > 0 || diag.brokenImages > 0) {
+    lines.push(`Media: ${diag.svgCount} SVG, ${diag.videoCount} video, ${diag.brokenImages} broken image(s)`);
+  }
+  if (diag.errorOverlay) {
+    lines.push(`Dev error overlay: ${diag.errorOverlay}`);
+  }
+  if (diag.consoleErrors.length > 0) {
+    lines.push(`Console/JS issues (${diag.consoleErrors.length}): ${diag.consoleErrors.slice(0, 6).join(" | ")}`);
+  } else {
+    lines.push("Console/JS issues: none captured.");
+  }
+  return lines.join("\n");
+}
+
+const DIAGNOSE_PAGE_EXPR = `(function(){
+  return new Promise(function(resolve){
+    var dpr = Number(window.devicePixelRatio || 1);
+    var vw = Number(window.innerWidth || 0);
+    var vh = Number(window.innerHeight || 0);
+    var canvases = [];
+    var cNodes = document.querySelectorAll('canvas');
+    for (var i = 0; i < cNodes.length && canvases.length < 10; i++) {
+      var c = cNodes[i];
+      var r = c.getBoundingClientRect();
+      var cw = Math.round(r.width);
+      var ch = Math.round(r.height);
+      var bw = Number(c.width || 0);
+      var bh = Number(c.height || 0);
+      var zero = cw === 0 || ch === 0 || bw === 0 || bh === 0;
+      var mismatch = !zero && (Math.abs(bw - Math.round(cw * dpr)) > 2 || Math.abs(bh - Math.round(ch * dpr)) > 2);
+      var label = c.id ? '#' + c.id : (c.className && typeof c.className === 'string' ? '.' + c.className.trim().split(/\\s+/)[0] : 'canvas[' + i + ']');
+      canvases.push({ label: String(label).slice(0, 40), cssWidth: cw, cssHeight: ch, bufferWidth: bw, bufferHeight: bh, dpiMismatch: mismatch, zeroSize: zero });
+    }
+    var animTotal = 0, animRunning = 0, animPaused = 0;
+    var heavySet = {};
+    var heavyNames = { top:1, left:1, right:1, bottom:1, width:1, height:1, margin:1, marginTop:1, marginLeft:1, padding:1, borderWidth:1, boxShadow:1, filter:1, backdropFilter:1 };
+    try {
+      var anims = typeof document.getAnimations === 'function' ? document.getAnimations() : [];
+      animTotal = anims.length;
+      for (var a = 0; a < anims.length; a++) {
+        var st = anims[a].playState;
+        if (st === 'running') animRunning++;
+        else if (st === 'paused') animPaused++;
+        var kf = anims[a].effect && typeof anims[a].effect.getKeyframes === 'function' ? anims[a].effect.getKeyframes() : [];
+        for (var k = 0; k < kf.length; k++) {
+          var keys = Object.keys(kf[k]);
+          for (var p = 0; p < keys.length; p++) {
+            if (heavyNames[keys[p]]) heavySet[keys[p]] = true;
+          }
+        }
+      }
+    } catch (e) {}
+    var brokenImages = 0;
+    var imgs = document.querySelectorAll('img');
+    for (var m = 0; m < imgs.length; m++) {
+      if (imgs[m].complete && imgs[m].naturalWidth === 0 && imgs[m].getAttribute('src')) brokenImages++;
+    }
+    var overlay = null;
+    try {
+      var vErr = document.querySelector('vite-error-overlay');
+      if (vErr) overlay = String((vErr.shadowRoot ? vErr.shadowRoot.textContent : vErr.textContent) || 'Vite error overlay').replace(/\\s+/g, ' ').trim().slice(0, 260);
+      if (!overlay) {
+        var wErr = document.querySelector('#webpack-dev-server-client-overlay,[data-nextjs-dialog]');
+        if (wErr) overlay = String(wErr.textContent || 'Build error overlay').replace(/\\s+/g, ' ').trim().slice(0, 260);
+      }
+    } catch (e) {}
+    var times = [];
+    var done = false;
+    var start = performance.now();
+    function finish() {
+      if (done) return;
+      done = true;
+      var deltas = [];
+      for (var t = 1; t < times.length; t++) deltas.push(times[t] - times[t - 1]);
+      var elapsed = times.length >= 2 ? (times[times.length - 1] - times[0]) : Math.max(1, performance.now() - start);
+      var frames = Math.max(0, times.length - 1);
+      var fps = frames > 0 ? Math.round((frames * 1000) / Math.max(1, elapsed)) : 0;
+      var sum = 0, maxMs = 0, dropped = 0;
+      for (var d = 0; d < deltas.length; d++) {
+        sum += deltas[d];
+        if (deltas[d] > maxMs) maxMs = deltas[d];
+        if (deltas[d] > 24) dropped++;
+      }
+      var avgMs = deltas.length > 0 ? Math.round((sum / deltas.length) * 10) / 10 : 0;
+      resolve({
+        viewport: { width: vw, height: vh, dpr: Math.round(dpr * 100) / 100 },
+        fps: { fps: fps, frames: frames, avgFrameMs: avgMs, maxFrameMs: Math.round(maxMs * 10) / 10, droppedFrames: dropped },
+        canvases: canvases,
+        animations: { total: animTotal, running: animRunning, paused: animPaused, layoutThrashingProps: Object.keys(heavySet) },
+        svgCount: document.querySelectorAll('svg').length,
+        videoCount: document.querySelectorAll('video').length,
+        brokenImages: brokenImages,
+        errorOverlay: overlay
+      });
+    }
+    var fallback = setTimeout(finish, 600);
+    if (typeof requestAnimationFrame !== 'function') {
+      clearTimeout(fallback);
+      finish();
+      return;
+    }
+    function step(ts) {
+      if (done) return;
+      times.push(ts);
+      if (ts - (times[0] || ts) >= 420 || times.length >= 40) {
+        clearTimeout(fallback);
+        finish();
+        return;
+      }
+      requestAnimationFrame(step);
+    }
+    requestAnimationFrame(step);
+  });
+})()`;
+
 /** Runs in the page, on an element (null: nothing is focused). Reads only; try/catch because a page can shadow what it reads. */
 const FACTS_FN = `function(el){
   try {
@@ -388,6 +551,8 @@ interface Tab {
   blocked: boolean;
   /** Set while an intercepted file chooser is waiting on the person or applying `DOM.setFileInputFiles`. */
   uploading: Promise<void> | null;
+  /** Recent console errors/warnings and uncaught JS exceptions on the current document, bounded to 16 entries. */
+  consoleErrors: string[];
 }
 
 interface ScreencastState {
@@ -921,10 +1086,12 @@ export class BrowserService {
       notes: [],
       blocked: false,
       uploading: null,
+      consoleErrors: [],
     };
     rt.tabs.set(targetId, tab);
     rt.bySession.set(tab.sessionId, tab);
     await rt.conn.send("Page.enable", {}, tab.sessionId);
+    await rt.conn.send("Runtime.enable", {}, tab.sessionId).catch(() => undefined);
     // A file chooser would open a native dialog on the headless browser process; intercepting routes it through the pane or task gate.
     await rt.conn.send("Page.setInterceptFileChooserDialog", { enabled: true }, tab.sessionId).catch(() => undefined);
     // The assistant's pages are asked about before they load: every document request (a page, a redirect, a frame) pauses until the gate answers.
@@ -1205,6 +1372,49 @@ export class BrowserService {
     return Buffer.from(shot.data, "base64");
   }
 
+  /**
+   * Samples live rendering health on the page (frame pacing over ~420ms of requestAnimationFrame, Canvas CSS vs backing
+   * buffer DPI mismatch, Web/CSS animations and layout-thrashing keyframes, dev error overlays, and captured console/JS errors).
+   */
+  async diagnosePage(id: string): Promise<PageDiagnostics> {
+    const rt = await this.ensure();
+    const tab = this.requireTab(rt, id);
+    await this.refreshInfo(rt, tab).catch(() => undefined);
+    type RawDiag = Omit<PageDiagnostics, "url" | "title" | "consoleErrors">;
+    let raw: RawDiag | null = null;
+    try {
+      const evaluated = await rt.conn.send<{ result?: { value?: RawDiag } }>(
+        "Runtime.evaluate",
+        { expression: DIAGNOSE_PAGE_EXPR, returnByValue: true, awaitPromise: true },
+        tab.sessionId,
+        3000,
+      );
+      raw = evaluated.result?.value ?? null;
+    } catch {
+      raw = null;
+    }
+    return {
+      url: tab.url,
+      title: tab.title,
+      viewport: raw?.viewport ?? { width: DEFAULT_SIZE.width, height: DEFAULT_SIZE.height, dpr: 1 },
+      fps: raw?.fps ?? { fps: 0, frames: 0, avgFrameMs: 0, maxFrameMs: 0, droppedFrames: 0 },
+      canvases: raw?.canvases ?? [],
+      animations: raw?.animations ?? { total: 0, running: 0, paused: 0, layoutThrashingProps: [] },
+      svgCount: raw?.svgCount ?? 0,
+      videoCount: raw?.videoCount ?? 0,
+      brokenImages: raw?.brokenImages ?? 0,
+      errorOverlay: raw?.errorOverlay ?? null,
+      consoleErrors: [...tab.consoleErrors],
+    };
+  }
+
+  private pushConsoleError(tab: Tab, message: string): void {
+    const clean = message.replace(/\s+/g, " ").trim().slice(0, 240);
+    if (!clean || tab.consoleErrors.includes(clean)) return;
+    if (tab.consoleErrors.length >= 16) tab.consoleErrors.shift();
+    tab.consoleErrors.push(clean);
+  }
+
   // ---------------------------------------------------------------- acting on the page
 
   private async centerOf(rt: Runtime, tab: Tab, ref: string): Promise<{ x: number; y: number; backendNodeId: number }> {
@@ -1483,7 +1693,7 @@ export class BrowserService {
     const tab = this.requireTab(rt, id);
     this.endScreencast(tab);
     const fps = Math.min(60, Math.max(1, options.maxFps ?? 30));
-    const state: ScreencastState = { onFrame, minGapMs: 1000 / fps, lastSent: 0, pending: null, timer: null };
+    const state: ScreencastState = { onFrame, minGapMs: 1000 / fps, lastSent: -Infinity, pending: null, timer: null };
     tab.screencast = state;
     await rt.conn.send(
       "Page.startScreencast",
@@ -1523,7 +1733,7 @@ export class BrowserService {
       at: Date.now(),
     };
     const deliver = (f: ScreencastFrame, done: () => void) => {
-      state.lastSent = Date.now();
+      state.lastSent = performance.now();
       let result: void | Promise<void>;
       try {
         result = state.onFrame(f);
@@ -1533,7 +1743,7 @@ export class BrowserService {
       if (result && typeof (result as Promise<void>).then === "function") (result as Promise<void>).then(done, done);
       else done();
     };
-    const wait = state.minGapMs - (Date.now() - state.lastSent);
+    const wait = state.minGapMs - (performance.now() - state.lastSent);
     if (wait <= 0 && !state.pending) {
       deliver(frame, ack);
       return;
@@ -1604,8 +1814,30 @@ export class BrowserService {
         break;
       case "Page.frameNavigated":
         // A new page replaced the one whose password inputs were read: nothing is known about the new one until it is read.
-        if (!params["frame"]?.parentId) tab.secretNames = null;
+        if (!params["frame"]?.parentId) {
+          tab.secretNames = null;
+          tab.consoleErrors.length = 0;
+        }
         break;
+      case "Runtime.consoleAPICalled": {
+        const type = String(params["type"] ?? "");
+        if (type === "error" || type === "warning") {
+          const args = Array.isArray(params["args"]) ? (params["args"] as Array<Record<string, unknown>>) : [];
+          const text = args
+            .map((a) => String(a["value"] ?? a["description"] ?? ""))
+            .filter(Boolean)
+            .join(" ");
+          if (text) this.pushConsoleError(tab, `[${type}] ${text}`);
+        }
+        break;
+      }
+      case "Runtime.exceptionThrown": {
+        const details = (params["exceptionDetails"] ?? {}) as Record<string, unknown>;
+        const exc = (details["exception"] ?? {}) as Record<string, unknown>;
+        const desc = String(exc["description"] ?? details["text"] ?? "Uncaught exception");
+        this.pushConsoleError(tab, desc);
+        break;
+      }
       case "Page.frameStoppedLoading":
         if (tab.loading) {
           tab.loading = false;

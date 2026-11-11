@@ -14,6 +14,15 @@ export const INPUT_RATE = 16_000;
 export type CallMode = "hands-free" | "push-to-talk";
 export type CallPhase = "listening" | "thinking" | "speaking" | "idle";
 
+export interface CallApproval {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string;
+  allowLabel: string;
+  denyLabel: string;
+}
+
 export interface TurnMetrics {
   turn: number;
   endpointMs: number | null;
@@ -31,6 +40,7 @@ export type ClientMessage =
   | { type: "text"; text: string }
   | { type: "mute"; on: boolean }
   | { type: "ptt"; down: boolean }
+  | { type: "decide"; id: string; allow: boolean }
   | { type: "end" }
   | { type: "ping"; t: number };
 
@@ -46,6 +56,7 @@ export type ServerMessage =
   | { type: "interrupted"; utterance: number; heard: string }
   | { type: "duck"; on: boolean }
   | { type: "task"; id: string; title: string; status: string; note: string | null }
+  | { type: "approval"; request: CallApproval | null }
   | { type: "notice"; level: "info" | "warn"; text: string }
   | { type: "metrics"; metrics: TurnMetrics }
   | { type: "pong"; t: number }

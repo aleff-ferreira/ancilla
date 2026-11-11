@@ -21,9 +21,19 @@ export interface MuseBrainHost {
   openSession?(sessionId: string): Promise<boolean>;
   /** Puts a thread on a model, doing nothing when it is on it already; absent where a thread's model cannot be changed. A refusal is an error. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
-  startTurn(input: { sessionId: string; text: string; displayText: string; commandId: string }): Promise<{ turnId: string }>;
+  startTurn(input: {
+    sessionId: string;
+    text: string;
+    displayText: string;
+    commandId: string;
+    reasoningEffort?: "low" | "medium" | "high";
+  }): Promise<{ turnId: string }>;
   interruptTurn(sessionId: string, turnId: string): Promise<void>;
   needsUser(sessionId: string): boolean;
+  /** Surfaces a live Muse tool/command approval on the voice call card instead of aborting the turn. */
+  onApprovalRequested?(input: { sessionId: string; turnId: string; params: Record<string, unknown> }): void;
+  /** Clears a live Muse approval from the call card once resolved or aborted. */
+  onApprovalResolved?(approvalId: string): void;
   watch(sessionId: string, handler: (method: string, params: Record<string, unknown>) => void): () => void;
   log(line: string): void;
 }
@@ -41,6 +51,8 @@ export interface MuseBrainOptions {
   idleMs?: number;
   /** The Muse model the thread answers with; null or absent leaves the thread on whatever Muse chose. */
   model?: string | null;
+  /** Reasoning effort per voice turn; defaults to "medium" so voice turns stay responsive while still supporting tool reasoning. */
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 /**
@@ -55,14 +67,16 @@ function isNotLoaded(error: unknown): boolean {
 }
 
 const DEFAULT_IDLE_MS = 90_000;
+const MAX_APPROVAL_WAIT_MS = 10 * 60_000;
 
 const RULES = [
-  "This is a live voice call: everything you write is spoken aloud.",
-  "Answer first, in one to three short sentences, the way a person talks. No markdown, lists, headings or emoji.",
-  "Do not use any tools, read or change any files, or run anything: answer from what you know and the notes below. If something needs that, say so in a sentence.",
+  "This is a live voice call: everything you write in your spoken reply is read aloud.",
+  "Answer first, in one to three short sentences, the way a person talks. No markdown, lists, headings, code blocks or emoji in spoken text.",
+  "Use your workspace tools and any [[tool_name {...}]] call tools whenever the user asks to check files or threads, inspect a project, launch localhost or a command or URL, or inspect a live page or animation.",
+  "Prefer the [[launch {...}]] and [[inspect_page {...}]] call tools when starting a local server or checking graphics and animations on localhost so Ancilla manages the process and measures FPS, Canvas scaling, CSS animations and console errors.",
 ].join(" ");
 
-const REMINDER = "(Voice call: answer aloud in one to three short sentences, no markdown, no tools.)";
+const REMINDER = "(Voice call: speak naturally in one to three short sentences, no markdown; use workspace or [[tool {...}]] call tools whenever needed.)";
 
 function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -204,6 +218,7 @@ export class MuseThreadBrain implements BrainProvider {
     });
     let turnId: string | null = null;
     let interrupted = false;
+    const waitingApprovals = new Set<string>();
     const interrupt = (): void => {
       if (interrupted || !turnId) return;
       interrupted = true;
@@ -216,7 +231,15 @@ export class MuseThreadBrain implements BrainProvider {
     request.signal.addEventListener("abort", onAbort, { once: true });
     try {
       try {
-        const send = () => host.startTurn({ sessionId, text: prompt.text, displayText: `Voice: ${clip(prompt.shown, 400)}`, commandId: `voice-${randomUUID()}` });
+        const effort = this.options.reasoningEffort ?? "medium";
+        const send = () =>
+          host.startTurn({
+            sessionId,
+            text: prompt.text,
+            displayText: `Voice: ${clip(prompt.shown, 400)}`,
+            commandId: `voice-${randomUUID()}`,
+            reasoningEffort: effort,
+          });
         let ack: { turnId: string };
         try {
           ack = await send();
@@ -240,6 +263,7 @@ export class MuseThreadBrain implements BrainProvider {
       const spoken = new Set<string>();
       const early = new Map<string, string[]>();
       let lastWordAt = Date.now();
+      let approvalWaitStartedAt: number | null = null;
       const idleMs = this.options.idleMs ?? DEFAULT_IDLE_MS;
       for (;;) {
         while (queue.length > 0) {
@@ -267,7 +291,14 @@ export class MuseThreadBrain implements BrainProvider {
                 spoken.add(id);
                 yield { type: "text", delta: item["text"] };
               }
-            } else if (kind !== "" && kind !== "reasoning" && kind !== "userMessage" && method !== "item/completed" && host.needsUser(sessionId)) {
+            } else if (
+              !host.onApprovalRequested &&
+              kind !== "" &&
+              kind !== "reasoning" &&
+              kind !== "userMessage" &&
+              method !== "item/completed" &&
+              host.needsUser(sessionId)
+            ) {
               interrupt();
               yield { type: "error", message: "Muse wants to do something that needs your approval, which a call cannot give. It is waiting on the screen.", retryable: false };
               return;
@@ -284,9 +315,23 @@ export class MuseThreadBrain implements BrainProvider {
               early.set(id, [...(early.get(id) ?? []), delta]);
             }
           } else if (method === "approval/requested") {
-            interrupt();
-            yield { type: "error", message: "Muse asked for an approval, which a call cannot give. It is waiting on the screen.", retryable: false };
-            return;
+            if (!host.onApprovalRequested) {
+              interrupt();
+              yield { type: "error", message: "Muse asked for an approval, which a call cannot give. It is waiting on the screen.", retryable: false };
+              return;
+            }
+            const approvalId = String(params["approvalId"] ?? "");
+            if (approvalId) waitingApprovals.add(approvalId);
+            approvalWaitStartedAt ??= Date.now();
+            host.onApprovalRequested({ sessionId, turnId: turnId ?? "", params });
+            yield { type: "notice", text: "Waiting for your approval — click Allow on the call card or say go ahead." };
+          } else if (method === "approval/resolved") {
+            const approvalId = String(params["approvalId"] ?? "");
+            if (approvalId) {
+              waitingApprovals.delete(approvalId);
+              host.onApprovalResolved?.(approvalId);
+            }
+            if (waitingApprovals.size === 0) approvalWaitStartedAt = null;
           } else if (method === "turn/completed" && params["turnId"] === turnId) {
             const terminal = String(params["terminal"] ?? "completed");
             if (terminal === "completed") {
@@ -301,10 +346,22 @@ export class MuseThreadBrain implements BrainProvider {
           }
         }
         if (request.signal.aborted) return;
-        if (Date.now() - lastWordAt > idleMs) {
-          interrupt();
-          yield { type: "error", message: "Muse took too long to answer.", retryable: true };
-          return;
+        const awaitingApproval = waitingApprovals.size > 0 || (Boolean(host.onApprovalRequested) && host.needsUser(sessionId));
+        if (awaitingApproval) {
+          approvalWaitStartedAt ??= Date.now();
+          lastWordAt = Date.now();
+          if (Date.now() - approvalWaitStartedAt > MAX_APPROVAL_WAIT_MS) {
+            interrupt();
+            yield { type: "error", message: "Approval timed out after ten minutes.", retryable: false };
+            return;
+          }
+        } else {
+          approvalWaitStartedAt = null;
+          if (Date.now() - lastWordAt > idleMs) {
+            interrupt();
+            yield { type: "error", message: "Muse took too long to answer.", retryable: true };
+            return;
+          }
         }
         // Wait for the next word from Muse, or for a second to pass so that silence is noticed.
         await new Promise<void>((resolve) => {
@@ -319,6 +376,9 @@ export class MuseThreadBrain implements BrainProvider {
         });
       }
     } finally {
+      for (const approvalId of waitingApprovals) {
+        host.onApprovalResolved?.(approvalId);
+      }
       request.signal.removeEventListener("abort", onAbort);
       unwatch();
     }

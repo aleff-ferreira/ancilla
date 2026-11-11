@@ -79,8 +79,10 @@ import {
   MuseSessionModelClient,
   MuseSessionWorkerRunner,
   ResearchJobManager,
+  approvalSubjectOf,
   gaveUpOnTimeout,
   museExecArgs,
+  planApproval,
   researchStartupAllowanceMs,
   startupEnvMs,
   uuidv7,
@@ -94,16 +96,19 @@ import {
 } from "./research/index.js";
 import { exportFileName, exportFormatOfName, isExportFormat, questionSlug, renderReport, serveExportFile } from "./research/export/index.js";
 import { handleAssistant, isAssistantPath, type AssistantReply } from "./assistant/routes.js";
+import { AuthorizationHub, LaunchManager, type PlannedSpawn } from "./assistant/launcher.js";
 import { handleVoice, isVoicePath } from "./voice/routes.js";
 import type { HarnessMessage, HarnessReader, HarnessThread, HarnessUsage } from "./voice/harness.js";
+import type { MuseBrainHost } from "./voice/muse-brain.js";
 import { VoiceService } from "./voice/service.js";
+import type { WorkspaceProjectRef, WorkspaceVoiceDeps } from "./voice/workspace-tools.js";
 import { handleBrowser, isBrowserPath } from "./browser/routes.js";
 import { BrowserService } from "./browser/service.js";
 import { VoiceSocketServer, VOICE_SOCKET_PATH } from "./voice/ws.js";
 import { BrowserSocketServer, BROWSER_SOCKET_PATH } from "./browser/ws.js";
 import { BrowserWatchServer, BROWSER_WATCH_PATH } from "./browser/watch.js";
 import { BrowseRunner } from "./browser/runner.js";
-import { BrowseSites } from "./browser/sites.js";
+import { BrowseSites, hostKind } from "./browser/sites.js";
 import { AuditLog } from "./connectors/audit.js";
 import { makeOpener } from "./connectors/connection.js";
 import { ConnectorRegistry } from "./connectors/registry.js";
@@ -1040,6 +1045,8 @@ export class AncillaServer {
   /** The connected accounts and the reading agent that works on them (both made on first use; see docs/connectors.md). */
   private connectorState: { registry: ConnectorRegistry; audit: AuditLog } | null = null;
   private connectorRunner: ConnectorRunner | null = null;
+  private authorizationHub: AuthorizationHub | null = null;
+  private launchManager: LaunchManager | null = null;
   private readonly researchEngine: ResearchEngine;
   private readonly researchMaxWorkers: number | undefined;
   /** The startup allowance the options or the environment asked for, if either did; see `researchStartupMs()`. */
@@ -1243,6 +1250,281 @@ export class AncillaServer {
     };
   }
 
+  /** Shared pending-authorization queue for live calls and interactive approvals. */
+  private authorizationsFor(): AuthorizationHub {
+    this.authorizationHub ??= new AuthorizationHub();
+    return this.authorizationHub;
+  }
+
+  /** Opens or reuses a tab in Ancilla's integrated browser (`you` for localhost dev servers, `assistant` for external URLs). */
+  private async openAncillaTabFor(url: string): Promise<{ id: string; url: string; title: string }> {
+    const parsed = new URL(url);
+    const local = hostKind(parsed.hostname) === "local";
+    const preferred = local ? "you" : "assistant";
+    const browser = this.browserFor();
+    const sameAddress = (a: string, b: string): boolean => {
+      try {
+        const ua = new URL(a);
+        const ub = new URL(b);
+        return ua.origin === ub.origin && (ua.pathname || "/") === (ub.pathname || "/") && ua.search === ub.search && ua.hash === ub.hash;
+      } catch {
+        return a === b;
+      }
+    };
+    const tabs = await browser.listTabs();
+    const existing = tabs.find((t) => t.context === preferred && sameAddress(t.url, url)) ?? (local ? tabs.find((t) => sameAddress(t.url, url)) : undefined);
+    if (existing) {
+      await browser.activateTab(existing.id).catch(() => undefined);
+      const refreshed = await browser.navigate(existing.id, url);
+      return { id: refreshed.id, url: refreshed.url, title: refreshed.title };
+    }
+    const blank = preferred === "you" ? tabs.find((t) => t.context === "you" && (t.url === "about:blank" || t.url === "")) : undefined;
+    if (blank) {
+      await browser.activateTab(blank.id).catch(() => undefined);
+      const nav = await browser.navigate(blank.id, url);
+      return { id: nav.id, url: nav.url, title: nav.title };
+    }
+    if (tabs.length >= 8) {
+      const reuse = tabs.find((t) => t.context === "assistant") ?? tabs[0];
+      if (reuse) {
+        const nav = await browser.navigate(reuse.id, url);
+        return { id: nav.id, url: nav.url, title: nav.title };
+      }
+    }
+    const opened = await browser.openTab(preferred, url);
+    return { id: opened.id, url: opened.url, title: opened.title };
+  }
+
+  /** Authorized process, dev-server, URL, and editor launcher shared across models and call sessions. */
+  private launcherFor(): LaunchManager {
+    this.launchManager ??= new LaunchManager({
+      planCommand: (cwd, command) => this.planWorkspaceCommand(cwd, command),
+      openPath: (localPath, target) => this.opener(localPath, target),
+      openAncillaBrowser: async (url) => {
+        const tab = await this.openAncillaTabFor(url);
+        return { url: tab.url, title: tab.title };
+      },
+      grantOrigin: (origin) => this.browseGate().grantSessionOrigin(origin),
+      isPreAuthorized: () => {
+        try {
+          return this.store.getYoloSettings().enabled;
+        } catch {
+          return false;
+        }
+      },
+      authorizations: this.authorizationsFor(),
+      log: (line) => this.log(line),
+    });
+    return this.launchManager;
+  }
+
+  /** Resolves a stored project folder synchronously to a path readable on this machine's filesystem. */
+  private syncLocalRootFor(cwd: string): string {
+    try {
+      return resolveUserPath(cwd, {
+        platform: this.options.platform ?? process.platform,
+        home: this.options.home ?? homedir(),
+        distro: this.wslDistro(),
+      }).local;
+    } catch {
+      return this.localPathFor(cwd);
+    }
+  }
+
+  /** Provider-independent workspace inspection, launch, and live page/animation diagnostic dependencies for calls. */
+  private workspaceVoiceDeps(): WorkspaceVoiceDeps {
+    const nameOf = (cwd: string): string => cwd.split(/[\\/]/).filter(Boolean).pop() ?? cwd;
+    const toRef = (cwd: string): WorkspaceProjectRef => ({
+      name: nameOf(cwd),
+      cwd: this.syncLocalRootFor(cwd),
+      displayCwd: cwd,
+    });
+    return {
+      projects: () => {
+        try {
+          return this.store.listFolders().map((p) => toRef(p.cwd));
+        } catch {
+          return [];
+        }
+      },
+      currentProject: () => {
+        try {
+          const first = this.store.listProjects()[0] ?? this.store.listFolders()[0];
+          return first ? toRef(first.cwd) : null;
+        } catch {
+          return null;
+        }
+      },
+      launcher: this.launcherFor(),
+      authorizations: this.authorizationsFor(),
+      isPreAuthorized: () => {
+        try {
+          return this.store.getYoloSettings().enabled;
+        } catch {
+          return false;
+        }
+      },
+      inspector: {
+        available: () => this.browseRunnerFor().available(),
+        isSiteAllowed: (origin) => this.browseGate().isAllowedNow(origin),
+        grantSite: (origin) => this.browseGate().grantSessionOrigin(origin),
+        inspectUrl: async (url) => {
+          const tab = await this.openAncillaTabFor(url);
+          const browser = this.browserFor();
+          await browser.waitLoaded(tab.id, 3000).catch(() => undefined);
+          await new Promise<void>((r) => setTimeout(r, 200));
+          const [diagnostics, snap] = await Promise.all([
+            browser.diagnosePage(tab.id),
+            browser.snapshot(tab.id, { maxChars: 2400 }).catch(() => ({ text: "", refs: 0, truncated: false })),
+          ]);
+          return {
+            url: diagnostics.url || tab.url,
+            title: diagnostics.title || tab.title,
+            diagnostics,
+            snapshotText: snap.text,
+          };
+        },
+      },
+    };
+  }
+
+  /**
+   * Muse host adapter dedicated to live voice calls: honours standing YOLO posture (`allowAll`), defaults spoken turns
+   * to `medium` reasoning effort so `muse-spark-1.3` answers promptly instead of burning 25s on Max thinking, and bridges
+   * live `approval/requested` frames into `AuthorizationHub` so the user can approve from the call card or by voice.
+   */
+  private voiceMuseHost(): MuseBrainHost {
+    const base = this.assistantHost();
+    const yolo = (): boolean => {
+      try {
+        return this.store.getYoloSettings().enabled;
+      } catch {
+        return false;
+      }
+    };
+    const describeSubject = (params: Record<string, unknown>): { title: string; detail: string; allowLabel: string } => {
+      const info = approvalSubjectOf(params);
+      const subject = asRecord(params["subject"]);
+      const cmd = str(subject?.["command"]) ?? str(params["command"]);
+      if (cmd) return { title: "Allow command in thread", detail: cmd.slice(0, 220), allowLabel: "Allow" };
+      const path = str(subject?.["path"]) ?? str(subject?.["filePath"]) ?? str(params["path"]);
+      if (path) return { title: `Allow ${info.kind === "fileWrite" ? "file write" : "file access"}`, detail: path.slice(0, 220), allowLabel: "Allow" };
+      const host = str(subject?.["host"]) ?? str(subject?.["url"]) ?? str(params["url"]);
+      if (host) return { title: "Allow network access", detail: host.slice(0, 220), allowLabel: "Allow" };
+      return {
+        title: info.toolName ? `Allow ${info.toolName}` : "Allow action in thread",
+        detail: str(params["reason"]) ?? str(subject?.["description"]) ?? info.kind,
+        allowLabel: "Allow",
+      };
+    };
+    return {
+      ...base,
+      startSession: async ({ cwd, account, title, modelId }) => {
+        const created = await this.startSession(normalizeCwd(cwd), yolo() ? "allowAll" : undefined, modelId ?? undefined, account);
+        const sessionId = String(created["sessionId"]);
+        try {
+          this.store.updateSession(sessionId, { title, titleSource: "user" });
+        } catch (error) {
+          this.log(`a call's thread could not be named: ${errorInfo(error).message}`);
+        }
+        return { sessionId };
+      },
+      openSession: async (sessionId) => {
+        const ok = (await base.openSession?.(sessionId)) ?? true;
+        if (ok && yolo()) {
+          const managed = await this.hostForSession(sessionId).catch(() => null);
+          if (managed) {
+            await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          }
+        }
+        return ok;
+      },
+      startTurn: async ({ sessionId, text, displayText, reasoningEffort }) => {
+        const managed = await this.hostForSession(sessionId);
+        if (yolo()) {
+          await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+        }
+        if (reasoningEffort && isReasoningEffort(reasoningEffort)) {
+          await this.applyEffort(managed.manager, sessionId, reasoningEffort).catch(() => undefined);
+        }
+        this.wake(sessionId);
+        const live = this.liveFor(sessionId);
+        const sentAtRevision = ++live.activityRevision;
+        let ack;
+        try {
+          ack = await managed.manager.sendTurn(sessionId, text, {
+            displayText,
+            ...(reasoningEffort ? { reasoningEffort } : {}),
+          });
+        } catch (error) {
+          const info = errorInfo(error);
+          if (/timed? ?out|timeout|aborted|socket|ECONNRESET|EPIPE/i.test(info.message) && info.status >= 500) {
+            throw new AmbiguousStartError(info.message);
+          }
+          throw Object.assign(new Error(info.message), { kind: info.kind });
+        }
+        if (!ack.turnId) {
+          throw new AmbiguousStartError("Muse accepted the prompt but named no turn");
+        }
+        this.afterTurnAccepted(sessionId, managed, ack, live, sentAtRevision);
+        return { turnId: ack.turnId };
+      },
+      onApprovalRequested: ({ sessionId, turnId, params }) => {
+        const approvalId = str(params["approvalId"]);
+        if (!approvalId) return;
+        if (yolo()) {
+          const planned = planApproval(params, true, "");
+          void this.managerForSession(sessionId)
+            .then((manager) =>
+              manager.decideApproval({
+                sessionId,
+                approvalId,
+                requirementId: planned ? planned.requirementId : (params["currentRequirementId"] ?? params["requirementId"] ?? null),
+                choiceId: planned ? planned.choiceId : "allow_once",
+                feedback: null,
+              }),
+            )
+            .catch(() => undefined);
+          return;
+        }
+        const desc = describeSubject(params);
+        this.authorizationsFor().request({
+          id: `muse_${approvalId}`,
+          kind: "muse-approval",
+          title: desc.title,
+          detail: desc.detail,
+          allowLabel: desc.allowLabel,
+          denyLabel: "Deny",
+          createdTurn: 0,
+          inFlightMuse: true,
+          onDecide: async (allow) => {
+            const manager = await this.managerForSession(sessionId);
+            const planned = planApproval(params, allow, allow ? "" : "Denied by user during voice call.");
+            try {
+              await manager.decideApproval({
+                sessionId,
+                approvalId,
+                requirementId: planned ? planned.requirementId : (params["currentRequirementId"] ?? params["requirementId"] ?? null),
+                choiceId: planned ? planned.choiceId : allow ? "allow_once" : "deny_once",
+                feedback: planned ? planned.feedback : null,
+              });
+              return { ok: true, message: allow ? "Approved in thread." : "Denied." };
+            } catch (error) {
+              if (!allow) {
+                await manager.interruptTurn(sessionId, turnId || undefined, false).catch(() => undefined);
+                return { ok: true, message: "Denied." };
+              }
+              return { ok: false, message: errorInfo(error).message };
+            }
+          },
+        });
+      },
+      onApprovalResolved: (approvalId) => {
+        this.authorizationsFor().cancel(`muse_${approvalId}`);
+      },
+    };
+  }
+
   /** The voice, made on first use. */
   private voiceFor(): VoiceService {
     if (!this.voiceService) {
@@ -1251,7 +1533,7 @@ export class AncillaServer {
         assistant: (create) => this.assistantFor(create),
         log: (line) => this.log(line),
         // The same four things a task uses to run in a Muse thread: a call thinks in one, and shows in the sidebar like any other.
-        museHost: this.assistantHost(),
+        museHost: this.voiceMuseHost(),
         harness: this.harnessReader(),
         // The model that browses is the voice's own; Muse is run with no tools of its own (see browser/muse-brain.ts).
         museExec: async (args, limits) => {
@@ -1267,9 +1549,11 @@ export class AncillaServer {
           },
           available: (id) => this.connectorRunnerFor().available(id),
         },
+        workspace: this.workspaceVoiceDeps(),
+        authorizations: this.authorizationsFor(),
         lastProject: () => {
           try {
-            return this.store.listProjects()[0]?.cwd ?? null;
+            return (this.store.listProjects()[0] ?? this.store.listFolders()[0])?.cwd ?? null;
           } catch {
             return null;
           }
@@ -1848,7 +2132,11 @@ export class AncillaServer {
       ...registered.map((managed) => this.closeHost(managed)),
       this.titleWorker ? settledWithin(this.titleWorker, this.hostWaits.startsMs) : undefined,
       stopPendingCaptures(this.pendingCaptures, { graceMs: this.hostWaits.shellsMs }),
+      this.launchManager ? this.launchManager.stopAll({ graceMs: this.hostWaits.shellsMs }) : undefined,
     ]);
+    this.launchManager = null;
+    this.authorizationHub?.clear();
+    this.authorizationHub = null;
     this.hosts.clear();
     if (!options.freePortFirst) {
       await this.closeListener();
@@ -4388,6 +4676,46 @@ export class AncillaServer {
   }
 
   /**
+   * Plans a shell command inside a project workspace across POSIX, WSL, and native Windows PowerShell (falling back to
+   * PowerShell on Windows when WSL is unavailable so local/cloud providers work without WSL or Muse installed).
+   */
+  private async planWorkspaceCommand(cwd: string, command: string): Promise<PlannedSpawn> {
+    if (this.closed) {
+      throw new HttpError(503, "Ancilla is shutting down.");
+    }
+    if (this.options.platform !== "win32") {
+      return {
+        command: "sh",
+        args: ["-c", 'cd "$1" || exit 1; shift; exec "${SHELL:-/bin/sh}" -lc "$1"', "sh", this.hostPathFor(cwd), command],
+      };
+    }
+    const hint = this.runtimeHint();
+    let useNative = hint === "native";
+    if (!useNative && hint !== "wsl") {
+      const env = await this.environment(false).catch(() => null);
+      useNative = env?.runtime === "native" || (!env?.wslAvailable && isWindowsAbs(this.spawnCwdFor(cwd)));
+    }
+    if (useNative) {
+      const folder = this.spawnCwdFor(cwd).replace(/['\u2018\u2019\u201a\u201b]/g, "$&$&");
+      const powershell = win32.join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const script = `Set-Location -LiteralPath '${folder}' -ErrorAction Stop\n${command}`;
+      return {
+        command: powershell,
+        args: ["-NoProfile", "-NonInteractive", "-Command", script],
+        cwd: this.spawnCwdFor(cwd),
+      };
+    }
+    const plan = planHostCommand({
+      platform: this.options.platform,
+      distro: this.wslDistro(),
+      program: "sh",
+      args: ["-c", 'cd "$1" || exit 1; shift; exec "${SHELL:-/bin/sh}" -lc "$1"', "sh", this.hostPathFor(cwd), command],
+    });
+    const wslEnv = this.wslEnvFor();
+    return { command: plan.command, args: plan.args, ...(wslEnv ? { env: wslEnv } : {}) };
+  }
+
+  /**
    * Runs a `!` command where the workspace lives: through WSL on Windows, in the folder itself elsewhere.
    * This is the user's own shell, not Muse's sandbox, which is the point: Muse cannot run these at all.
    */
@@ -6108,6 +6436,7 @@ export class AncillaServer {
       }
       case "approval/resolved": {
         const id = str(params["approvalId"]);
+        if (id) this.authorizationHub?.cancel(`muse_${id}`);
         changed = id ? live.pendingApprovals.delete(id) : false;
         break;
       }

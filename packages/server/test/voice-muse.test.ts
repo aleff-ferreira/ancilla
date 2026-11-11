@@ -117,7 +117,8 @@ describe("Muse as the call's mind", () => {
     assert.deepEqual(sessions, ["s1"], "the conversation is told which thread it has");
     const sent = muse.turns[0]?.text ?? "";
     assert.match(sent, /live voice call/);
-    assert.match(sent, /Do not use any tools/);
+    assert.doesNotMatch(sent, /Do not use any tools/);
+    assert.match(sent, /workspace tools/);
     assert.match(sent, /You are Vesper/);
     assert.match(sent, /What time is it\?$/);
     assert.equal(muse.turns[0]?.displayText, "Voice: What time is it?", "the thread shows what was said, not the rules");
@@ -225,6 +226,41 @@ describe("Muse as the call's mind", () => {
     const second = await collect(new MuseThreadBrain({ host: asks, cwd: "/w", title: "v" }).stream({ messages: [system, user("do it")], tools: [], signal: new AbortController().signal }));
     assert.match((second[second.length - 1] as { message: string }).message, /approval/);
     assert.equal(asks.interrupts.length, 1);
+  });
+
+  it("keeps the turn alive and speaks the final answer when onApprovalRequested resolves a live approval", async () => {
+    const requested: string[] = [];
+    const resolved: string[] = [];
+    let emitRef: ((method: string, params: Record<string, unknown>) => void) | null = null;
+    let turnRef = "";
+    const muse = new FakeMuse((_n, emit, turnId) => {
+      emitRef = emit;
+      turnRef = turnId;
+      muse.waiting = true;
+      emit("turn/started", { turnId });
+      emit("item/started", { item: { itemId: "c1", kind: "commandExecution", turnId, status: "inProgress" } });
+      emit("approval/requested", { approvalId: "ap_live_1", subject: { kind: "command", command: "npm run dev" } });
+    });
+    (muse as MuseBrainHost).onApprovalRequested = ({ params }) => {
+      const id = String(params["approvalId"] ?? "");
+      requested.push(id);
+      setTimeout(() => {
+        muse.waiting = false;
+        emitRef?.("approval/resolved", { approvalId: id });
+        emitRef?.("item/completed", { item: { ...message("m1", turnRef), status: "completed", text: "Started localhost on port 5173." } });
+        emitRef?.("turn/completed", { turnId: turnRef, terminal: "completed" });
+      }, 20);
+    };
+    (muse as MuseBrainHost).onApprovalResolved = (id) => resolved.push(id);
+
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/work/amazonia_river", title: "Voice", idleMs: 80 });
+    const events = await collect(brain.stream({ messages: [system, user("Launch localhost")], tools: [], signal: new AbortController().signal }));
+    assert.deepEqual(requested, ["ap_live_1"]);
+    assert.deepEqual(resolved, ["ap_live_1"]);
+    assert.equal(muse.interrupts.length, 0, "turn is paused for approval, not interrupted");
+    assert.ok(events.some((e) => e.type === "notice" && /approval/i.test(e.text)));
+    assert.equal(text(events), "Started localhost on port 5173.");
+    assert.deepEqual(events[events.length - 1], { type: "done", reason: "stop" });
   });
 
   it("lets go when the person cuts the call off, and says nothing more", async () => {
