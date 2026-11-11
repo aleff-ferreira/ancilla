@@ -52,6 +52,12 @@ const PRESETS: { id: string; label: string; kind: "openai" | "anthropic"; baseUr
   { id: "vllm", label: "vLLM", kind: "openai", baseUrl: "http://127.0.0.1:8000/v1", model: "local-model", local: true, apiKeyEnv: null },
 ];
 
+const SPEECH_PRESETS: { id: string; label: string; baseUrl: string; sttModel: string; ttsModel: string; local: boolean; apiKeyEnv: string | null }[] = [
+  { id: "openai-speech", label: "OpenAI", baseUrl: "https://api.openai.com/v1", sttModel: "gpt-4o-mini-transcribe", ttsModel: "gpt-4o-mini-tts", local: false, apiKeyEnv: "OPENAI_API_KEY" },
+  { id: "speaches", label: "Speaches (local)", baseUrl: "http://127.0.0.1:8000/v1", sttModel: "Systran/faster-whisper-small", ttsModel: "speaches-ai/Kokoro-82M-v1.0-ONNX", local: true, apiKeyEnv: null },
+  { id: "localai", label: "LocalAI / whisper.cpp", baseUrl: "http://127.0.0.1:8080/v1", sttModel: "whisper-1", ttsModel: "tts-1", local: true, apiKeyEnv: null },
+];
+
 export function VoicePanel(props: { changed: () => void }) {
   const controller = useController();
   const [status, setStatus] = useState<VoiceStatusView | null>(null);
@@ -81,6 +87,7 @@ export function VoicePanel(props: { changed: () => void }) {
     setError(null);
     try {
       await controller.voice("PATCH", "/settings", patch);
+      forgetVoiceStatus();
       reload();
     } catch (e) {
       setError(errorMessage(e));
@@ -93,7 +100,7 @@ export function VoicePanel(props: { changed: () => void }) {
   return (
     <div className="pb-4">
       {error ? <div className="mt-6"><Notice tone="error">{error}</Notice></div> : null}
-      <Install status={status} reload={reload} />
+      <Install status={status} save={save} reload={reload} />
       <Brain settings={s} status={status} save={save} />
       <Sound settings={s} status={status} save={save} />
       <Conversations settings={s} save={save} changed={props.changed} />
@@ -108,9 +115,24 @@ export function VoicePanel(props: { changed: () => void }) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 
-function Install(props: { status: VoiceStatusView; reload: () => void }) {
+function Install(props: { status: VoiceStatusView; save: (patch: Record<string, unknown>) => Promise<void>; reload: () => void }) {
   const controller = useController();
   const { status } = props;
+  const speech = status.settings.speech;
+  const isHttp = speech.kind === "http";
+  const [speechDraft, setSpeechDraft] = useState({
+    baseUrl: speech.kind === "http" ? speech.baseUrl : "https://api.openai.com/v1",
+    sttModel: speech.kind === "http" ? speech.sttModel : "gpt-4o-mini-transcribe",
+    ttsModel: speech.kind === "http" ? speech.ttsModel : "gpt-4o-mini-tts",
+    local: speech.kind === "http" ? speech.local : false,
+    apiKeyEnv: speech.kind === "http" ? (speech.apiKeyEnv ?? "OPENAI_API_KEY") : "OPENAI_API_KEY",
+    speechKey: "",
+  });
+  useEffect(() => {
+    if (speech.kind === "http") {
+      setSpeechDraft((d) => ({ ...d, baseUrl: speech.baseUrl, sttModel: speech.sttModel, ttsModel: speech.ttsModel, local: speech.local, apiKeyEnv: speech.apiKeyEnv ?? "" }));
+    }
+  }, [speech]);
   const [pack, setPack] = useState<PackView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [accepted, setAccepted] = useState(false);
@@ -185,77 +207,162 @@ function Install(props: { status: VoiceStatusView; reload: () => void }) {
   const job = pack?.job;
   const percent = job && job.totalBytes > 0 ? Math.min(100, Math.round((job.doneBytes / job.totalBytes) * 100)) : 0;
 
+  const chooseSpeech = (kind: "local" | "http") => {
+    if (kind === "local") {
+      void props.save({ speech: { kind: "local" } });
+      return;
+    }
+    void props.save({
+      speech: {
+        kind: "http",
+        baseUrl: speechDraft.baseUrl.trim() || "https://api.openai.com/v1",
+        sttModel: speechDraft.sttModel.trim() || "gpt-4o-mini-transcribe",
+        ttsModel: speechDraft.ttsModel.trim() || "gpt-4o-mini-tts",
+        local: speechDraft.local,
+        apiKeyEnv: speechDraft.apiKeyEnv.trim() || null,
+      },
+    });
+  };
+
+  const applySpeech = async (patch: Partial<typeof speechDraft>) => {
+    const next = { ...speechDraft, ...patch };
+    setSpeechDraft(next);
+    if (!/^https?:\/\//.test(next.baseUrl) || next.sttModel.trim() === "" || next.ttsModel.trim() === "") return;
+    await props.save({
+      speech: {
+        kind: "http",
+        baseUrl: next.baseUrl.trim(),
+        sttModel: next.sttModel.trim(),
+        ttsModel: next.ttsModel.trim(),
+        local: next.local,
+        apiKeyEnv: next.apiKeyEnv.trim() || null,
+      },
+      ...(next.speechKey !== "" ? { speechKey: next.speechKey } : {}),
+    });
+    if (next.speechKey !== "") setSpeechDraft((d) => ({ ...d, speechKey: "" }));
+  };
+
   return (
     <Section title="Voice engines">
-      <Row
-        label={status.available ? "Installed" : "Not installed yet"}
-        description={
-          status.available
-            ? `Speech recognition and the voice run on this computer: your words and your voice are not sent anywhere unless you choose a model that is hosted elsewhere.${status.pack.refine ? " The accuracy booster is installed." : ""}`
-            : status.pack.ready
-              ? ""
-              : `Missing: ${status.pack.missing.join(", ")}. The voice runs on this computer, so it needs to be downloaded once.`
-        }
-      >
-        <div className="flex flex-wrap items-center gap-2">
-          {status.available ? <Chip tone="ok">Ready</Chip> : <Chip tone="warn">Needs install</Chip>}
-          {status.engines.loaded ? <Chip>In memory</Chip> : null}
-          {status.available && !running ? (
-            <Button size="sm" variant="ghost" onClick={() => void remove()}>
-              Remove
-            </Button>
-          ) : null}
-        </div>
+      <Row label="Where speech runs" description="Run speech recognition and synthesis on this computer with the local pack, or connect a speech server with no model download.">
+        <Pick<"local" | "http">
+          value={speech.kind}
+          options={[
+            { value: "local", label: "On this computer", hint: "Downloaded once; audio stays here." },
+            { value: "http", label: "Speech server", hint: "Zero download; local server or hosted speech API." },
+          ]}
+          onChange={chooseSpeech}
+        />
       </Row>
-      {!status.available && pack ? (
+      {isHttp ? (
         <>
-          <Row label="What is downloaded" description="Models are downloaded from their publishers and checked against a fixed checksum before they are used. They are kept in Ancilla's data folder.">
-            <ul className="space-y-1 text-xs text-muted">
-              {items.map((item) => (
-                <li key={item.id} className={item.optional && !refine ? "opacity-50" : undefined}>
-                  <span className="text-fg">{item.label}</span> · {size(item.bytes)} ·{" "}
-                  <a className="text-accent-text underline-offset-2 hover:underline" href={item.licenseUrl} target="_blank" rel="noreferrer">
-                    {item.license}
-                  </a>
-                </li>
+          <Row label="Start from" description="Fills in the address and speech model names; change any of them.">
+            <div className="flex flex-wrap gap-1.5">
+              {SPEECH_PRESETS.map((p) => (
+                <Button key={p.id} size="xs" variant={speechDraft.baseUrl === p.baseUrl ? "primary" : "secondary"} onClick={() => void applySpeech({ baseUrl: p.baseUrl, sttModel: p.sttModel, ttsModel: p.ttsModel, local: p.local, apiKeyEnv: p.apiKeyEnv ?? "" })}>
+                  {p.label}
+                </Button>
               ))}
-            </ul>
-          </Row>
-          <Row label="Accuracy booster" description="Reads each thing you say a second time with a larger model. It writes names and numbers much more accurately, at a cost of about half a gigabyte more to download and of memory while you talk.">
-            <Toggle checked={refine} onChange={setRefine} label="Download the accuracy booster" disabled={running} />
-          </Row>
-          <Row label={`Download ${size(total)}`} description="By installing you accept the licences above. Nothing is installed or run until you do.">
-            <div className="flex flex-col items-end gap-2">
-              <label className="flex items-center gap-2 text-xs text-muted">
-                <input type="checkbox" checked={accepted} disabled={running} onChange={(e) => setAccepted(e.target.checked)} />I accept the licences
-              </label>
-              {running ? (
-                <Button size="sm" variant="secondary" onClick={() => void cancel()}>
-                  Cancel
-                </Button>
-              ) : (
-                <Button size="sm" variant="accent" disabled={!accepted} onClick={() => void install()}>
-                  Install the voice
-                </Button>
-              )}
             </div>
           </Row>
+          <Row label="Speech address" description={status.available ? "Ready to listen and speak." : "Add a key below or switch on local mode if this server needs no key."}>
+            <div className="flex flex-wrap items-center gap-2">
+              <input value={speechDraft.baseUrl} onChange={(e) => setSpeechDraft({ ...speechDraft, baseUrl: e.target.value })} onBlur={() => void applySpeech({})} aria-label="Speech server address" placeholder="http://127.0.0.1:8000/v1" className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+              {status.available ? <Chip tone="ok">Ready</Chip> : <Chip tone="warn">Needs key</Chip>}
+            </div>
+          </Row>
+          <Row label="Speech-to-text model">
+            <input value={speechDraft.sttModel} onChange={(e) => setSpeechDraft({ ...speechDraft, sttModel: e.target.value })} onBlur={() => void applySpeech({})} aria-label="Speech-to-text model" className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+          </Row>
+          <Row label="Text-to-speech model">
+            <input value={speechDraft.ttsModel} onChange={(e) => setSpeechDraft({ ...speechDraft, ttsModel: e.target.value })} onBlur={() => void applySpeech({})} aria-label="Text-to-speech model" className="h-8 w-72 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+          </Row>
+          <Row label="Speech key" description={status.settings.hasSpeechKey ? "A key is set (or shared with the chat model at the same address)." : "Not needed for a local speech server."}>
+            <div className="flex flex-wrap items-center gap-2">
+              <input type="password" autoComplete="off" value={speechDraft.speechKey} onChange={(e) => setSpeechDraft({ ...speechDraft, speechKey: e.target.value })} onBlur={() => void applySpeech({})} aria-label="Speech API key" placeholder={status.settings.hasSpeechKey ? "saved" : "sk-..."} className="h-8 w-56 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+              {status.settings.hasSpeechKey ? <Chip tone="ok">Set</Chip> : null}
+            </div>
+          </Row>
+          <Row label="Speech key variable" description="Optional environment variable name (such as OPENAI_API_KEY).">
+            <input value={speechDraft.apiKeyEnv} onChange={(e) => setSpeechDraft({ ...speechDraft, apiKeyEnv: e.target.value })} onBlur={() => void applySpeech({})} aria-label="Speech API key environment variable" placeholder="Optional" className="h-8 w-56 max-w-full rounded-lg bg-sunken px-2.5 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus" />
+          </Row>
+          <Row label="Speech runs on this computer" description="Switch on when the speech server runs on localhost and needs no key.">
+            <Toggle checked={speechDraft.local} onChange={(local) => void applySpeech({ local })} label="The speech server runs on this computer" />
+          </Row>
         </>
-      ) : null}
-      {running && job ? (
-        <Row label={job.step || "Downloading"} description={`${size(job.doneBytes)} of ${size(job.totalBytes)}`}>
-          <div className="h-1.5 w-48 overflow-hidden rounded-full bg-sunken" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
-            <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${percent}%` }} />
-          </div>
-        </Row>
-      ) : null}
-      {job?.state === "failed" && job.error ? (
-        <Row label="The install stopped" description={job.error}>
-          <Button size="sm" variant="secondary" onClick={() => void install()}>
-            Try again
-          </Button>
-        </Row>
-      ) : null}
+      ) : (
+        <>
+          <Row
+            label={status.available ? "Installed" : "Not installed yet"}
+            description={
+              status.available
+                ? `Speech recognition and the voice run on this computer: your words and your voice are not sent anywhere unless you choose a model that is hosted elsewhere.${status.pack.refine ? " The accuracy booster is installed." : ""}`
+                : status.pack.ready
+                  ? ""
+                  : `Missing: ${status.pack.missing.join(", ")}. The voice runs on this computer, so it needs to be downloaded once.`
+            }
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              {status.available ? <Chip tone="ok">Ready</Chip> : <Chip tone="warn">Needs install</Chip>}
+              {status.engines.loaded ? <Chip>In memory</Chip> : null}
+              {status.available && !running ? (
+                <Button size="sm" variant="ghost" onClick={() => void remove()}>
+                  Remove
+                </Button>
+              ) : null}
+            </div>
+          </Row>
+          {!status.available && pack ? (
+            <>
+              <Row label="What is downloaded" description="Models are downloaded from their publishers and checked against a fixed checksum before they are used. They are kept in Ancilla's data folder.">
+                <ul className="space-y-1 text-xs text-muted">
+                  {items.map((item) => (
+                    <li key={item.id} className={item.optional && !refine ? "opacity-50" : undefined}>
+                      <span className="text-fg">{item.label}</span> · {size(item.bytes)} ·{" "}
+                      <a className="text-accent-text underline-offset-2 hover:underline" href={item.licenseUrl} target="_blank" rel="noreferrer">
+                        {item.license}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </Row>
+              <Row label="Accuracy booster" description="Reads each thing you say a second time with a larger model. It writes names and numbers much more accurately, at a cost of about half a gigabyte more to download and of memory while you talk.">
+                <Toggle checked={refine} onChange={setRefine} label="Download the accuracy booster" disabled={running} />
+              </Row>
+              <Row label={`Download ${size(total)}`} description="By installing you accept the licences above. Nothing is installed or run until you do.">
+                <div className="flex flex-col items-end gap-2">
+                  <label className="flex items-center gap-2 text-xs text-muted">
+                    <input type="checkbox" checked={accepted} disabled={running} onChange={(e) => setAccepted(e.target.checked)} />I accept the licences
+                  </label>
+                  {running ? (
+                    <Button size="sm" variant="secondary" onClick={() => void cancel()}>
+                      Cancel
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="accent" disabled={!accepted} onClick={() => void install()}>
+                      Install the voice
+                    </Button>
+                  )}
+                </div>
+              </Row>
+            </>
+          ) : null}
+          {running && job ? (
+            <Row label={job.step || "Downloading"} description={`${size(job.doneBytes)} of ${size(job.totalBytes)}`}>
+              <div className="h-1.5 w-48 overflow-hidden rounded-full bg-sunken" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+                <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${percent}%` }} />
+              </div>
+            </Row>
+          ) : null}
+          {job?.state === "failed" && job.error ? (
+            <Row label="The install stopped" description={job.error}>
+              <Button size="sm" variant="secondary" onClick={() => void install()}>
+                Try again
+              </Button>
+            </Row>
+          ) : null}
+        </>
+      )}
       {error ? <Row label="Something went wrong" description={error} /> : null}
     </Section>
   );

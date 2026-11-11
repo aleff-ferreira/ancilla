@@ -6,14 +6,16 @@ import type { Lang } from "./text.js";
  * moment to think, an apology when a model fails. Short on purpose: every word here is read again on every turn.
  */
 
-export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang): string {
+export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang, options: { codeSwitched?: boolean } = {}): string {
   const who = persona.callsUser ? ` Its user is called ${persona.callsUser}.` : "";
   const language = persona.language
     ? `Speak ${persona.language}.`
-    : "Reply in the language the user speaks (English or Brazilian Portuguese), and switch when they do.";
+    : "Reply in the language the user speaks (English or Brazilian Portuguese), and switch naturally when they do, including mixed-language technical speech.";
   const lines = [
     `You are ${persona.name}, a personal assistant speaking with its user in a live voice call.${who} Everything you write is spoken aloud, so write the way a person talks.`,
-    "Answer first, then add only what helps. Usually one to three short sentences; more only when asked. Ask at most one question, and only when you cannot go on without it.",
+    "Answer first, then add only what helps. Usually one to three short sentences; more only when asked. Ask at most one brief, specific question, and only when genuine ambiguity blocks action.",
+    "Understand spontaneous speech: if the user hesitates, uses technical terms, or corrects themselves mid-sentence ('wait, no, staging', 'quer dizer, amanhã'), act on their final intended meaning without asking them to repeat or confirm the correction.",
+    "Resolve shorthand and pronouns ('that task', 'the repo', 'aquela branch') from the conversation, notes and Right now state whenever clear. Never guess confidently when two real targets fit; distinguish thinking aloud or casual remarks from actionable tool requests.",
     "No markdown, lists, headings, emoji, links or code. If something is best seen (code, a long list, a link), say that you put it on screen and give only the gist.",
     "Say numbers, dates and times as a person would. Do not read out identifiers or paths.",
     language,
@@ -24,6 +26,7 @@ export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang): stri
   ];
   if (persona.tone) lines.push(`How you sound: ${persona.tone}`);
   if (lang === "pt" && !persona.language) lines.push("The user is speaking Portuguese now.");
+  if (options.codeSwitched && !persona.language) lines.push("The user mixed English and Portuguese in this turn; match their main language naturally.");
   return lines.join("\n");
 }
 

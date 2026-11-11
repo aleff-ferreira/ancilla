@@ -1069,6 +1069,10 @@ export type VoiceBrainSetting =
   | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "none" };
 
+export type VoiceSpeechSetting =
+  | { kind: "local" }
+  | { kind: "http"; baseUrl: string; sttModel: string; ttsModel: string; local: boolean; apiKeyEnv: string | null };
+
 export interface VoiceSettingsView {
   mode: "hands-free" | "push-to-talk";
   voice: string | null;
@@ -1076,6 +1080,7 @@ export interface VoiceSettingsView {
   refine: boolean;
   ttsSteps: number;
   brain: VoiceBrainSetting;
+  speech: VoiceSpeechSetting;
   proactive: boolean;
   keepDays: number | null;
   runtimeDir: string | null;
@@ -1083,6 +1088,8 @@ export interface VoiceSettingsView {
   defaultProject: string | null;
   /** A key is set for the model in `brain`. */
   hasKey: boolean;
+  /** A key is set (or shared with `brain`) for the HTTP speech server in `speech`. */
+  hasSpeechKey: boolean;
 }
 
 export interface VoiceStatusView {

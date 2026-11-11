@@ -23,9 +23,15 @@ export type BrainSetting =
   /** No model: the call can be opened to be set up, and says so. */
   | { kind: "none" };
 
+export type SpeechSetting =
+  /** Native sherpa-onnx pack on this machine (Silero VAD + Nemotron/Parakeet ASR + Supertonic TTS). */
+  | { kind: "local" }
+  /** Zero-download HTTP speech endpoints (`/audio/transcriptions` + `/audio/speech`, local or hosted). */
+  | { kind: "http"; baseUrl: string; sttModel: string; ttsModel: string; local: boolean; apiKeyEnv: string | null };
+
 export interface VoiceSettings {
   mode: CallModeSetting;
-  /** An engine voice (such as "en:F2"), or null to pick one that speaks the language being spoken. */
+  /** An engine voice (such as "en:F2" or "en:nova"), or null to pick one that speaks the language being spoken. */
   voice: string | null;
   speed: number;
   /** Read each turn again with the accurate model when it is installed. */
@@ -33,6 +39,7 @@ export interface VoiceSettings {
   /** Denoising steps of the voice: fewer is quicker and rougher (measured: 3 hears back at 7% error, 4 at 2%, 5 at 1.7%). */
   ttsSteps: number;
   brain: BrainSetting;
+  speech: SpeechSetting;
   /** The assistant may say something unprompted, in a lull, when a task needs the person or finishes. */
   proactive: boolean;
   /** How many days a conversation is kept; null keeps them until they are deleted. */
@@ -51,6 +58,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   refine: true,
   ttsSteps: 4,
   brain: { kind: "muse", model: null },
+  speech: { kind: "local" },
   proactive: true,
   keepDays: null,
   runtimeDir: null,
@@ -115,10 +123,29 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
   throw new ValidationError("brain.kind", "brain.kind must be muse, openai, anthropic or none");
 }
 
+function parseSpeech(value: unknown): SpeechSetting {
+  if (!isObject(value)) throw new ValidationError("speech", "speech must be an object");
+  if (value["kind"] === "local") return { kind: "local" };
+  if (value["kind"] === "http") {
+    const baseUrl = text(value["baseUrl"], "speech.baseUrl", 300).trim();
+    if (!/^https?:\/\/[^\s]+$/i.test(baseUrl)) throw new ValidationError("speech.baseUrl", "speech.baseUrl must be an http or https address");
+    const sttModel = text(value["sttModel"], "speech.sttModel", 200).trim();
+    if (sttModel === "") throw new ValidationError("speech.sttModel", "speech.sttModel must name a speech-to-text model");
+    const ttsModel = text(value["ttsModel"], "speech.ttsModel", 200).trim();
+    if (ttsModel === "") throw new ValidationError("speech.ttsModel", "speech.ttsModel must name a text-to-speech model");
+    const apiKeyEnv = optionalText(value["apiKeyEnv"], "speech.apiKeyEnv", 100);
+    if (apiKeyEnv !== null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) {
+      throw new ValidationError("speech.apiKeyEnv", "speech.apiKeyEnv must be the name of an environment variable");
+    }
+    return { kind: "http", baseUrl, sttModel, ttsModel, local: value["local"] === true, apiKeyEnv };
+  }
+  throw new ValidationError("speech.kind", "speech.kind must be local or http");
+}
+
 /** Reads settings from untrusted text (a file, or a patch from the page): a field that is not valid is an error, one that is missing keeps its value. */
 export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceSettings {
   if (!isObject(raw)) throw new ValidationError("settings", "settings must be an object");
-  const known = ["mode", "voice", "speed", "refine", "ttsSteps", "brain", "proactive", "keepDays", "runtimeDir", "modelsDir", "defaultProject", "apiKey"];
+  const known = ["mode", "voice", "speed", "refine", "ttsSteps", "brain", "speech", "proactive", "keepDays", "runtimeDir", "modelsDir", "defaultProject", "apiKey", "speechKey"];
   for (const key of Object.keys(raw)) if (!known.includes(key)) throw new ValidationError(key, `unknown setting ${key}`);
   const next: VoiceSettings = { ...current };
   if ("mode" in raw) {
@@ -127,7 +154,7 @@ export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceS
   }
   if ("voice" in raw) {
     const voice = optionalText(raw["voice"], "voice", 40);
-    if (voice !== null && !/^[a-z]{2}:[A-Z][0-9]$/.test(voice)) throw new ValidationError("voice", "voice must look like en:F2");
+    if (voice !== null && !/^[a-z]{2}:[A-Za-z0-9_-]{1,24}$/.test(voice)) throw new ValidationError("voice", "voice must look like en:F2 or en:nova");
     next.voice = voice;
   }
   if ("speed" in raw) next.speed = number(raw["speed"], "speed", 0.6, 1.6, current.speed);
@@ -135,6 +162,7 @@ export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceS
   // Two steps is fast and unintelligible (half the words are lost when the speech is read back), so three is the least.
   if ("ttsSteps" in raw) next.ttsSteps = Math.round(number(raw["ttsSteps"], "ttsSteps", 3, 8, current.ttsSteps));
   if ("brain" in raw) next.brain = parseBrain(raw["brain"], current.brain);
+  if ("speech" in raw) next.speech = parseSpeech(raw["speech"]);
   if ("proactive" in raw) next.proactive = raw["proactive"] === true;
   if ("keepDays" in raw) next.keepDays = raw["keepDays"] === null ? null : Math.round(number(raw["keepDays"], "keepDays", 1, 3650, 30));
   if ("runtimeDir" in raw) next.runtimeDir = optionalText(raw["runtimeDir"], "runtimeDir", 500);
@@ -147,6 +175,8 @@ export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceS
 export interface VoiceSettingsView extends VoiceSettings {
   /** A key is set for the model in `brain`. */
   hasKey: boolean;
+  /** A key is set (or shared with `brain`) for the HTTP speech server in `speech`. */
+  hasSpeechKey: boolean;
 }
 
 export class VoiceSettingsStore {
@@ -169,7 +199,7 @@ export class VoiceSettingsStore {
     if (settingsPath && existsSync(settingsPath)) {
       try {
         const raw = JSON.parse(readText(settingsPath)) as unknown;
-        if (isObject(raw)) this.settings = applySettingsPatch({ ...DEFAULT_VOICE_SETTINGS }, { ...raw, apiKey: undefined });
+        if (isObject(raw)) this.settings = applySettingsPatch({ ...DEFAULT_VOICE_SETTINGS }, { ...raw, apiKey: undefined, speechKey: undefined });
       } catch (error) {
         this.log(`voice: the settings file could not be read, so the defaults are used: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -196,6 +226,10 @@ export class VoiceSettingsStore {
     return null;
   }
 
+  private speechKeyOf(speech: SpeechSetting): string | null {
+    return speech.kind === "http" ? `speech:${speech.baseUrl.replace(/\/+$/, "")}` : null;
+  }
+
   /** The key for the model in use: the one saved, or the one in the environment variable the settings name. */
   keyFor(brain: BrainSetting): string | null {
     if (brain.kind !== "openai" && brain.kind !== "anthropic") return null;
@@ -208,8 +242,27 @@ export class VoiceSettingsStore {
     return null;
   }
 
+  /** The key for an HTTP speech server: its own saved key, its environment variable, or the brain's key when at the same address. */
+  speechKeyFor(speech: SpeechSetting = this.settings.speech, brain: BrainSetting = this.settings.brain): string | null {
+    if (speech.kind !== "http") return null;
+    const saved = this.secrets[this.speechKeyOf(speech) as string];
+    if (saved) return saved;
+    if (speech.apiKeyEnv) {
+      const fromEnv = process.env[speech.apiKeyEnv];
+      if (fromEnv) return fromEnv;
+    }
+    if (brain.kind === "openai" && brain.baseUrl.replace(/\/+$/, "") === speech.baseUrl.replace(/\/+$/, "")) {
+      return this.keyFor(brain);
+    }
+    return null;
+  }
+
   view(): VoiceSettingsView {
-    return { ...this.settings, hasKey: this.keyFor(this.settings.brain) !== null };
+    return {
+      ...this.settings,
+      hasKey: this.keyFor(this.settings.brain) !== null,
+      hasSpeechKey: this.speechKeyFor(this.settings.speech, this.settings.brain) !== null,
+    };
   }
 
   /**
@@ -223,14 +276,25 @@ export class VoiceSettingsStore {
     const next = applySettingsPatch(this.settings, patch);
     const key = isObject(patch) ? patch["apiKey"] : undefined;
     if (key !== undefined && key !== null && typeof key !== "string") throw new ValidationError("apiKey", "apiKey must be text");
+    const speechKey = isObject(patch) ? patch["speechKey"] : undefined;
+    if (speechKey !== undefined && speechKey !== null && typeof speechKey !== "string") throw new ValidationError("speechKey", "speechKey must be text");
     this.settings = next;
+    let dirtySecrets = false;
     if (typeof key === "string") {
       const id = this.keyOf(next.brain);
       if (id === null) throw new ValidationError("apiKey", "this model takes no key");
       if (key === "") delete this.secrets[id];
       else this.secrets[id] = key.slice(0, 500);
-      this.writeSecrets();
+      dirtySecrets = true;
     }
+    if (typeof speechKey === "string") {
+      const id = this.speechKeyOf(next.speech);
+      if (id === null) throw new ValidationError("speechKey", "this speech engine takes no key");
+      if (speechKey === "") delete this.secrets[id];
+      else this.secrets[id] = speechKey.slice(0, 500);
+      dirtySecrets = true;
+    }
+    if (dirtySecrets) this.writeSecrets();
     this.writeSettings();
     return this.view();
   }

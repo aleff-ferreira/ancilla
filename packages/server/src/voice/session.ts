@@ -10,7 +10,7 @@ import type { CallMode, ClientMessage, ServerMessage } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import type { Scheduler } from "./scheduler.js";
 import { SpeechOut } from "./speech.js";
-import { guessLanguage, SpeechChunker, wordsOf, type Lang } from "./text.js";
+import { guessLanguage, hasCodeSwitch, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
 import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEvent } from "./turn.js";
 
 /**
@@ -156,6 +156,7 @@ export class VoiceSession {
   private history: ChatMessage[] = [];
   private lastTurnEndAt = -Infinity;
   private pendingMerge: { text: string; turn: number } | null = null;
+  private speculativeContext: { text: string; promise: Promise<string | null> } | null = null;
   private recentSpoken: Array<{ at: number; words: string[] }> = [];
   private readonly pendingSay: HostEvent[] = [];
   /** The news waiting for the call to open, said once after a moment's quiet; dropped if the person speaks first. */
@@ -413,6 +414,7 @@ export class VoiceSession {
           await this.onTurnEnd(ev);
           break;
         case "noise":
+          this.speculativeContext = null;
           this.disposeStream();
           break;
         case "duck":
@@ -422,6 +424,7 @@ export class VoiceSession {
           this.interruptReply(`the person spoke (${ev.reason})`);
           break;
         case "speech_resume":
+          this.speculativeContext = null;
           if (this.flushed && this.stream) {
             // The person goes on: the recogniser gets the stretch it was not fed, up to and including this frame.
             this.flushed = false;
@@ -432,8 +435,15 @@ export class VoiceSession {
           this.flushed = false;
           break;
         case "backchannel":
-        case "end_candidate":
           break;
+        case "end_candidate": {
+          // Pre-warm memory and harness context while the endpoint pause is still running, reusing it if the turn ends on these words.
+          const candidate = this.userText.trim();
+          if (candidate !== "" && !this.pendingMerge && this.speculativeContext?.text !== candidate) {
+            this.speculativeContext = { text: candidate, promise: Promise.resolve(this.deps.host.context(candidate, "voice")) };
+          }
+          break;
+        }
       }
     }
     void t;
@@ -521,6 +531,8 @@ export class VoiceSession {
       asrDoneAt = this.deps.scheduler.now();
     }
     this.userText = "";
+    const prewarmed = this.speculativeContext;
+    this.speculativeContext = null;
     if (text === "") {
       this.pendingMerge = null;
       this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
@@ -532,7 +544,7 @@ export class VoiceSession {
     trace.speechEnd = now - ev.silenceMs;
     trace.turnEnd = now;
     trace.asrFinal = asrDoneAt;
-    this.beginUserTurn(text, "voice", trace);
+    this.beginUserTurn(text, "voice", trace, prewarmed);
   }
 
   private async onPushToTalk(down: boolean): Promise<void> {
@@ -566,11 +578,17 @@ export class VoiceSession {
   // -------------------------------------------------------------------------------------------------------------------
   // Answering
 
-  private beginUserTurn(text: string, source: "voice" | "text", trace: TurnTrace | null): void {
+  private beginUserTurn(
+    text: string,
+    source: "voice" | "text",
+    trace: TurnTrace | null,
+    prewarmed: { text: string; promise: Promise<string | null> } | null = null,
+  ): void {
     if (text === "") return;
     // The person has the floor, in words that could be made out (a cough does not take it): what the call would have opened
     // with is not said now, over the topic they chose, as if it were fresh.
     this.openingSay = null;
+    this.speculativeContext = null;
     let turn: number;
     let said = text;
     if (this.pendingMerge) {
@@ -588,7 +606,8 @@ export class VoiceSession {
     if (lang !== "unknown") this.userLang = lang;
     this.send({ type: "user", turn, text: said, source });
     this.deps.host.record({ turn, role: "user", text: said, source, at: this.deps.scheduler.now() });
-    this.startReply(turn, said, source, trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null);
+    const contextPromise = source === "voice" && prewarmed && prewarmed.text === said ? prewarmed.promise : null;
+    this.startReply(turn, said, source, trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null, contextPromise);
   }
 
   private newReply(turn: number, userText: string | null, source: Reply["source"], trace: TurnTrace | null): Reply {
@@ -637,7 +656,7 @@ export class VoiceSession {
     const guess = guessLanguage(text);
     const lang = guess !== "unknown" ? guess : this.langCode();
     const voice = pickVoice(this.deps.engines.tts.voices, lang, this.deps.host.persona().voice);
-    return { voice: voice?.id ?? "", speed: this.cfg.speed };
+    return { voice: voice?.id ?? "", speed: paceForText(text, this.cfg.speed) };
   }
 
   private noteSpoken(text: string): void {
@@ -665,12 +684,18 @@ export class VoiceSession {
     this.send({ type: "state", state: activity === "idle" ? "listening" : activity });
   }
 
-  private startReply(turn: number, text: string, source: "voice" | "text", trace: TurnTrace | null): void {
+  private startReply(
+    turn: number,
+    text: string,
+    source: "voice" | "text",
+    trace: TurnTrace | null,
+    prewarmedContext: Promise<string | null> | null = null,
+  ): void {
     const reply = this.newReply(turn, text, source, trace);
     this.reply = reply;
     this.setAgent("thinking");
     reply.cancelFiller = this.deps.scheduler.after(this.cfg.fillerAfterMs, () => this.onFillerDue(reply));
-    void this.runReply(reply, text, source).catch((error) => {
+    void this.runReply(reply, text, source, prewarmedContext).catch((error) => {
       this.deps.log(`a reply failed: ${error instanceof Error ? error.message : String(error)}`);
       this.failReply(reply);
     });
@@ -691,11 +716,16 @@ export class VoiceSession {
     reply.speech.enqueue(phrase);
   }
 
-  private async runReply(reply: Reply, text: string, source: "voice" | "text"): Promise<void> {
+  private async runReply(
+    reply: Reply,
+    text: string,
+    source: "voice" | "text",
+    prewarmedContext: Promise<string | null> | null = null,
+  ): Promise<void> {
     const { brain, host, scheduler } = this.deps;
-    const context = await host.context(text, source);
+    const context = await (prewarmedContext ?? host.context(text, source));
     if (reply.aborted) return;
-    const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang());
+    const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), { codeSwitched: hasCodeSwitch(text) });
     const base: ChatMessage[] = [{ role: "system", content: system }, ...this.history.slice(-this.cfg.maxHistory), { role: "user", content: context ? `${context}\n\n${text}` : text }];
     this.history.push({ role: "user", content: text });
     const tools = host.tools();

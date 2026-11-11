@@ -44,6 +44,21 @@ export function guessLanguage(text: string): Lang {
   return pt > en ? "pt" : "en";
 }
 
+/** Whether a single utterance mixes distinct English and Portuguese words (natural bilingual code-switching). */
+export function hasCodeSwitch(text: string): boolean {
+  const words = wordsOf(text);
+  if (words.length < 3) return false;
+  let pt = 0;
+  let en = 0;
+  for (const w of words) {
+    const inPt = PT_WORDS.has(w);
+    const inEn = EN_WORDS.has(w);
+    if (inPt && !inEn) pt++;
+    else if (inEn && !inPt) en++;
+  }
+  return pt >= 1 && en >= 1;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // What the person said: backchannels, stop words and whether they are done.
 
@@ -103,6 +118,11 @@ const CONTINUATION_PT = new Set([
 const SOUND_FILLERS = new Set(["uh", "um", "umm", "uhh", "er", "erm", "hmm", "hm", "mm", "ah", "ahn", "eh", "ehh", "éé", "ééé", "hã", "hum", "humm", "ahm", "ãh"]);
 /** Words that are fillers when they trail off, but can also end a sentence ("I think so."). */
 const WORD_FILLERS = new Set(["like", "well", "so", "tipo", "né", "ne", "então", "entao", "assim", "aí", "ai", "digamos"]);
+/** Trailing self-correction pivots ("send it to staging wait no", "às três quer dizer"): the speaker is mid-repair. */
+const REPAIR_TRAIL_WORDS = new Set(["actually", "wait", "digo", "aliás", "alias", "espera", "peraí", "perai"]);
+const REPAIR_TRAIL_PAIRS = new Set(["wait no", "no wait", "i mean", "or rather", "scratch that", "make that", "quer dizer", "ou melhor", "na verdade", "pera aí", "não espera", "nao espera"]);
+/** Leading question words for recognizing syntactically complete unpunctuated questions from streaming ASR. */
+const QUESTION_HEADS = new Set(["what", "whats", "what's", "where", "when", "who", "how", "which", "why", "qual", "quais", "quando", "onde", "como", "quem", "quanto", "quanta", "cadê", "cade"]);
 
 const NUMBER_WORDS = new Set([
   "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
@@ -131,11 +151,15 @@ export function readCompleteness(text: string): CompletenessReading {
   if (raw === "") return { verdict: "unknown", why: "no words yet", command: false };
   const words = wordsOf(raw);
   const last = words[words.length - 1] ?? "";
+  const tailPair = words.length >= 2 ? `${words[words.length - 2]} ${last}` : "";
   if (words.length <= 2 && words.length > 0 && words.every((w) => COMMAND_WORDS.has(w))) return { verdict: "complete", why: "a short command", command: true };
   if (/(\.\.\.|…|,|;|:|—)\s*$/.test(raw)) return { verdict: "incomplete", why: "ends on a pause mark", command: false };
   const marked = /[.!?]["')\]]*\s*$/.test(raw);
   if (SOUND_FILLERS.has(last)) return { verdict: "incomplete", why: "ends on a hesitation sound", command: false };
   if (marked) return { verdict: "complete", why: "ends on a sentence mark", command: false };
+  if (REPAIR_TRAIL_PAIRS.has(tailPair) || (words.length >= 2 && REPAIR_TRAIL_WORDS.has(last))) {
+    return { verdict: "incomplete", why: "ends on a self-correction pivot", command: false };
+  }
   if (WORD_FILLERS.has(last)) return { verdict: "incomplete", why: `trails off on "${last}"`, command: false };
   const isDigits = (w: string): boolean => /^\d+$/.test(w) || NUMBER_WORDS.has(w);
   if (words.filter(isDigits).length >= 3 && isDigits(last)) return { verdict: "incomplete", why: "a list of numbers still going", command: false };
@@ -143,7 +167,21 @@ export function readCompleteness(text: string): CompletenessReading {
   const continuation = lang === "pt" ? CONTINUATION_PT : lang === "en" ? CONTINUATION_EN : new Set([...CONTINUATION_EN, ...CONTINUATION_PT]);
   if (continuation.has(last)) return { verdict: "incomplete", why: `ends on "${last}"`, command: false };
   if (words.length <= 1) return { verdict: "unknown", why: "one word", command: false };
+  if (words.length >= 4 && QUESTION_HEADS.has(words[0] as string)) {
+    return { verdict: "complete", why: "unpunctuated question", command: false };
+  }
   return { verdict: "unknown", why: "no mark and no trailing connective", command: false };
+}
+
+/** Subtle context-sensitive speech rate around `baseSpeed` so acknowledgements feel crisp and dense details stay clear. */
+export function paceForText(text: string, baseSpeed: number): number {
+  const words = wordsOf(text);
+  let factor = 1;
+  const digitTokens = words.filter((w) => /\d/.test(w) || NUMBER_WORDS.has(w)).length;
+  if (digitTokens >= 2) factor = 0.95;
+  else if (words.length > 0 && words.length <= 4 && text.length <= 24) factor = 1.03;
+  else if (words.length >= 26) factor = 0.98;
+  return Math.max(0.6, Math.min(1.6, Math.round(baseSpeed * factor * 100) / 100));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

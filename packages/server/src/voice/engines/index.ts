@@ -78,13 +78,16 @@ export interface SherpaEngineOptions {
   log?: (line: string) => void;
 }
 
-export interface SherpaEngineSet {
+export interface VoiceEngineSet {
   engines: Engines;
+  /** Stops the recogniser's thread or connections and lets go of the models. */
+  dispose(): Promise<void>;
+}
+
+export interface SherpaEngineSet extends VoiceEngineSet {
   asr: SherpaAsr;
   tts: SherpaTts;
   report: PackReport;
-  /** Stops the recogniser's thread and lets go of the models. */
-  dispose(): Promise<void>;
 }
 
 /** Chooses how many threads each model gets from the machine it runs on. */
@@ -113,3 +116,4 @@ export function createSherpaEngines(layout: VoicePackLayout, options: SherpaEngi
 
 export { SherpaAsr, SherpaTts, SherpaVad };
 export { loadSherpa, VoiceRuntimeError } from "./sherpa.js";
+export { AdaptiveEnergyVad, HttpWhisperAsr, HttpSpeechTts, createRemoteEngines, encodeWavPcm16, findWavDataOffset, cleanWhisperTranscript, httpSpeechVoices, type RemoteSpeechOptions } from "./remote.js";

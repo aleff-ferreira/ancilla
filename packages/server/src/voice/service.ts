@@ -10,7 +10,7 @@ import type { VoiceConnectors } from "./tools.js";
 import type { HarnessReader } from "./harness.js";
 import { ConversationStore } from "./conversations.js";
 import type { Voice } from "./engines.js";
-import { createSherpaEngines, inspectPack, type PackReport, type SherpaEngineOptions, type SherpaEngineSet, type VoicePackLayout } from "./engines/index.js";
+import { createRemoteEngines, createSherpaEngines, httpSpeechVoices, inspectPack, type PackReport, type SherpaEngineOptions, type SherpaEngineSet, type VoiceEngineSet, type VoicePackLayout } from "./engines/index.js";
 import { InstallError, PackInstaller, type InstallerDeps, type PackJob } from "./installer.js";
 import { supertonicVoices } from "./engines/tts.js";
 import { summarize, type Summary } from "./metrics.js";
@@ -75,6 +75,8 @@ export interface VoiceServiceDeps {
   scheduler?: Scheduler;
   /** For tests: the engines, instead of the downloaded ones. */
   engineFactory?: (layout: VoicePackLayout, options: SherpaEngineOptions) => SherpaEngineSet;
+  /** For tests: custom HTTP fetch for speech servers. */
+  fetchImpl?: typeof fetch;
   /** How long the models stay loaded after the last call. */
   idleUnloadMs?: number;
   /** For tests: what the installer is given instead of its defaults. */
@@ -111,8 +113,8 @@ const KEEP_METRICS = 60;
 export class VoiceService {
   readonly settings: VoiceSettingsStore;
   readonly hub = new TaskHub();
-  private engines: SherpaEngineSet | null = null;
-  private loading: Promise<SherpaEngineSet> | null = null;
+  private engines: VoiceEngineSet | null = null;
+  private loading: Promise<VoiceEngineSet> | null = null;
   private stale = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private active: ActiveCall | null = null;
@@ -181,15 +183,16 @@ export class VoiceService {
     const chosen = makeBrain(settings, { project: settings.defaultProject ?? this.deps.lastProject?.() ?? null, name: "Assistant", museSession: null, rememberMuseSession: () => undefined }, this.brainDeps());
     const asr = this.engines?.engines.asr;
     const tts = this.engines?.engines.tts;
+    const remoteReady = settings.speech.kind === "http" && (settings.speech.local || settings.hasSpeechKey);
     return {
-      available: pack.ready,
+      available: settings.speech.kind === "http" ? remoteReady : pack.ready,
       pack,
       layout,
       engines: { loaded: this.engines !== null, asr: asr?.id ?? null, tts: tts?.id ?? null, sampleRate: tts?.sampleRate ?? null, loadMs: null },
       call: { active: this.active !== null, id: this.active?.id ?? null, conversation: this.active?.conversation ?? null, since: this.active?.since ?? null },
       settings,
       brain: { label: chosen.brain.label, local: chosen.brain.capabilities.local, problem: chosen.problem },
-      voices: pack.tts ? supertonicVoices() : [],
+      voices: settings.speech.kind === "http" ? httpSpeechVoices() : pack.tts ? supertonicVoices() : [],
       latency: {
         turns: this.recent.length,
         firstAudio: summarize(this.recent.map((m) => m.firstAudioMs).filter((x): x is number => x !== null)),
@@ -217,7 +220,13 @@ export class VoiceService {
     const before = this.settings.get();
     const view = this.settings.update(patch);
     const after = this.settings.get();
-    if (before.refine !== after.refine || before.ttsSteps !== after.ttsSteps || before.runtimeDir !== after.runtimeDir || before.modelsDir !== after.modelsDir) {
+    if (
+      before.refine !== after.refine ||
+      before.ttsSteps !== after.ttsSteps ||
+      before.runtimeDir !== after.runtimeDir ||
+      before.modelsDir !== after.modelsDir ||
+      JSON.stringify(before.speech) !== JSON.stringify(after.speech)
+    ) {
       this.stale = true;
       if (this.active === null) void this.unload();
     }
@@ -227,8 +236,20 @@ export class VoiceService {
   // -------------------------------------------------------------------------------------------------------------------
   // The models
 
-  private async build(): Promise<SherpaEngineSet> {
+  private async build(): Promise<VoiceEngineSet> {
     const s = this.settings.get();
+    if (s.speech.kind === "http") {
+      const set = createRemoteEngines({
+        baseUrl: s.speech.baseUrl,
+        sttModel: s.speech.sttModel,
+        ttsModel: s.speech.ttsModel,
+        apiKey: () => this.settings.speechKeyFor(),
+        fetchImpl: this.deps.fetchImpl,
+        log: (line) => this.deps.log(`voice: ${line}`),
+      });
+      await Promise.all([set.engines.asr.warm?.(), set.engines.tts.warm?.()]);
+      return set;
+    }
     const options: SherpaEngineOptions = { refine: s.refine, ttsSteps: s.ttsSteps, log: (line) => this.deps.log(`voice: ${line}`) };
     const layout = this.layout();
     const set = (this.deps.engineFactory ?? createSherpaEngines)(layout, options);
@@ -237,15 +258,22 @@ export class VoiceService {
   }
 
   /** The loaded engines, loading them first if need be. A pack that is not all there is a plain explanation, not a crash. */
-  async ensureEngines(): Promise<SherpaEngineSet> {
+  async ensureEngines(): Promise<VoiceEngineSet> {
     if (this.closed) throw new VoiceUnavailableError("Ancilla is shutting down.", 503);
     this.cancelIdle();
     if (this.engines && !this.stale) return this.engines;
     if (this.engines && this.stale && this.active === null) await this.unload();
     if (!this.engines && !this.loading) {
-      // An injected factory (a test) brings its own engines; the downloaded ones must all be there.
-      const report = this.deps.engineFactory ? null : inspectPack(this.layout());
-      if (report && !report.ready) throw new VoiceUnavailableError(`The voice is not installed yet: ${report.missing.join(", ")} missing. Install it in Settings, Voice.`);
+      const s = this.settings.get();
+      if (s.speech.kind === "http") {
+        if (!s.speech.local && this.settings.speechKeyFor() === null) {
+          throw new VoiceUnavailableError("The speech server needs an API key. Add one in Settings, Voice.");
+        }
+      } else {
+        // An injected factory (a test) brings its own engines; the downloaded ones must all be there.
+        const report = this.deps.engineFactory ? null : inspectPack(this.layout());
+        if (report && !report.ready) throw new VoiceUnavailableError(`The voice is not installed yet: ${report.missing.join(", ")} missing. Install it in Settings, Voice.`);
+      }
       this.loading = this.build()
         .then((set) => {
           this.engines = set;
@@ -256,7 +284,7 @@ export class VoiceService {
           this.loading = null;
         });
     }
-    return (this.engines ?? this.loading) as Promise<SherpaEngineSet>;
+    return (this.engines ?? this.loading) as Promise<VoiceEngineSet>;
   }
 
   /** Loads the models ahead of a call, so that the first words are not the slowest. Never throws. */

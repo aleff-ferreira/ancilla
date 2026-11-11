@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { guessLanguage, isBackchannel, isStopIntent, readCompleteness, SpeechChunker, toSpeakable, wordsOf } from "../src/voice/text.js";
+import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, readCompleteness, SpeechChunker, toSpeakable, wordsOf } from "../src/voice/text.js";
 
 function chunk(deltas: string[], lang: "en" | "pt" | "unknown" = "en"): string[] {
   const c = new SpeechChunker(() => lang);
@@ -22,6 +22,11 @@ describe("language guess", () => {
   });
   it("splits words and keeps accents and apostrophes", () => {
     assert.deepEqual(wordsOf("Don't stop, não pare!"), ["don't", "stop", "não", "pare"]);
+  });
+  it("detects natural bilingual code-switching within a single turn", () => {
+    assert.equal(hasCodeSwitch("Pode checar the deploy status na branch principal?"), true);
+    assert.equal(hasCodeSwitch("What time is the meeting tomorrow?"), false);
+    assert.equal(hasCodeSwitch("Que horas é a reunião amanhã?"), false);
   });
 });
 
@@ -63,6 +68,31 @@ describe("has the person finished", () => {
   it("answers a one-word command quickly", () => {
     for (const s of ["stop", "yes", "no", "sim", "não", "pause"]) assert.equal(readCompleteness(s).command, true, s);
     assert.equal(readCompleteness("yes please open it").command, false);
+  });
+  it("holds the turn open on mid-utterance self-correction pivots and closes unpunctuated multi-word questions", () => {
+    for (const s of [
+      "deploy to production wait no",
+      "schedule it for three actually",
+      "check the auth service i mean",
+      "manda para produção quer dizer",
+      "às três horas na verdade",
+      "no ambiente antigo ou melhor",
+    ]) {
+      assert.equal(readCompleteness(s).verdict, "incomplete", `${s}: ${readCompleteness(s).why}`);
+    }
+    for (const s of [
+      "what time is the deployment",
+      "where did we put the credentials",
+      "qual é o status da tarefa",
+      "onde ficou salvo o arquivo",
+    ]) {
+      assert.equal(readCompleteness(s).verdict, "complete", `${s}: ${readCompleteness(s).why}`);
+    }
+  });
+  it("paces crisp acknowledgements slightly faster and number-heavy clauses slightly steadier", () => {
+    assert.ok(paceForText("Got it.", 1.0) > 1.0);
+    assert.ok(paceForText("Port 8080 had 14 errors at 12:30.", 1.0) < 1.0);
+    assert.equal(paceForText("I checked the repository configuration and everything looks clean.", 1.0), 1.0);
   });
 });
 
