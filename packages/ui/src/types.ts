@@ -116,6 +116,7 @@ export interface ProviderLoginResult {
   status: "waiting" | "done" | "interactive" | "error";
   url: string | null;
   code: string | null;
+  needsCodeInput?: boolean;
   loginId: string;
   terminalCommand: string;
   message?: string;
@@ -811,6 +812,7 @@ export interface AccountLoginProgress {
   status: "waiting" | "done" | "error" | "idle";
   url?: string | null;
   code?: string | null;
+  needsCodeInput?: boolean;
   message?: string;
 }
 
@@ -1054,6 +1056,12 @@ export interface AssistantBondView {
   milestones: { id: string; at: number }[];
 }
 
+export interface AssistantModelPreferenceView {
+  providerId: ProviderId | null;
+  accountId: string | null;
+  modelId: string | null;
+}
+
 export interface AssistantProfileView {
   id: string;
   enabled: boolean;
@@ -1063,6 +1071,7 @@ export interface AssistantProfileView {
   communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
   autonomy: AssistantAutonomy;
   policy: { allowReadOnly: boolean; allowProjectWrites: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };
+  model?: AssistantModelPreferenceView;
   capturePaused: boolean;
   contextBudgetTokens: number;
   updatedAt: number;
@@ -1205,7 +1214,9 @@ export interface AssistantConnectorActivity {
 /** How the voice is set up; a key is never part of it. */
 export type VoiceBrainSetting =
   /** Through Muse; `model` is the Muse model that answers, or null for Muse's own choice. */
-  | { kind: "muse"; model: string | null }
+  | { kind: "muse"; model: string | null; accountId?: string | null }
+  /** Through any configured CLI provider or saved API endpoint from `Settings -> Providers`. */
+  | { kind: "provider"; providerId: ProviderId; accountId: string | null; model: string | null }
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "anthropic"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   | { kind: "google"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useApp, useController } from "../../app/context.js";
 import { providerBadgeName } from "../../model/models.js";
 import type { AccountView, ApiProviderKind, ProviderAccountView, ProviderAuthStatus, ProviderId, ProviderView } from "../../types.js";
@@ -498,6 +498,180 @@ function CustomAcpModal(props: { open: boolean; onOpenChange: (open: boolean) =>
   );
 }
 
+export function ProviderLoginBody() {
+  const controller = useController();
+  const login = useApp((s) => s.providerLogin);
+  const providers = useApp((s) => s.providers);
+  const [authCode, setAuthCode] = useState("");
+  const codeInputId = useId();
+  const provider = providers?.find((p) => p.id === login?.providerId);
+  const providerName = provider?.displayName ?? (login ? providerBadgeName(login.providerId) : "Provider");
+
+  useEffect(() => {
+    setAuthCode("");
+  }, [login?.loginId, login?.providerId, login?.accountId]);
+
+  if (!login) {
+    return null;
+  }
+
+  const trimmedCode = authCode.trim();
+  const submitCode = () => {
+    if (!trimmedCode || login.submittingCode || typeof controller.submitProviderLoginCode !== "function") {
+      return;
+    }
+    void controller.submitProviderLoginCode(trimmedCode);
+  };
+
+  return (
+    <div className="mt-4 flex flex-col gap-4">
+      {login.status === "done" ? (
+        <>
+          <p role="status" className="flex items-start gap-2 text-sm text-fg">
+            <CheckCircleIcon size={18} className="mt-0.5 shrink-0 text-ok-text" />
+            <span>{providerName} confirmed your subscription login.</span>
+          </p>
+          <p className="text-xs leading-relaxed text-muted">
+            Select {providerName} from the Provider &amp; Account menu beside the model picker when starting a new thread.
+          </p>
+          <div className="flex justify-end">
+            <Button variant="primary" onClick={() => controller.cancelProviderLogin()}>
+              Continue
+            </Button>
+          </div>
+        </>
+      ) : login.status === "starting" ? (
+        <>
+          <p role="status" className="flex items-center gap-2 text-sm text-muted">
+            <Spinner size={14} /> Starting {providerName} sign-in…
+          </p>
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={() => controller.cancelProviderLogin()}>
+              Cancel
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          {login.message ? (
+            <p
+              role={login.status === "error" || /invalid|error|failed|expired|denied/i.test(login.message) ? "alert" : undefined}
+              className={cn(
+                "text-sm leading-relaxed",
+                login.status === "error" || /invalid|error|failed|expired|denied/i.test(login.message) ? "text-warn-text" : "text-muted",
+              )}
+            >
+              {login.message}
+            </p>
+          ) : null}
+          {login.code ? (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted">Verification code</span>
+              <div className="flex w-fit max-w-full items-center gap-3 rounded-lg border border-line bg-sunken py-2 pr-2 pl-3">
+                <code className="break-all font-mono text-lg tracking-wide text-fg">{login.code}</code>
+                <CopyButton text={login.code} label="Copy sign-in code" />
+              </div>
+            </div>
+          ) : null}
+          {login.url ? (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted">Browser sign-in link</span>
+              <div className="flex items-center gap-2 rounded-lg border border-line bg-sunken py-1.5 pr-1.5 pl-3 font-mono text-xs text-muted">
+                <span className="min-w-0 flex-1 truncate">{login.url}</span>
+                <CopyButton text={login.url} label="Copy sign-in link" />
+              </div>
+            </div>
+          ) : null}
+          {login.needsCodeInput && login.status === "waiting" ? (
+            <form
+              className="flex flex-col gap-2 rounded-lg border border-line bg-sunken/50 p-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitCode();
+              }}
+            >
+              <label htmlFor={codeInputId} className="text-xs font-medium text-fg">
+                Authorization code from browser
+              </label>
+              <p className="text-xs leading-relaxed text-muted">
+                Open the sign-in page, approve access in your browser, then copy the authorization code shown there and paste it here:
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  id={codeInputId}
+                  type="text"
+                  value={authCode}
+                  onChange={(event) => setAuthCode(event.currentTarget.value)}
+                  placeholder="Paste authorization code…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  disabled={login.submittingCode}
+                  className="h-8 min-w-0 flex-1 rounded-lg border border-line bg-raised px-3 font-mono text-xs text-fg outline-none placeholder:text-subtle focus-visible:ring-2 focus-visible:ring-focus"
+                />
+                <Button
+                  size="sm"
+                  variant="primary"
+                  type="submit"
+                  disabled={!trimmedCode || Boolean(login.submittingCode)}
+                  loading={Boolean(login.submittingCode)}
+                >
+                  Complete sign-in
+                </Button>
+              </div>
+            </form>
+          ) : null}
+          {login.terminalCommand ? (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted">Terminal sign-in command</span>
+              <div className="flex items-center gap-2 rounded-lg border border-line bg-sunken py-1.5 pr-1.5 pl-3 font-mono text-xs text-fg">
+                <span className="min-w-0 flex-1 break-all">{login.terminalCommand}</span>
+                <CopyButton text={login.terminalCommand} label="Copy command" />
+              </div>
+            </div>
+          ) : null}
+          {login.status === "waiting" ? (
+            <p role="status" className="flex items-center gap-2 text-xs text-subtle">
+              <Spinner size={12} /> Waiting for {providerName} browser sign-in to complete…
+            </p>
+          ) : null}
+          <p className="text-xs leading-relaxed text-subtle">
+            {providerName} manages its own credentials locally. Ancilla never reads or copies your OAuth tokens.
+          </p>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => controller.cancelProviderLogin()}>
+              Close
+            </Button>
+            {login.status === "error" ? (
+              <Button
+                variant="primary"
+                onClick={() => void controller.beginProviderLogin(login.providerId, login.accountId)}
+              >
+                <ArrowsClockwiseIcon size={14} /> Try again
+              </Button>
+            ) : (
+              <>
+                <Button variant="secondary" onClick={() => void controller.checkProviderLogin()}>
+                  <ArrowsClockwiseIcon size={14} /> Check sign-in
+                </Button>
+                {login.url ? (
+                  <a
+                    href={login.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-8 items-center justify-center gap-2 rounded-lg bg-inverse px-3 text-sm font-medium text-inverse-fg outline-offset-4 hover:opacity-90"
+                  >
+                    <ArrowSquareOutIcon size={14} /> Open sign-in page
+                  </a>
+                ) : null}
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /** Mounted globally in AncillaApp so CLI provider sign-in works from any screen. */
 export function ProviderLoginModal() {
   const controller = useController();
@@ -521,86 +695,7 @@ export function ProviderLoginModal() {
       description={`Profile: ${accountLabel}`}
       className="top-[6vh] max-h-[88dvh] w-[min(560px,calc(100%-32px))] overflow-y-auto"
     >
-      {login ? (
-        <div className="mt-4 flex flex-col gap-4">
-          {login.status === "done" ? (
-            <>
-              <p role="status" className="flex items-start gap-2 text-sm text-fg">
-                <CheckCircleIcon size={18} className="mt-0.5 shrink-0 text-ok-text" />
-                <span>{providerName} confirmed your subscription login.</span>
-              </p>
-              <p className="text-xs leading-relaxed text-muted">
-                Select {providerName} from the Provider &amp; Account menu beside the model picker when starting a new thread.
-              </p>
-              <div className="flex justify-end">
-                <Button variant="primary" onClick={() => controller.cancelProviderLogin()}>
-                  Continue
-                </Button>
-              </div>
-            </>
-          ) : login.status === "starting" ? (
-            <>
-              <p role="status" className="flex items-center gap-2 text-sm text-muted">
-                <Spinner size={14} /> Starting {providerName} sign-in…
-              </p>
-              <div className="flex justify-end">
-                <Button variant="ghost" onClick={() => controller.cancelProviderLogin()}>
-                  Cancel
-                </Button>
-              </div>
-            </>
-          ) : (
-            <>
-              {login.message ? (
-                <p className={cn("text-sm leading-relaxed", login.status === "error" ? "text-warn-text" : "text-muted")}>
-                  {login.message}
-                </p>
-              ) : null}
-              {login.code ? (
-                <div className="flex w-fit max-w-full items-center gap-3 rounded-lg border border-line bg-sunken py-2 pr-2 pl-3">
-                  <code className="break-all font-mono text-lg tracking-wide text-fg">{login.code}</code>
-                  <CopyButton text={login.code} label="Copy sign-in code" />
-                </div>
-              ) : null}
-              {login.terminalCommand ? (
-                <div className="flex flex-col gap-1.5">
-                  <span className="text-xs font-medium text-muted">Terminal sign-in command</span>
-                  <div className="flex items-center gap-2 rounded-lg border border-line bg-sunken py-1.5 pr-1.5 pl-3 font-mono text-xs text-fg">
-                    <span className="min-w-0 flex-1 break-all">{login.terminalCommand}</span>
-                    <CopyButton text={login.terminalCommand} label="Copy command" />
-                  </div>
-                </div>
-              ) : null}
-              {login.status === "waiting" ? (
-                <p role="status" className="flex items-center gap-2 text-xs text-subtle">
-                  <Spinner size={12} /> Waiting for {providerName} browser sign-in to complete…
-                </p>
-              ) : null}
-              <p className="text-xs leading-relaxed text-subtle">
-                {providerName} manages its own credentials locally. Ancilla never reads or copies your OAuth tokens.
-              </p>
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <Button variant="ghost" onClick={() => controller.cancelProviderLogin()}>
-                  Close
-                </Button>
-                <Button variant="secondary" onClick={() => void controller.checkProviderLogin()}>
-                  <ArrowsClockwiseIcon size={14} /> Check sign-in
-                </Button>
-                {login.url ? (
-                  <a
-                    href={login.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex h-8 items-center justify-center gap-2 rounded-lg bg-inverse px-3 text-sm font-medium text-inverse-fg outline-offset-4 hover:opacity-90"
-                  >
-                    <ArrowSquareOutIcon size={14} /> Open sign-in page
-                  </a>
-                ) : null}
-              </div>
-            </>
-          )}
-        </div>
-      ) : null}
+      <ProviderLoginBody />
     </Modal>
   );
 }

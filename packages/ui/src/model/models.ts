@@ -362,6 +362,8 @@ export interface PinContext {
   tried?: boolean;
   /** Another account's list offers the pinned model, so this list's silence about it is not a verdict. */
   elsewhere?: boolean;
+  /** The catalog finished loading (`status === "ready"`), so even an empty built-in catalog pins the active/saved model. */
+  loaded?: boolean;
   /** Display name of the active provider (`"Muse"`, `"Codex"`, `"Claude"`, etc.); defaults to `"Muse"`. */
   providerName?: string;
 }
@@ -392,11 +394,18 @@ function contributorNote(description: string | null): boolean {
 }
 
 function modelChoice(model: ModelOption, selected: boolean): ModelChoice {
-  const displayLabel = model.displayLabel && model.displayLabel !== model.modelId ? model.displayLabel : null;
+  const label = modelDisplayName(model.modelId);
+  const rawDisplay = model.displayLabel?.trim() ?? "";
+  const displayLabel =
+    rawDisplay &&
+    rawDisplay.toLowerCase() !== model.modelId.toLowerCase() &&
+    rawDisplay.toLowerCase() !== label.toLowerCase()
+      ? rawDisplay
+      : null;
   return {
     kind: "model",
     id: model.modelId,
-    label: modelDisplayName(model.modelId),
+    label,
     displayLabel,
     description: model.description && !contributorNote(model.description) ? model.description : null,
     contextLimit: model.contextLimit,
@@ -462,9 +471,9 @@ export function modelChoices(
     note: null,
     unlisted: null,
   });
-  // An empty list says nothing about a model: it may only not have loaded yet.
-  if (picked && models.length > 0 && !models.some((m) => m.modelId === picked)) {
-    const unlisted = pinReason(judged, context, onThread);
+  // An empty list says nothing about a model before it loads; once loaded, keep the active or saved model selected.
+  if (picked && (models.length > 0 || context.loaded === true) && !models.some((m) => m.modelId === picked)) {
+    const unlisted = pinReason(judged && models.length > 0, context, onThread);
     rows.push({
       kind: "pin",
       id: picked,
@@ -684,12 +693,14 @@ export function modelMenu(source: ModelMenuSource, options: ModelMenuOptions): M
   const mode: ModelMenuMode = namedMuseSignIn ? "signin" : modelsMenuState(status, own);
   const pinned = options.current ?? options.pref;
   const offeredElsewhere = options.elsewhere === true && offeredByAnother(source, models, pinned);
+  const effectiveJudged = judged && models.length > 0;
   const pinCtx: PinContext = {
     tried: options.tried === true,
     elsewhere: offeredElsewhere,
+    loaded: status?.status === "ready",
     ...(isMuse ? {} : { providerName }),
   };
-  const rows = modelChoices(models, options.current, options.pref, judged, pinCtx);
+  const rows = modelChoices(models, options.current, options.pref, effectiveJudged, pinCtx);
   const picked = rows.find((row) => row.kind === "pin")?.id ?? null;
   const notes: string[] = [];
   if (fallback) {
@@ -728,7 +739,7 @@ export function modelMenu(source: ModelMenuSource, options: ModelMenuOptions): M
           .filter((id) => id !== picked && !models.some((m) => m.modelId === id))
           .map((id) => ({ id, label: modelDisplayName(id) }))
       : [],
-    trigger: modelTrigger(models, options.current, options.pref, judged, pinCtx),
+    trigger: modelTrigger(models, options.current, options.pref, effectiveJudged, pinCtx),
     refreshing: status?.status === "loading",
     models,
     fallback,
@@ -805,7 +816,7 @@ export function modelPickLine(menu: Pick<ModelMenu, "rows" | "models">, options:
     return null;
   }
   const name = modelDisplayName(followed.modelId);
-  return followed.contributor ? `Muse default is ${name}, a Contributor model. ${CONTRIBUTOR_NOTE}` : `Muse default is ${name}`;
+  return followed.contributor ? `${selected.label} is ${name}, a Contributor model. ${CONTRIBUTOR_NOTE}` : `${selected.label} is ${name}`;
 }
 
 /** What a screen reader hears for the model button: the name and its note, and the tier, which the badge beside them cannot carry. */
@@ -898,17 +909,23 @@ export function activeModel(
 
 /** The two controller calls a model choice can make, so the composer's picker and Settings choose through one rule. */
 export interface ModelChoiceTarget {
-  clearModelPref(): void;
-  setModel(modelId: string): unknown;
+  clearModelPref(scope?: ModelsScope): void;
+  setModel(modelId: string, options?: { typed?: boolean; scope?: ModelsScope }): unknown;
 }
 
 /**
  * Applies a picked row: "Muse default" (the empty radio value, or null where a control has no row id for it) clears
  * the saved model, any other value picks that model. Asking for a model with an empty id would only say it is not one.
  */
-export function applyModelChoice(target: ModelChoiceTarget, value: string | null): void {
+export function applyModelChoice(target: ModelChoiceTarget, value: string | null, scope?: ModelsScope): void {
   if (value === null || value === MUSE_DEFAULT_VALUE) {
-    target.clearModelPref();
+    if (scope !== undefined) {
+      target.clearModelPref(scope);
+    } else {
+      target.clearModelPref();
+    }
+  } else if (scope !== undefined) {
+    void target.setModel(value, { scope });
   } else {
     void target.setModel(value);
   }
@@ -916,7 +933,7 @@ export function applyModelChoice(target: ModelChoiceTarget, value: string | null
 
 /** The one controller call a typed model id makes. */
 export interface TypedModelTarget {
-  setModel(modelId: string, options: { typed: true }): Promise<boolean>;
+  setModel(modelId: string, options: { typed: true; scope?: ModelsScope }): Promise<boolean>;
 }
 
 /**
@@ -925,8 +942,8 @@ export interface TypedModelTarget {
  * alone on an open thread, remembered as tried when it becomes the default), never taken for a listed one. Says
  * whether it took.
  */
-export function tryTypedModel(target: TypedModelTarget, modelId: string): Promise<boolean> {
-  return target.setModel(modelId, { typed: true });
+export function tryTypedModel(target: TypedModelTarget, modelId: string, scope?: ModelsScope): Promise<boolean> {
+  return target.setModel(modelId, scope !== undefined ? { typed: true, scope } : { typed: true });
 }
 
 // ---------------------------------------------------------------- finding a model by name
@@ -940,7 +957,7 @@ function isContributorId(modelId: string): boolean {
 }
 
 /** `muse-spark-1.3-contributor` and `muse-spark-1.2` are both the `muse-spark` family; `muse-wonder-full-1.0` is another. */
-function familyOf(modelId: string): string {
+export function familyOf(modelId: string): string {
   return modelId.toLowerCase().replace(/-contributor$/, "").replace(/[-\s]*v?\d+(\.\d+)*$/, "");
 }
 

@@ -388,6 +388,44 @@ describe("Anthropic Claude stream-json driver conformance", () => {
 
     await host.close();
   });
+
+  it("does not cache unauthenticated bundledCatalog so post-login listModels immediately returns live subscription models", async () => {
+    let loggedIn = false;
+    const host = new ClaudeCliStreamHost(
+      { command: "claude", args: ["-p", "--input-format", "stream-json"], cwd: "/tmp" },
+      {
+        spawnFn: (opts) =>
+          createFakeClaudeSpawn({
+            tokenSource: loggedIn ? "oauth" : "none",
+            models: loggedIn
+              ? [
+                  { value: "default", resolvedModel: "claude-opus-5-5" },
+                  { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" },
+                  { value: "fable[1m]", resolvedModel: "claude-fable-5-1", displayName: "Fable" },
+                ]
+              : [{ value: "sonnet", resolvedModel: "claude-sonnet-4-6", displayName: "Sonnet" }],
+          })(opts),
+      },
+    );
+    await host.start("0.28.0");
+    const manager = new SessionManager(host.connection, {
+      providerId: host.providerId,
+      capabilities: host.capabilities,
+    });
+
+    const preLogin = (await manager.listModels()) as { source: string; models: { modelId: string }[] };
+    assert.equal(preLogin.source, "bundledCatalog");
+
+    loggedIn = true;
+    const postLogin = (await manager.listModels()) as { source: string; models: { modelId: string }[] };
+    assert.equal(postLogin.source, "providerCatalog");
+    assert.deepEqual(
+      postLogin.models.map((m) => m.modelId),
+      ["opus", "fable[1m]"],
+    );
+
+    await host.close();
+  });
 });
 
 describe("AncillaStore provider accounts & runtime planning", () => {

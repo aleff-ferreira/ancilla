@@ -11,14 +11,21 @@ import type { BrainCapabilities, BrainEvent, BrainProvider, BrainRequest, ChatMe
 
 /** What this needs of the server: the same four things the task executive uses, and a way to ask whether the thread is waiting on the person. */
 export interface MuseBrainHost {
-  /** `modelId` is the model the thread starts on; absent leaves it to Muse. */
-  startSession(input: { cwd: string; account: string | null; title: string; modelId?: string | null }): Promise<{ sessionId: string }>;
+  /** `modelId` is the model the thread starts on; absent leaves it to Muse / the chosen CLI provider. */
+  startSession(input: {
+    cwd: string;
+    account: string | null;
+    providerId?: string | null;
+    title: string;
+    modelId?: string | null;
+  }): Promise<{ sessionId: string }>;
   /**
    * Makes sure a thread this conversation already had is loaded on its Muse host, as opening it on the screen does: a host
    * that started again since the thread was last used holds none, and refuses every command to a thread it does not hold.
-   * False when the thread cannot be used (it is gone, or another Muse client holds it); an error when the host cannot be reached.
+   * False when the thread cannot be used (it is gone, belongs to another provider/account, or another client holds it);
+   * an error when the host cannot be reached.
    */
-  openSession?(sessionId: string): Promise<boolean>;
+  openSession?(sessionId: string, expected?: { providerId?: string | null; account?: string | null }): Promise<boolean>;
   /** Puts a thread on a model, doing nothing when it is on it already; absent where a thread's model cannot be changed. A refusal is an error. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
   startTurn(input: {
@@ -42,6 +49,12 @@ export interface MuseBrainOptions {
   host: MuseBrainHost;
   /** The folder the thread belongs to. */
   cwd: string;
+  /** Named account/profile for the chosen CLI provider, or null for its default sign-in. */
+  account?: string | null;
+  /** Which CLI provider runs the thread ("muse" by default). */
+  providerId?: string | null;
+  /** Display name of the chosen provider/account for status labels and notices. */
+  providerLabel?: string | null;
   title: string;
   /** The thread this conversation already has, to go on in. */
   sessionId?: string | null;
@@ -118,27 +131,40 @@ export class MuseThreadBrain implements BrainProvider {
     this.sessionId = options.sessionId ?? null;
     this.fresh = this.sessionId === null;
     this.modelSet = !options.model;
-    this.label = options.model ? `Muse (${options.model})` : "Muse";
+    const who = options.providerLabel ?? "Muse";
+    this.label = options.model ? `${who} (${options.model})` : who;
   }
 
   /** The thread to talk in: the conversation's own, loaded and on the model chosen, or a new one when it cannot be used. */
   private async session(): Promise<string> {
     const { host, model } = this.options;
+    const who = this.options.providerLabel ?? "Muse";
     if (this.sessionId !== null && !this.opened) {
       // A thread the conversation already had is not loaded on a Muse host that started again since it was last used (the
       // desktop app starts one with each launch), and the host refuses every command to it. It is loaded, as opening it on
       // the screen does, once for the call; one that cannot be used is replaced by a new thread, told what was said before.
-      const usable = host.openSession ? await host.openSession(this.sessionId) : true;
+      const usable = host.openSession
+        ? await host.openSession(this.sessionId, {
+            providerId: this.options.providerId ?? "muse",
+            account: this.options.account ?? null,
+          })
+        : true;
       if (usable) this.opened = true;
       else {
-        host.log(`voice: the conversation's Muse thread ${this.sessionId} cannot be used, so a new one was started`);
+        host.log(`voice: the conversation's ${who} thread ${this.sessionId} cannot be used, so a new one was started`);
         this.sessionId = null;
         this.fresh = true;
         this.told = false;
       }
     }
     if (this.sessionId === null) {
-      const { sessionId } = await host.startSession({ cwd: this.options.cwd, account: null, title: this.options.title, ...(model ? { modelId: model } : {}) });
+      const { sessionId } = await host.startSession({
+        cwd: this.options.cwd,
+        account: this.options.account ?? null,
+        ...(this.options.providerId ? { providerId: this.options.providerId } : {}),
+        title: this.options.title,
+        ...(model ? { modelId: model } : {}),
+      });
       this.sessionId = sessionId;
       this.opened = true;
       // A thread that began on the model is on it.
@@ -155,7 +181,7 @@ export class MuseThreadBrain implements BrainProvider {
           await host.setModel(this.sessionId, model);
         } catch (error) {
           const why = (error instanceof Error ? error.message : String(error)).trim().replace(/[.\s]+$/, "");
-          this.notice = `Muse would not put this thread on ${model}: ${why}. It answers on the model the thread already has.`;
+          this.notice = `${who} would not put this thread on ${model}: ${why}. It answers on the model the thread already has.`;
           host.log(`voice: ${this.notice}`);
         }
       }

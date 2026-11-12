@@ -46,6 +46,7 @@ import {
   anyWorkRunning,
   effectiveEffort,
   effortLabel,
+  familyOf,
   findModel,
   isLimitedCatalog,
   isModelId,
@@ -56,6 +57,7 @@ import {
   modelIdError,
   modelMatches,
   modelStub,
+  modelsFor,
   modelsKey,
   modelsNeedSignIn,
   modelsShown,
@@ -97,9 +99,11 @@ import {
   ZOOM_MAX,
   ZOOM_MIN,
   ZOOM_STEPS,
+  defaultModelForScope,
   defaultPrefs,
   emptyCrewPanel,
   initialState,
+  patchDefaultModelForScope,
   revivePrefs,
   type AppState,
   type CodeTheme,
@@ -1243,10 +1247,23 @@ export class AncillaController {
       sessionId: options.sessionId ?? null,
     };
     const watching = options.watch === true;
-    return this.loadModelsFor(scope, options.force === true || watching, watching ? this.startModelsWatch(scope) : null, options.navigation === true);
+    const explicitForce = options.force === true;
+    return this.loadModelsFor(
+      scope,
+      explicitForce || watching,
+      watching ? this.startModelsWatch(scope) : null,
+      options.navigation === true,
+      explicitForce,
+    );
   }
 
-  private loadModelsFor(scope: ModelsScope, force: boolean, watch: ModelsWatch | null, navigation = false): Promise<void> {
+  private loadModelsFor(
+    scope: ModelsScope,
+    force: boolean,
+    watch: ModelsWatch | null,
+    navigation = false,
+    explicitForce = false,
+  ): Promise<void> {
     const key = modelsKey(scope);
     const isMuse = !scope.providerId || scope.providerId === "muse";
     const account = this.modelsAccount(scope);
@@ -1271,7 +1288,7 @@ export class AncillaController {
         return Promise.resolve();
       }
     }
-    const run: Promise<void> = this.readModels(scope, key, watch).finally(() => {
+    const run: Promise<void> = this.readModels(scope, key, watch, explicitForce).finally(() => {
       if (this.modelLoads.get(key) === run) {
         this.modelLoads.delete(key);
       }
@@ -1280,13 +1297,18 @@ export class AncillaController {
     return run;
   }
 
-  private async readModels(scope: ModelsScope, key: string, watch: ModelsWatch | null): Promise<void> {
+  private async readModels(
+    scope: ModelsScope,
+    key: string,
+    watch: ModelsWatch | null,
+    explicitForce = false,
+  ): Promise<void> {
     const rev = (this.modelRevs.get(key) ?? 0) + 1;
     this.modelRevs.set(key, rev);
     this.holdModelsScope(key);
     this.putModels(key, undefined, { status: "loading", error: null });
     try {
-      const { models, ...info } = await this.fetchModelCatalog(scope).catch((error: unknown) => {
+      const { models, ...info } = await this.fetchModelCatalog(scope, explicitForce).catch((error: unknown) => {
         // A thread its host has not loaded cannot flag an active row, but its account's catalog still lists the models.
         const kind = errorKind(error);
         if (scope.sessionId && (kind === "sessionNotLoaded" || kind === "sessionNotFound" || kind === "sessionStreamMismatch")) {
@@ -1294,7 +1316,7 @@ export class AncillaController {
           return this.fetchModelCatalog({
             ...(sessionProvider && sessionProvider !== "muse" ? { providerId: sessionProvider } : {}),
             accountId: this.modelsAccount(scope),
-          });
+          }, explicitForce);
         }
         throw error;
       });
@@ -1315,20 +1337,25 @@ export class AncillaController {
     }
   }
 
-  private fetchModelCatalog(scope: ModelsScope): Promise<ModelCatalog> {
+  private fetchModelCatalog(scope: ModelsScope, explicitForce = false): Promise<ModelCatalog> {
     const sessionId = scope.sessionId ?? undefined;
     const accountId = scope.accountId ?? undefined;
     const providerId = scope.providerId && scope.providerId !== "muse" ? scope.providerId : undefined;
+    const options = explicitForce ? { refresh: true } : undefined;
     if (this.client.listModelCatalog) {
       return providerId !== undefined
-        ? this.client.listModelCatalog(sessionId, accountId, providerId)
-        : this.client.listModelCatalog(sessionId, accountId);
+        ? this.client.listModelCatalog(sessionId, accountId, providerId, options)
+        : options
+          ? this.client.listModelCatalog(sessionId, accountId, undefined, options)
+          : this.client.listModelCatalog(sessionId, accountId);
     }
     // A transport that cannot say where its list came from gives the rows alone.
     return (
       providerId !== undefined
-        ? this.client.listModels(sessionId, accountId, providerId)
-        : this.client.listModels(sessionId, accountId)
+        ? this.client.listModels(sessionId, accountId, providerId, options)
+        : options
+          ? this.client.listModels(sessionId, accountId, undefined, options)
+          : this.client.listModels(sessionId, accountId)
     ).then((models) => ({ models, source: null, providerId: providerId ?? null, profileId: null, hostVersion: null }));
   }
 
@@ -2750,7 +2777,7 @@ export class AncillaController {
     }
     this.setBusy("start", true);
     try {
-      const { defaultMode, defaultModelId } = this.state.prefs;
+      const { defaultMode } = this.state.prefs;
       // YOLO owns every thread's posture while it is on, new or old: a stale default from before it
       // was armed must never seed a thread that asks when the rest of the app does not.
       const approvalMode: ApprovalMode = this.state.yoloSettings?.enabled === true ? "allowAll" : defaultMode;
@@ -2759,11 +2786,13 @@ export class AncillaController {
       const providerId = project?.defaultProviderId ?? "muse";
       const accountId = project?.defaultAccountId ?? null;
       const isMuse = providerId === "muse";
-      const nonMuseList = isMuse ? [] : (this.state.accountModels[modelsKey({ providerId, accountId })] ?? []);
-      const nonMuseTried = !isMuse && defaultModelId !== null && this.state.prefs.defaultModelTried && !/^muse-/i.test(defaultModelId);
+      const scope: ModelsScope = isMuse ? { accountId } : { providerId, accountId };
+      const nonMuseList = isMuse ? [] : (this.state.accountModels[modelsKey(scope)] ?? []);
+      const pref = defaultModelForScope(this.state.prefs, scope);
+      const nonMuseTried = !isMuse && pref.tried && pref.modelId !== null && !/^muse-/i.test(pref.modelId);
       const modelId = isMuse
-        ? this.startModel(defaultModelId, accountId)
-        : (defaultModelId && (nonMuseList.some((m) => m.modelId === defaultModelId) || nonMuseTried) ? defaultModelId : null);
+        ? this.startModel(pref.modelId, accountId)
+        : (pref.modelId && (nonMuseList.some((m) => m.modelId === pref.modelId) || nonMuseTried) ? pref.modelId : null);
       const session = await this.client.startSession(cwd, {
         approvalMode,
         modelId: modelId ?? undefined,
@@ -3385,6 +3414,34 @@ export class AncillaController {
   // ---------------------------------------------------------------- composer settings
 
   /**
+   * Sets the default model for a specific provider/account scope without affecting the active thread.
+   */
+  setDefaultModelForScope(
+    scope: ModelsScope | string,
+    modelId: string | null,
+    options: { typed?: boolean } = {},
+  ): void {
+    if (modelId === null || modelId === "") {
+      this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, null, false));
+      return;
+    }
+    const id = modelId.trim();
+    if (!id) {
+      this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, null, false));
+      return;
+    }
+    const models = modelsFor(this.state, scope);
+    const listed = models.find((m) => m.modelId === id);
+    const unlisted = !listed && (options.typed ?? true);
+    if (!listed && !isModelId(id)) {
+      this.toast("info", "That is not a model id", modelIdError(id) ?? undefined);
+      return;
+    }
+    this.noteContributorPick(id, listed);
+    this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, id, unlisted));
+  }
+
+  /**
    * Picks a model: for the open thread, which switches it, else for the threads that start next. The default new
    * threads start on is written only once Muse has taken the switch, so a refusal leaves it where it was. A model
    * the list does not offer can still be tried, since Muse checks access when a prompt is sent: on a thread for
@@ -3393,9 +3450,9 @@ export class AncillaController {
    * has not confirmed it. `typed` is text typed by hand (`/model`, an "Other model id" field), which an empty list
    * cannot vouch for either. Says whether the choice took.
    */
-  async setModel(modelId: string, options: { typed?: boolean } = {}): Promise<boolean> {
+  async setModel(modelId: string, options: { typed?: boolean; scope?: ModelsScope } = {}): Promise<boolean> {
     const id = modelId.trim();
-    const scope = this.modelsScope();
+    const scope = options.scope ?? this.modelsScope();
     const { models, fallback } = modelsShown(this.state, scope);
     const listed = models.find((m) => m.modelId === id);
     // The account a stand-in list stands in for; none when the list is the default login's own (a thread of that login
@@ -3410,9 +3467,9 @@ export class AncillaController {
     }
     const route = this.state.route;
     if (route.kind !== "thread") {
-      this.setPrefs({ defaultModelId: id, defaultModelTried: unlisted });
+      this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, id, unlisted));
       this.noteContributorPick(id, listed);
-      this.settleModel(id, unlisted, standIn);
+      this.settleModel(id, unlisted, standIn, scope);
       return true;
     }
     const sessionId = route.sessionId;
@@ -3434,10 +3491,10 @@ export class AncillaController {
     // Only a model Muse's list offers becomes what new threads start on; one tried by its id is this thread's alone.
     // The newest pick on any thread is the one that writes it.
     if (!unlisted && rev === this.modelSwitchRev) {
-      this.setPrefs({ defaultModelId: id, defaultModelTried: false });
+      this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, id, false));
     }
     this.noteContributorPick(id, listed);
-    this.settleModel(id, unlisted, standIn);
+    this.settleModel(id, unlisted, standIn, scope);
     return true;
   }
 
@@ -3472,8 +3529,8 @@ export class AncillaController {
    * What a taken model choice owes the user: that an id Muse did not list is only tried, that an account whose own list
    * did not load (`standIn`) has not confirmed it, and what the new model does with the effort.
    */
-  private settleModel(id: string, unlisted: boolean, standIn: string | null): void {
-    const scope = this.modelsScope();
+  private settleModel(id: string, unlisted: boolean, standIn: string | null, scopeOverride?: ModelsScope): void {
+    const scope = scopeOverride ?? this.modelsScope();
     const providerLabel = scope.providerId && scope.providerId !== "muse" ? providerBadgeName(scope.providerId) : "Muse";
     if (standIn !== null) {
       this.toast("info", MODEL_COPY.unconfirmed(id, standIn), MODEL_COPY.unconfirmedDetail);
@@ -3490,7 +3547,7 @@ export class AncillaController {
         this.modelNotes.delete(note);
       }
     }
-    this.effortOn(id, this.modelRow(id, modelsKey(this.modelsScope())), this.state.prefs.effort);
+    this.effortOn(id, this.modelRow(id, modelsKey(scope)), this.state.prefs.effort);
   }
 
   /**
@@ -3498,19 +3555,21 @@ export class AncillaController {
    * own pick is a Contributor model nobody chose by name, the notice every such model carries is shown once. Choosing
    * it again when new threads already follow Muse changes nothing, so it says nothing either.
    */
-  clearModelPref(): void {
-    if (this.state.prefs.defaultModelId === null) {
+  clearModelPref(scopeOverride?: ModelsScope): void {
+    const scope = scopeOverride ?? this.modelsScope();
+    const pref = defaultModelForScope(this.state.prefs, scope);
+    if (pref.modelId === null) {
       return;
     }
-    // Setting the default also ends its being a model tried by hand.
-    this.setPrefs({ defaultModelId: null, defaultModelTried: false });
-    const { models } = modelsShown(this.state, this.modelsScope());
+    this.setPrefs(patchDefaultModelForScope(this.state.prefs, scope, null, false));
+    const { models } = modelsShown(this.state, scope);
     const followed = models.find((m) => m.isDefault);
     const noticed = this.noteDefaultContributor(followed);
     const route = this.state.route;
     if (route.kind === "thread" && !noticed) {
       const current = this.state.threads[route.sessionId]?.fold.meta.modelId;
-      this.toast("info", "New threads will use Muse's default", current ? `This thread stays on ${modelDisplayName(current)}.` : undefined);
+      const providerLabel = scope.providerId && scope.providerId !== "muse" ? providerBadgeName(scope.providerId) : "Muse";
+      this.toast("info", `New threads will use ${providerLabel}'s default`, current ? `This thread stays on ${modelDisplayName(current)}.` : undefined);
     }
   }
 
@@ -3586,7 +3645,8 @@ export class AncillaController {
     }
     const scope = this.modelsScope();
     const { models } = modelsShown(this.state, scope);
-    const id = this.state.prefs.defaultModelId ?? models.find((m) => m.isDefault)?.modelId ?? null;
+    const pref = defaultModelForScope(this.state.prefs, scope);
+    const id = pref.modelId ?? models.find((m) => m.isDefault)?.modelId ?? null;
     return { id, row: this.modelRow(id, modelsKey(scope)) };
   }
 
@@ -3631,14 +3691,26 @@ export class AncillaController {
       found = findModel(shown(), name, modelDisplayName);
       matches = modelMatches(shown(), name, modelDisplayName);
     }
+    let fromPublished = false;
     if (!found && matches.length === 0 && (!scope.providerId || scope.providerId === "muse") && modelsStanding(this.state, scope).limited) {
       // The built-in list names few models; what Meta publishes stands in for the rest, ranked the same way.
       const pool = [...shown(), ...publishedStubs(shown())];
       found = findModel(pool, name, modelDisplayName);
       matches = modelMatches(pool, name, modelDisplayName);
+      fromPublished = true;
     }
     if (found) {
       return this.setModel(found.modelId, { typed: true });
+    }
+    if (fromPublished) {
+      const q = name.toLowerCase().trim();
+      const exact = matches.filter((m) => {
+        const fam = familyOf(m.modelId);
+        return fam === q || fam.endsWith("-" + q);
+      });
+      if (exact.length === 1 && exact[0]) {
+        return this.setModel(exact[0].modelId, { typed: true });
+      }
     }
     if (matches.length > 1) {
       this.toast("info", `More than one model fits ${name}`, "Pick one from the list.");
@@ -4383,6 +4455,7 @@ export class AncillaController {
           status: res.status,
           url: res.url,
           code: res.code,
+          ...(res.needsCodeInput !== undefined ? { needsCodeInput: res.needsCodeInput } : {}),
           ...(res.loginId ? { loginId: res.loginId } : {}),
           ...(res.terminalCommand ? { terminalCommand: res.terminalCommand } : {}),
           ...(res.message ? { message: res.message } : {}),
@@ -4412,6 +4485,89 @@ export class AncillaController {
           message: errorMessage(error),
         },
       }));
+    }
+  }
+
+  async submitProviderLoginCode(code: string): Promise<boolean> {
+    const login = this.state.providerLogin;
+    const clean = code.trim();
+    if (!login || !login.loginId || !clean || login.submittingCode || !this.client.submitProviderLoginCode) {
+      return false;
+    }
+    const rev = this.providerLoginRev;
+    this.update((s) =>
+      s.providerLogin && s.providerLogin.loginId === login.loginId
+        ? { ...s, providerLogin: { ...s.providerLogin, submittingCode: true, message: undefined } }
+        : s,
+    );
+    try {
+      const res = await this.client.submitProviderLoginCode(
+        login.providerId,
+        login.loginId,
+        clean,
+        login.accountId,
+      );
+      if (rev !== this.providerLoginRev || !this.state.providerLogin || this.state.providerLogin.loginId !== login.loginId) {
+        return false;
+      }
+      if (res.status === "done") {
+        this.stopProviderLoginPoll();
+        this.update((s) =>
+          s.providerLogin
+            ? { ...s, providerLogin: { ...s.providerLogin, status: "done", submittingCode: false, message: undefined } }
+            : s,
+        );
+        await Promise.all([this.loadProviders(true), this.loadPlanUsage({ background: true })]);
+        void this.refreshModels({ providerId: login.providerId, accountId: login.accountId, force: true, watch: true });
+        return true;
+      }
+      if (res.status === "error" || res.status === "idle") {
+        this.stopProviderLoginPoll();
+        this.update((s) =>
+          s.providerLogin
+            ? {
+                ...s,
+                providerLogin: {
+                  ...s.providerLogin,
+                  status: "error",
+                  submittingCode: false,
+                  message: res.message ?? "Authorization code was rejected. Start sign-in again for a fresh link.",
+                },
+              }
+            : s,
+        );
+        return false;
+      }
+      this.update((s) =>
+        s.providerLogin
+          ? {
+              ...s,
+              providerLogin: {
+                ...s.providerLogin,
+                submittingCode: false,
+                ...(res.message ? { message: res.message } : {}),
+              },
+            }
+          : s,
+      );
+      return false;
+    } catch (error) {
+      if (rev !== this.providerLoginRev || !this.state.providerLogin || this.state.providerLogin.loginId !== login.loginId) {
+        return false;
+      }
+      this.update((s) =>
+        s.providerLogin
+          ? {
+              ...s,
+              providerLogin: {
+                ...s.providerLogin,
+                submittingCode: false,
+                message: errorMessage(error),
+              },
+            }
+          : s,
+      );
+      return false;
     }
   }
 
@@ -4503,6 +4659,7 @@ export class AncillaController {
                 ...s.providerLogin,
                 url: res.url ?? s.providerLogin.url,
                 code: res.code ?? s.providerLogin.code,
+                needsCodeInput: res.needsCodeInput ?? s.providerLogin.needsCodeInput,
               },
             }
           : s,

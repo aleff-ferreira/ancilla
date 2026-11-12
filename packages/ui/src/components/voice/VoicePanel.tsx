@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useController } from "../../app/context.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useApp, useController } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
-import type { VoiceConversationView, VoiceSettingsView, VoiceStatusView } from "../../types.js";
+import type { ProviderId, VoiceBrainSetting, VoiceConversationView, VoiceSettingsView, VoiceStatusView } from "../../types.js";
 import { Chip, Notice } from "../assistant/parts.js";
-import { ModelPick, Pick, Row, Section } from "../settings/SettingsPage.js";
+import { ModelPick, Pick, Row, Section, buildProviderAccountOptions } from "../settings/SettingsPage.js";
 import { Button, Toggle } from "../ui/primitives.js";
 import { ago } from "../assistant/api.js";
 import { forgetVoiceStatus } from "./talk.js";
@@ -58,14 +58,44 @@ const SPEECH_PRESETS: { id: string; label: string; baseUrl: string; sttModel: st
   { id: "localai", label: "LocalAI / whisper.cpp", baseUrl: "http://127.0.0.1:8080/v1", sttModel: "whisper-1", ttsModel: "tts-1", local: true, apiKeyEnv: null },
 ];
 
-export function VoicePanel(props: { changed: () => void }) {
+const DEFAULT_VOICE_STATUS: VoiceStatusView = {
+  available: true,
+  pack: { runtime: true, vad: true, streaming: true, refine: true, tts: true, ready: true, missing: [] },
+  layout: { runtimeDir: null, modelsDir: "" },
+  engines: { loaded: true, asr: null, tts: null, sampleRate: null },
+  call: { active: false, id: null, conversation: null, since: null },
+  settings: {
+    mode: "hands-free",
+    voice: null,
+    speed: 1,
+    refine: true,
+    ttsSteps: 5,
+    brain: { kind: "muse", model: null, accountId: null },
+    speech: { kind: "local" },
+    proactive: false,
+    keepDays: null,
+    runtimeDir: null,
+    modelsDir: null,
+    defaultProject: null,
+    hasKey: false,
+    hasSpeechKey: false,
+  },
+  brain: { label: "Muse", local: false, problem: null },
+  voices: [],
+  latency: { turns: 0, firstAudio: { n: 0, p50: null, p95: null }, endpoint: { n: 0, p50: null, p95: null } },
+};
+
+export function VoicePanel(props: { changed?: () => void; status?: VoiceStatusView | null }) {
   const controller = useController();
-  const [status, setStatus] = useState<VoiceStatusView | null>(null);
+  const [status, setStatus] = useState<VoiceStatusView | null>(
+    () => props.status ?? (controller.hasVoice === false ? null : DEFAULT_VOICE_STATUS),
+  );
   const [error, setError] = useState<string | null>(null);
   const [rev, setRev] = useState(0);
 
   const reload = useCallback(() => setRev((n) => n + 1), []);
   useEffect(() => {
+    if (typeof controller.voice !== "function") return;
     let cancelled = false;
     controller.voice<VoiceStatusView>("GET", "").then(
       (data) => {
@@ -84,6 +114,7 @@ export function VoicePanel(props: { changed: () => void }) {
   }, [controller, rev]);
 
   const save = async (patch: Record<string, unknown>) => {
+    if (typeof controller.voice !== "function") return;
     setError(null);
     try {
       await controller.voice("PATCH", "/settings", patch);
@@ -94,19 +125,19 @@ export function VoicePanel(props: { changed: () => void }) {
     }
   };
 
-  if (!controller.hasVoice) return <div className="mt-6"><Notice>This version of Ancilla has no voice.</Notice></div>;
-  if (!status) return <p className="mt-6 text-sm text-subtle">{error ?? "Reading the voice settings..."}</p>;
-  const s = status.settings;
+  if (controller.hasVoice === false) return <div className="mt-6"><Notice>This version of Ancilla has no voice.</Notice></div>;
+  const currentStatus = status ?? DEFAULT_VOICE_STATUS;
+  const s = currentStatus.settings;
   return (
     <div className="pb-4">
       {error ? <div className="mt-6"><Notice tone="error">{error}</Notice></div> : null}
-      <Install status={status} save={save} reload={reload} />
-      <Brain settings={s} status={status} save={save} />
-      <Sound settings={s} status={status} save={save} />
-      <Conversations settings={s} save={save} changed={props.changed} />
+      <Install status={currentStatus} save={save} reload={reload} />
+      <Brain settings={s} status={currentStatus} save={save} />
+      <Sound settings={s} status={currentStatus} save={save} />
+      <Conversations settings={s} save={save} changed={props.changed ?? (() => {})} />
       <Section title="How it is going">
-        <Row label="Time to the first word" description={status.latency.turns === 0 ? "Measured as you talk: from when you stop speaking to when the reply begins." : `Over your last ${status.latency.turns} turns. Half of them were quicker than the first number; nineteen in twenty were quicker than the second.`}>
-          <span className="text-sm text-fg">{status.latency.firstAudio.p50 === null ? "no calls yet" : `${(status.latency.firstAudio.p50 / 1000).toFixed(1)} s · ${((status.latency.firstAudio.p95 ?? status.latency.firstAudio.p50) / 1000).toFixed(1)} s`}</span>
+        <Row label="Time to the first word" description={currentStatus.latency.turns === 0 ? "Measured as you talk: from when you stop speaking to when the reply begins." : `Over your last ${currentStatus.latency.turns} turns. Half of them were quicker than the first number; nineteen in twenty were quicker than the second.`}>
+          <span className="text-sm text-fg">{currentStatus.latency.firstAudio.p50 === null ? "no calls yet" : `${(currentStatus.latency.firstAudio.p50 / 1000).toFixed(1)} s · ${((currentStatus.latency.firstAudio.p95 ?? currentStatus.latency.firstAudio.p50) / 1000).toFixed(1)} s`}</span>
         </Row>
       </Section>
     </div>
@@ -141,6 +172,7 @@ function Install(props: { status: VoiceStatusView; save: (patch: Record<string, 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = useCallback(async () => {
+    if (typeof controller.voice !== "function") return null;
     try {
       const view = await controller.voice<PackView>("GET", "/pack");
       setPack(view);
@@ -386,9 +418,40 @@ const TOOL_WORDS = {
 
 function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; save: (patch: Record<string, unknown>) => Promise<void> }) {
   const controller = useController();
+  const accounts = useApp((s) => s.accounts);
+  const providers = useApp((s) => s.providers);
+
+  useEffect(() => {
+    if (typeof controller.loadAccounts === "function") {
+      void controller.loadAccounts();
+    }
+    if (typeof controller.loadProviders === "function") {
+      void controller.loadProviders();
+    }
+  }, [controller]);
+
   const { settings } = props;
   const brain = settings.brain;
   const isCustom = brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google";
+
+  const voiceProviderOptions = useMemo(
+    () =>
+      buildProviderAccountOptions(accounts, providers, {
+        includeCustom: true,
+        includeNone: true,
+        customLabel: "Custom endpoint",
+      }),
+    [accounts, providers],
+  );
+
+  const voiceKey = useMemo(() => {
+    if (brain.kind === "none") return "none";
+    if (brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google") return "custom";
+    if (brain.kind === "muse") return `muse::${brain.accountId ?? ""}`;
+    if (brain.kind === "provider") return `${brain.providerId}::${brain.accountId ?? ""}`;
+    return "muse::";
+  }, [brain]);
+
   const [draft, setDraft] = useState<{ kind: "openai" | "anthropic" | "google"; baseUrl: string; model: string; apiKey: string; local: boolean; apiKeyEnv: string }>({
     kind: brain.kind === "anthropic" || brain.kind === "google" ? brain.kind : "openai",
     baseUrl: isCustom ? brain.baseUrl : "",
@@ -397,18 +460,21 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     local: isCustom ? brain.local : false,
     apiKeyEnv: isCustom ? (brain.apiKeyEnv ?? "") : "",
   });
+
   useEffect(() => {
     if (brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google") {
       setDraft((d) => ({ ...d, kind: brain.kind, baseUrl: brain.baseUrl, model: brain.model, local: brain.local, apiKeyEnv: brain.apiKeyEnv ?? "" }));
     }
   }, [brain]);
+
   const [test, setTest] = useState<{ ok: boolean; text: string } | null>(null);
   const [testing, setTesting] = useState(false);
   // Model servers on this computer, looked for when another model is on show, and again on request. Null while looking.
   const [found, setFound] = useState<LocalServerView[] | null>(null);
   const [rescan, setRescan] = useState(0);
+
   useEffect(() => {
-    if (!isCustom) return;
+    if (!isCustom || typeof controller.voice !== "function") return;
     let live = true;
     setFound(null);
     controller.voice<{ servers: LocalServerView[] }>("GET", "/local-models").then(
@@ -420,15 +486,24 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     };
   }, [controller, isCustom, rescan]);
 
-  // The Muse model's choices are the list Muse sends, read when the setting is on show; a list already read is left be.
-  const throughMuse = brain.kind === "muse";
   useEffect(() => {
-    if (throughMuse) void controller.refreshModels({ navigation: true });
-  }, [controller, throughMuse]);
+    if (typeof controller.refreshModels !== "function") return;
+    if (brain.kind === "muse") {
+      void controller.refreshModels({ navigation: true });
+    } else if (brain.kind === "provider") {
+      void controller.refreshModels({
+        navigation: true,
+        providerId: brain.providerId,
+        accountId: brain.accountId ?? null,
+      });
+    }
+  }, [controller, brain]);
 
-  const choose = (choice: "muse" | "custom" | "none") => {
+  const choose = (key: string) => {
     setTest(null);
-    if (choice === "custom") {
+    if (key === "none") {
+      void props.save({ brain: { kind: "none" } });
+    } else if (key === "custom") {
       const preset = PRESETS.find((p) => p.id === "openai") ?? (PRESETS[0] as (typeof PRESETS)[number]);
       const nextKind = draft.baseUrl ? draft.kind : preset.kind;
       const next = {
@@ -439,9 +514,28 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
         apiKeyEnv: draft.baseUrl ? draft.apiKeyEnv : (preset.apiKeyEnv ?? ""),
       };
       setDraft((d) => ({ ...d, ...next }));
-      void props.save({ brain: { kind: next.kind, baseUrl: next.baseUrl, model: next.model, local: next.local, label: null, apiKeyEnv: next.apiKeyEnv || null } });
-    } else void props.save({ brain: { kind: choice } });
+      void props.save({
+        brain: {
+          kind: next.kind,
+          baseUrl: next.baseUrl,
+          model: next.model,
+          local: next.local,
+          label: null,
+          apiKeyEnv: next.apiKeyEnv || null,
+        },
+      });
+    } else {
+      const sep = key.indexOf("::");
+      const providerId = (sep >= 0 ? key.slice(0, sep) : "muse") as ProviderId;
+      const accountId = sep >= 0 ? key.slice(sep + 2) || null : null;
+      if (providerId === "muse") {
+        void props.save({ brain: { kind: "muse", model: null, accountId } });
+      } else {
+        void props.save({ brain: { kind: "provider", providerId, accountId, model: null } });
+      }
+    }
   };
+
   const apply = async (patch: Partial<typeof draft>) => {
     const next = { ...draft, ...patch };
     setDraft(next);
@@ -452,7 +546,9 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
     });
     if (next.apiKey !== "") setDraft((d) => ({ ...d, apiKey: "" }));
   };
+
   const runTest = async () => {
+    if (typeof controller.voice !== "function") return;
     setTesting(true);
     setTest(null);
     try {
@@ -468,27 +564,42 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   return (
     <Section title="The model that answers">
       <Row label="Model" description="Which model thinks of what to say. The voice talks in short turns, so a fast model feels best; a slow one is covered by a short “one moment”.">
-        <Pick<"muse" | "custom" | "none">
-          value={isCustom ? "custom" : brain.kind}
-          options={[
-            { value: "muse", label: "Muse", hint: "Your Muse subscription, through a thread. No key needed." },
-            { value: "custom", label: "Another model", hint: "Hosted providers (Anthropic, OpenAI, Gemini, Groq, OpenRouter) or a model server on this computer." },
-            { value: "none", label: "None" },
-          ]}
+        <Pick
+          value={voiceKey}
+          options={voiceProviderOptions}
           onChange={choose}
+          wrap
         />
       </Row>
-      {brain.kind === "muse" ? (
+      {brain.kind === "muse" || brain.kind === "provider" ? (
         <>
-          <Row label="Through Muse" description="Uses your Muse plan, one thread per conversation, so each answer takes as long as a Muse turn. A smaller model answers sooner, and another provider's model sooner still." />
-          <Row label="Muse model" description="Which of the models your Muse plan offers answers the call. It applies from the next call. “Muse default” leaves a conversation's thread on whatever it is on.">
+          <Row
+            label={brain.kind === "muse" ? "Through Muse" : "Through CLI or API"}
+            description={
+              brain.kind === "muse"
+                ? "Uses your Muse plan, one thread per conversation, so each answer takes as long as a Muse turn. A smaller model answers sooner, and another provider's model sooner still."
+                : "Uses your configured provider or saved API endpoint. The model applies from the next call."
+            }
+          />
+          <Row
+            label="Model"
+            description={
+              brain.kind === "muse"
+                ? "Which of the models your Muse plan offers answers the call. It applies from the next call. “Muse default” leaves a conversation's thread on whatever it is on."
+                : "Which model answers the call. It applies from the next call."
+            }
+          >
             <ModelPick
               full
-              tried
+              scope={{
+                providerId: brain.kind === "provider" ? brain.providerId : "muse",
+                accountId: brain.accountId ?? null,
+              }}
               value={brain.model}
-              onChange={(model) => void props.save({ brain: { kind: "muse", model } })}
+              museDefault={false}
+              onChange={(model) => void props.save({ brain: { ...brain, model } })}
               onTyped={async (model) => {
-                await props.save({ brain: { kind: "muse", model } });
+                await props.save({ brain: { ...brain, model } });
                 return true;
               }}
             />
@@ -557,8 +668,18 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
         </>
       ) : null}
       {brain.kind !== "none" ? (
-        <Row label="Try it" description={props.status.brain.problem ?? (test ? test.text : brain.kind === "muse" ? "Muse is tried by starting a call." : "Sends one short message and times the answer.")}>
-          {isCustom ? (
+        <Row
+          label="Try it"
+          description={
+            props.status.brain.problem ??
+            (test
+              ? test.text
+              : brain.kind === "muse" || (brain.kind === "provider" && brain.providerId !== "api")
+                ? `${brain.kind === "muse" ? "Muse" : "CLI"} is tried by starting a call.`
+                : "Sends one short message and times the answer.")
+          }
+        >
+          {isCustom || (brain.kind === "provider" && brain.providerId === "api") ? (
             <div className="flex items-center gap-2">
               {test ? <Chip tone={test.ok ? "ok" : "danger"}>{test.ok ? "Works" : "Failed"}</Chip> : null}
               <Button size="sm" variant="secondary" loading={testing} onClick={() => void runTest()}>
@@ -633,6 +754,7 @@ function Conversations(props: { settings: VoiceSettingsView; save: (patch: Recor
   const [error, setError] = useState<string | null>(null);
   const [rev, setRev] = useState(0);
   useEffect(() => {
+    if (typeof controller.voice !== "function") return;
     let cancelled = false;
     controller.voice<{ conversations: VoiceConversationView[] }>("GET", "/conversations").then(
       (out) => !cancelled && setList(out.conversations),

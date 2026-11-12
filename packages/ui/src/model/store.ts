@@ -30,6 +30,7 @@ import {
   type AssistantAnchor,
   type AssistantWindowMode,
 } from "./voice/floatingWindow.js";
+import type { ModelsScope } from "./models.js";
 
 /** A tiny external store: immutable snapshots plus change listeners, read through useSyncExternalStore-style hooks. */
 export class Store<T> {
@@ -122,6 +123,8 @@ export interface Prefs {
    * and passed on at thread start, and it survives a restart; any other choice of model clears it.
    */
   defaultModelTried: boolean;
+  /** Per-provider default chat models for non-Muse CLIs and saved API profiles. */
+  providerDefaultModels: Record<string, { modelId: string | null; tried: boolean }>;
   effort: ReasoningEffort | null;
   /** The last project a new thread was started in. */
   lastProject: string | null;
@@ -252,6 +255,7 @@ export function defaultPrefs(now = new Date().toISOString()): Prefs {
     defaultMode: "onRequest",
     defaultModelId: null,
     defaultModelTried: false,
+    providerDefaultModels: {},
     effort: null,
     lastProject: null,
     contributorAck: false,
@@ -459,6 +463,8 @@ export interface ProviderAccountLoginState {
   status: "starting" | "waiting" | "done" | "interactive" | "error";
   url: string | null;
   code: string | null;
+  needsCodeInput?: boolean;
+  submittingCode?: boolean;
   loginId?: string;
   terminalCommand?: string;
   message?: string;
@@ -545,6 +551,26 @@ export function initialState(prefs: Prefs): AppState {
   };
 }
 
+function reviveProviderDefaultModels(
+  raw: unknown,
+  fallback: Record<string, { modelId: string | null; tried: boolean }>,
+): Record<string, { modelId: string | null; tried: boolean }> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return fallback ?? {};
+  }
+  const result: Record<string, { modelId: string | null; tried: boolean }> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== "string" || !key) continue;
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      const item = val as Record<string, unknown>;
+      const modelId = typeof item["modelId"] === "string" ? item["modelId"] : null;
+      const tried = modelId !== null && typeof item["tried"] === "boolean" ? item["tried"] : false;
+      result[key] = { modelId, tried };
+    }
+  }
+  return result;
+}
+
 /** Merge persisted prefs over defaults, dropping anything malformed. */
 export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
   if (!raw || typeof raw !== "object") {
@@ -607,6 +633,7 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
     defaultModelId,
     // A flag with no pin to belong to is stale, however it was saved.
     defaultModelTried: defaultModelId !== null && pick("defaultModelTried", (v) => typeof v === "boolean"),
+    providerDefaultModels: reviveProviderDefaultModels(r["providerDefaultModels"], fallback.providerDefaultModels),
     effort: pick("effort", (v) => v === null || ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(v as string)),
     lastProject: pick("lastProject", (v) => v === null || typeof v === "string"),
     contributorAck: pick("contributorAck", (v) => typeof v === "boolean"),
@@ -631,5 +658,105 @@ export function revivePrefs(raw: unknown, fallback: Prefs): Prefs {
           : pick("assistantAvatarSize", (v) => typeof v === "number" && Number.isFinite(v) && v >= ASSISTANT_AVATAR_MIN && v <= ASSISTANT_AVATAR_MAX),
     assistantPosition: pick("assistantPosition", (v) => v === null || isValidAnchor(v)),
     preYolo: pick("preYolo", isPreYolo),
+  };
+}
+
+/**
+ * Derives the preference key for a provider scope.
+ * Muse scopes (omitted, null, "muse", "default", "acct:*", "thread:*") return null so they map
+ * to the backwards-compatible defaultModelId / defaultModelTried fields.
+ * Saved API profiles map to "api:<accountId>".
+ * Non-Muse CLI providers map to "<providerId>" or "<providerId>:<accountId>".
+ */
+export function providerKeyForScope(scope?: ModelsScope | string | null): string | null {
+  if (!scope) {
+    return null;
+  }
+  if (typeof scope === "string") {
+    if (scope === "default" || scope === "muse" || scope.startsWith("acct:") || scope.startsWith("thread:")) {
+      return null;
+    }
+    if (scope.startsWith("prov:")) {
+      const parts = scope.split(":");
+      const providerId = parts[1];
+      const accountId = parts.slice(2).join(":");
+      if (!providerId || providerId === "muse") {
+        return null;
+      }
+      if (providerId === "api") {
+        return `api:${accountId || "default"}`;
+      }
+      return accountId && accountId !== "default" ? `${providerId}:${accountId}` : providerId;
+    }
+    if (scope === "api") {
+      return "api:default";
+    }
+    if (scope.startsWith("api:")) {
+      return scope;
+    }
+    if (scope.includes(":")) {
+      const [providerId, ...rest] = scope.split(":");
+      if (providerId === "muse") {
+        return null;
+      }
+      const accountId = rest.join(":");
+      if (providerId === "api") {
+        return `api:${accountId || "default"}`;
+      }
+      return accountId && accountId !== "default" ? `${providerId}:${accountId}` : providerId;
+    }
+    return scope;
+  }
+  const providerId = scope.providerId ?? null;
+  if (!providerId || providerId === "muse") {
+    return null;
+  }
+  if (providerId === "api") {
+    return `api:${scope.accountId ?? "default"}`;
+  }
+  return scope.accountId && scope.accountId !== "default" ? `${providerId}:${scope.accountId}` : providerId;
+}
+
+/** Reads the saved default model and tried status for a given scope. */
+export function defaultModelForScope(
+  prefs: Prefs,
+  scope?: ModelsScope | string | null,
+): { modelId: string | null; tried: boolean } {
+  const key = providerKeyForScope(scope);
+  if (key === null) {
+    return {
+      modelId: prefs.defaultModelId,
+      tried: prefs.defaultModelTried,
+    };
+  }
+  const entry = prefs.providerDefaultModels?.[key];
+  return {
+    modelId: entry?.modelId ?? null,
+    tried: entry?.tried ?? false,
+  };
+}
+
+/** Returns a partial Prefs patch to set or clear the default model for a given scope. */
+export function patchDefaultModelForScope(
+  prefs: Prefs,
+  scope: ModelsScope | string | null | undefined,
+  modelId: string | null,
+  tried: boolean,
+): Partial<Prefs> {
+  const key = providerKeyForScope(scope);
+  if (key === null) {
+    return {
+      defaultModelId: modelId,
+      defaultModelTried: modelId !== null && tried,
+    };
+  }
+  return {
+    providerDefaultModels: {
+      ...(prefs.providerDefaultModels ?? {}),
+      [key]: {
+        modelId,
+        tried: modelId !== null && tried,
+      },
+    },
   };
 }

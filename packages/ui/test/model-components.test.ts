@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ControllerProvider } from "../src/app/context.js";
 import { ModelPicker, slashMenuFor } from "../src/components/composer/Composer.js";
 import { SlashMenu } from "../src/components/composer/SlashMenu.js";
-import { SettingsPage } from "../src/components/settings/SettingsPage.js";
+import { ModelPick, Pick, SettingsPage } from "../src/components/settings/SettingsPage.js";
 import { TooltipProvider } from "../src/components/ui/overlays.js";
 import type { AncillaController } from "../src/model/controller.js";
 import { formatTokens } from "../src/model/format.js";
@@ -20,12 +20,13 @@ import {
   modelPickLine,
   modelStub,
   modelTrigger,
+  modelsKey,
   type ModelMenuOptions,
   type ModelMenuSource,
 } from "../src/model/models.js";
 import { slashCommands } from "../src/model/slash.js";
 import { defaultPrefs, initialState, Store, type AppState, type Prefs } from "../src/model/store.js";
-import type { ModelCatalogInfo, ModelOption, ModelsStatus } from "../src/types.js";
+import type { ModelCatalogInfo, ModelOption, ModelsStatus, ProviderView } from "../src/types.js";
 import { SESSION } from "./fixtures/lantern.js";
 import { LIVE_1_4_0, LIVE_1_4_7 } from "./fixtures/picker-catalogs.js";
 
@@ -203,8 +204,14 @@ describe("the /model completions on a built-in list", () => {
   const ids = (view: ReturnType<typeof menuFor>) => (view?.kind === "models" ? view.items.map((item) => item.id) : null);
 
   it("offers the models Meta publishes after the list's own, and finds Wonder by its name", () => {
-    assert.deepEqual(ids(menuFor("/model ", true)), ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]);
-    assert.deepEqual(ids(menuFor("/model wonder", true)), ["muse-wonder-1.0"]);
+    assert.deepEqual(ids(menuFor("/model ", true)), [
+      "muse-spark-1.3",
+      "muse-wonder-1.0",
+      "muse-wonder-full-1.0",
+      "muse-ember-1.0",
+      "muse-spark-1.2",
+    ]);
+    assert.deepEqual(ids(menuFor("/model wonder", true)), ["muse-wonder-1.0", "muse-wonder-full-1.0"]);
     assert.deepEqual(ids(menuFor("/model spark", true)), ["muse-spark-1.3", "muse-spark-1.2"]);
   });
 
@@ -216,7 +223,7 @@ describe("the /model completions on a built-in list", () => {
   it("marks a published model as a try, and never a listed one", () => {
     const view = menuFor("/model ", true);
     const items = view?.kind === "models" ? view.items : [];
-    assert.deepEqual(items.map((item) => item.published), [false, true, true]);
+    assert.deepEqual(items.map((item) => item.published), [false, true, true, true, true]);
     assert.equal(modelCompletionNote(items[0] as (typeof items)[number]), null);
     assert.equal(modelCompletionNote(items[1] as (typeof items)[number]), MODEL_COPY.notListed);
   });
@@ -248,8 +255,123 @@ describe("the /model completion rows", () => {
   it("says under a published model that it is only a try, and says nothing under a listed one", () => {
     const html = rows(modelCompletions([model("muse-spark-1.3", { isDefault: true })], "", undefined, true));
     const note = escaped(MODEL_COPY.notListed);
-    assert.equal(html.split(note).length - 1, 2, "once under Wonder, once under Spark 1.2, none under the listed row");
+    assert.equal(html.split(note).length - 1, 4, "once under each published stub, none under the listed row");
     assert.ok(html.indexOf(note) > html.indexOf("muse-wonder-1.0"), "the first note belongs to the first published row, after the listed one");
     assert.equal(html.split(note).length - 1, count(html, /Not in Muse/g));
+  });
+});
+
+// ---------------------------------------------------------------- Pick wrapping & ModelPick filter (M2)
+
+describe("the Pick component wrapping behavior", () => {
+  const fiveOptions = [
+    { value: "a", label: "Alpha" },
+    { value: "b", label: "Beta" },
+    { value: "c", label: "Gamma" },
+    { value: "d", label: "Delta" },
+    { value: "e", label: "Epsilon" },
+  ];
+  const sixOptions = [...fiveOptions, { value: "f", label: "Zeta" }];
+
+  it("uses horizontal scroll when options <= 5 and wrap is false or omitted", () => {
+    const html = renderToStaticMarkup(createElement(Pick, { value: "a", options: fiveOptions, onChange: () => {} }));
+    assert.match(html, /overflow-x-auto/);
+    assert.doesNotMatch(html, /flex-wrap/);
+  });
+
+  it("uses flex-wrap when options > 5", () => {
+    const html = renderToStaticMarkup(createElement(Pick, { value: "a", options: sixOptions, onChange: () => {} }));
+    assert.match(html, /flex-wrap/);
+    assert.doesNotMatch(html, /overflow-x-auto/);
+  });
+
+  it("uses flex-wrap when wrap is explicitly true even with <= 5 options", () => {
+    const html = renderToStaticMarkup(createElement(Pick, { value: "a", options: fiveOptions, wrap: true, onChange: () => {} }));
+    assert.match(html, /flex-wrap/);
+    assert.doesNotMatch(html, /overflow-x-auto/);
+  });
+});
+
+describe("the ModelPick component search and selection preservation", () => {
+  it("does not render a search filter when options <= 10", () => {
+    const state = listed({ default: [SPARK] }, { default: PLAN });
+    const html = render(ModelPick, { value: "muse-spark-1.3", onChange: () => {} }, state);
+    assert.doesNotMatch(html, /<input/i);
+    assert.ok(pressed(html, "muse-spark-1.3"));
+  });
+
+  it("renders a search filter when options > 10 and preserves the selected button's aria-pressed state", () => {
+    const elevenModels = Array.from({ length: 11 }, (_, i) => model(`model-${i + 1}`));
+    const state = listed({ default: elevenModels }, { default: PLAN });
+    const html = render(ModelPick, { value: "model-3", onChange: () => {} }, state);
+    assert.match(html, /<input/i);
+    assert.match(html, /placeholder="Filter models/i);
+    assert.ok(pressed(html, "model-3"));
+  });
+});
+
+describe("scoped model reading in the composer", () => {
+  it("reads providerDefaultModels for non-Muse providers without bleeding Muse default", () => {
+    const codexModel = model("gpt-4o");
+    const codexProvider: ProviderView = {
+      id: "codex",
+      displayName: "OpenAI Codex",
+      vendorName: "OpenAI",
+      subscriptionSummary: "OpenAI",
+      binaryName: "codex",
+      serveArgs: [],
+      loginArgs: null,
+      installDocsUrl: null,
+      usageDashboardUrl: null,
+      capabilities: {
+        transport: "codex-app-server",
+        authKind: "cli-oauth",
+        supportsResume: true,
+        supportsFork: true,
+        supportsCompact: true,
+        supportsSteer: true,
+        supportsReasoningEffort: true,
+        supportsApprovalModes: [],
+        supportsInteractiveQuestions: true,
+        supportsSkills: true,
+        supportsGoals: true,
+        supportsSubagents: true,
+        supportsOutputPaging: true,
+        supportsImageAttachments: true,
+        supportsNativeWebSearch: true,
+        quotaSupport: "none",
+      },
+      binary: { providerId: "codex", available: true, runtime: "native", binaryPath: "/usr/bin/codex", distro: null, version: "1.0.0" },
+      ambientKeyOverrides: [],
+      accounts: [],
+      defaultAuth: { state: "authenticated", planTier: "Pro", summary: "OpenAI", email: null, authMethod: null },
+    };
+    const state: Partial<AppState> = {
+      ...listed(
+        { default: [SPARK], [modelsKey({ providerId: "codex" })]: [codexModel] },
+        { default: PLAN, [modelsKey({ providerId: "codex" })]: PLAN },
+      ),
+      projects: [
+        {
+          cwd: "/work/codex",
+          displayName: "Codex",
+          pinned: false,
+          activityAt: "2026-11-12",
+          defaultProviderId: "codex",
+          defaultAccountId: null,
+          folders: [],
+        },
+      ],
+      providers: [codexProvider],
+    };
+    const prefs: Partial<Prefs> = {
+      defaultModelId: "muse-wonder-1.0",
+      providerDefaultModels: {
+        codex: { modelId: "gpt-4o", tried: false },
+      },
+    };
+    const html = render(ModelPicker, { sessionId: null, cwd: "/work/codex", side: "top" }, state, prefs);
+    assert.match(html, /aria-label="Model: gpt-4o"/);
+    assert.doesNotMatch(html, /muse-wonder/);
   });
 });

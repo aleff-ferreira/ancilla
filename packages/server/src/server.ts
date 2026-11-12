@@ -6,7 +6,7 @@ import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/p
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
-import type { Duplex, Readable } from "node:stream";
+import type { Duplex, Readable, Writable } from "node:stream";
 import {
   AncillaMspHost,
   AncillaStore,
@@ -74,6 +74,7 @@ import {
   type ProviderId,
 } from "@ancilla/daemon";
 import { ApiAgentHost } from "./providers/apiAgentHost.js";
+import { extractLoginFailureMessage, parseProviderLoginOutput } from "./providers/loginParser.js";
 import { ProfileIsolator, detectAmbientKeyOverrides } from "./providers/profiles.js";
 import { OpenAiCompatibleProvider, AnthropicProvider, GoogleGenAiProvider } from "./voice/brain.js";
 import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
@@ -192,22 +193,23 @@ export type ProviderHostFactory = (spec: {
 export type OpenTarget = "files" | "editor";
 export type Opener = (path: string, target: OpenTarget) => Promise<void>;
 
-/** The shape of a spawned `muse login` child the route needs: readable output and a way to kill it. */
+/** The shape of a spawned CLI login child the route needs: readable output, optional stdin for paste-code flows, and kill. */
 export interface LoginChild {
+  stdin?: Writable | null;
   stdout: Readable;
   stderr: Readable;
   on(event: "close" | "error", listener: (arg: unknown) => void): void;
   kill(): void;
 }
 
-/** Spawns `muse login` for a profile. `env` is the profile's overlay; the real impl spreads it over `process.env`. */
+/** Spawns `muse login` or a CLI provider login for a profile. `env` is the profile's overlay; the real impl spreads it over `process.env`. */
 export type LoginSpawn = (command: string, args: string[], opts: { env: Record<string, string> }) => LoginChild;
 
 const defaultLoginSpawn: LoginSpawn = (command, args, opts) =>
   spawn(command, args, {
     cwd: homedir(),
     env: { ...process.env, ...opts.env },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   }) as unknown as LoginChild;
 
@@ -1061,9 +1063,20 @@ export class AncillaServer {
       exec: ExecFn;
       loginSpawn: LoginSpawn;
     };
-  /** `muse login` children in flight, keyed by account id; a reopened modal kills and replaces the old one. */
+  /** CLI login children in flight, keyed by account/provider scope; a reopened modal kills and replaces the old one. */
   private readonly loginChildren = new Map<string, LoginChild>();
-  private readonly loginAttempts = new Map<string, { loginId: string; status: "waiting" | "done" | "error"; message?: string }>();
+  private readonly loginAttempts = new Map<
+    string,
+    {
+      loginId: string;
+      status: "waiting" | "done" | "error";
+      message?: string;
+      url?: string | null;
+      code?: string | null;
+      needsCodeInput?: boolean;
+      waiters?: (() => void)[];
+    }
+  >();
   /** Reserved before async setup, so a slow earlier POST cannot replace a newer account sign-in. */
   private readonly loginStartGenerations = new Map<string, number>();
   /** Opened with the store, by `openStore()`. */
@@ -1475,8 +1488,15 @@ export class AncillaServer {
     };
     return {
       ...base,
-      startSession: async ({ cwd, account, title, modelId }) => {
-        const created = await this.startSession(normalizeCwd(cwd), yolo() ? "allowAll" : undefined, modelId ?? undefined, account);
+      startSession: async ({ cwd, account, providerId, title, modelId }) => {
+        const effectiveProvider = providerId ? this.normalizeProviderId(providerId) : "muse";
+        const created = await this.startSession(
+          normalizeCwd(cwd),
+          yolo() ? "allowAll" : undefined,
+          modelId ?? undefined,
+          account,
+          effectiveProvider,
+        );
         const sessionId = String(created["sessionId"]);
         try {
           this.store.updateSession(sessionId, { title, titleSource: "user" });
@@ -1485,7 +1505,17 @@ export class AncillaServer {
         }
         return { sessionId };
       },
-      openSession: async (sessionId) => {
+      openSession: async (sessionId, expected) => {
+        if (expected) {
+          const found = this.store.findSession(sessionId);
+          if (!found) return false;
+          if (expected.providerId && this.normalizeProviderId(found.session.providerId) !== this.normalizeProviderId(expected.providerId)) {
+            return false;
+          }
+          if (expected.account !== undefined && (found.session.accountId ?? null) !== (expected.account ?? null)) {
+            return false;
+          }
+        }
         const ok = (await base.openSession?.(sessionId)) ?? true;
         if (ok && yolo()) {
           const managed = await this.hostForSession(sessionId).catch(() => null);
@@ -1593,9 +1623,37 @@ export class AncillaServer {
         museHost: this.voiceMuseHost(),
         harness: this.harnessReader(),
         // The model that browses is the voice's own; Muse is run with no tools of its own (see browser/muse-brain.ts).
-        museExec: async (args, limits) => {
-          const plan = await this.planMuseExec(args, null);
+        museExec: async (args, limits, accountId) => {
+          const plan = await this.planMuseExec(args, accountId ?? null);
           return this.options.exec(plan.command, plan.args, { ...(plan.env ? { env: plan.env } : {}), timeoutMs: limits.timeoutMs, signal: limits.signal });
+        },
+        resolveApiAccount: (accountId) => {
+          const account = accountId ? this.store.getProviderAccount(accountId) : (this.store.listProviderAccounts("api")[0] ?? null);
+          if (!account || account.providerId !== "api") return null;
+          const baseUrl = account.apiBaseUrl ?? "https://api.openai.com/v1";
+          return {
+            apiKind: account.apiKind ?? "openai",
+            baseUrl,
+            apiKey: this.profilesFor().resolveApiKey(account),
+            defaultModelId: account.defaultModelId,
+            label: account.name || "API",
+            local: /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(baseUrl),
+          };
+        },
+        providerName: (rawProviderId, accountId) => {
+          const pid = this.normalizeProviderId(rawProviderId);
+          const base = descriptorForProvider(pid).displayName;
+          if (pid === "muse") return accountId ? `${base} (${accountId})` : base;
+          if (accountId) {
+            const acct = this.store.getProviderAccount(accountId);
+            if (acct?.name) return pid === "api" ? acct.name : `${base} (${acct.name})`;
+            return `${base} (${accountId})`;
+          }
+          if (pid === "api") {
+            const acct = this.store.listProviderAccounts("api")[0] ?? null;
+            return acct?.name ?? base;
+          }
+          return base;
         },
         browse: this.browseRunnerFor(),
         // The accounts the call may read: only those connected and switched on are named to it.
@@ -1918,8 +1976,10 @@ export class AncillaServer {
         try {
           const norm = normalizeCwd(cwd);
           const proj = norm ? this.store.projectForFolder(norm) : null;
-          const providerId = this.normalizeProviderId(proj?.defaultProviderId);
-          await this.hostFor(norm, account ?? (providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null), providerId);
+          const pref = this.assistantFor(false)?.store.getProfile().model ?? { providerId: null, accountId: null, modelId: null };
+          const providerId = pref.providerId ? this.normalizeProviderId(pref.providerId) : this.normalizeProviderId(proj?.defaultProviderId);
+          const effectiveAccount = account ?? (pref.providerId !== null ? pref.accountId : providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null);
+          await this.hostFor(norm, effectiveAccount, providerId);
           return { ok: true };
         } catch (error) {
           return { ok: false, reason: errorInfo(error).message };
@@ -1928,9 +1988,11 @@ export class AncillaServer {
       startSession: async ({ cwd, account, title, modelId }) => {
         const norm = normalizeCwd(cwd);
         const proj = norm ? this.store.projectForFolder(norm) : null;
-        const providerId = this.normalizeProviderId(proj?.defaultProviderId);
-        const effectiveAccount = account ?? (providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null);
-        const created = await this.startSession(norm, yolo() ? "allowAll" : undefined, modelId ?? undefined, effectiveAccount, providerId);
+        const pref = this.assistantFor(false)?.store.getProfile().model ?? { providerId: null, accountId: null, modelId: null };
+        const providerId = pref.providerId ? this.normalizeProviderId(pref.providerId) : this.normalizeProviderId(proj?.defaultProviderId);
+        const effectiveAccount = account ?? (pref.providerId !== null ? pref.accountId : providerId !== "muse" ? (proj?.defaultAccountId ?? null) : null);
+        const effectiveModel = modelId ?? pref.modelId ?? undefined;
+        const created = await this.startSession(norm, yolo() ? "allowAll" : undefined, effectiveModel, effectiveAccount, providerId);
         const sessionId = String(created["sessionId"]);
         try {
           this.store.updateSession(sessionId, { title, titleSource: "user" });
@@ -3418,6 +3480,60 @@ export class AncillaServer {
         return true;
       }
     }
+    const providerLoginCodeMatch = /^\/api\/providers\/([^/]+)\/login\/code$/.exec(path);
+    if (providerLoginCodeMatch && method === "POST") {
+      const rawProvider = this.segment(providerLoginCodeMatch[1] as string);
+      if (!isProviderId(rawProvider) || rawProvider === "muse" || rawProvider === "api") {
+        throw new HttpError(400, "Unsupported providerId for authorization code submission.");
+      }
+      const body = await this.readBody(req);
+      const loginId = str(body["loginId"]);
+      const rawCode = str(body["code"]);
+      const accountId = str(body["accountId"]) ?? (url.searchParams.get("accountId") || null);
+      if (!loginId || !rawCode) {
+        throw new HttpError(400, "loginId and code are required.");
+      }
+      const cleanCode = rawCode.trim().replace(/[\r\n]+/g, "");
+      if (!cleanCode || cleanCode.length > 2048) {
+        throw new HttpError(400, "Invalid authorization code.");
+      }
+      const key = `provider:${rawProvider}:${accountId ?? ""}`;
+      const attempt = this.loginAttempts.get(key);
+      if (!attempt || attempt.loginId !== loginId || attempt.status !== "waiting") {
+        throw new HttpError(409, "Sign-in session is no longer active. Start sign-in again for a fresh link.");
+      }
+      const child = this.loginChildren.get(key);
+      if (!child?.stdin || child.stdin.destroyed) {
+        throw new HttpError(409, "CLI sign-in process is not accepting input. Start sign-in again.");
+      }
+      attempt.message = undefined;
+      const outcomePromise = new Promise<void>((resolveWait) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(waitTimer);
+          resolveWait();
+        };
+        const waitTimer = setTimeout(finish, 8_000);
+        waitTimer.unref?.();
+        attempt.waiters = [...(attempt.waiters ?? []), finish];
+      });
+      await new Promise<void>((resolveWrite, rejectWrite) => {
+        child.stdin!.write(`${cleanCode}\n`, "utf8", (err) => (err ? rejectWrite(err) : resolveWrite()));
+      }).catch(() => {
+        throw new HttpError(409, "Could not send authorization code to CLI sign-in process.");
+      });
+      await outcomePromise;
+      this.json(res, 200, {
+        status: attempt.status,
+        ...(attempt.url !== undefined ? { url: attempt.url } : {}),
+        ...(attempt.code !== undefined ? { code: attempt.code } : {}),
+        ...(attempt.needsCodeInput !== undefined ? { needsCodeInput: attempt.needsCodeInput } : {}),
+        ...(attempt.message ? { message: attempt.message } : {}),
+      });
+      return true;
+    }
     const providerLoginMatch = /^\/api\/providers\/([^/]+)\/login$/.exec(path);
     if (providerLoginMatch) {
       const rawProvider = this.segment(providerLoginMatch[1] as string);
@@ -3468,7 +3584,19 @@ export class AncillaServer {
             }
             this.json(res, 200, { ok: true });
           } else {
-            this.json(res, 200, matches ? { status: attempt.status, ...(attempt.message ? { message: attempt.message } : {}) } : { status: "idle" });
+            this.json(
+              res,
+              200,
+              matches
+                ? {
+                    status: attempt.status,
+                    ...(attempt.url !== undefined ? { url: attempt.url } : {}),
+                    ...(attempt.code !== undefined ? { code: attempt.code } : {}),
+                    ...(attempt.needsCodeInput !== undefined ? { needsCodeInput: attempt.needsCodeInput } : {}),
+                    ...(attempt.message ? { message: attempt.message } : {}),
+                  }
+                : { status: "idle" },
+            );
           }
           return true;
         }
@@ -3761,16 +3889,34 @@ export class AncillaServer {
       const sessionId = url.searchParams.get("sessionId") ?? undefined;
       const accountId = url.searchParams.get("accountId") || null;
       const providerParam = url.searchParams.get("providerId");
+      const refresh = url.searchParams.get("refresh") === "1" || url.searchParams.get("refresh") === "true";
       if (providerParam !== null && providerParam !== "" && !isProviderId(providerParam)) {
         throw new HttpError(400, "Unknown providerId.");
       }
       const providerId: ProviderId = providerParam ? providerParam : "muse";
       if (sessionId) {
         const host = await this.hostForSession(sessionId);
-        this.json(res, 200, { models: await host.manager.listModels(sessionId), hostVersion: host.serverVersion });
+        const listed = await host.manager.listModels(sessionId);
+        if (refresh && asRecord(listed)?.["source"] === "bundledCatalog") {
+          const sess = this.store.findSession(sessionId)?.session;
+          const sessProvider = this.normalizeProviderId(sess?.providerId);
+          const sessAccount = sess?.accountId ?? null;
+          try {
+            const fresh = await this.oneShotListModels(sessProvider, sessAccount);
+            const freshRec = asRecord(fresh.models);
+            const freshList = Array.isArray(freshRec?.["models"]) ? freshRec["models"] : null;
+            if (freshRec?.["source"] !== "bundledCatalog" || (freshList && freshList.length > 0)) {
+              this.json(res, 200, fresh);
+              return true;
+            }
+          } catch {
+            // Keep the session host's response if spawning a fresh probe host fails.
+          }
+        }
+        this.json(res, 200, { models: listed, hostVersion: host.serverVersion });
         return true;
       }
-      const catalogReply = await this.resolveLiveModelCatalog(providerId, accountId);
+      const catalogReply = await this.resolveLiveModelCatalog(providerId, accountId, refresh);
       this.json(res, 200, catalogReply);
       return true;
     }
@@ -7916,14 +8062,15 @@ export class AncillaServer {
   private async resolveLiveModelCatalog(
     providerId: ProviderId,
     accountId: string | null,
+    force = false,
   ): Promise<{ models: unknown; hostVersion: string | null }> {
     const recycleStaleListingHost = async (): Promise<"ready" | "busy"> => {
       const listingKey = this.hostKey("", accountId, providerId);
       const existing = this.hosts.get(listingKey);
-      if (existing && this.staleAfterLoginHosts.has(existing)) {
+      if (existing && (this.staleAfterLoginHosts.has(existing) || force)) {
         if (this.isHostIdle(existing)) {
           await this.closeHost(existing);
-          this.forgetHost(existing, "Refreshing host after sign-in.");
+          this.forgetHost(existing, force ? "Refreshing model catalog." : "Refreshing host after sign-in.");
           return "ready";
         }
         return "busy";
@@ -7932,9 +8079,11 @@ export class AncillaServer {
     };
 
     if (providerId === "muse") {
-      const candidate = accountId ? await this.runningHostOf(accountId, "muse") : null;
-      if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
-        return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+      if (!force) {
+        const candidate = accountId ? await this.runningHostOf(accountId, "muse") : null;
+        if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
+          return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+        }
       }
       if ((await recycleStaleListingHost()) === "busy") {
         return this.oneShotListModels("muse", accountId);
@@ -7944,9 +8093,11 @@ export class AncillaServer {
     }
 
     if (providerId === "api") {
-      const candidate = accountId ? await this.runningHostOf(accountId, "api") : null;
-      if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
-        return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+      if (!force) {
+        const candidate = accountId ? await this.runningHostOf(accountId, "api") : null;
+        if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
+          return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+        }
       }
       if ((await recycleStaleListingHost()) === "busy") {
         return this.oneShotListModels("api", accountId);
@@ -7964,15 +8115,17 @@ export class AncillaServer {
       }
     }
 
-    const running = accountId
-      ? await this.runningHostOf(accountId, providerId)
-      : ([...this.hosts.values()].find(
-          (h) => h.providerId === providerId && h.accountId === null && !this.staleAfterLoginHosts.has(h),
-        ) ?? null);
-    const freshRunning = running && !this.staleAfterLoginHosts.has(running) ? running : null;
+    if (!force) {
+      const running = accountId
+        ? await this.runningHostOf(accountId, providerId)
+        : ([...this.hosts.values()].find(
+            (h) => h.providerId === providerId && h.accountId === null && !this.staleAfterLoginHosts.has(h),
+          ) ?? null);
+      const freshRunning = running && !this.staleAfterLoginHosts.has(running) ? running : null;
 
-    if (freshRunning) {
-      return { models: await freshRunning.manager.listModels(undefined), hostVersion: freshRunning.serverVersion };
+      if (freshRunning) {
+        return { models: await freshRunning.manager.listModels(undefined), hostVersion: freshRunning.serverVersion };
+      }
     }
 
     if ((await recycleStaleListingHost()) === "busy") {
@@ -7984,7 +8137,7 @@ export class AncillaServer {
       return { models: await host.manager.listModels(undefined), hostVersion: host.serverVersion };
     }
 
-    const cachedProbes = await this.probeProvidersCached(false);
+    const cachedProbes = await this.probeProvidersCached(force);
     let probe = cachedProbes[providerId];
     if (!probe || account?.binaryPath || account?.runtimeOverride) {
       probe = await probeProviderBinary(providerId, {
@@ -8287,6 +8440,23 @@ export class AncillaServer {
     const loginEnv = Object.fromEntries(
       Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     );
+    const remoteDeployment = !isLoopbackBind(this.options.host);
+    const headlessPosix =
+      this.options.platform !== "win32" &&
+      this.options.platform !== "darwin" &&
+      !process.env["DISPLAY"] &&
+      !process.env["WAYLAND_DISPLAY"];
+    if (viaWsl || headlessPosix || remoteDeployment) {
+      loginEnv["BROWSER"] = "/bin/true";
+      if (viaWsl) {
+        const currentWslEnv = loginEnv["WSLENV"]?.trim();
+        const entries = currentWslEnv ? currentWslEnv.split(":").filter(Boolean) : [];
+        if (!entries.some((e) => e === "BROWSER" || e.startsWith("BROWSER/"))) {
+          entries.push("BROWSER");
+        }
+        loginEnv["WSLENV"] = entries.join(":");
+      }
+    }
 
     const binaryDisplay = account?.binaryPath ?? probe.binaryPath ?? descriptor.binaryName ?? providerId;
     const profileDir = accountId ? isolator.profileDir(providerId, accountId) : null;
@@ -8300,7 +8470,15 @@ export class AncillaServer {
             : profileDir && providerId === "copilot"
               ? `COPILOT_HOME="${profileDir}" `
               : "";
-    const loginArgs = descriptor.loginArgs;
+    const baseLoginArgs = descriptor.loginArgs;
+    const loginArgs =
+      providerId === "codex" &&
+      remoteDeployment &&
+      baseLoginArgs &&
+      baseLoginArgs.length === 1 &&
+      baseLoginArgs[0] === "login"
+        ? ["login", "--device-auth"]
+        : baseLoginArgs;
     const terminalCommand = loginArgs && loginArgs.length > 0
       ? `${envPrefix}${binaryDisplay} ${loginArgs.join(" ")}`
       : `${envPrefix}${binaryDisplay}`;
@@ -8321,6 +8499,7 @@ export class AncillaServer {
         status: "interactive",
         url: null,
         code: null,
+        needsCodeInput: false,
         loginId,
         terminalCommand,
         message: `Run \`${terminalCommand}\` in a terminal once to complete interactive sign-in.`,
@@ -8353,6 +8532,16 @@ export class AncillaServer {
       loginId: randomUUID(),
       status: "waiting" as "waiting" | "done" | "error",
       message: undefined as string | undefined,
+      url: null as string | null,
+      code: null as string | null,
+      needsCodeInput: false,
+      waiters: [] as (() => void)[],
+    };
+    const notifyWaiters = () => {
+      const list = attempt.waiters.splice(0, attempt.waiters.length);
+      for (const fn of list) {
+        fn();
+      }
     };
     this.loginAttempts.set(key, attempt);
     let child: LoginChild;
@@ -8369,64 +8558,99 @@ export class AncillaServer {
     return new Promise((resolvePromise, reject) => {
       let settled = false;
       let accumulated = "";
-      let completionTimer: ReturnType<typeof setTimeout> | null = null;
-      const timer = setTimeout(() => {
+      let urlSettleTimer: ReturnType<typeof setTimeout> | null = null;
+      let completionTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+        if (attempt.status === "waiting") {
+          attempt.status = "error";
+          attempt.message = "Sign-in timed out.";
+          notifyWaiters();
+        }
+        child.kill();
+      }, LOGIN_COMPLETE_TIMEOUT_MS);
+      completionTimer.unref?.();
+
+      const resolveWaiting = () => {
         if (settled) return;
         settled = true;
-        child.kill();
-        if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
-        attempt.status = "done";
-        attempt.message = `Finish sign-in in your browser or run \`${terminalCommand}\` in a terminal.`;
+        clearTimeout(timer);
+        if (urlSettleTimer) {
+          clearTimeout(urlSettleTimer);
+          urlSettleTimer = null;
+        }
         resolvePromise({
-          status: "interactive",
-          url: null,
-          code: null,
+          status: "waiting",
+          url: attempt.url,
+          code: attempt.code,
+          needsCodeInput: attempt.needsCodeInput,
           loginId: attempt.loginId,
           terminalCommand,
-          message: attempt.message,
+          ...(attempt.message ? { message: attempt.message } : {}),
         });
-      }, 8_000);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        attempt.message = `Finish sign-in in your browser or run \`${terminalCommand}\` in a terminal.`;
+        resolveWaiting();
+      }, 12_000);
+      timer.unref?.();
 
       const onData = (chunk: unknown) => {
-        if (settled) return;
         accumulated = (accumulated + String(chunk)).slice(-32_768);
-        const parsed = parseLoginOutput(accumulated);
+        const parsed = parseProviderLoginOutput(accumulated);
         if (parsed.url) {
-          settled = true;
-          clearTimeout(timer);
-          completionTimer = setTimeout(() => {
-            if (attempt.status === "waiting") {
-              attempt.status = "error";
-              attempt.message = "Sign-in timed out.";
-            }
-            child.kill();
-          }, LOGIN_COMPLETE_TIMEOUT_MS);
-          completionTimer.unref();
-          resolvePromise({
-            status: "waiting",
-            url: parsed.url,
-            code: parsed.code,
-            loginId: attempt.loginId,
-            terminalCommand,
-          });
+          attempt.url = parsed.url;
+        }
+        if (parsed.code) {
+          attempt.code = parsed.code;
+        }
+        if (parsed.needsCodeInput) {
+          attempt.needsCodeInput = true;
+        }
+        if (!settled && attempt.url) {
+          if (parsed.urlComplete && (attempt.code !== null || attempt.needsCodeInput)) {
+            resolveWaiting();
+          } else if (!urlSettleTimer) {
+            urlSettleTimer = setTimeout(resolveWaiting, 80);
+            urlSettleTimer.unref?.();
+          }
         }
       };
       child.stdout.on("data", onData);
-      child.stderr.on("data", onData);
+      child.stderr.on("data", (chunk: unknown) => {
+        onData(chunk);
+        if (settled && attempt.status === "waiting") {
+          const errMsg = extractLoginFailureMessage(String(chunk));
+          if (errMsg) {
+            attempt.message = errMsg;
+            notifyWaiters();
+          }
+        }
+      });
       child.on("close", (exitCode) => {
-        if (completionTimer) clearTimeout(completionTimer);
+        if (completionTimer) {
+          clearTimeout(completionTimer);
+          completionTimer = null;
+        }
+        if (urlSettleTimer) {
+          clearTimeout(urlSettleTimer);
+          urlSettleTimer = null;
+        }
         if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
         this.providerProbeCache = null;
         if (exitCode === 0) {
           attempt.status = "done";
+          attempt.message = undefined;
+          notifyWaiters();
           void this.onLoginCompleted(providerId, accountId);
           if (!settled) {
             settled = true;
             clearTimeout(timer);
             resolvePromise({
               status: "done",
-              url: null,
-              code: null,
+              url: attempt.url,
+              code: attempt.code,
+              needsCodeInput: attempt.needsCodeInput,
               loginId: attempt.loginId,
               terminalCommand,
             });
@@ -8435,15 +8659,20 @@ export class AncillaServer {
         }
         if (attempt.status === "waiting") {
           attempt.status = "error";
-          attempt.message = `Sign-in exited before completing. Run \`${terminalCommand}\` in a terminal if needed.`;
+          const detail = extractLoginFailureMessage(accumulated);
+          attempt.message = detail
+            ? `${detail} You can retry sign-in or run \`${terminalCommand}\` in a terminal.`
+            : `Sign-in exited before completing. Run \`${terminalCommand}\` in a terminal if needed.`;
         }
+        notifyWaiters();
         if (!settled) {
           settled = true;
           clearTimeout(timer);
           resolvePromise({
             status: "interactive",
-            url: null,
-            code: null,
+            url: attempt.url,
+            code: attempt.code,
+            needsCodeInput: attempt.needsCodeInput,
             loginId: attempt.loginId,
             terminalCommand,
             message: attempt.message,
@@ -8451,10 +8680,18 @@ export class AncillaServer {
         }
       });
       child.on("error", () => {
-        if (completionTimer) clearTimeout(completionTimer);
+        if (completionTimer) {
+          clearTimeout(completionTimer);
+          completionTimer = null;
+        }
+        if (urlSettleTimer) {
+          clearTimeout(urlSettleTimer);
+          urlSettleTimer = null;
+        }
         if (this.loginChildren.get(key) === child) this.loginChildren.delete(key);
         attempt.status = "error";
         attempt.message = `Could not launch ${descriptor.displayName} login.`;
+        notifyWaiters();
         if (!settled) {
           settled = true;
           clearTimeout(timer);

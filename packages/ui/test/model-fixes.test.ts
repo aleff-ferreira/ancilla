@@ -4,6 +4,7 @@ import {
   MODEL_COPY,
   MODELS_RETRY_MS,
   MODELS_TTL_MS,
+  MUSE_DEFAULT_VALUE,
   anyTurnRunning,
   anyWorkRunning,
   choiceDetail,
@@ -20,6 +21,7 @@ import {
   modelsStanding,
   offeredByAnother,
   publishedStubs,
+  selectedValue,
   type ModelMenuOptions,
   type ModelMenuSource,
 } from "../src/model/models.js";
@@ -141,10 +143,20 @@ describe("a union that keeps what each list knows (K4)", () => {
 
 describe("Muse Code's published ids (K11)", () => {
   it("suggest Wonder, Spark 1.3 and Spark 1.2, and leave out the API-only Spark 1.1 that stays priced", () => {
-    assert.deepEqual(publishedModelIds(), ["muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.2"]);
+    assert.deepEqual(publishedModelIds(), [
+      "muse-wonder-1.0",
+      "muse-wonder-full-1.0",
+      "muse-ember-1.0",
+      "muse-spark-1.3",
+      "muse-spark-1.2",
+    ]);
     assert.notEqual(listedPrice("muse-spark-1.1"), null);
     const menu = modelMenu(source({ default: REAL_BUILT_IN }, { default: ready(catalog("bundledCatalog")) }), options());
-    assert.deepEqual(menu.published.map((choice) => choice.id), ["muse-wonder-1.0", "muse-spark-1.2"], "on this machine's 1.4.7 list");
+    assert.deepEqual(
+      menu.published.map((choice) => choice.id),
+      ["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-ember-1.0", "muse-spark-1.2"],
+      "on this machine's 1.4.7 list",
+    );
   });
 
   it("words the pin of a model a thread really uses neutrally on a limited list, and keeps the old caption where the plan's list says so", () => {
@@ -319,10 +331,23 @@ describe("a typed name or id (K1)", () => {
 
   it("completes a limited list with the published models it lacks, after its own, and marks them", () => {
     const rows = modelCompletions(limited, "", undefined, true);
-    assert.deepEqual(rows.map((row) => row.id), ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]);
-    assert.deepEqual(rows.map((row) => row.published), [false, true, true]);
-    assert.deepEqual(modelCompletions(limited, "wonder", undefined, true).map((row) => row.id), ["muse-wonder-1.0"]);
-    assert.deepEqual(modelCompletions(limited, "WOND", undefined, true).map((row) => row.id), ["muse-wonder-1.0"], "case does not matter");
+    assert.deepEqual(rows.map((row) => row.id), [
+      "muse-spark-1.3",
+      "muse-wonder-1.0",
+      "muse-wonder-full-1.0",
+      "muse-ember-1.0",
+      "muse-spark-1.2",
+    ]);
+    assert.deepEqual(rows.map((row) => row.published), [false, true, true, true, true]);
+    assert.deepEqual(
+      modelCompletions(limited, "wonder", undefined, true).map((row) => row.id),
+      ["muse-wonder-1.0", "muse-wonder-full-1.0"],
+    );
+    assert.deepEqual(
+      modelCompletions(limited, "WOND", undefined, true).map((row) => row.id),
+      ["muse-wonder-1.0", "muse-wonder-full-1.0"],
+      "case does not matter",
+    );
     assert.deepEqual(modelCompletions(limited, "1.2", undefined, true).map((row) => row.id), ["muse-spark-1.2"]);
     assert.deepEqual(modelCompletions(limited, "spark", undefined, true).map((row) => row.id), ["muse-spark-1.3", "muse-spark-1.2"], "the list's own row first");
     assert.deepEqual(modelCompletions(limited, "wonder"), [], "a list that is not limited completes from its own rows");
@@ -330,8 +355,20 @@ describe("a typed name or id (K1)", () => {
   });
 
   it("builds the stand-ins from what Meta publishes, without repeating a model the list names", () => {
-    assert.deepEqual(publishedStubs(limited).map((m) => m.modelId), ["muse-wonder-1.0", "muse-spark-1.2"]);
-    assert.deepEqual(publishedStubs([]).map((m) => m.modelId), ["muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.2"]);
+    assert.deepEqual(
+      publishedStubs(limited).map((m) => m.modelId),
+      ["muse-wonder-1.0", "muse-wonder-full-1.0", "muse-ember-1.0", "muse-spark-1.2"],
+    );
+    assert.deepEqual(
+      publishedStubs([]).map((m) => m.modelId),
+      [
+        "muse-wonder-1.0",
+        "muse-wonder-full-1.0",
+        "muse-ember-1.0",
+        "muse-spark-1.3",
+        "muse-spark-1.2",
+      ],
+    );
     assert.ok(publishedStubs(limited).every((m) => !m.contributor && !m.isDefault && m.contextLimit === null));
   });
 
@@ -351,5 +388,68 @@ describe("a typed name or id (K1)", () => {
     assert.equal(stand.fallback, true);
     assert.equal(stand.limited, true, "a stand-in list is what the default login's catalog says it is");
     assert.equal(stand.judged, false, "and is never a verdict on the account");
+  });
+});
+
+describe("empty bundledCatalog selection highlighting", () => {
+  it("keeps pinned saved model selected and unjudged when bundledCatalog is empty and ready", () => {
+    const src: ModelMenuSource = {
+      models: [],
+      accountModels: { default: [] },
+      modelsStatus: {
+        default: {
+          status: "ready",
+          error: null,
+          loadedAt: 1000,
+          catalog: { source: "bundledCatalog", hostVersion: "1.4.7", providerId: "meta", profileId: "default" },
+        },
+      },
+      accounts: null,
+    };
+    const menu = modelMenu(src, {
+      scope: {},
+      accountId: null,
+      current: null,
+      pref: "muse-wonder-1.0",
+      plan: null,
+    });
+    assert.equal(menu.mode, "empty");
+    assert.equal(menu.showRows, true);
+    const pin = menu.rows.find((r) => r.kind === "pin");
+    assert.ok(pin, "pinned row exists");
+    assert.equal(pin?.id, "muse-wonder-1.0");
+    assert.equal(pin?.selected, true);
+    assert.equal(pin?.note, null);
+    assert.equal(pin?.unlisted, "limited");
+    assert.equal(selectedValue(menu.rows), "muse-wonder-1.0");
+    assert.equal(menu.trigger.name, "muse-wonder-1.0");
+    assert.equal(menu.trigger.note, null);
+    assert.equal(menu.trigger.text, "muse-wonder-1.0");
+  });
+
+  it("selects default row when bundledCatalog is empty and ready with null pref", () => {
+    const src: ModelMenuSource = {
+      models: [],
+      accountModels: { default: [] },
+      modelsStatus: {
+        default: {
+          status: "ready",
+          error: null,
+          loadedAt: 1000,
+          catalog: { source: "bundledCatalog", hostVersion: "1.4.7", providerId: "meta", profileId: "default" },
+        },
+      },
+      accounts: null,
+    };
+    const menu = modelMenu(src, {
+      scope: {},
+      accountId: null,
+      current: null,
+      pref: null,
+      plan: null,
+    });
+    assert.equal(menu.rows[0]?.kind, "default");
+    assert.equal(menu.rows[0]?.selected, true);
+    assert.equal(selectedValue(menu.rows), MUSE_DEFAULT_VALUE);
   });
 });

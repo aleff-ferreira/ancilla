@@ -104,7 +104,7 @@ export class ClaudeCliStreamHost implements AgentHost {
   ) {
     this.spawnFn = options.spawnFn ?? defaultSpawnStdio;
     this.onStderr = options.onStderr ?? (() => {});
-    this.initTimeoutMs = options.initTimeoutMs ?? 2_500;
+    this.initTimeoutMs = options.initTimeoutMs ?? 6_000;
     this.runtime = new CanonicalSessionRuntime({
       providerId: this.providerId,
       capabilities: this.capabilities,
@@ -354,7 +354,9 @@ export class ClaudeCliStreamHost implements AgentHost {
         const hasAmbientKey = Boolean(this.target.env?.["ANTHROPIC_API_KEY"]);
         const source =
           (tokenSource && tokenSource !== "none") || hasAmbientKey ? "providerCatalog" : "bundledCatalog";
-        this.cachedCatalog = { models, source, fetchedAtMs: Date.now() };
+        if (source === "providerCatalog") {
+          this.cachedCatalog = { models, source, fetchedAtMs: Date.now() };
+        }
         finish({ models, source });
       };
 

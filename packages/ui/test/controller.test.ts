@@ -7,7 +7,7 @@ import { DEFAULT_CREW_WIDTH, ZOOM_MAX, ZOOM_MIN, defaultPrefs, revivePrefs } fro
 import { crewBusy, crewView } from "../src/model/crew.js";
 import { takeWantedTab } from "../src/model/wantedTab.js";
 import { modelIdError, modelMenu, modelsShown, offeredByAnother, tryTypedModel } from "../src/model/models.js";
-import type { AncillaEvent, ModelCatalog, ModelOption, ProjectView, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
+import type { AncillaEvent, ModelCatalog, ModelOption, ProjectView, ProviderId, SessionSummary, SkillEntry, TranscriptLoad, UserInputRequest, ViewEvent, ResearchConfig, ResearchExport, ResearchExportFormat, ResearchRunView, ResearchSettings } from "../src/types.js";
 import { historyEvents } from "./fixtures/probe.js";
 import { fakeResearchRun, runningResearch } from "./fixtures/research.js";
 import { LIVE_1_4_0, LIVE_1_4_7, answer } from "./fixtures/picker-catalogs.js";
@@ -161,6 +161,7 @@ class FakeClient implements AncillaClient {
   modelQueue: (ModelAnswer | (() => Promise<ModelAnswer>))[] = [];
   /** Every ask for models, with the thread and account it was for. */
   modelCalls: { sessionId?: string; accountId?: string | null }[] = [];
+  catalogCalls: { sessionId?: string; accountId?: string | null; providerId?: ProviderId | null; options?: { refresh?: boolean } }[] = [];
   private async nextModels(sessionId?: string, accountId?: string | null): Promise<{ models: ModelOption[]; source: string | null }> {
     this.modelCalls.push({ sessionId, accountId });
     const next = this.modelQueue.shift();
@@ -173,12 +174,14 @@ class FakeClient implements AncillaClient {
     }
     return answer ?? { models: this.models, source: this.modelSource };
   }
-  async listModels(sessionId?: string, accountId?: string | null) {
+  async listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }) {
+    this.catalogCalls.push({ sessionId, accountId, providerId, options });
     return (await this.nextModels(sessionId, accountId)).models;
   }
-  async listModelCatalog(sessionId?: string, accountId?: string | null): Promise<ModelCatalog> {
+  async listModelCatalog(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }): Promise<ModelCatalog> {
+    this.catalogCalls.push({ sessionId, accountId, providerId, options });
     const { models, source } = await this.nextModels(sessionId, accountId);
-    return { models, source, providerId: "meta", profileId: "default", hostVersion: "1.4.7" };
+    return { models, source, providerId: providerId ?? "meta", profileId: "default", hostVersion: "1.4.7" };
   }
   restarts = 0;
   restartError: Error | null = null;
@@ -6590,6 +6593,63 @@ describe("the assistant page", () => {
     assert.equal(after.assistantRev, before.assistantRev + 1);
     assert.equal(after.toasts.length, before.toasts.length);
     assert.deepEqual(after.assistantReaction, before.assistantReaction);
+    stop();
+  });
+});
+
+describe("per-provider default chat models and scoped preferences", () => {
+  it("isolates default models between Muse, CLI providers, and API profiles", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await startedWith(client);
+
+    // Set Muse default model
+    controller.setDefaultModelForScope({ providerId: "muse" }, "muse-wonder-1.0");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.deepEqual(controller.store.get().prefs.providerDefaultModels, {});
+
+    // Set Codex default model
+    controller.setDefaultModelForScope({ providerId: "codex" }, "o3-mini");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0", "Muse default model unchanged");
+    assert.deepEqual(controller.store.get().prefs.providerDefaultModels["codex"], {
+      modelId: "o3-mini",
+      tried: true, // not in empty accountModels without load
+    });
+
+    // Set API profile default model
+    controller.setDefaultModelForScope({ providerId: "api", accountId: "openrouter" }, "deepseek-r1");
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0");
+    assert.deepEqual(controller.store.get().prefs.providerDefaultModels["api:openrouter"], {
+      modelId: "deepseek-r1",
+      tried: true,
+    });
+
+    // Clear Codex default model
+    controller.setDefaultModelForScope({ providerId: "codex" }, null);
+    assert.deepEqual(controller.store.get().prefs.providerDefaultModels["codex"], {
+      modelId: null,
+      tried: false,
+    });
+    assert.equal(controller.store.get().prefs.defaultModelId, "muse-wonder-1.0", "Muse default still intact");
+
+    stop();
+  });
+
+  it("threads explicit force to listModelCatalog only when options.force is true", async () => {
+    const client = new FakeClient();
+    const { controller, stop } = await startedWith(client);
+
+    // Initial refresh with watch: true
+    await controller.refreshModels({ watch: true });
+    assert.equal(client.catalogCalls.at(-1)?.options, undefined, "watch does not send refresh: true");
+
+    // Standard unforced refresh
+    await controller.refreshModels({ sessionId: "s1" });
+    assert.equal(client.catalogCalls.at(-1)?.options, undefined, "unforced does not send refresh: true");
+
+    // Explicit force refresh
+    await controller.refreshModels({ force: true });
+    assert.deepEqual(client.catalogCalls.at(-1)?.options, { refresh: true }, "explicit force forwards refresh: true");
+
     stop();
   });
 });

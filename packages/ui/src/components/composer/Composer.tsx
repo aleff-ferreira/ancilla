@@ -50,7 +50,7 @@ import { publishedModelIds } from "../../model/pricing.js";
 import { matchSlash, parseSlash, resolveSlash, slashCommands, type SlashCommand } from "../../model/slash.js";
 import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber, popoverOverrides, researchLive, type ResearchRange, type ResearchTyped } from "../../model/research.js";
 import { projectForCwd } from "../../model/status.js";
-import type { SkillsState } from "../../model/store.js";
+import { defaultModelForScope, type SkillsState } from "../../model/store.js";
 import { lastTurnSpeed, streamingSpeed } from "../../model/usage.js";
 import type { ApprovalMode, ModelOption, ProviderAccountView, ProviderCapabilities, ProviderId, ReasoningEffort } from "../../types.js";
 import { Menu, MenuContent, MenuItem, MenuLabel, MenuOption, MenuRadioGroup, MenuSeparator, MenuTrigger, Modal, Tip, FLOATING } from "../ui/overlays.js";
@@ -774,7 +774,7 @@ function ModelMenuBody(props: { menu: ModelMenu; scope: ModelsScope; onOther: ()
   const value = selectedValue(menu.rows);
   const choose = (next: string) => {
     if (next !== value) {
-      applyModelChoice(controller, next);
+      applyModelChoice(controller, next, props.scope);
     }
   };
   const read = () => void controller.refreshModels({ ...props.scope, force: true });
@@ -867,8 +867,7 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
   const { scope, accountId, providerId } = useModelsScope(props.sessionId, props.cwd);
   const source = useModelSource();
   const current = useThreadModel(props.sessionId);
-  const preferred = useApp((s) => s.prefs.defaultModelId);
-  const tried = useApp((s) => s.prefs.defaultModelTried);
+  const { modelId: preferred, tried } = useApp((s) => defaultModelForScope(s.prefs, scope), shallowEqual);
   const plan = useApp((s) => {
     if (providerId === "muse") {
       return planAccount(s, accountId).planName;
@@ -881,15 +880,21 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
   });
   const [typing, setTyping] = useState(false);
   const isMuse = providerId === "muse";
-  const nonMuseTried = !isMuse && tried && preferred !== null && !/^muse-/i.test(preferred);
+  const scopeKey = modelsKey(scope);
+  const hasScopeStatus = Boolean(source.modelsStatus[scopeKey]);
+  useEffect(() => {
+    if (!isMuse && !hasScopeStatus && typeof controller.refreshModels === "function") {
+      void controller.refreshModels(scope);
+    }
+  }, [isMuse, hasScopeStatus, scopeKey, scope, controller]);
   const scopedPref = isMuse
     ? preferred
-    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || nonMuseTried)
+    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || tried)
       ? preferred
       : null;
   // A thread whose model Muse has not said yet runs on Muse's default, whatever the saved default is. A saved default
   // the user tried by its id is kept: it is shown as not in Muse's list, never as unavailable.
-  const menu = modelMenu(source, { scope, accountId, current, pref: props.sessionId && !current ? null : scopedPref, plan, tried: isMuse ? tried : nonMuseTried });
+  const menu = modelMenu(source, { scope, accountId, current, pref: props.sessionId && !current ? null : scopedPref, plan, tried });
   const { trigger } = menu;
   const triggerName = trigger.name;
   return (
@@ -940,7 +945,7 @@ export function ModelPicker(props: { sessionId: string | null; cwd: string | nul
         }
       >
         <div className="mt-4">
-          <ModelIdForm onUse={(modelId) => tryTypedModel(controller, modelId)} onDone={() => setTyping(false)} onCancel={() => setTyping(false)} />
+          <ModelIdForm onUse={(modelId) => tryTypedModel(controller, modelId, scope)} onDone={() => setTyping(false)} onCancel={() => setTyping(false)} />
         </div>
       </Modal>
     </>
@@ -1277,13 +1282,12 @@ export function EffortPicker(props: { sessionId: string | null; cwd: string | nu
   const { scope, providerId } = useModelsScope(props.sessionId, props.cwd);
   const source = useModelSource();
   const current = useThreadModel(props.sessionId);
-  const preferred = useApp((s) => s.prefs.defaultModelId);
-  const tried = useApp((s) => s.prefs.defaultModelTried);
+  const { modelId: preferred, tried } = useApp((s) => defaultModelForScope(s.prefs, scope), shallowEqual);
   const isMuse = providerId === "muse";
   const providerName = providerBadgeName(providerId);
   const scopedPref = isMuse
     ? preferred
-    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || (tried && !/^muse-/i.test(preferred)))
+    : preferred && ((source.accountModels[modelsKey(scope)] ?? []).some((m) => m.modelId === preferred) || tried)
       ? preferred
       : null;
   const model = activeModel(source, scope, current, props.sessionId && !current ? null : scopedPref);

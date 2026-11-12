@@ -77,6 +77,7 @@ export class DemoAssistant {
     communication: { verbosity: "concise", tone: "plain", language: "", notes: "Show the exact path or version, never a paraphrase." },
     autonomy: "suggest",
     policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 1, maxTurnsPerTask: 12, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
+    model: { providerId: null, accountId: null, modelId: null },
     capturePaused: false,
     contextBudgetTokens: 900,
     updatedAt: Date.now() - DAY,

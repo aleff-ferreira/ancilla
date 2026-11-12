@@ -137,9 +137,9 @@ export interface AncillaClient {
    * The catalog Muse lists. With a `sessionId` the host that runs that thread answers (and flags its active row);
    * else the named account's host, or the default login's when `accountId` is absent.
    */
-  listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelOption[]>;
+  listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }): Promise<ModelOption[]>;
   /** The same list with what the host says about it (source, provider, host version). Optional for older transports. */
-  listModelCatalog?(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelCatalog>;
+  listModelCatalog?(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }): Promise<ModelCatalog>;
   /** Closes every live Muse host so the next use starts them again; refused while a turn is running. Optional for older transports. */
   restartHosts?(): Promise<void>;
   getTitleSettings(): Promise<TitleSettings>;
@@ -161,6 +161,12 @@ export interface AncillaClient {
   deleteProviderAccount?(id: string): Promise<void>;
   loginProvider?(providerId: ProviderId, accountId?: string | null): Promise<ProviderLoginResult>;
   providerLoginProgress?(providerId: ProviderId, loginId: string, accountId?: string | null): Promise<import("./types.js").AccountLoginProgress>;
+  submitProviderLoginCode?(
+    providerId: ProviderId,
+    loginId: string,
+    code: string,
+    accountId?: string | null,
+  ): Promise<import("./types.js").AccountLoginProgress>;
   cancelProviderLogin?(providerId: ProviderId, loginId: string, accountId?: string | null): Promise<void>;
   /** Whether META_API_KEY in the environment makes every account share one Meta login. */
   accountsHealth(): Promise<import("./types.js").AccountsHealth>;

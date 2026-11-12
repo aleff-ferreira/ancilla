@@ -1,13 +1,52 @@
 import { ArrowClockwiseIcon, ArrowLeftIcon, ArrowLineDownIcon, ArrowsClockwiseIcon, MinusIcon, PencilSimpleIcon, PlusIcon, ScrollIcon, SignInIcon, TrashIcon, WarningIcon } from "../ui/icons.js";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
 import { modelDisplayName } from "../../model/format.js";
 import type { AncillaController } from "../../model/controller.js";
-import { MODEL_COPY, activeModel, applyModelChoice, choiceDetail, choiceName, effortNote, effortView, modelMenu, modelPickLine, tryTypedModel } from "../../model/models.js";
+import {
+  MODEL_COPY,
+  NO_CHOICE,
+  activeModel,
+  applyModelChoice,
+  choiceDetail,
+  choiceName,
+  effortNote,
+  effortView,
+  modelMenu,
+  modelPickLine,
+  modelsKey,
+  providerBadgeName,
+  tryTypedModel,
+  type ModelsScope,
+} from "../../model/models.js";
 import { RESEARCH_LIMITS, WINDOW_STEP, clampResearchNumber } from "../../model/research.js";
-import { CODE_THEMES, ZOOM_MAX, ZOOM_MIN, type CodeTheme, type GroupBy, type ThemePref } from "../../model/store.js";
-import type { AccountView, ApprovalMode, ReasoningEffort, ResearchConfig, ResearchModelIds } from "../../types.js";
+import {
+  CODE_THEMES,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  defaultModelForScope,
+  type CodeTheme,
+  type GroupBy,
+  type ThemePref,
+} from "../../model/store.js";
+import type {
+  AccountView,
+  ApprovalMode,
+  AssistantProfileView,
+  AssistantStatusView,
+  ModelOption,
+  ModelsStatus,
+  ProviderAccountView,
+  ProviderId,
+  ProviderView,
+  ReasoningEffort,
+  ResearchConfig,
+  ResearchModelIds,
+  VoiceBrainSetting,
+  VoiceSettingsView,
+  VoiceStatusView,
+} from "../../types.js";
 import { LEVELS, MODES, ModelIdForm } from "../composer/Composer.js";
 import { CODE_THEME_LABELS, updateSummary } from "../sidebar/Sidebar.js";
 import { Modal } from "../ui/overlays.js";
@@ -18,15 +57,24 @@ import { MuseSubscriptionCard } from "./MuseSignIn.js";
 import { LinuxSetupCard } from "./LinuxSetup.js";
 import { ProvidersSettings } from "./ProvidersSettings.js";
 
-/** A row's control: one choice out of a few. Scrolls sideways when the row is too narrow to wrap. */
+/** A row's control: one choice out of a few. Wraps when requested or when there are more than 5 options. */
 export function Pick<T extends string | number | null>(props: {
   value: T;
   options: readonly { value: T; label: string; hint?: string }[];
   onChange: (value: T) => void;
   disabled?: boolean;
+  wrap?: boolean;
+  className?: string;
 }) {
+  const shouldWrap = props.wrap === true || props.options.length > 5;
   return (
-    <div className="flex max-w-full min-w-0 items-center gap-1 overflow-x-auto overscroll-x-contain rounded-lg bg-sunken p-0.5 [scrollbar-width:thin]">
+    <div
+      className={cn(
+        "flex max-w-full min-w-0 items-center gap-1 rounded-lg bg-sunken p-0.5",
+        shouldWrap ? "flex-wrap" : "overflow-x-auto overscroll-x-contain [scrollbar-width:thin]",
+        props.className,
+      )}
+    >
       {props.options.map((option) => (
         <button
           key={String(option.value)}
@@ -50,10 +98,7 @@ export function Pick<T extends string | number | null>(props: {
 /**
  * A model control: the rows of the composer's picker, with Muse default first, and the same words when the list is
  * loading, failed or empty. `full` is the new-thread default, which also says what the list is, takes a model id Muse
- * did not list, and reads the list again on request; the title and research models keep to the rows and a retry.
- * A control for some other setting that is a full one (the model a voice call thinks with) says what a model id typed
- * by hand does (`onTyped`) and whether the saved model is one tried that way (`tried`), since the new-thread default's
- * answers to both are not its own.
+ * did not list, and reads the list again on request. Accepts an optional `scope` to inspect any provider or account.
  */
 export function ModelPick(props: {
   value: string | null;
@@ -61,34 +106,102 @@ export function ModelPick(props: {
   full?: boolean;
   tried?: boolean;
   onTyped?: (modelId: string) => Promise<boolean>;
+  scope?: ModelsScope;
+  filter?: string;
+  museDefault?: boolean;
 }) {
   const controller = useController();
   const models = useApp((s) => s.models);
   const accountModels = useApp((s) => s.accountModels);
   const modelsStatus = useApp((s) => s.modelsStatus);
   const accounts = useApp((s) => s.accounts);
+  const providers = useApp((s) => s.providers);
+
+  const scope = props.scope ?? {};
+  const accountId = scope.accountId ?? null;
+  const isMuse = !scope.providerId || scope.providerId === "muse";
+  const scopedPref = useApp((s) => defaultModelForScope(s.prefs, scope));
   const defaultTried = useApp((s) => s.prefs.defaultModelTried);
-  const tried = props.tried ?? (props.full === true && defaultTried);
-  // A saved model is global and this control shows one list, the default login's: an id another loaded list offers is
-  // not called unavailable (it says whose it is), and the default tried by its id is kept and said to be tried.
-  const menu = modelMenu({ models, accountModels, modelsStatus, accounts }, { scope: {}, accountId: null, current: null, pref: props.value, plan: null, tried, elsewhere: true });
-  // Said in words under the rows: what Muse default follows (it can be a Contributor model), or why a saved model is not among them.
-  const line = modelPickLine(menu, { museDefault: props.full === true });
-  const selected = menu.rows.find((row) => row.selected);
-  const picked = selected ? selected.id : "";
+  const tried = props.tried ?? (props.full === true && (scope.providerId && scope.providerId !== "muse" ? scopedPref.tried : defaultTried));
+
+  const effectiveAccountModels = useMemo(() => {
+    if (!accountModels) return accountModels;
+    const result: Record<string, readonly ModelOption[]> = { ...accountModels };
+    for (const [k, v] of Object.entries(accountModels)) {
+      if (k.startsWith("prov:")) {
+        const alt = k.slice(5);
+        if (!(alt in result)) result[alt] = v;
+      } else {
+        const provKey = `prov:${k}`;
+        if (!(provKey in result)) result[provKey] = v;
+      }
+    }
+    return result;
+  }, [accountModels]);
+
+  const effectiveModelsStatus = useMemo(() => {
+    if (!modelsStatus) return modelsStatus;
+    const result: Record<string, ModelsStatus> = { ...modelsStatus };
+    for (const [k, v] of Object.entries(modelsStatus)) {
+      if (k.startsWith("prov:")) {
+        const alt = k.slice(5);
+        if (!(alt in result)) result[alt] = v;
+      } else {
+        const provKey = `prov:${k}`;
+        if (!(provKey in result)) result[provKey] = v;
+      }
+    }
+    return result;
+  }, [modelsStatus]);
+
+  const menu = modelMenu(
+    { models, accountModels: effectiveAccountModels, modelsStatus: effectiveModelsStatus, accounts, providers },
+    { scope, accountId, current: null, pref: props.value, plan: null, tried, elsewhere: true },
+  );
+
+  const showMuseDefault = props.museDefault ?? (props.full === true && isMuse && !scope.providerId);
+  const line = modelPickLine(menu, { museDefault: showMuseDefault });
+
   const options = [
-    ...menu.rows.map((row) => ({
-      value: row.id,
-      // The contributor variants share a display name, so each says so: without it the list offers the same word twice.
-      label: row.kind !== "default" && row.contributor ? `${choiceName(row)} · Contributor` : choiceName(row),
-      hint: [row.isDefault ? "Muse's default" : null, choiceDetail(row)].filter(Boolean).join(". ") || undefined,
-    })),
-    // A list Muse built in leaves out models it may still serve: the ones Meta publishes are a click away.
-    ...(props.full ? menu.published.map((model) => ({ value: model.id as string | null, label: model.label, hint: MODEL_COPY.notListed })) : []),
+    ...menu.rows.map((row) => {
+      const baseName = row.displayLabel ? (row.note ? `${row.displayLabel} (${row.note})` : row.displayLabel) : choiceName(row);
+      const label = row.kind !== "default" && row.contributor ? `${baseName} · Contributor` : baseName;
+      return {
+        value: row.id,
+        label,
+        hint: [row.isDefault ? (isMuse ? "Muse's default" : "Default") : null, choiceDetail(row)].filter(Boolean).join(". ") || undefined,
+      };
+    }),
+    ...(props.full && isMuse ? menu.published.map((model) => ({ value: model.id as string | null, label: model.label, hint: MODEL_COPY.notListed })) : []),
   ];
+
+  const selected = menu.rows.find((row) => row.selected);
+  const picked = selected ? selected.id : (options.some((o) => o.value === props.value) ? props.value : NO_CHOICE);
+
+  const [filterState, setFilterState] = useState(props.filter ?? "");
+  const filter = props.filter !== undefined ? props.filter : filterState;
+  const scopeKey = modelsKey(scope);
+
+  useEffect(() => {
+    if (props.filter === undefined) {
+      setFilterState("");
+    }
+  }, [scopeKey, props.filter]);
+
+  const q = filter.trim().toLowerCase();
+  const filteredOptions = options.length > 10 && q
+    ? options.filter((o) => {
+        // CRITICAL RULE: ALWAYS keep the selected option visible even if it does not match filter!
+        if (o.value === picked) return true;
+        const matchLabel = o.label.toLowerCase().includes(q);
+        const matchValue = o.value ? o.value.toLowerCase().includes(q) : false;
+        return matchLabel || matchValue;
+      })
+    : options;
+
   const retry = menu.mode === "error" || menu.mode === "empty" || props.full === true;
-  // What the list is, and the likeliest reason a model is missing from it.
   const footer = [menu.footer.line, menu.footer.builtIn ?? menu.footer.hint].filter(Boolean).join(". ");
+
   return (
     <div className="flex min-w-0 w-full flex-col items-end gap-1.5 @min-[520px]:w-auto">
       {menu.message ? (
@@ -96,12 +209,43 @@ export function ModelPick(props: {
           {menu.message}
         </p>
       ) : null}
+      {menu.signIn ? (
+        <Button
+          size="sm"
+          variant="primary"
+          onClick={() => {
+            const signIn = menu.signIn;
+            if (!signIn) return;
+            if (signIn.providerId && signIn.providerId !== "muse") {
+              if (typeof controller.beginProviderLogin === "function") {
+                void controller.beginProviderLogin(signIn.providerId, signIn.id);
+              }
+            } else if (typeof controller.beginLogin === "function") {
+              void controller.beginLogin(signIn.id);
+            }
+          }}
+        >
+          <SignInIcon size={13} />
+          {menu.signIn.actionLabel ?? MODEL_COPY.signInAction}
+        </Button>
+      ) : null}
+      {options.length > 10 ? (
+        <input
+          type="search"
+          value={filter}
+          onChange={(e) => setFilterState(e.target.value)}
+          placeholder="Filter models…"
+          aria-label="Filter models"
+          className="h-7 w-48 rounded-md bg-sunken px-2 text-xs text-fg placeholder:text-subtle outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        />
+      ) : null}
       {menu.showRows ? (
         <Pick<string | null>
+          wrap={options.length > 5}
           value={picked}
-          options={options}
+          options={filteredOptions}
           onChange={(value) => {
-            if (value !== picked) {
+            if (value !== picked && value !== NO_CHOICE) {
               props.onChange(value);
             }
           }}
@@ -116,7 +260,16 @@ export function ModelPick(props: {
           ))
         : null}
       {retry ? (
-        <Button size="sm" variant="secondary" disabled={menu.refreshing} onClick={() => void controller.refreshModels({ force: true })}>
+        <Button
+          size="sm"
+          variant="secondary"
+          disabled={menu.refreshing}
+          onClick={() => {
+            if (typeof controller.refreshModels === "function") {
+              void controller.refreshModels({ ...props.scope, force: true });
+            }
+          }}
+        >
           <ArrowsClockwiseIcon size={13} className={cn(menu.refreshing && "animate-spin")} />
           {menu.mode === "error" ? MODEL_COPY.retry : MODEL_COPY.refresh}
         </Button>
@@ -125,7 +278,19 @@ export function ModelPick(props: {
         <>
           {footer ? <p className="text-xs text-subtle [overflow-wrap:anywhere]">{footer}</p> : null}
           <div className="w-full @min-[520px]:w-72">
-            <ModelIdForm label="Other model id" onUse={(modelId) => (props.onTyped ? props.onTyped(modelId) : tryTypedModel(controller, modelId))} />
+            <ModelIdForm
+              label="Other model id"
+              onUse={(modelId) => {
+                if (props.onTyped) return props.onTyped(modelId);
+                if (props.scope && (props.scope.providerId || props.scope.accountId)) {
+                  if (typeof controller.setDefaultModelForScope === "function") {
+                    controller.setDefaultModelForScope(props.scope, modelId, { typed: true });
+                  }
+                  return Promise.resolve(true);
+                }
+                return tryTypedModel(controller, modelId);
+              }}
+            />
           </div>
         </>
       ) : null}
@@ -416,6 +581,109 @@ function RemoveAccountModal(props: { account: AccountView | null; onOpenChange: 
   );
 }
 
+export interface ProviderAccountOption {
+  value: string;
+  label: string;
+  hint?: string;
+}
+
+export function buildProviderAccountOptions(
+  accounts: readonly AccountView[] | null,
+  providers: readonly ProviderView[] | null,
+  cfg: {
+    includeFollowProject?: boolean;
+    includeCustom?: boolean;
+    includeNone?: boolean;
+    defaultMuseLabel?: string;
+    customLabel?: string;
+  } = {},
+): ProviderAccountOption[] {
+  const list: ProviderAccountOption[] = [];
+
+  if (cfg.includeFollowProject) {
+    list.push({
+      value: "project",
+      label: "Follow project",
+      hint: "Uses whichever provider and model the active project or thread uses",
+    });
+  }
+
+  const altProviders = (providers ?? []).filter(
+    (p) =>
+      p.id !== "muse" &&
+      (p.id === "api" ? p.accounts.length > 0 : p.binary.available || p.accounts.length > 0),
+  );
+
+  list.push({
+    value: "muse::",
+    label: cfg.defaultMuseLabel ?? (altProviders.length > 0 ? "Meta Muse · Default login" : "Meta Muse"),
+    hint: "Your Muse subscription",
+  });
+
+  for (const acct of accounts ?? []) {
+    list.push({
+      value: `muse::${acct.id}`,
+      label: `Meta Muse · ${acct.name}`,
+      hint: acct.hasLogin ? (acct.email ?? "Signed in") : "Not signed in",
+    });
+  }
+
+  for (const prov of altProviders) {
+    if (prov.id === "api") continue;
+
+    if (!prov.id.startsWith("acp:") && prov.binary.available) {
+      list.push({
+        value: `${prov.id}::`,
+        label: prov.displayName,
+        hint:
+          prov.defaultAuth?.summary ??
+          (prov.defaultAuth?.state === "authenticated" ? "Signed in" : "Sign in in Settings"),
+      });
+    }
+
+    for (const acct of prov.accounts) {
+      if ("providerId" in acct) {
+        list.push({
+          value: `${prov.id}::${acct.id}`,
+          label: `${providerBadgeName(prov.id)} · ${acct.name}`,
+          hint: acct.auth?.summary ?? (acct.auth?.state === "authenticated" ? "Signed in" : undefined),
+        });
+      }
+    }
+  }
+
+  const apiProvider = (providers ?? []).find((p) => p.id === "api");
+  if (apiProvider) {
+    for (const acct of apiProvider.accounts) {
+      if ("providerId" in acct) {
+        list.push({
+          value: `api::${acct.id}`,
+          label: `API · ${acct.name}`,
+          hint: acct.apiBaseUrl ?? undefined,
+        });
+      }
+    }
+  }
+
+  if (cfg.includeCustom) {
+    list.push({
+      value: "custom",
+      label: cfg.customLabel ?? "Custom endpoint",
+      hint: "Hosted providers (Anthropic, OpenAI, Gemini) or a local server",
+    });
+  }
+
+  if (cfg.includeNone) {
+    list.push({
+      value: "none",
+      label: "None",
+      hint: "Turn voice answering off",
+    });
+  }
+
+  return list;
+}
+
 /** Everything Ancilla lets you set, in one place: the menus around the app are shortcuts into this. */
 export function SettingsPage() {
   const controller = useController();
@@ -424,6 +692,210 @@ export function SettingsPage() {
   const accountModels = useApp((s) => s.accountModels);
   const modelsStatus = useApp((s) => s.modelsStatus);
   const accounts = useApp((s) => s.accounts);
+  const providers = useApp((s) => s.providers);
+
+  const [assistantProfile, setAssistantProfile] = useState<AssistantProfileView | null>(null);
+  const [voiceSettings, setVoiceSettings] = useState<VoiceSettingsView | null>(null);
+
+  useEffect(() => {
+    if (typeof controller.loadAccounts === "function") {
+      void controller.loadAccounts();
+    }
+    if (typeof controller.loadProviders === "function") {
+      void controller.loadProviders();
+    }
+    let cancelled = false;
+    if (typeof controller.assistant === "function") {
+      controller.assistant<AssistantStatusView>("GET", "").then(
+        (status) => {
+          if (!cancelled && status?.profile) {
+            setAssistantProfile(status.profile);
+          }
+        },
+        () => {},
+      );
+    }
+    if (controller.hasVoice && typeof controller.voice === "function") {
+      controller.voice<VoiceStatusView>("GET", "").then(
+        (status) => {
+          if (!cancelled && status?.settings) {
+            setVoiceSettings(status.settings);
+          }
+        },
+        () => {},
+      );
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [controller]);
+
+  const altProviders = useMemo(
+    () =>
+      (providers ?? []).filter(
+        (p) =>
+          p.id !== "muse" &&
+          (p.id === "api" ? p.accounts.length > 0 : p.binary.available || p.accounts.length > 0),
+      ),
+    [providers],
+  );
+
+  const hasMultipleChatProviders = Boolean((accounts && accounts.length > 0) || altProviders.length > 0);
+  const chatProviderOptions = useMemo(
+    () => buildProviderAccountOptions(accounts, providers),
+    [accounts, providers],
+  );
+
+  const [newThreadsScope, setNewThreadsScope] = useState<string>("muse::");
+  const selectedChatScope = useMemo<ModelsScope>(() => {
+    const sep = newThreadsScope.indexOf("::");
+    const providerId = (sep >= 0 ? newThreadsScope.slice(0, sep) : "muse") as ProviderId;
+    const accountId = sep >= 0 ? newThreadsScope.slice(sep + 2) || null : null;
+    if (providerId === "muse" && !accountId) return {};
+    return { providerId, accountId };
+  }, [newThreadsScope]);
+
+  const taskProviderOptions = useMemo(
+    () => buildProviderAccountOptions(accounts, providers, { includeFollowProject: true }),
+    [accounts, providers],
+  );
+
+  const currentTaskKey = useMemo(() => {
+    const m = assistantProfile?.model;
+    if (!m || m.providerId === null) return "project";
+    return `${m.providerId}::${m.accountId ?? ""}`;
+  }, [assistantProfile?.model]);
+
+  const [localTaskKey, setLocalTaskKey] = useState<string | null>(null);
+  const taskKey = localTaskKey ?? currentTaskKey;
+
+  const taskScope = useMemo<ModelsScope>(() => {
+    if (taskKey === "project") return {};
+    const sep = taskKey.indexOf("::");
+    const providerId = (sep >= 0 ? taskKey.slice(0, sep) : "muse") as ProviderId;
+    const accountId = sep >= 0 ? taskKey.slice(sep + 2) || null : null;
+    return { providerId, accountId };
+  }, [taskKey]);
+
+  const saveAssistantModel = async (model: {
+    providerId: ProviderId | null;
+    accountId: string | null;
+    modelId: string | null;
+  }) => {
+    if (typeof controller.assistant !== "function") return;
+    try {
+      await controller.assistant("PATCH", "/profile", {
+        model,
+        expectedUpdatedAt: assistantProfile?.updatedAt,
+      });
+      setAssistantProfile((prev) => (prev ? { ...prev, model } : null));
+      if (typeof controller.loadAssistantGlance === "function") {
+        void controller.loadAssistantGlance();
+      }
+      if (typeof controller.assistantMoved === "function") {
+        controller.assistantMoved();
+      }
+    } catch {
+      // error handled
+    }
+  };
+
+  const handleTaskProviderChange = async (key: string) => {
+    setLocalTaskKey(key);
+    if (key === "project") {
+      await saveAssistantModel({ providerId: null, accountId: null, modelId: null });
+    } else {
+      const sep = key.indexOf("::");
+      const providerId = (sep >= 0 ? key.slice(0, sep) : "muse") as ProviderId;
+      const accountId = sep >= 0 ? key.slice(sep + 2) || null : null;
+      await saveAssistantModel({ providerId, accountId, modelId: null });
+    }
+  };
+
+  const voiceProviderOptions = useMemo(
+    () => buildProviderAccountOptions(accounts, providers, { includeCustom: true, includeNone: true }),
+    [accounts, providers],
+  );
+
+  const currentVoiceKey = useMemo(() => {
+    const b = voiceSettings?.brain;
+    if (!b) return "muse::";
+    if (b.kind === "none") return "none";
+    if (b.kind === "openai" || b.kind === "anthropic" || b.kind === "google") return "custom";
+    if (b.kind === "muse") return `muse::${b.accountId ?? ""}`;
+    if (b.kind === "provider") return `${b.providerId}::${b.accountId ?? ""}`;
+    return "muse::";
+  }, [voiceSettings?.brain]);
+
+  const [localVoiceKey, setLocalVoiceKey] = useState<string | null>(null);
+  const voiceKey = localVoiceKey ?? currentVoiceKey;
+
+  const voiceScope = useMemo<ModelsScope>(() => {
+    if (voiceKey === "none" || voiceKey === "custom") return {};
+    const sep = voiceKey.indexOf("::");
+    const providerId = (sep >= 0 ? voiceKey.slice(0, sep) : "muse") as ProviderId;
+    const accountId = sep >= 0 ? voiceKey.slice(sep + 2) || null : null;
+    return { providerId, accountId };
+  }, [voiceKey]);
+
+  const voiceBrainModel = useMemo(() => {
+    const b = voiceSettings?.brain;
+    if (!b) return null;
+    if (b.kind === "muse" || b.kind === "provider") return b.model;
+    return null;
+  }, [voiceSettings?.brain]);
+
+  const saveVoiceModel = async (modelId: string | null) => {
+    if (!controller.hasVoice || typeof controller.voice !== "function") return;
+    const sep = voiceKey.indexOf("::");
+    const providerId = (sep >= 0 ? voiceKey.slice(0, sep) : "muse") as ProviderId;
+    const accountId = sep >= 0 ? voiceKey.slice(sep + 2) || null : null;
+    let brain: VoiceBrainSetting;
+    if (providerId === "muse") {
+      brain = { kind: "muse", model: modelId, accountId };
+    } else {
+      brain = { kind: "provider", providerId, accountId, model: modelId };
+    }
+    try {
+      await controller.voice("PATCH", "/settings", { brain });
+      setVoiceSettings((prev) => (prev ? { ...prev, brain } : null));
+    } catch {
+      // error handled
+    }
+  };
+
+  const handleVoiceProviderChange = async (key: string) => {
+    setLocalVoiceKey(key);
+    if (!controller.hasVoice || typeof controller.voice !== "function") return;
+    let nextBrain: VoiceBrainSetting;
+    if (key === "none") {
+      nextBrain = { kind: "none" };
+    } else if (key === "custom") {
+      nextBrain = {
+        kind: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        model: "gpt-4o-mini",
+        local: false,
+        label: null,
+        apiKeyEnv: null,
+      };
+    } else {
+      const sep = key.indexOf("::");
+      const providerId = (sep >= 0 ? key.slice(0, sep) : "muse") as ProviderId;
+      const accountId = sep >= 0 ? key.slice(sep + 2) || null : null;
+      if (providerId === "muse") {
+        nextBrain = { kind: "muse", model: null, accountId };
+      } else {
+        nextBrain = { kind: "provider", providerId, accountId, model: null };
+      }
+    }
+    try {
+      await controller.voice("PATCH", "/settings", { brain: nextBrain });
+      setVoiceSettings((prev) => (prev ? { ...prev, brain: nextBrain } : null));
+    } catch {
+      // error handled
+    }
+  };
   const titleSettings = useApp((s) => s.titleSettings);
   const researchSettings = useApp((s) => s.researchSettings);
   const sandboxSettings = useApp((s) => s.sandboxSettings);
@@ -448,10 +920,6 @@ export function SettingsPage() {
   const busy = updates?.status === "checking" || updates?.status === "downloading" || updates?.status === "installing";
   const drag = useOverlayDragProps();
   const collapsed = useApp((s) => s.prefs.sidebarCollapsed);
-
-  useEffect(() => {
-    void controller.loadAccounts();
-  }, [controller]);
 
   return (
     <div className="@container flex h-full min-w-0 flex-col">
@@ -518,11 +986,35 @@ export function SettingsPage() {
         </Section>
 
         <Section title="New threads">
+          {hasMultipleChatProviders ? (
+            <Row
+              label="Provider & account"
+              description="Which subscription or API account new threads start with. Changing this chooses which provider's default chat model you are editing below."
+            >
+              <Pick
+                value={newThreadsScope}
+                options={chatProviderOptions}
+                onChange={(value) => setNewThreadsScope(value)}
+                wrap
+              />
+            </Row>
+          ) : null}
           <Row label="Model" description="What a new thread starts on. Muse default follows whatever Muse picks. Changing it here leaves running threads alone.">
             <ModelPick
               full
-              value={prefs.defaultModelId}
-              onChange={(value) => applyModelChoice(controller, value)}
+              scope={selectedChatScope}
+              value={defaultModelForScope(prefs, selectedChatScope).modelId}
+              onChange={(value) => {
+                if (typeof controller.setDefaultModelForScope === "function") {
+                  controller.setDefaultModelForScope(selectedChatScope, value);
+                }
+              }}
+              onTyped={async (modelId) => {
+                if (typeof controller.setDefaultModelForScope === "function") {
+                  controller.setDefaultModelForScope(selectedChatScope, modelId, { typed: true });
+                }
+                return true;
+              }}
             />
           </Row>
           <Row label="Permissions" description="What Muse may do before it asks you.">
@@ -551,6 +1043,79 @@ export function SettingsPage() {
               {effortHint ? <p className="text-xs text-subtle">{effortHint}</p> : null}
             </div>
           </Row>
+        </Section>
+
+        <Section title="Assistant">
+          <Row
+            label="Task provider & account"
+            description="Which subscription, provider, or API endpoint the assistant uses to run background tasks and research. Follow project uses whichever model the open thread or project uses."
+          >
+            <Pick
+              value={taskKey}
+              options={taskProviderOptions}
+              onChange={(k) => void handleTaskProviderChange(k)}
+              wrap
+            />
+          </Row>
+          {taskKey !== "project" ? (
+            <Row
+              label="Task model"
+              description="Which model the assistant uses to run autonomous tasks and research."
+            >
+              <ModelPick
+                full
+                scope={taskScope}
+                value={assistantProfile?.model?.modelId ?? null}
+                museDefault={false}
+                onChange={(modelId) => {
+                  const sep = taskKey.indexOf("::");
+                  const providerId = (sep >= 0 ? taskKey.slice(0, sep) : "muse") as ProviderId;
+                  const accountId = sep >= 0 ? taskKey.slice(sep + 2) || null : null;
+                  void saveAssistantModel({ providerId, accountId, modelId });
+                }}
+                onTyped={async (modelId) => {
+                  const sep = taskKey.indexOf("::");
+                  const providerId = (sep >= 0 ? taskKey.slice(0, sep) : "muse") as ProviderId;
+                  const accountId = sep >= 0 ? taskKey.slice(sep + 2) || null : null;
+                  await saveAssistantModel({ providerId, accountId, modelId });
+                  return true;
+                }}
+              />
+            </Row>
+          ) : null}
+          {controller.hasVoice ? (
+            <>
+              <Row
+                label="Voice & web provider"
+                description="Which subscription, CLI provider, or custom endpoint thinks of what to say during voice and web conversations."
+              >
+                <Pick
+                  value={voiceKey}
+                  options={voiceProviderOptions}
+                  onChange={(k) => void handleVoiceProviderChange(k)}
+                  wrap
+                />
+              </Row>
+              {voiceKey !== "none" && voiceKey !== "custom" ? (
+                <Row
+                  label="Voice & web model"
+                  description="Which model thinks of what to say. Fast models feel best for audio turns."
+                >
+                  <ModelPick
+                    full
+                    museDefault={false}
+                    scope={voiceScope}
+                    value={voiceBrainModel}
+                    onChange={(modelId) => void saveVoiceModel(modelId)}
+                    onTyped={async (modelId) => {
+                      await saveVoiceModel(modelId);
+                      return true;
+                    }}
+                  />
+                </Row>
+              ) : null}
+            </>
+          ) : null}
         </Section>
 
         <Section title="Accounts">

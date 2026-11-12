@@ -243,6 +243,15 @@ export interface AssistantCharacter {
   setupAt: number | null;
 }
 
+export interface AssistantModelPreference {
+  /** Provider to run assistant tasks on (`"muse"`, `"codex"`, `"claude"`, etc.), or `null` to follow each project's provider. */
+  providerId: string | null;
+  /** Named account or API profile id for `providerId`, or `null` for that provider's default login. */
+  accountId: string | null;
+  /** Model id for assistant tasks, or `null` for the provider's default model. */
+  modelId: string | null;
+}
+
 export interface AssistantProfile {
   /** One assistant per data folder; the id is fixed. */
   id: string;
@@ -253,6 +262,8 @@ export interface AssistantProfile {
   character: AssistantCharacter;
   /** How it talks to the user. */
   communication: { verbosity: "concise" | "balanced" | "detailed"; tone: "plain" | "warm" | "formal"; language: string; notes: string };
+  /** Separate provider and model selection for assistant tasks, independent of chat thread defaults. */
+  model: AssistantModelPreference;
   autonomy: Autonomy;
   /** What an autonomous task may do without asking, and how much it may spend. */
   policy: { allowReadOnly: boolean; allowProjectWrites: boolean; maxConcurrent: number; maxTurnsPerTask: number; maxMinutesPerTask: number; maxTasksPerDay: number };

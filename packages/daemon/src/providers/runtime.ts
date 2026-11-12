@@ -57,6 +57,10 @@ function findWindowsCliOnPath(
   return null;
 }
 
+const POSIX_CLI_PATH_PREAMBLE =
+  'PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH"; ' +
+  'for d in "$HOME"/.nvm/versions/node/*/bin; do [ -d "$d" ] && PATH="$d:$PATH"; done; export PATH; ';
+
 export async function resolveBinaryInDistro(
   exec: ExecFn,
   distro: string,
@@ -66,7 +70,7 @@ export async function resolveBinaryInDistro(
   if (!/^[A-Za-z0-9._/-]+$/.test(binaryName)) {
     return null;
   }
-  const args = ["-d", distro, "--", "sh", "-lc", `command -v ${binaryName}`];
+  const args = ["-d", distro, "--", "sh", "-lc", `${POSIX_CLI_PATH_PREAMBLE}command -v ${binaryName}`];
   const result = await (options ? exec("wsl", args, options) : exec("wsl", args));
   if (result.exitCode !== 0) {
     return null;
@@ -123,7 +127,7 @@ export async function probeProviderBinary(
   if (platform !== "win32") {
     const checkCmd = binaryName.includes("/")
       ? `test -x "${binaryName.replace(/"/g, '\\"')}" && printf '%s\\n' "${binaryName.replace(/"/g, '\\"')}"`
-      : `command -v ${binaryName}`;
+      : `${POSIX_CLI_PATH_PREAMBLE}command -v ${binaryName}`;
     const found = await exec("sh", ["-lc", checkCmd], { timeoutMs: 5000, ...(options.env ? { env: options.env } : {}) });
     const resolved =
       found.exitCode === 0

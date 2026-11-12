@@ -88,7 +88,10 @@ async function route(service: VoiceService, req: AssistantRequest): Promise<Assi
   if (method === "POST" && sub === "/brain/test") {
     const settings = service.settings.get();
     const chosen = service.brainFor(null);
-    if (settings.brain.kind === "muse") return { status: 200, body: { ok: true, skipped: true, text: "Muse answers through a thread; it is tried by starting a call." } };
+    if (settings.brain.kind === "muse" || (settings.brain.kind === "provider" && settings.brain.providerId !== "api")) {
+      const who = chosen.brain.label || "Muse";
+      return { status: 200, body: { ok: true, skipped: true, text: `${who} answers through a thread; it is tried by starting a call.` } };
+    }
     if (chosen.problem) return { status: 200, body: { ok: false, error: chosen.problem } };
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), 15_000);

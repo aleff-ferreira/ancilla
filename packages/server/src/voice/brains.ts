@@ -35,12 +35,25 @@ export interface BrainContext {
   rememberMuseSession: (sessionId: string) => void;
 }
 
+export interface ResolvedApiAccount {
+  apiKind: "openai" | "anthropic" | "google";
+  baseUrl: string;
+  apiKey: string | null;
+  defaultModelId: string | null;
+  label: string;
+  local: boolean;
+}
+
 export interface BrainFactoryDeps {
   /** What a Muse thread needs of the server; absent where there is no Muse host to think in. */
   museHost: MuseBrainHost | null;
   /** For tests: a model that stands in for Muse. */
   muse?: ((context: BrainContext) => BrainProvider) | null;
   keyFor: (brain: BrainSetting) => string | null;
+  /** Resolves a saved `Settings -> Providers` API account for direct HTTP brains. */
+  resolveApiAccount?: (accountId: string | null) => ResolvedApiAccount | null;
+  /** Human-readable name for a provider and optional account. */
+  providerName?: (providerId: string, accountId: string | null) => string;
 }
 
 export interface ChosenBrain {
@@ -50,6 +63,42 @@ export interface ChosenBrain {
 }
 
 export const NO_BRAIN_CONTEXT: BrainContext = { project: null, name: "Assistant", museSession: null, rememberMuseSession: () => undefined };
+
+function defaultApiModel(kind: ResolvedApiAccount["apiKind"], baseUrl: string): string {
+  if (/openrouter\.ai/i.test(baseUrl)) return "openrouter/auto";
+  if (/localhost:11434|127\.0\.0\.1:11434/i.test(baseUrl)) return "qwen2.5-coder:7b";
+  if (kind === "anthropic") return "claude-sonnet-4-6";
+  if (kind === "google") return "gemini-2.5-pro";
+  return "gpt-5.3-codex";
+}
+
+function makeApiAccountBrain(
+  accountId: string | null,
+  chosenModel: string | null,
+  resolveApiAccount: ((id: string | null) => ResolvedApiAccount | null) | undefined,
+  missingKeyHint: string,
+): ChosenBrain {
+  const resolved = resolveApiAccount?.(accountId) ?? null;
+  if (!resolved) {
+    return {
+      brain: new StaticBrain("That API provider is not configured. Check Settings, Providers, or choose another model in the voice settings."),
+      problem: "API provider is not configured in Settings, Providers.",
+    };
+  }
+  const model = chosenModel ?? resolved.defaultModelId ?? defaultApiModel(resolved.apiKind, resolved.baseUrl);
+  const label = `${resolved.label} (${model})`;
+  const problem = resolved.apiKey === null && !resolved.local ? missingKeyHint.replace("{label}", resolved.label) : null;
+  if (resolved.apiKind === "anthropic") {
+    const provider = new AnthropicProvider({ baseUrl: resolved.baseUrl, model, apiKey: resolved.apiKey, label, local: resolved.local });
+    return { brain: withToolFallback(provider, { key: `anthropic:${resolved.baseUrl}|${model}` }), problem };
+  }
+  if (resolved.apiKind === "google") {
+    const provider = new GoogleGenAiProvider({ baseUrl: resolved.baseUrl, model, apiKey: resolved.apiKey, label, local: resolved.local });
+    return { brain: withToolFallback(provider, { key: `google:${resolved.baseUrl}|${model}` }), problem };
+  }
+  const provider = new OpenAiCompatibleProvider({ baseUrl: resolved.baseUrl, model, apiKey: resolved.apiKey, label, local: resolved.local });
+  return { brain: withToolFallback(provider, { key: `${resolved.baseUrl}|${model}` }), problem };
+}
 
 export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: BrainFactoryDeps): ChosenBrain {
   const choice = settings.brain;
@@ -80,24 +129,74 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
   }
   if (choice.kind === "muse") {
     if (deps.muse) return { brain: deps.muse(context), problem: null };
-    if (!deps.museHost) return { brain: new StaticBrain("I cannot reach Muse from here. Choose another model in the voice settings."), problem: "Muse is not available here." };
+    const accountId = choice.accountId ?? null;
+    const who = deps.providerName?.("muse", accountId) ?? "Muse";
+    if (!deps.museHost) return { brain: new StaticBrain(`I cannot reach ${who} from here. Choose another model in the voice settings.`), problem: `${who} is not available here.` };
     if (!context.project) {
-      return { brain: new StaticBrain("Muse needs a project to think in, and none is open. Open a project in Ancilla, or choose another model in the voice settings."), problem: "Muse needs a project: open one in Ancilla." };
+      return { brain: new StaticBrain(`${who} needs a project to think in, and none is open. Open a project in Ancilla, or choose another model in the voice settings.`), problem: `${who} needs a project: open one in Ancilla.` };
     }
     // Muse has no tool calling of its own to offer a call, so its tools are asked for in its text.
-    const thread = new MuseThreadBrain({ host: deps.museHost, cwd: context.project, title: `Voice with ${context.name}`, sessionId: context.museSession, onSession: context.rememberMuseSession, model: choice.model });
+    const thread = new MuseThreadBrain({
+      host: deps.museHost,
+      cwd: context.project,
+      account: accountId,
+      providerId: "muse",
+      providerLabel: who,
+      title: `Voice with ${context.name}`,
+      sessionId: context.museSession,
+      onSession: context.rememberMuseSession,
+      model: choice.model,
+    });
+    return { brain: withTextTools(thread), problem: null };
+  }
+  if (choice.kind === "provider") {
+    if (choice.providerId === "api") {
+      return makeApiAccountBrain(
+        choice.accountId,
+        choice.model,
+        deps.resolveApiAccount,
+        "No API key is set for {label}. Add one in Settings, Providers.",
+      );
+    }
+    if (choice.providerId === "muse" && deps.muse) return { brain: deps.muse(context), problem: null };
+    const who = deps.providerName?.(choice.providerId, choice.accountId) ?? choice.providerId;
+    if (!deps.museHost) {
+      return {
+        brain: new StaticBrain(`I cannot reach ${who} from here. Choose another model in the voice settings.`),
+        problem: `${who} is not available here.`,
+      };
+    }
+    if (!context.project) {
+      return {
+        brain: new StaticBrain(`${who} needs a project to think in, and none is open. Open a project in Ancilla, or choose another model in the voice settings.`),
+        problem: `${who} needs a project: open one in Ancilla.`,
+      };
+    }
+    const thread = new MuseThreadBrain({
+      host: deps.museHost,
+      cwd: context.project,
+      account: choice.accountId,
+      providerId: choice.providerId,
+      providerLabel: who,
+      title: `Voice with ${context.name}`,
+      sessionId: context.museSession,
+      onSession: context.rememberMuseSession,
+      model: choice.model,
+    });
     return { brain: withTextTools(thread), problem: null };
   }
   return { brain: new StaticBrain("No model is set up for the voice yet. Open the voice settings and choose one."), problem: "No model is chosen." };
 }
 
 /** Runs one `muse exec` the way the server does every one-shot Muse call: its binary, WSL routing and account. */
-export type MuseExecRunner = (args: string[], limits: { timeoutMs: number; signal: AbortSignal }) => Promise<ExecResult>;
+export type MuseExecRunner = (args: string[], limits: { timeoutMs: number; signal: AbortSignal }, accountId?: string | null) => Promise<ExecResult>;
 
 export interface BrowseBrainDeps {
   keyFor: (brain: BrainSetting) => string | null;
   /** Absent where there is no Muse to run. */
   museExec: MuseExecRunner | null;
+  resolveApiAccount?: (accountId: string | null) => ResolvedApiAccount | null;
+  providerName?: (providerId: string, accountId: string | null) => string;
   log: (line: string) => void;
 }
 
@@ -134,7 +233,33 @@ export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps):
   }
   if (choice.kind === "muse") {
     if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model in the voice settings." };
-    return { brain: withTextTools(new MuseExecBrain({ run: deps.museExec, model: choice.model, log: deps.log })), problem: null };
+    const accountId = choice.accountId ?? null;
+    return {
+      brain: withTextTools(new MuseExecBrain({ run: (args, limits) => deps.museExec!(args, limits, accountId), model: choice.model, log: deps.log })),
+      problem: null,
+    };
+  }
+  if (choice.kind === "provider") {
+    if (choice.providerId === "api") {
+      return makeApiAccountBrain(
+        choice.accountId,
+        choice.model,
+        deps.resolveApiAccount,
+        "No API key is set for {label}. Add one in Settings, Providers.",
+      );
+    }
+    if (choice.providerId === "muse") {
+      if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model in the voice settings." };
+      return {
+        brain: withTextTools(new MuseExecBrain({ run: (args, limits) => deps.museExec!(args, limits, choice.accountId), model: choice.model, log: deps.log })),
+        problem: null,
+      };
+    }
+    const who = deps.providerName?.(choice.providerId, choice.accountId) ?? choice.providerId;
+    return {
+      brain: new StaticBrain(`${who} cannot browse untrusted web pages without a sandboxed text-only mode.`),
+      problem: `${who} answers voice calls, while web browsing needs Muse, an API provider, or a custom endpoint.`,
+    };
   }
   return { brain: new StaticBrain("No model is set up yet."), problem: "No model is chosen for the assistant. Open the voice settings and choose one." };
 }

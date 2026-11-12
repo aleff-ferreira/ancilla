@@ -21,6 +21,7 @@ const profile: AssistantProfile = {
   id: "default", enabled: true, name: "Ancilla", persona: "A careful engineering partner.", character: DEFAULT_CHARACTER, autonomy: "ask", capturePaused: false, contextBudgetTokens: 1200, updatedAt: NOW,
   communication: { verbosity: "concise", tone: "plain", language: "English", notes: "" },
   policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 1, maxTurnsPerTask: 8, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
+  model: { providerId: null, accountId: null, modelId: null },
 };
 
 function query(text: string, extra: Partial<RetrievalQuery> = {}): RetrievalQuery {

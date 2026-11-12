@@ -1,5 +1,6 @@
+import { isProviderId } from "@ancilla/daemon";
 import { looksSecret } from "./secrets.js";
-import type { AssistantCharacter, AssistantProfile, AvatarForm, AvatarLook, Autonomy, CharacterPresence, FigureSpec, Goal, VoiceArchetype } from "./types.js";
+import type { AssistantCharacter, AssistantModelPreference, AssistantProfile, AvatarForm, AvatarLook, Autonomy, CharacterPresence, FigureSpec, Goal, VoiceArchetype } from "./types.js";
 
 /**
  * The assistant's configurable identity: what it is called, how it talks, how much it may do alone and how much it
@@ -39,6 +40,12 @@ export const DEFAULT_CHARACTER: AssistantCharacter = {
   setupAt: null,
 };
 
+export const DEFAULT_MODEL_PREFERENCE: AssistantModelPreference = {
+  providerId: null,
+  accountId: null,
+  modelId: null,
+};
+
 export const DEFAULT_PROFILE: AssistantProfile = {
   id: ASSISTANT_ID,
   enabled: false,
@@ -46,6 +53,7 @@ export const DEFAULT_PROFILE: AssistantProfile = {
   persona: "",
   character: DEFAULT_CHARACTER,
   communication: { verbosity: "balanced", tone: "plain", language: "", notes: "" },
+  model: DEFAULT_MODEL_PREFERENCE,
   autonomy: "ask",
   policy: { allowReadOnly: true, allowProjectWrites: false, maxConcurrent: 3, maxTurnsPerTask: 12, maxMinutesPerTask: 30, maxTasksPerDay: 10 },
   capturePaused: false,
@@ -231,6 +239,19 @@ export function normalizeCharacter(raw: unknown): AssistantCharacter {
   };
 }
 
+const MODEL_ACCOUNT_RE = /^[A-Za-z0-9._:-]{1,120}$/;
+const MODEL_ID_RE = /^[A-Za-z0-9][\w.:/\-[\]]{0,199}$/;
+
+function normalizeModelPreference(raw: unknown): AssistantModelPreference {
+  const r = isObj(raw) ? raw : {};
+  const providerId = typeof r.providerId === "string" && isProviderId(r.providerId) ? r.providerId : null;
+  const rawAccount = typeof r.accountId === "string" ? r.accountId.trim() : "";
+  const accountId = rawAccount && MODEL_ACCOUNT_RE.test(rawAccount) ? rawAccount : null;
+  const rawModel = typeof r.modelId === "string" ? r.modelId.trim() : "";
+  const modelId = rawModel && MODEL_ID_RE.test(rawModel) ? rawModel : null;
+  return { providerId, accountId, modelId };
+}
+
 /** The profile as stored, completed with defaults for anything missing and brought inside the limits. Never throws. */
 export function normalizeProfile(raw: unknown): AssistantProfile {
   const d = DEFAULT_PROFILE;
@@ -258,6 +279,7 @@ export function normalizeProfile(raw: unknown): AssistantProfile {
       maxMinutesPerTask: clamp(pol.maxMinutesPerTask, 1, 240, d.policy.maxMinutesPerTask),
       maxTasksPerDay: clamp(pol.maxTasksPerDay, 1, 100, d.policy.maxTasksPerDay),
     },
+    model: normalizeModelPreference(r.model),
     capturePaused: r.capturePaused === true,
     contextBudgetTokens: clamp(r.contextBudgetTokens, 300, 4000, d.contextBudgetTokens),
     updatedAt: typeof r.updatedAt === "number" && Number.isFinite(r.updatedAt) ? r.updatedAt : 0,
@@ -283,6 +305,7 @@ export type ProfilePatch = {
   communication?: Partial<AssistantProfile["communication"]>;
   autonomy?: Autonomy;
   policy?: Partial<AssistantProfile["policy"]>;
+  model?: Partial<AssistantModelPreference>;
   capturePaused?: boolean;
   contextBudgetTokens?: number;
 };
@@ -331,7 +354,7 @@ function parseCharacterPatch(raw: unknown): CharacterPatch {
 export function parseProfilePatch(raw: unknown): ProfilePatch {
   if (!isObj(raw)) throw new ValidationError("body", "the profile change must be an object");
   const out: ProfilePatch = {};
-  const known = new Set(["enabled", "name", "persona", "character", "communication", "autonomy", "policy", "capturePaused", "contextBudgetTokens"]);
+  const known = new Set(["enabled", "name", "persona", "character", "communication", "autonomy", "policy", "model", "capturePaused", "contextBudgetTokens"]);
   for (const key of Object.keys(raw)) if (!known.has(key)) throw new ValidationError(key, `unknown field ${key}`);
   if ("enabled" in raw) out.enabled = flag(raw.enabled, "enabled");
   if ("name" in raw) {
@@ -368,6 +391,28 @@ export function parseProfilePatch(raw: unknown): ProfilePatch {
     if ("maxTasksPerDay" in p) pol.maxTasksPerDay = whole(p.maxTasksPerDay, "policy.maxTasksPerDay", 1, 100);
     out.policy = pol;
   }
+  if ("model" in raw) {
+    if (!isObj(raw.model)) throw new ValidationError("model", "model must be an object");
+    const m = raw.model;
+    const model: NonNullable<ProfilePatch["model"]> = {};
+    for (const key of Object.keys(m)) if (!["providerId", "accountId", "modelId"].includes(key)) throw new ValidationError(`model.${key}`, `unknown field model.${key}`);
+    if ("providerId" in m) {
+      if (m.providerId === null || m.providerId === "") model.providerId = null;
+      else if (typeof m.providerId === "string" && isProviderId(m.providerId)) model.providerId = m.providerId;
+      else throw new ValidationError("model.providerId", "unknown providerId");
+    }
+    if ("accountId" in m) {
+      if (m.accountId === null || m.accountId === "") model.accountId = null;
+      else if (typeof m.accountId === "string" && MODEL_ACCOUNT_RE.test(m.accountId.trim())) model.accountId = m.accountId.trim();
+      else throw new ValidationError("model.accountId", "accountId has disallowed characters");
+    }
+    if ("modelId" in m) {
+      if (m.modelId === null || m.modelId === "") model.modelId = null;
+      else if (typeof m.modelId === "string" && MODEL_ID_RE.test(m.modelId.trim())) model.modelId = m.modelId.trim();
+      else throw new ValidationError("model.modelId", "modelId has disallowed characters");
+    }
+    out.model = model;
+  }
   return out;
 }
 
@@ -391,6 +436,7 @@ export function applyProfilePatch(current: AssistantProfile, patch: ProfilePatch
     character: applyCharacterPatch(current.character, character, now),
     communication: { ...current.communication, ...(patch.communication ?? {}) },
     policy: { ...current.policy, ...(patch.policy ?? {}) },
+    model: { ...current.model, ...(patch.model ?? {}) },
     updatedAt: now,
   });
 }

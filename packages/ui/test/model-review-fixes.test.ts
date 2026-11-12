@@ -51,8 +51,14 @@ describe("the slash menu over a scope's model catalog", () => {
   const builtIn = held({ default: [...LIVE_1_4_7.models] }, { default: ready("bundledCatalog") });
 
   it("completes a name against the models Meta publishes while the list on show is Muse's built-in one", () => {
-    assert.deepEqual(completed("/model wonder", builtIn, {}), ["muse-wonder-1.0"]);
-    assert.deepEqual(completed("/model ", builtIn, {}), ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]);
+    assert.deepEqual(completed("/model wonder", builtIn, {}), ["muse-wonder-1.0", "muse-wonder-full-1.0"]);
+    assert.deepEqual(completed("/model ", builtIn, {}), [
+      "muse-spark-1.3",
+      "muse-wonder-1.0",
+      "muse-wonder-full-1.0",
+      "muse-ember-1.0",
+      "muse-spark-1.2",
+    ]);
   });
 
   it("completes from the plan's own rows alone", () => {
@@ -67,11 +73,11 @@ describe("the slash menu over a scope's model catalog", () => {
       { default: ready("bundledCatalog"), "thread:s1": ready("providerCatalog") },
     );
     assert.equal(completed("/model wonder", state, { sessionId: "s1" }), null, "the thread's own list is the plan's: it names what it names");
-    assert.deepEqual(completed("/model wonder", state, {}), ["muse-wonder-1.0"], "the default login's is a built-in one");
+    assert.deepEqual(completed("/model wonder", state, {}), ["muse-wonder-1.0", "muse-wonder-full-1.0"], "the default login's is a built-in one");
   });
 
   it("takes a stand-in list's verdict from the default login's catalog", () => {
     const state = held({ default: [...LIVE_1_4_7.models], "acct:work": [] }, { default: ready("bundledCatalog"), "acct:work": failed });
-    assert.deepEqual(completed("/model wonder", state, { accountId: "work" }), ["muse-wonder-1.0"]);
+    assert.deepEqual(completed("/model wonder", state, { accountId: "work" }), ["muse-wonder-1.0", "muse-wonder-full-1.0"]);
   });
 });

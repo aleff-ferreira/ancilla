@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AuthorizationHub } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
-import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner } from "./brains.js";
+import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner, type ResolvedApiAccount } from "./brains.js";
 import type { BrainProvider } from "./brain.js";
 import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
@@ -70,6 +70,10 @@ export interface VoiceServiceDeps {
   harness?: HarnessReader | null;
   /** One `muse exec` through the server's routing, for the model that browses when it is Muse. */
   museExec?: MuseExecRunner | null;
+  /** Resolves a saved `Settings -> Providers` API account for direct HTTP voice/browse brains. */
+  resolveApiAccount?: (accountId: string | null) => ResolvedApiAccount | null;
+  /** Display name for a provider and optional account. */
+  providerName?: (providerId: string, accountId: string | null) => string;
   /** The assistant's own browser, which the `browse` tool starts web tasks on; without it the tool is not offered. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
   /** The connected accounts, which the `use_connector` tool starts tasks on; without any the tool is not offered. */
@@ -217,12 +221,24 @@ export class VoiceService {
   }
 
   private brainDeps(): BrainFactoryDeps {
-    return { museHost: this.deps.museHost ?? null, muse: this.deps.museBrain ?? null, keyFor: (b) => this.settings.keyFor(b) };
+    return {
+      museHost: this.deps.museHost ?? null,
+      muse: this.deps.museBrain ?? null,
+      keyFor: (b) => this.settings.keyFor(b),
+      resolveApiAccount: this.deps.resolveApiAccount,
+      providerName: this.deps.providerName,
+    };
   }
 
   /** The model that browses for the assistant: the voice's own, used with the browser's tools only (see browser/agent.ts). */
   browseBrain(): ChosenBrain {
-    return makeBrowseBrain(this.settings.get(), { keyFor: (b) => this.settings.keyFor(b), museExec: this.deps.museExec ?? null, log: this.deps.log });
+    return makeBrowseBrain(this.settings.get(), {
+      keyFor: (b) => this.settings.keyFor(b),
+      museExec: this.deps.museExec ?? null,
+      resolveApiAccount: this.deps.resolveApiAccount,
+      providerName: this.deps.providerName,
+      log: this.deps.log,
+    });
   }
 
   /** What the model of a call is told about it. Used by the settings page's test as well. */

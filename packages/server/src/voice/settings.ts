@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { isProviderId } from "@ancilla/daemon";
 import { ValidationError } from "../assistant/profile.js";
 
 /**
@@ -15,7 +16,12 @@ export type BrainSetting =
    * Muse, through a thread: works with a Muse subscription and no key, at the speed of a Muse turn. `model` is the Muse model
    * a new thread starts on and a thread of the conversation is put on; null leaves it to Muse's own choice.
    */
-  | { kind: "muse"; model: string | null }
+  | { kind: "muse"; model: string | null; accountId?: string | null }
+  /**
+   * Any configured subscription CLI (`codex`, `claude`, `gemini`, `copilot`, `kimi`, `qwen`, `opencode`, `acp:...`) or saved `api`
+   * provider profile in Settings → Providers, independent of chat thread defaults.
+   */
+  | { kind: "provider"; providerId: string; accountId: string | null; model: string | null }
   /** Any server that speaks the OpenAI chat protocol: a hosted model with a key, or one running on this machine. */
   | { kind: "openai"; baseUrl: string; model: string; local: boolean; label: string | null; apiKeyEnv: string | null }
   /** Any server that speaks the Messages API (`/v1/messages`): Anthropic, or a compatible server. */
@@ -96,20 +102,48 @@ function optionalText(value: unknown, field: string, max: number): string | null
   return text(value, field, max);
 }
 
-/** What a Muse model id looks like: the same shape the page accepts when a model is typed by hand. */
-const MUSE_MODEL_ID = /^[A-Za-z0-9][\w.:-]*$/;
+/** Model id shape accepted across Muse, Codex, Claude (`fable[1m]`), OpenRouter (`openai/gpt-5.4`) and Ollama (`llama3.2:3b`). */
+const VOICE_MODEL_ID = /^[A-Za-z0-9][\w.:/\-[\]]*$/;
+const ACCOUNT_ID_SHAPE = /^[A-Za-z0-9._:-]{1,120}$/;
 
-function museModel(value: unknown): string | null {
-  const id = optionalText(value, "brain.model", 100)?.trim() ?? "";
+function optionalModelId(value: unknown, field = "brain.model", max = 200): string | null {
+  const id = optionalText(value, field, max)?.trim() ?? "";
   if (id === "") return null;
-  if (!MUSE_MODEL_ID.test(id)) throw new ValidationError("brain.model", "brain.model must be a model id: letters, digits and . _ : - only");
+  if (!VOICE_MODEL_ID.test(id)) throw new ValidationError(field, `${field} must start with a letter or digit and contain only letters, digits and . _ : / - [ ]`);
+  return id;
+}
+
+function optionalAccountId(value: unknown, field = "brain.accountId"): string | null {
+  const id = optionalText(value, field, 120)?.trim() ?? "";
+  if (id === "") return null;
+  if (!ACCOUNT_ID_SHAPE.test(id)) throw new ValidationError(field, `${field} is not a valid account id`);
   return id;
 }
 
 /** `current` is the brain that is set now, for a change that says nothing about a model and must not undo the one chosen. */
 function parseBrain(value: unknown, current: BrainSetting | null = null): BrainSetting {
   if (!isObject(value)) throw new ValidationError("brain", "brain must be an object");
-  if (value["kind"] === "muse") return { kind: "muse", model: "model" in value ? museModel(value["model"]) : current?.kind === "muse" ? current.model : null };
+  if (value["kind"] === "muse") {
+    const accountId = "accountId" in value
+      ? optionalAccountId(value["accountId"])
+      : current?.kind === "muse"
+        ? (current.accountId ?? null)
+        : null;
+    const model = "model" in value
+      ? optionalModelId(value["model"], "brain.model", 100)
+      : current?.kind === "muse"
+        ? current.model
+        : null;
+    return accountId ? { kind: "muse", model, accountId } : { kind: "muse", model };
+  }
+  if (value["kind"] === "provider") {
+    const rawProvider = optionalText(value["providerId"], "brain.providerId", 80)?.trim() ?? "";
+    if (!isProviderId(rawProvider)) throw new ValidationError("brain.providerId", "brain.providerId must be a supported provider id");
+    const sameCurrent = current?.kind === "provider" && current.providerId === rawProvider ? current : null;
+    const accountId = "accountId" in value ? optionalAccountId(value["accountId"]) : (sameCurrent?.accountId ?? null);
+    const model = "model" in value ? optionalModelId(value["model"], "brain.model", 200) : (sameCurrent?.model ?? null);
+    return { kind: "provider", providerId: rawProvider, accountId, model };
+  }
   if (value["kind"] === "none") return { kind: "none" };
   if (value["kind"] === "openai" || value["kind"] === "anthropic" || value["kind"] === "google") {
     const kind = value["kind"];
@@ -127,7 +161,7 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
     if (apiKeyEnv !== null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) throw new ValidationError("brain.apiKeyEnv", "brain.apiKeyEnv must be the name of an environment variable");
     return { kind, baseUrl, model, local: value["local"] === true, label: optionalText(value["label"], "brain.label", 80), apiKeyEnv };
   }
-  throw new ValidationError("brain.kind", "brain.kind must be muse, openai, anthropic, google or none");
+  throw new ValidationError("brain.kind", "brain.kind must be muse, provider, openai, anthropic, google or none");
 }
 
 function parseSpeech(value: unknown): SpeechSetting {

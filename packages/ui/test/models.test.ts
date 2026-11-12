@@ -5,6 +5,7 @@ import {
   CONTRIBUTOR_NOTE,
   EFFORT_TIERS,
   MODELS_TTL_MS,
+  NO_CHOICE,
   effectiveEffort,
   effortLevelsFor,
   findModel,
@@ -17,6 +18,7 @@ import {
   modelsKey,
   modelsMenuState,
   modelsShown,
+  selectedValue,
 } from "../src/model/models.js";
 import type { ModelOption, ModelsStatus, ReasoningEffort } from "../src/types.js";
 
@@ -283,6 +285,69 @@ describe("the rows of a model menu", () => {
     assert.deepEqual(modelChoices([], null, "retired-x").map((row) => row.id), [null]);
     assert.deepEqual(modelChoices([], "retired-x", null).map((row) => row.id), [null]);
     assert.ok(modelChoices(catalog, null, null).every((row) => row.note === null));
+  });
+
+  it("deduplicates displayLabel case-insensitively against modelId and label", () => {
+    const models = [
+      model("gpt-6.1-sol", { displayLabel: "GPT-6.1-Sol" }),
+      model("opus", { displayLabel: "Opus" }),
+      model("fable[1m]", { displayLabel: "Fable" }),
+      model("muse-spark-1.3-contributor", { displayLabel: "MUSE-SPARK-1.3" }),
+      model("trimmed-model", { displayLabel: "  Trimmed-Model  " }),
+      model("whitespace-model", { displayLabel: "   " }),
+    ];
+    const rows = modelChoices(models, null, null);
+    const byId = (id: string) => rows.find((r) => r.id === id);
+
+    // gpt-6.1-sol: matches modelId case-insensitively -> deduplicated to null
+    assert.equal(byId("gpt-6.1-sol")?.displayLabel, null);
+    assert.equal(byId("gpt-6.1-sol")?.label, "gpt-6.1-sol");
+
+    // opus: matches modelId case-insensitively -> deduplicated to null
+    assert.equal(byId("opus")?.displayLabel, null);
+    assert.equal(byId("opus")?.label, "opus");
+
+    // fable[1m]: distinct brand name -> preserved
+    assert.equal(byId("fable[1m]")?.displayLabel, "Fable");
+    assert.equal(byId("fable[1m]")?.label, "fable[1m]");
+
+    // muse-spark-1.3-contributor: matches tier-stripped label -> deduplicated to null
+    assert.equal(byId("muse-spark-1.3-contributor")?.displayLabel, null);
+    assert.equal(byId("muse-spark-1.3-contributor")?.label, "muse-spark-1.3");
+
+    // trimmed-model: trimmed and matches modelId -> deduplicated to null
+    assert.equal(byId("trimmed-model")?.displayLabel, null);
+
+    // whitespace-model: whitespace-only -> null
+    assert.equal(byId("whitespace-model")?.displayLabel, null);
+  });
+
+  it("pins and highlights active or saved model when catalog is empty but loaded", () => {
+    // When loaded is true, empty catalog keeps saved preference selected without "unavailable" note
+    const loadedRows = modelChoices([], null, "muse-wonder-1.0", false, { loaded: true });
+    assert.equal(loadedRows.length, 2);
+    assert.equal(loadedRows[0]?.kind, "default");
+    assert.equal(loadedRows[0]?.selected, false);
+    const pin = loadedRows[1];
+    assert.equal(pin?.kind, "pin");
+    assert.equal(pin?.id, "muse-wonder-1.0");
+    assert.equal(pin?.selected, true);
+    assert.equal(pin?.note, null, "empty catalog does not judge model as unavailable");
+    assert.equal(pin?.unlisted, "limited");
+    assert.equal(selectedValue(loadedRows), "muse-wonder-1.0");
+
+    // On an active thread with empty loaded catalog
+    const threadRows = modelChoices([], "muse-spark-1.3", null, false, { loaded: true });
+    assert.equal(threadRows[1]?.id, "muse-spark-1.3");
+    assert.equal(threadRows[1]?.selected, true);
+    assert.equal(threadRows[1]?.note, null, "empty catalog does not judge thread model as not offered");
+    assert.equal(selectedValue(threadRows), "muse-spark-1.3");
+
+    // When loaded is false or omitted, empty catalog does not pin unvouched model
+    const unloadedRows = modelChoices([], null, "muse-wonder-1.0", false, { loaded: false });
+    assert.equal(unloadedRows.length, 1);
+    assert.equal(unloadedRows[0]?.kind, "default");
+    assert.equal(selectedValue(unloadedRows), NO_CHOICE);
   });
 });
 

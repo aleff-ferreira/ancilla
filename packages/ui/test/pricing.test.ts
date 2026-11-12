@@ -65,7 +65,13 @@ describe("pricing", () => {
 
 describe("publishedModelIds", () => {
   it("lists the ids Meta prices and serves in Muse Code, newest first, without contributor tiers", () => {
-    assert.deepEqual(publishedModelIds(), ["muse-wonder-1.0", "muse-spark-1.3", "muse-spark-1.2"]);
+    assert.deepEqual(publishedModelIds(), [
+      "muse-wonder-1.0",
+      "muse-wonder-full-1.0",
+      "muse-ember-1.0",
+      "muse-spark-1.3",
+      "muse-spark-1.2",
+    ]);
   });
 
   it("leaves out Spark 1.1, which is API only, though its price stays for the calls that used it", () => {

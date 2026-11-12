@@ -54,7 +54,7 @@ export function NewThread(props: { cwd: string | null }) {
           </h1>
           {project.folders.length > 1 ? <FolderSwitcher project={project} folder={folder ?? project.cwd} /> : null}
           <div className="mt-6 empty:hidden"><LinuxSetupCard compact /></div>
-          {needsLogin && project.defaultAccountId === null ? <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div> : null}
+          {needsLogin && (!project.defaultProviderId || project.defaultProviderId === "muse") && project.defaultAccountId === null ? <div className="mt-6 rounded-xl border border-line bg-raised p-4"><MuseSubscriptionCard /></div> : null}
           <div className="mt-7">
             <Composer sessionId={null} cwd={folder ?? project.cwd} running={false} readOnly={false} variant="home" autoFocus />
           </div>

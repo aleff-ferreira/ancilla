@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useApp, useController } from "../../app/context.js";
 import { errorMessage } from "../../client.js";
-import type { AssistantAutonomy, AssistantGoalView, AssistantProfileView } from "../../types.js";
+import { providerBadgeName, type ModelsScope } from "../../model/models.js";
+import type { AssistantAutonomy, AssistantGoalView, AssistantProfileView, ProviderId } from "../../types.js";
 import { Button, Toggle } from "../ui/primitives.js";
-import { Num, Pick, Row, Section } from "../settings/SettingsPage.js";
+import { ModelPick, Num, Pick, Row, Section, buildProviderAccountOptions } from "../settings/SettingsPage.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
 import { Chip, Notice } from "./parts.js";
 
@@ -14,9 +16,61 @@ const AUTONOMY: { value: AssistantAutonomy; label: string; hint: string }[] = [
 
 /** What the assistant is working toward, what it may do on its own, and how much it may spend. Who it is lives in the Persona tab. */
 export function ProfilePanel(props: { profile: AssistantProfileView; changed: () => void; bump: number }) {
+  const controller = useController();
+  const accounts = useApp((s) => s.accounts);
+  const providers = useApp((s) => s.providers);
+
+  useEffect(() => {
+    if (typeof controller.loadAccounts === "function") {
+      void controller.loadAccounts();
+    }
+    if (typeof controller.loadProviders === "function") {
+      void controller.loadProviders();
+    }
+  }, [controller]);
+
   const call = useAssistantCall();
   const [error, setError] = useState<string | null>(null);
   const p = props.profile;
+
+  const currentTaskKey = useMemo(() => {
+    const m = p.model;
+    if (!m || m.providerId === null) return "project";
+    return `${m.providerId}::${m.accountId ?? ""}`;
+  }, [p.model]);
+
+  const [localTaskKey, setLocalTaskKey] = useState<string | null>(null);
+  const taskKey = localTaskKey ?? currentTaskKey;
+
+  useEffect(() => {
+    setLocalTaskKey(null);
+  }, [p.model]);
+
+  const taskScope = useMemo<ModelsScope>(() => {
+    if (taskKey === "project") return {};
+    const sep = taskKey.indexOf("::");
+    const providerId = (sep >= 0 ? taskKey.slice(0, sep) : "muse") as ProviderId;
+    const accountId = sep >= 0 ? taskKey.slice(sep + 2) || null : null;
+    return { providerId, accountId };
+  }, [taskKey]);
+
+  const taskProviderOptions = useMemo(() => {
+    const list = buildProviderAccountOptions(accounts, providers, {
+      includeFollowProject: true,
+      defaultMuseLabel: "Meta Muse",
+    });
+    if (taskKey !== "project" && !list.some((o) => o.value === taskKey)) {
+      const sep = taskKey.indexOf("::");
+      const providerId = sep >= 0 ? taskKey.slice(0, sep) : taskKey;
+      const accountId = sep >= 0 ? taskKey.slice(sep + 2) : "";
+      const label = accountId
+        ? `${providerBadgeName(providerId as ProviderId)} · ${accountId}`
+        : providerBadgeName(providerId as ProviderId);
+      list.push({ value: taskKey, label, hint: "Configured model provider" });
+    }
+    return list;
+  }, [accounts, providers, taskKey]);
+
   const save = async (patch: Record<string, unknown>) => {
     setError(null);
     try {
@@ -27,9 +81,77 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
       props.changed();
     }
   };
+
+  const handleTaskProviderChange = async (key: string) => {
+    setLocalTaskKey(key);
+    try {
+      if (key === "project") {
+        await save({
+          model: {
+            providerId: null,
+            accountId: null,
+            modelId: null,
+          },
+        });
+      } else {
+        const sep = key.indexOf("::");
+        const providerId = (sep >= 0 ? key.slice(0, sep) : "muse") as ProviderId;
+        const accountId = sep >= 0 ? key.slice(sep + 2) || null : null;
+        await save({
+          model: {
+            providerId,
+            accountId,
+            modelId: null,
+          },
+        });
+      }
+    } finally {
+      setLocalTaskKey(null);
+    }
+  };
+
   return (
     <div>
       {error ? <div className="mt-6"><Notice tone="error">{error}</Notice></div> : null}
+
+      <Section title="Model for assistant tasks">
+        <Row
+          label="Task provider & account"
+          description="Which subscription, provider, or API endpoint the assistant uses to run background tasks and research. Follow project uses whichever model the open thread or project uses."
+        >
+          <Pick
+            wrap
+            value={taskKey}
+            options={taskProviderOptions}
+            onChange={handleTaskProviderChange}
+          />
+        </Row>
+        {taskKey !== "project" ? (
+          <Row
+            label="Task model"
+            description="Which model the assistant uses to run autonomous tasks and research."
+          >
+            <ModelPick
+              full
+              scope={taskScope}
+              value={p.model?.modelId ?? null}
+              museDefault={false}
+              onChange={(modelId) => {
+                const providerId = taskScope.providerId ?? "muse";
+                const accountId = taskScope.accountId ?? null;
+                void save({ model: { providerId, accountId, modelId } });
+              }}
+              onTyped={async (modelId) => {
+                const providerId = taskScope.providerId ?? "muse";
+                const accountId = taskScope.accountId ?? null;
+                await save({ model: { providerId, accountId, modelId } });
+                return true;
+              }}
+            />
+          </Row>
+        ) : null}
+      </Section>
+
       <Goals bump={props.bump} changed={props.changed} />
 
       <Section title="What it may do on its own">

@@ -35,6 +35,9 @@ const OTHER_PROVIDER_PRICES: Record<string, TokenPrice> = {
   "gpt-5.3-codex": { input: 1.75, output: 14, cached: 0.175, currency: USD },
   "gpt-5-mini": { input: 0.25, output: 2, cached: 0.025, currency: USD },
   "o3": { input: 2, output: 8, cached: 0.5, currency: USD },
+  "claude-opus-5-5": { input: 5, output: 25, cached: 0.5, currency: USD },
+  "claude-sonnet-5-5": { input: 3, output: 15, cached: 0.3, currency: USD },
+  "claude-haiku-5-5": { input: 1, output: 5, cached: 0.1, currency: USD },
   "claude-opus-4-6": { input: 5, output: 25, cached: 0.5, currency: USD },
   "claude-sonnet-4-6": { input: 3, output: 15, cached: 0.3, currency: USD },
   "claude-haiku-4-5": { input: 1, output: 5, cached: 0.1, currency: USD },
@@ -75,17 +78,22 @@ export function listedPrice(modelId: string | null): TokenPrice | null {
   return family ? (PRICES[family] as TokenPrice) : null;
 }
 
-/** Priced models Meta lists as API only: they stay in the table for old calls but are not served in Muse Code. */
-const NOT_IN_MUSE_CODE: ReadonlySet<string> = new Set(["muse-spark-1.1"]);
+/** All models served in Muse Code's catalog, newest first and without contributor tiers. */
+const PUBLISHED_MUSE_MODELS = [
+  "muse-wonder-1.0",
+  "muse-wonder-full-1.0",
+  "muse-ember-1.0",
+  "muse-spark-1.3",
+  "muse-spark-1.2",
+] as const;
 
 /**
- * The model ids Meta publishes a price for and serves in Muse Code, newest first and without contributor tiers. The
- * picker offers these when Muse sends only a limited list of its own, so a model the list lacks can still be tried.
+ * The model ids Meta serves in Muse Code, newest first and without contributor tiers. The picker offers these when
+ * Muse sends only a limited built-in list of its own, so any Muse Code model (including subscription-only tiers like
+ * Wonder Full and Ember) can still be selected in one click.
  */
 export function publishedModelIds(): string[] {
-  return Object.keys(PRICES)
-    .filter((id) => !/contributor/i.test(id) && !NOT_IN_MUSE_CODE.has(id))
-    .reverse();
+  return [...PUBLISHED_MUSE_MODELS];
 }
 
 /**

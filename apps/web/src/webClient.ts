@@ -431,15 +431,16 @@ export class WebAncillaClient implements AncillaClient {
     await call("POST", "/api/user-input/clarify", { sessionId, userInputId, content });
   }
 
-  async listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelOption[]> {
-    return (await this.listModelCatalog(sessionId, accountId, providerId)).models;
+  async listModels(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }): Promise<ModelOption[]> {
+    return (await this.listModelCatalog(sessionId, accountId, providerId, options)).models;
   }
 
-  async listModelCatalog(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null): Promise<ModelCatalog> {
+  async listModelCatalog(sessionId?: string, accountId?: string | null, providerId?: ProviderId | null, options?: { refresh?: boolean }): Promise<ModelCatalog> {
     const query = [
       sessionId ? `sessionId=${enc(sessionId)}` : "",
       accountId ? `accountId=${enc(accountId)}` : "",
       providerId ? `providerId=${enc(providerId)}` : "",
+      options?.refresh ? "refresh=1" : "",
     ]
       .filter(Boolean)
       .join("&");
@@ -522,6 +523,19 @@ export class WebAncillaClient implements AncillaClient {
   async providerLoginProgress(providerId: ProviderId, loginId: string, accountId: string | null = null): Promise<AccountLoginProgress> {
     const query = [`loginId=${enc(loginId)}`, accountId ? `accountId=${enc(accountId)}` : ""].filter(Boolean).join("&");
     return call<AccountLoginProgress>("GET", `/api/providers/${enc(providerId)}/login?${query}`);
+  }
+
+  async submitProviderLoginCode(
+    providerId: ProviderId,
+    loginId: string,
+    code: string,
+    accountId: string | null = null,
+  ): Promise<AccountLoginProgress> {
+    return call<AccountLoginProgress>("POST", `/api/providers/${enc(providerId)}/login/code`, {
+      loginId,
+      code,
+      ...(accountId ? { accountId } : {}),
+    });
   }
 
   async cancelProviderLogin(providerId: ProviderId, loginId: string, accountId: string | null = null): Promise<void> {
