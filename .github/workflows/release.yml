@@ -41,9 +41,9 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.28.0**
-    - **Multi-subscription harnesses, ACP agents, Direct APIs and live model catalogs.** Run threads across Meta's Muse Code (`muse`), OpenAI Codex (`codex`), Anthropic Claude Code (`claude`), Google Gemini CLI (`gemini`), GitHub Copilot CLI (`copilot`), Kimi, Qwen, OpenCode, custom Agent Client Protocol (`acp`) agents, and Direct API / local servers (OpenRouter, Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM), with isolated multi-account profiles, ambient API-key stripping, live subscription model and reasoning-effort discovery, and instant post-login catalog refresh.
-    - **Concurrent background tasks during live voice calls, plus resilient Browser sessions.** Delegate up to three multi-step background tasks (`delegate_task`) while continuing to talk freely without spoken barge-in cancelling running work, and keep the integrated Browser panel connected across ordered browser fallbacks and WebSocket reconnects.
+    **New in 0.28.1**
+    - **Independent model selection across Chats, Assistant tasks, and Voice.** Pick separate providers, accounts, and models for **New threads** / Composer chats, **Assistant** background tasks, and **Voice** calls—with per-provider chat defaults, searchable model pickers, all five published Muse Code models (`muse-wonder-1.0`, `muse-wonder-full-1.0`, `muse-ember-1.0`, `muse-spark-1.3`, `muse-spark-1.2`), and live force-refresh across scopes.
+    - **Reliable subscription CLI sign-in and WSL binary discovery.** Preserves full OAuth query URLs during Claude Code, Codex, Copilot, and ACP sign-ins without truncating `&` parameters or showing bogus `?code=true` badges, adds inline authorization-code pasting right inside the sign-in modal with instant retry feedback, keeps `codex login` callback servers alive until browser sign-in finishes, discovers user-installed WSL CLIs in `~/.local/bin` and `~/.nvm`, and upgrades unauthenticated catalogs immediately upon login.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 

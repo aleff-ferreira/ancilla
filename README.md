@@ -18,8 +18,8 @@ Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.28.0:** multi-subscription harnesses (`muse`, `codex`, `claude`, `gemini`, `copilot`, `kimi`, `qwen`, `opencode`, custom `acp` agents, and Direct API / local model servers) with isolated multi-account profiles, live native subscription model and reasoning-effort discovery, instant post-login catalog refresh, concurrent background task delegation during live voice calls, and resilient Browser fallback and reconnect recovery.
-> [Read the release notes](docs/CHANGELOG.md#0280).
+> **New in 0.28.1:** independent provider, account, and model selection across Chats / New threads, Assistant tasks, and Voice calls (with per-provider defaults, searchable catalogs, and all five published Muse Code models), plus full OAuth URL preservation, in-modal authorization-code pasting for Claude Code, persistent callback sign-in for Codex, and `~/.local/bin` / `~/.nvm` WSL CLI discovery.
+> [Read the release notes](docs/CHANGELOG.md#0281).
 
 > **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
 > supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is

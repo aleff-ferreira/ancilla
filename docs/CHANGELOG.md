@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.28.1
+
+### New
+
+- **Independent provider, account, and model selection for Chats, Assistant tasks, and Voice.** Choose separate subscriptions, named profiles, Direct API endpoints, and models for **New threads** and Composer chats, **Assistant** background task execution (`profile.model`), and live **Voice** calls (`brain.kind = "provider"`), without changing running threads or tying your assistant's model to your chat default. New-thread settings now remember a default model per provider (`providerDefaultModels`), filter large catalogs (`>10` models) with an instant search box, wrap segmented model pills cleanly at any zoom level, include all five published Muse Code models (`muse-wonder-1.0`, `muse-wonder-full-1.0`, `muse-ember-1.0`, `muse-spark-1.3`, `muse-spark-1.2`), and offer one-click sign-in directly inside settings and composer pickers.
+- **In-modal authorization-code sign-in for interactive CLI OAuth flows.** When an official CLI such as Claude Code prompts for an authorization code after browser approval (`POST /api/providers/:id/login/code`), the sign-in dialog now displays the full copyable OAuth link alongside an **Authorization code from browser** input that pipes your code over `stdin`, surfaces mistyped-code diagnostics immediately while keeping the session open for retry, and refreshes your live subscription catalog as soon as sign-in completes.
+
+### Fixed
+
+- **CLI OAuth URL truncation, `?code=true` false device codes, and premature callback server shutdown.** Subscription sign-in parsing (`parseProviderLoginOutput`) now preserves full `https://` query strings (`&client_id=...&state=...`) instead of stopping at `&` or mistaking `?code=true` for a verification code, sets `BROWSER=/bin/true` (forwarded via `WSLENV`) on WSL, headless POSIX, and remote servers so `xdg-open` / `cmd.exe /c start` never open truncated OAuth URLs, parses `codex login --device-auth` one-time codes with parenthetical expiry notes, and keeps `codex login`'s `localhost:1455` callback server alive until browser approval finishes.
+- **WSL user-local CLI discovery, uncached pre-login catalogs, and force-refreshed model lists.** Probing WSL and POSIX provider binaries now prepends `~/.local/bin`, `~/.npm-global/bin`, `~/.cargo/bin`, `/usr/local/bin`, and `~/.nvm/versions/node/*/bin` so user-installed CLIs resolve reliably under non-interactive shells; `ClaudeCliStreamHost` uses a 6-second cold-start handshake ceiling and never caches unauthenticated `bundledCatalog` responses; `GET /api/models?refresh=1` recycles idle hosts or probes a fresh one-shot host; and `NewThread` hides the Meta Muse sign-in card whenever another provider owns the project's default.
+
 ## 0.28.0
 
 ### New
