@@ -437,6 +437,7 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   const voiceProviderOptions = useMemo(
     () =>
       buildProviderAccountOptions(accounts, providers, {
+        includeFollowAssistant: true,
         includeCustom: true,
         includeNone: true,
         customLabel: "Custom endpoint",
@@ -445,6 +446,7 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
   );
 
   const voiceKey = useMemo(() => {
+    if (brain.kind === "assistant") return "assistant";
     if (brain.kind === "none") return "none";
     if (brain.kind === "openai" || brain.kind === "anthropic" || brain.kind === "google") return "custom";
     if (brain.kind === "muse") return `muse::${brain.accountId ?? ""}`;
@@ -501,7 +503,9 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
 
   const choose = (key: string) => {
     setTest(null);
-    if (key === "none") {
+    if (key === "assistant") {
+      void props.save({ brain: { kind: "assistant" } });
+    } else if (key === "none") {
       void props.save({ brain: { kind: "none" } });
     } else if (key === "custom") {
       const preset = PRESETS.find((p) => p.id === "openai") ?? (PRESETS[0] as (typeof PRESETS)[number]);
@@ -571,6 +575,12 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
           wrap
         />
       </Row>
+      {brain.kind === "assistant" ? (
+        <Row
+          label="Following assistant"
+          description={`Answering with ${props.status.brain.label}. Changing the model on the Assistant tab applies on the next turn, even during an open call.`}
+        />
+      ) : null}
       {brain.kind === "muse" || brain.kind === "provider" ? (
         <>
           <Row
@@ -578,15 +588,15 @@ function Brain(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
             description={
               brain.kind === "muse"
                 ? "Uses your Muse plan, one thread per conversation, so each answer takes as long as a Muse turn. A smaller model answers sooner, and another provider's model sooner still."
-                : "Uses your configured provider or saved API endpoint. The model applies from the next call."
+                : "Uses your configured provider or saved API endpoint. Applies on the next turn, even during an open call."
             }
           />
           <Row
             label="Model"
             description={
               brain.kind === "muse"
-                ? "Which of the models your Muse plan offers answers the call. It applies from the next call. “Muse default” leaves a conversation's thread on whatever it is on."
-                : "Which model answers the call. It applies from the next call."
+                ? "Which of the models your Muse plan offers answers the call. Applies on the next turn, even during an open call. “Muse default” uses Muse's default model."
+                : "Which model answers the call. Applies on the next turn, even during an open call."
             }
           >
             <ModelPick

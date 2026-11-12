@@ -75,6 +75,7 @@ import {
 } from "@ancilla/daemon";
 import { ApiAgentHost } from "./providers/apiAgentHost.js";
 import { extractLoginFailureMessage, parseProviderLoginOutput } from "./providers/loginParser.js";
+import { buildAuthenticatedMuseFallbackCatalog, isMuse1415OrNewer, readCachedMuseCatalog } from "./providers/museCatalog.js";
 import { ProfileIsolator, detectAmbientKeyOverrides } from "./providers/profiles.js";
 import { OpenAiCompatibleProvider, AnthropicProvider, GoogleGenAiProvider } from "./voice/brain.js";
 import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
@@ -338,6 +339,7 @@ interface ManagedHost {
   handle: HostHandle;
   manager: SessionManager;
   serverVersion: string | null;
+  museHome: string | null;
   startedAt: string;
 }
 
@@ -1124,8 +1126,11 @@ export class AncillaServer {
   private providerProbeCache: { at: number; probes: Record<string, ProviderBinaryProbe> } | null = null;
   private readonly providerUsageByKey = new Map<string, SubscriptionUsage>();
   private readonly staleAfterLoginHosts = new WeakSet<ManagedHost>();
+  private readonly hasCustomHostFactory: boolean;
+  private readonly museCliAuthCache = new Map<string, { at: number; ok: boolean }>();
 
   constructor(options: ServerOptions = {}) {
+    this.hasCustomHostFactory = options.hostFactory !== undefined;
     this.providerHostFactory = options.providerHostFactory;
     this.hostStartTimeoutMs = resolveHostStartTimeoutMs({
       option: options.hostStartTimeoutMs,
@@ -1281,8 +1286,13 @@ export class AncillaServer {
     return {
       available: () => {
         const voice = this.voiceFor();
-        const kind = voice.settings.get().brain.kind;
-        if (kind !== "openai" && kind !== "anthropic" && kind !== "google") return { ok: false };
+        const b = voice.effectiveSettings().brain;
+        const isApiBrain =
+          b.kind === "openai" ||
+          b.kind === "anthropic" ||
+          b.kind === "google" ||
+          (b.kind === "provider" && b.providerId === "api");
+        if (!isApiBrain) return { ok: false };
         const chosen = voice.browseBrain();
         return chosen.problem ? { ok: false } : { ok: true, label: chosen.brain.label };
       },
@@ -1301,8 +1311,13 @@ export class AncillaServer {
     return {
       available: () => {
         const voice = this.voiceFor();
-        const kind = voice.settings.get().brain.kind;
-        if (kind !== "openai" && kind !== "anthropic" && kind !== "google") return { ok: false };
+        const b = voice.effectiveSettings().brain;
+        const isApiBrain =
+          b.kind === "openai" ||
+          b.kind === "anthropic" ||
+          b.kind === "google" ||
+          (b.kind === "provider" && b.providerId === "api");
+        if (!isApiBrain) return { ok: false };
         const chosen = voice.browseBrain();
         return chosen.problem ? { ok: false } : { ok: true, label: chosen.brain.label };
       },
@@ -1654,6 +1669,21 @@ export class AncillaServer {
             return acct?.name ?? base;
           }
           return base;
+        },
+        projectDefault: (cwd) => {
+          if (!cwd) return null;
+          try {
+            const proj = this.store.projectForFolder(normalizeCwd(cwd));
+            if (!proj) return null;
+            const providerId = this.normalizeProviderId(proj.defaultProviderId);
+            return {
+              providerId,
+              accountId: providerId === "muse" ? null : (proj.defaultAccountId ?? null),
+              modelId: null,
+            };
+          } catch {
+            return null;
+          }
         },
         browse: this.browseRunnerFor(),
         // The accounts the call may read: only those connected and switched on are named to it.
@@ -3334,8 +3364,27 @@ export class AncillaServer {
       return true;
     }
     if (isAssistantPath(path)) {
-      const reply = await handleAssistant(this.assistantAccess, { method, path, query: url.searchParams, body: () => this.readBody(req) });
+      let parsedBody: Record<string, unknown> | null = null;
+      const reply = await handleAssistant(this.assistantAccess, {
+        method,
+        path,
+        query: url.searchParams,
+        body: async () => {
+          parsedBody = await this.readBody(req);
+          return parsedBody;
+        },
+      });
       if (reply) {
+        if (
+          method === "PATCH" &&
+          path === "/api/assistant/profile" &&
+          reply.status >= 200 &&
+          reply.status < 300 &&
+          parsedBody !== null &&
+          "model" in parsedBody
+        ) {
+          this.syncVoiceToAssistantModel();
+        }
         this.sendAssistant(res, reply);
         return true;
       }
@@ -3896,7 +3945,7 @@ export class AncillaServer {
       const providerId: ProviderId = providerParam ? providerParam : "muse";
       if (sessionId) {
         const host = await this.hostForSession(sessionId);
-        const listed = await host.manager.listModels(sessionId);
+        const listed = await this.listHostModels(host, sessionId);
         if (refresh && asRecord(listed)?.["source"] === "bundledCatalog") {
           const sess = this.store.findSession(sessionId)?.session;
           const sessProvider = this.normalizeProviderId(sess?.providerId);
@@ -4701,7 +4750,10 @@ export class AncillaServer {
       return { selection: model, listed: null, source: null };
     }
     try {
-      const result = asRecord(await manager.listModels(sessionId));
+      const managed = [...this.hosts.values()].find((h) => h.manager === manager) ?? null;
+      const result = asRecord(
+        managed ? await this.listHostModels(managed, sessionId) : await manager.listModels(sessionId),
+      );
       const source = str(result?.["source"]);
       const rows = (Array.isArray(result?.["models"]) ? result["models"] : []).map(asRecord);
       if (rows.length === 0) {
@@ -6405,7 +6457,8 @@ export class AncillaServer {
     if (!reportsProtocolErrors) {
       this.log(`host ${key} cannot report protocol errors; dropped frames stay invisible`);
     }
-    const serverInfo = asRecord(asRecord(started?.initializeResult)?.["serverInfo"]);
+    const initRec = asRecord(started?.initializeResult);
+    const serverInfo = asRecord(initRec?.["serverInfo"]);
     const managed: ManagedHost = {
       quotaCacheScope,
       quotaAccountGeneration,
@@ -6416,6 +6469,7 @@ export class AncillaServer {
       handle,
       manager,
       serverVersion: serverInfo ? str(serverInfo["version"]) : null,
+      museHome: str(initRec?.["museHome"]),
       startedAt: nowIso(),
     };
     handle.onExit?.((exit) => this.hostExited(managed, exit));
@@ -8013,6 +8067,99 @@ export class AncillaServer {
     return true;
   }
 
+  private syncVoiceToAssistantModel(): void {
+    try {
+      const hasPersistedVoice =
+        this.options.dataDir !== ":memory:" && existsSync(join(this.options.dataDir, "voice.json"));
+      if (!this.voiceService && !hasPersistedVoice) return;
+      const voice = this.voiceFor();
+      const kind = voice.settings.get().brain.kind;
+      if (kind === "muse" || kind === "provider") {
+        voice.updateSettings({ brain: { kind: "assistant" } });
+      }
+    } catch {
+      // Best-effort synchronization when updating the assistant model preference.
+    }
+  }
+
+  private async isMuseAccountAuthenticated(managed: ManagedHost): Promise<boolean> {
+    if (managed.quotaCacheScope !== null) return true;
+    const cacheKey = managed.accountId ?? "__default__";
+    const cached = this.museCliAuthCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && now - cached.at < 60_000) return cached.ok;
+
+    let ok = false;
+    try {
+      if (managed.accountId !== null) {
+        const profile = await this.aonia.getProfile(managed.accountId).catch(() => null);
+        if (profile) {
+          const id = await this.aonia.identityOf(profile);
+          ok = id.hasLogin === true;
+        }
+      } else {
+        const id = await this.defaultLoginIdentity();
+        if (id.hasLogin === true) {
+          ok = true;
+        } else if (id.hasLogin === null) {
+          const plan = await this.planMuseExec(["usage", "--json"], null);
+          const res = await this.options.exec(plan.command, plan.args, {
+            ...(plan.env ? { env: plan.env } : {}),
+            timeoutMs: 4_000,
+          });
+          ok = res.exitCode === 0 && !res.timedOut;
+        }
+      }
+    } catch {
+      ok = false;
+    }
+    this.museCliAuthCache.set(cacheKey, { at: now, ok });
+    return ok;
+  }
+
+  private async listHostModels(managed: ManagedHost, sessionId?: string): Promise<unknown> {
+    const raw = await managed.manager.listModels(sessionId);
+    if (managed.providerId !== "muse") return raw;
+    const rec = asRecord(raw);
+    if (!rec || rec["source"] !== "bundledCatalog" || !Array.isArray(rec["models"]) || rec["models"].length > 0) {
+      return raw;
+    }
+    const activeModelId = sessionId ? (this.store.findSession(sessionId)?.session.modelId ?? null) : null;
+    const providerId = str(rec["providerId"]) ?? "meta";
+    const profileId = str(rec["profileId"]);
+
+    if (managed.museHome) {
+      let modelCatalogDir = join(managed.museHome, "model-catalog");
+      try {
+        const remoteDir = `${managed.museHome.replace(/[\\/]+$/, "")}/model-catalog`;
+        modelCatalogDir = resolveUserPath(remoteDir, await this.pathContext(managed.museHome)).local;
+      } catch {
+        // Fall back to direct path join when museHome is already a local path.
+      }
+      const enriched = await readCachedMuseCatalog({
+        modelCatalogDir,
+        providerId,
+        profileId,
+        activeModelId,
+      });
+      if (enriched) return enriched;
+    }
+
+    if (
+      !this.hasCustomHostFactory &&
+      isMuse1415OrNewer(managed.serverVersion) &&
+      (await this.isMuseAccountAuthenticated(managed))
+    ) {
+      return buildAuthenticatedMuseFallbackCatalog({
+        providerId,
+        profileId,
+        activeModelId,
+      });
+    }
+
+    return raw;
+  }
+
   private async onLoginCompleted(providerId: ProviderId, accountId: string | null): Promise<void> {
     if (this.closed) {
       return;
@@ -8020,6 +8167,7 @@ export class AncillaServer {
     this.providerProbeCache = null;
     if (providerId === "muse") {
       this.quotaScopes.delete(accountId);
+      this.museCliAuthCache.delete(accountId ?? "__default__");
     }
     const matching = [...this.hosts.values()].filter(
       (h) => h.providerId === providerId && h.accountId === accountId,
@@ -8052,7 +8200,7 @@ export class AncillaServer {
         : await this.spawnProviderHost(tempKey, "", accountId, providerId, token);
     this.hosts.delete(tempKey);
     try {
-      const models = await managed.manager.listModels(undefined);
+      const models = await this.listHostModels(managed, undefined);
       return { models, hostVersion: managed.serverVersion };
     } finally {
       await this.closeHost(managed);
@@ -8079,17 +8227,20 @@ export class AncillaServer {
     };
 
     if (providerId === "muse") {
+      if (force) {
+        this.museCliAuthCache.delete(accountId ?? "__default__");
+      }
       if (!force) {
         const candidate = accountId ? await this.runningHostOf(accountId, "muse") : null;
         if (candidate && !this.staleAfterLoginHosts.has(candidate)) {
-          return { models: await candidate.manager.listModels(undefined), hostVersion: candidate.serverVersion };
+          return { models: await this.listHostModels(candidate, undefined), hostVersion: candidate.serverVersion };
         }
       }
       if ((await recycleStaleListingHost()) === "busy") {
         return this.oneShotListModels("muse", accountId);
       }
       const host = await this.hostFor("", accountId, "muse");
-      return { models: await host.manager.listModels(undefined), hostVersion: host.serverVersion };
+      return { models: await this.listHostModels(host, undefined), hostVersion: host.serverVersion };
     }
 
     if (providerId === "api") {
@@ -8403,6 +8554,7 @@ export class AncillaServer {
       handle,
       manager,
       serverVersion: serverInfo ? str(serverInfo["version"]) : null,
+      museHome: null,
       startedAt: nowIso(),
     };
     handle.onExit?.((exit) => this.hostExited(managed, exit));

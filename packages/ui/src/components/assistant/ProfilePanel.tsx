@@ -5,6 +5,7 @@ import { providerBadgeName, type ModelsScope } from "../../model/models.js";
 import type { AssistantAutonomy, AssistantGoalView, AssistantProfileView, ProviderId } from "../../types.js";
 import { Button, Toggle } from "../ui/primitives.js";
 import { ModelPick, Num, Pick, Row, Section, buildProviderAccountOptions } from "../settings/SettingsPage.js";
+import { forgetVoiceStatus } from "../voice/talk.js";
 import { useAssistantCall, useAssistantData } from "./api.js";
 import { Chip, Notice } from "./parts.js";
 
@@ -75,6 +76,9 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
     setError(null);
     try {
       await call("PATCH", "/profile", { ...patch, expectedUpdatedAt: p.updatedAt });
+      if ("model" in patch) {
+        forgetVoiceStatus();
+      }
       props.changed();
     } catch (e) {
       setError(errorMessage(e));
@@ -117,7 +121,7 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
       <Section title="Model for assistant tasks">
         <Row
           label="Task provider & account"
-          description="Which subscription, provider, or API endpoint the assistant uses to run background tasks and research. Follow project uses whichever model the open thread or project uses."
+          description="Which subscription, provider, or API endpoint powers the assistant across voice calls, background tasks, and research. Follow project uses whichever model the open thread or project uses."
         >
           <Pick
             wrap
@@ -129,7 +133,7 @@ export function ProfilePanel(props: { profile: AssistantProfileView; changed: ()
         {taskKey !== "project" ? (
           <Row
             label="Task model"
-            description="Which model the assistant uses to run autonomous tasks and research."
+            description="Which model powers the assistant across voice calls, autonomous tasks, and research. Changes take effect on the next turn, even during an open call."
           >
             <ModelPick
               full

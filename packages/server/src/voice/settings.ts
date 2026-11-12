@@ -12,6 +12,8 @@ import { ValidationError } from "../assistant/profile.js";
 export type CallModeSetting = "hands-free" | "push-to-talk";
 
 export type BrainSetting =
+  /** Follows whichever provider, account, and model are configured on the Assistant profile. */
+  | { kind: "assistant" }
   /**
    * Muse, through a thread: works with a Muse subscription and no key, at the speed of a Muse turn. `model` is the Muse model
    * a new thread starts on and a thread of the conversation is put on; null leaves it to Muse's own choice.
@@ -123,6 +125,7 @@ function optionalAccountId(value: unknown, field = "brain.accountId"): string | 
 /** `current` is the brain that is set now, for a change that says nothing about a model and must not undo the one chosen. */
 function parseBrain(value: unknown, current: BrainSetting | null = null): BrainSetting {
   if (!isObject(value)) throw new ValidationError("brain", "brain must be an object");
+  if (value["kind"] === "assistant") return { kind: "assistant" };
   if (value["kind"] === "muse") {
     const accountId = "accountId" in value
       ? optionalAccountId(value["accountId"])
@@ -161,7 +164,7 @@ function parseBrain(value: unknown, current: BrainSetting | null = null): BrainS
     if (apiKeyEnv !== null && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(apiKeyEnv)) throw new ValidationError("brain.apiKeyEnv", "brain.apiKeyEnv must be the name of an environment variable");
     return { kind, baseUrl, model, local: value["local"] === true, label: optionalText(value["label"], "brain.label", 80), apiKeyEnv };
   }
-  throw new ValidationError("brain.kind", "brain.kind must be muse, provider, openai, anthropic, google or none");
+  throw new ValidationError("brain.kind", "brain.kind must be assistant, muse, provider, openai, anthropic, google or none");
 }
 
 function parseSpeech(value: unknown): SpeechSetting {

@@ -60,6 +60,8 @@ export interface ChosenBrain {
   brain: BrainProvider;
   /** Why it is not the model the settings ask for, or null when it is. */
   problem: string | null;
+  /** Underlying CLI session brain when backed by Muse or another CLI provider, allowing live in-call model switches. */
+  thread?: MuseThreadBrain;
 }
 
 export const NO_BRAIN_CONTEXT: BrainContext = { project: null, name: "Assistant", museSession: null, rememberMuseSession: () => undefined };
@@ -101,7 +103,7 @@ function makeApiAccountBrain(
 }
 
 export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: BrainFactoryDeps): ChosenBrain {
-  const choice = settings.brain;
+  const choice: BrainSetting = settings.brain.kind === "assistant" ? { kind: "muse", model: null } : settings.brain;
   if (choice.kind === "openai") {
     const apiKey = deps.keyFor(choice);
     // A server that cannot take tools (a model on this computer often cannot) is given them through text instead.
@@ -147,7 +149,7 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       onSession: context.rememberMuseSession,
       model: choice.model,
     });
-    return { brain: withTextTools(thread), problem: null };
+    return { brain: withTextTools(thread), problem: null, thread };
   }
   if (choice.kind === "provider") {
     if (choice.providerId === "api") {
@@ -183,7 +185,7 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       onSession: context.rememberMuseSession,
       model: choice.model,
     });
-    return { brain: withTextTools(thread), problem: null };
+    return { brain: withTextTools(thread), problem: null, thread };
   }
   return { brain: new StaticBrain("No model is set up for the voice yet. Open the voice settings and choose one."), problem: "No model is chosen." };
 }
@@ -206,7 +208,7 @@ export interface BrowseBrainDeps {
  * can read the person's files and the pages it reads are written by strangers.
  */
 export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps): ChosenBrain {
-  const choice = settings.brain;
+  const choice: BrainSetting = settings.brain.kind === "assistant" ? { kind: "muse", model: null } : settings.brain;
   if (choice.kind === "openai") {
     const apiKey = deps.keyFor(choice);
     const provider = new OpenAiCompatibleProvider({ baseUrl: choice.baseUrl, model: choice.model, apiKey, label: choice.label ?? choice.model, local: choice.local });

@@ -817,7 +817,9 @@ export function withTextTools(inner: BrainProvider): BrainProvider {
   if (inner.capabilities.tools) return inner;
   return {
     id: inner.id,
-    label: inner.label,
+    get label() {
+      return inner.label;
+    },
     capabilities: { ...inner.capabilities, tools: true },
     async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
       const filter = new TextToolFilter();

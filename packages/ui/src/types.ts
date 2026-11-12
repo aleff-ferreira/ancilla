@@ -1213,6 +1213,8 @@ export interface AssistantConnectorActivity {
 
 /** How the voice is set up; a key is never part of it. */
 export type VoiceBrainSetting =
+  /** Follows the provider, account, and model configured on the Assistant profile. */
+  | { kind: "assistant" }
   /** Through Muse; `model` is the Muse model that answers, or null for Muse's own choice. */
   | { kind: "muse"; model: string | null; accountId?: string | null }
   /** Through any configured CLI provider or saved API endpoint from `Settings -> Providers`. */

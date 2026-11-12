@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { AuthorizationHub } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner, type ResolvedApiAccount } from "./brains.js";
-import type { BrainProvider } from "./brain.js";
+import type { BrainProvider, BrainRequest } from "./brain.js";
 import type { MuseBrainHost } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
 import type { VoiceConnectors } from "./tools.js";
@@ -20,7 +20,17 @@ import type { ClientMessage, ServerMessage, TurnMetrics } from "./protocol.js";
 import { serialize } from "./protocol.js";
 import { systemScheduler, type Scheduler } from "./scheduler.js";
 import { VoiceSession } from "./session.js";
-import { VoiceSettingsStore, type VoiceSettingsView } from "./settings.js";
+import { VoiceSettingsStore, type BrainSetting, type VoiceSettings, type VoiceSettingsView } from "./settings.js";
+
+function cliScopeOf(brain: BrainSetting): { providerId: string; accountId: string | null; model: string | null } | null {
+  if (brain.kind === "muse") {
+    return { providerId: "muse", accountId: brain.accountId ?? null, model: brain.model ?? null };
+  }
+  if (brain.kind === "provider" && brain.providerId !== "api") {
+    return { providerId: brain.providerId, accountId: brain.accountId ?? null, model: brain.model ?? null };
+  }
+  return null;
+}
 
 /**
  * The voice as the server runs it: the models, which stay loaded between calls and are let go when nobody has called for
@@ -74,6 +84,8 @@ export interface VoiceServiceDeps {
   resolveApiAccount?: (accountId: string | null) => ResolvedApiAccount | null;
   /** Display name for a provider and optional account. */
   providerName?: (providerId: string, accountId: string | null) => string;
+  /** Default provider/account configured on a project folder when the assistant is set to Follow project. */
+  projectDefault?: (cwd: string | null) => { providerId: string; accountId: string | null; modelId: string | null } | null;
   /** The assistant's own browser, which the `browse` tool starts web tasks on; without it the tool is not offered. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
   /** The connected accounts, which the `use_connector` tool starts tasks on; without any the tool is not offered. */
@@ -186,14 +198,59 @@ export class VoiceService {
     return { runtimeDir, modelsDir: s.modelsDir ?? join(this.voiceDir(), "models") };
   }
 
+  /**
+   * Resolves the active voice settings against the Assistant profile's unified model preference whenever the voice brain is
+   * set to follow the assistant (`kind === "assistant"`) or left at its untouched default (`{ kind: "muse", model: null }`).
+   */
+  effectiveSettings(projectHint?: string | null): VoiceSettings {
+    const raw = this.settings.get();
+    if (
+      raw.brain.kind === "assistant" ||
+      (raw.brain.kind === "muse" && raw.brain.model === null && !raw.brain.accountId)
+    ) {
+      const pref = this.deps.assistant(false)?.store.getProfile().model ?? null;
+      const targetProject =
+        projectHint ?? raw.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
+      const resolved =
+        pref && pref.providerId !== null
+          ? pref
+          : (this.deps.projectDefault?.(targetProject) ?? null);
+      if (resolved && resolved.providerId !== null) {
+        if (resolved.providerId === "muse") {
+          return {
+            ...raw,
+            brain: resolved.accountId
+              ? { kind: "muse", model: resolved.modelId, accountId: resolved.accountId }
+              : { kind: "muse", model: resolved.modelId },
+          };
+        }
+        return {
+          ...raw,
+          brain: {
+            kind: "provider",
+            providerId: resolved.providerId,
+            accountId: resolved.accountId,
+            model: resolved.modelId,
+          },
+        };
+      }
+      if (raw.brain.kind === "assistant") {
+        return { ...raw, brain: { kind: "muse", model: null } };
+      }
+    }
+    return raw;
+  }
+
   status(): VoiceStatus {
     const layout = this.layout();
     const pack = inspectPack(layout);
     const settings = this.settings.view();
+    const project = settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
+    const effective = this.effectiveSettings(project);
     const chosen = makeBrain(
-      settings,
+      effective,
       {
-        project: settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null,
+        project,
         name: "Assistant",
         museSession: null,
         rememberMuseSession: () => undefined,
@@ -232,7 +289,7 @@ export class VoiceService {
 
   /** The model that browses for the assistant: the voice's own, used with the browser's tools only (see browser/agent.ts). */
   browseBrain(): ChosenBrain {
-    return makeBrowseBrain(this.settings.get(), {
+    return makeBrowseBrain(this.effectiveSettings(), {
       keyFor: (b) => this.settings.keyFor(b),
       museExec: this.deps.museExec ?? null,
       resolveApiAccount: this.deps.resolveApiAccount,
@@ -243,7 +300,7 @@ export class VoiceService {
 
   /** What the model of a call is told about it. Used by the settings page's test as well. */
   brainFor(project: string | null) {
-    return makeBrain(this.settings.get(), { project, name: "Assistant", museSession: null, rememberMuseSession: () => undefined }, this.brainDeps());
+    return makeBrain(this.effectiveSettings(project), { project, name: "Assistant", museSession: null, rememberMuseSession: () => undefined }, this.brainDeps());
   }
 
   /** Applies a change from the page. Engines that were built with the old settings are rebuilt for the next call. */
@@ -398,7 +455,7 @@ export class VoiceService {
       assistant,
       conversations: store,
       conversationId: conversation,
-      settings: () => this.settings.get(),
+      settings: () => this.effectiveSettings(project),
       hub: this.hub,
       project: () => project,
       harness: this.deps.harness ?? null,
@@ -408,17 +465,92 @@ export class VoiceService {
       ...(this.deps.authorizations ? { authorizations: this.deps.authorizations } : {}),
       log: (line) => this.deps.log(line),
     });
-    const chosen = makeBrain(
-      settings,
+    let activeSettings = this.effectiveSettings(project);
+    let activeSig = JSON.stringify(activeSettings.brain);
+    let activeChosen = makeBrain(
+      activeSettings,
       { project, name: assistant.store.getProfile().name, museSession: store.museSession(conversation), rememberMuseSession: (sessionId) => store.setMuseSession(conversation, sessionId) },
       this.brainDeps(),
     );
+    let pendingHttpSwitchLabel: string | null = null;
+    const self = this;
+    const liveBrain: BrainProvider = {
+      get id() {
+        return activeChosen.brain.id;
+      },
+      get label() {
+        return activeChosen.brain.label;
+      },
+      get capabilities() {
+        return activeChosen.brain.capabilities;
+      },
+      stream: async function* (request: BrainRequest) {
+        const lastMsg = request.messages[request.messages.length - 1];
+        const isNewTurn = !lastMsg || lastMsg.role !== "tool";
+        if (isNewTurn) {
+          const latestSettings = self.effectiveSettings(project);
+          const latestSig = JSON.stringify(latestSettings.brain);
+          if (latestSig !== activeSig) {
+            const prevCli = cliScopeOf(activeSettings.brain);
+            const nextCli = cliScopeOf(latestSettings.brain);
+            if (
+              prevCli &&
+              nextCli &&
+              prevCli.providerId === nextCli.providerId &&
+              prevCli.accountId === nextCli.accountId &&
+              activeChosen.thread
+            ) {
+              activeChosen.thread.switchModel(nextCli.model);
+              activeSettings = latestSettings;
+              activeSig = latestSig;
+              self.deps.log(`voice: switched live call model on ${nextCli.providerId} to ${nextCli.model ?? "default"}`);
+            } else {
+              const nextChosen = makeBrain(
+                latestSettings,
+                {
+                  project,
+                  name: assistant.store.getProfile().name,
+                  museSession: null,
+                  rememberMuseSession: (sessionId) => store.setMuseSession(conversation, sessionId),
+                },
+                self.brainDeps(),
+              );
+              activeChosen = nextChosen;
+              activeSettings = latestSettings;
+              activeSig = latestSig;
+              if (nextChosen.thread) {
+                nextChosen.thread.announceInitialSwitch(nextChosen.brain.label);
+              } else {
+                pendingHttpSwitchLabel = nextChosen.brain.label;
+              }
+              if (nextChosen.problem) {
+                socket.sendText(serialize({ type: "notice", level: "warn", text: nextChosen.problem }));
+              }
+              self.deps.log(`voice: switched live call brain to ${nextChosen.brain.label}`);
+            }
+          }
+        }
+        let effectiveRequest = request;
+        if (pendingHttpSwitchLabel !== null && isNewTurn) {
+          const switchedTo = pendingHttpSwitchLabel;
+          pendingHttpSwitchLabel = null;
+          const note = `(System note: The user just switched your active model for this conversation to ${switchedTo}. Answer from your current model identity and do not repeat any previous model name mentioned in earlier turns.)`;
+          effectiveRequest = {
+            ...request,
+            messages: request.messages.map((m, idx) =>
+              idx === 0 && m.role === "system" ? { ...m, content: `${m.content}\n\n${note}` } : m,
+            ),
+          };
+        }
+        yield* activeChosen.brain.stream(effectiveRequest);
+      },
+    };
     const id = `call-${randomUUID().slice(0, 8)}`;
     // The person can hang up from the screen ("end"), which closes the session from inside: the socket and the service follow.
     let opened: ActiveCall | null = null;
     const session = new VoiceSession({
       engines: set.engines,
-      brain: chosen.brain,
+      brain: liveBrain,
       host,
       scheduler: this.scheduler,
       send: (message: ServerMessage) => {
@@ -442,7 +574,7 @@ export class VoiceService {
       await this.endCall(call, "the call could not start");
       throw error;
     }
-    if (chosen.problem) socket.sendText(serialize({ type: "notice", level: "warn", text: chosen.problem }));
+    if (activeChosen.problem) socket.sendText(serialize({ type: "notice", level: "warn", text: activeChosen.problem }));
     return {
       id,
       onAudio: (pcm) => session.onAudio(pcm),

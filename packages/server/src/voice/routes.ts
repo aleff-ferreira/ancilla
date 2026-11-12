@@ -86,7 +86,7 @@ async function route(service: VoiceService, req: AssistantRequest): Promise<Assi
   }
 
   if (method === "POST" && sub === "/brain/test") {
-    const settings = service.settings.get();
+    const settings = service.effectiveSettings();
     const chosen = service.brainFor(null);
     if (settings.brain.kind === "muse" || (settings.brain.kind === "provider" && settings.brain.providerId !== "api")) {
       const who = chosen.brain.label || "Muse";

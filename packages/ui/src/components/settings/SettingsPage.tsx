@@ -1,4 +1,5 @@
 import { ArrowClockwiseIcon, ArrowLeftIcon, ArrowLineDownIcon, ArrowsClockwiseIcon, MinusIcon, PencilSimpleIcon, PlusIcon, ScrollIcon, SignInIcon, TrashIcon, WarningIcon } from "../ui/icons.js";
+import { forgetVoiceStatus } from "../voice/talk.js";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useApp, useController, useNow } from "../../app/context.js";
 import { useOverlayDragProps } from "../../app/frame.js";
@@ -591,6 +592,7 @@ export function buildProviderAccountOptions(
   accounts: readonly AccountView[] | null,
   providers: readonly ProviderView[] | null,
   cfg: {
+    includeFollowAssistant?: boolean;
     includeFollowProject?: boolean;
     includeCustom?: boolean;
     includeNone?: boolean;
@@ -599,6 +601,14 @@ export function buildProviderAccountOptions(
   } = {},
 ): ProviderAccountOption[] {
   const list: ProviderAccountOption[] = [];
+
+  if (cfg.includeFollowAssistant) {
+    list.push({
+      value: "assistant",
+      label: "Follow assistant",
+      hint: "Uses the same provider and model configured for the assistant",
+    });
+  }
 
   if (cfg.includeFollowProject) {
     list.push({
@@ -789,6 +799,13 @@ export function SettingsPage() {
         expectedUpdatedAt: assistantProfile?.updatedAt,
       });
       setAssistantProfile((prev) => (prev ? { ...prev, model } : null));
+      setLocalVoiceKey(null);
+      forgetVoiceStatus();
+      setVoiceSettings((prev) =>
+        prev && (prev.brain.kind === "muse" || prev.brain.kind === "provider")
+          ? { ...prev, brain: { kind: "assistant" } }
+          : prev,
+      );
       if (typeof controller.loadAssistantGlance === "function") {
         void controller.loadAssistantGlance();
       }
@@ -813,25 +830,36 @@ export function SettingsPage() {
   };
 
   const voiceProviderOptions = useMemo(
-    () => buildProviderAccountOptions(accounts, providers, { includeCustom: true, includeNone: true }),
+    () =>
+      buildProviderAccountOptions(accounts, providers, {
+        includeFollowAssistant: true,
+        includeCustom: true,
+        includeNone: true,
+      }),
     [accounts, providers],
   );
 
   const currentVoiceKey = useMemo(() => {
     const b = voiceSettings?.brain;
-    if (!b) return "muse::";
+    if (!b) return "assistant";
+    if (b.kind === "assistant") return "assistant";
     if (b.kind === "none") return "none";
     if (b.kind === "openai" || b.kind === "anthropic" || b.kind === "google") return "custom";
-    if (b.kind === "muse") return `muse::${b.accountId ?? ""}`;
+    if (b.kind === "muse") {
+      if (b.model === null && !b.accountId && assistantProfile?.model?.providerId != null) {
+        return "assistant";
+      }
+      return `muse::${b.accountId ?? ""}`;
+    }
     if (b.kind === "provider") return `${b.providerId}::${b.accountId ?? ""}`;
-    return "muse::";
-  }, [voiceSettings?.brain]);
+    return "assistant";
+  }, [voiceSettings?.brain, assistantProfile?.model?.providerId]);
 
   const [localVoiceKey, setLocalVoiceKey] = useState<string | null>(null);
   const voiceKey = localVoiceKey ?? currentVoiceKey;
 
   const voiceScope = useMemo<ModelsScope>(() => {
-    if (voiceKey === "none" || voiceKey === "custom") return {};
+    if (voiceKey === "none" || voiceKey === "custom" || voiceKey === "assistant") return {};
     const sep = voiceKey.indexOf("::");
     const providerId = (sep >= 0 ? voiceKey.slice(0, sep) : "muse") as ProviderId;
     const accountId = sep >= 0 ? voiceKey.slice(sep + 2) || null : null;
@@ -858,6 +886,7 @@ export function SettingsPage() {
     }
     try {
       await controller.voice("PATCH", "/settings", { brain });
+      forgetVoiceStatus();
       setVoiceSettings((prev) => (prev ? { ...prev, brain } : null));
     } catch {
       // error handled
@@ -868,7 +897,9 @@ export function SettingsPage() {
     setLocalVoiceKey(key);
     if (!controller.hasVoice || typeof controller.voice !== "function") return;
     let nextBrain: VoiceBrainSetting;
-    if (key === "none") {
+    if (key === "assistant") {
+      nextBrain = { kind: "assistant" };
+    } else if (key === "none") {
       nextBrain = { kind: "none" };
     } else if (key === "custom") {
       nextBrain = {
@@ -891,6 +922,7 @@ export function SettingsPage() {
     }
     try {
       await controller.voice("PATCH", "/settings", { brain: nextBrain });
+      forgetVoiceStatus();
       setVoiceSettings((prev) => (prev ? { ...prev, brain: nextBrain } : null));
     } catch {
       // error handled
@@ -1048,7 +1080,7 @@ export function SettingsPage() {
         <Section title="Assistant">
           <Row
             label="Task provider & account"
-            description="Which subscription, provider, or API endpoint the assistant uses to run background tasks and research. Follow project uses whichever model the open thread or project uses."
+            description="Which subscription, provider, or API endpoint powers the assistant across voice calls, background tasks, and research. Follow project uses whichever model the open thread or project uses."
           >
             <Pick
               value={taskKey}
@@ -1060,7 +1092,7 @@ export function SettingsPage() {
           {taskKey !== "project" ? (
             <Row
               label="Task model"
-              description="Which model the assistant uses to run autonomous tasks and research."
+              description="Which model powers the assistant across voice calls, autonomous tasks, and research. Changes take effect on the next turn, even during an open call."
             >
               <ModelPick
                 full
@@ -1087,7 +1119,7 @@ export function SettingsPage() {
             <>
               <Row
                 label="Voice & web provider"
-                description="Which subscription, CLI provider, or custom endpoint thinks of what to say during voice and web conversations."
+                description="Follow assistant uses the same model selected above for spoken calls and web tasks, or pick a separate fast voice-only override."
               >
                 <Pick
                   value={voiceKey}
@@ -1096,10 +1128,10 @@ export function SettingsPage() {
                   wrap
                 />
               </Row>
-              {voiceKey !== "none" && voiceKey !== "custom" ? (
+              {voiceKey !== "none" && voiceKey !== "custom" && voiceKey !== "assistant" ? (
                 <Row
                   label="Voice & web model"
-                  description="Which model thinks of what to say. Fast models feel best for audio turns."
+                  description="Which model thinks of what to say when overriding the assistant model. Applies on the next turn, even during an open call."
                 >
                   <ModelPick
                     full

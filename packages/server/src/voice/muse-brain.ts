@@ -113,9 +113,13 @@ function freshMessages(messages: readonly ChatMessage[]): ChatMessage[] {
 
 export class MuseThreadBrain implements BrainProvider {
   readonly id = "muse-thread";
-  readonly label: string;
   readonly capabilities: BrainCapabilities = { tools: false, speculative: false, local: false };
   private sessionId: string | null;
+  private model: string | null;
+  /** The model confirmed active on the underlying session after `startSession` or `setModel` succeeded. */
+  private confirmedModel: string | null;
+  /** One-time context note injected on the next turn after a mid-call model or provider switch. */
+  private switchedToModel: string | null = null;
   /** The rules of the call have been told to the thread. */
   private told = false;
   /** The thread was made for this call, so earlier turns of the conversation have to be told to it. */
@@ -129,15 +133,49 @@ export class MuseThreadBrain implements BrainProvider {
 
   constructor(private readonly options: MuseBrainOptions) {
     this.sessionId = options.sessionId ?? null;
+    this.model = options.model ?? null;
+    this.confirmedModel = this.sessionId === null ? this.model : null;
     this.fresh = this.sessionId === null;
-    this.modelSet = !options.model;
-    const who = options.providerLabel ?? "Muse";
-    this.label = options.model ? `${who} (${options.model})` : who;
+    this.modelSet = !this.model;
+  }
+
+  get label(): string {
+    const who = this.options.providerLabel ?? "Muse";
+    return this.model ? `${who} (${this.model})` : who;
+  }
+
+  /** Switches the active model of an open voice call without dropping the call. */
+  switchModel(nextModel: string | null): void {
+    const normalized = nextModel?.trim() ? nextModel.trim() : null;
+    if (normalized === this.model) return;
+    const who = this.options.providerLabel ?? "Muse";
+    if (normalized === null) {
+      this.model = null;
+      this.confirmedModel = null;
+      this.modelSet = true;
+      if (this.sessionId !== null) {
+        this.sessionId = null;
+        this.opened = false;
+        this.fresh = true;
+        this.told = false;
+      }
+      this.switchedToModel = `${who}'s default model`;
+      return;
+    }
+    this.model = normalized;
+    this.modelSet = false;
+    this.switchedToModel = `${who} (${normalized})`;
+  }
+
+  /** Marks a brand-new provider thread opened mid-call so its first turn knows a live switch just occurred. */
+  announceInitialSwitch(targetLabel: string): void {
+    this.switchedToModel = targetLabel;
   }
 
   /** The thread to talk in: the conversation's own, loaded and on the model chosen, or a new one when it cannot be used. */
   private async session(): Promise<string> {
-    const { host, model } = this.options;
+    const { host } = this.options;
+    const model = this.model;
     const who = this.options.providerLabel ?? "Muse";
     if (this.sessionId !== null && !this.opened) {
       // A thread the conversation already had is not loaded on a Muse host that started again since it was last used (the
@@ -169,6 +207,7 @@ export class MuseThreadBrain implements BrainProvider {
       this.opened = true;
       // A thread that began on the model is on it.
       this.modelSet = true;
+      this.confirmedModel = model;
       this.options.onSession?.(sessionId);
     }
     if (!this.modelSet && model) {
@@ -179,11 +218,16 @@ export class MuseThreadBrain implements BrainProvider {
       if (host.setModel) {
         try {
           await host.setModel(this.sessionId, model);
+          this.confirmedModel = model;
         } catch (error) {
           const why = (error instanceof Error ? error.message : String(error)).trim().replace(/[.\s]+$/, "");
           this.notice = `${who} would not put this thread on ${model}: ${why}. It answers on the model the thread already has.`;
+          this.model = this.confirmedModel;
+          this.switchedToModel = null;
           host.log(`voice: ${this.notice}`);
         }
+      } else {
+        this.confirmedModel = model;
       }
     }
     return this.sessionId;
@@ -196,7 +240,13 @@ export class MuseThreadBrain implements BrainProvider {
   private promptFor(messages: readonly ChatMessage[]): { text: string; shown: string } | null {
     const fresh = freshMessages(messages);
     if (fresh.length === 0) return null;
+    const who = this.options.providerLabel ?? "Muse";
     const parts: string[] = [];
+    if (this.switchedToModel !== null) {
+      parts.push(
+        `(System note: The user just switched your active model for this conversation to ${this.switchedToModel}. Answer from your current model identity and do not repeat any previous model name mentioned in earlier turns.)`,
+      );
+    }
     let shown = "";
     let startedBackgroundTask = false;
     for (const m of fresh) {
@@ -213,13 +263,14 @@ export class MuseThreadBrain implements BrainProvider {
       parts.push("(The background task is now managed independently in its own session. Give a brief spoken confirmation in one or two plain sentences and finish this turn immediately — do not read or edit project files for that task in this voice thread.)");
     }
     let text = parts.join("\n\n");
+    const activeIdentity = this.confirmedModel ? ` Active model: ${who} (${this.confirmedModel}).` : "";
     if (!this.told) {
       const system = messages.find((m) => m.role === "system");
       const earlier = this.fresh ? messages.slice(0, messages.length - fresh.length).filter((m) => m.role === "user" || m.role === "assistant") : [];
       const recap = earlier.length === 0 ? "" : `Earlier in this conversation:\n${earlier.slice(-12).map((m) => `${m.role === "user" ? "User" : "You"}: ${clip((m as { content: string }).content, 300)}`).join("\n")}\n\n`;
-      text = `${RULES}\n${system && system.role === "system" ? system.content : ""}\n\n${recap}${text}`;
+      text = `${RULES}${activeIdentity}\n${system && system.role === "system" ? system.content : ""}\n\n${recap}${text}`;
     } else {
-      text = `${REMINDER}\n${text}`;
+      text = `${REMINDER}${activeIdentity ? `\n(${activeIdentity.trim()})` : ""}\n${text}`;
     }
     return { text, shown };
   }
@@ -287,6 +338,7 @@ export class MuseThreadBrain implements BrainProvider {
         }
         turnId = ack.turnId;
         this.told = true;
+        this.switchedToModel = null;
       } catch (error) {
         yield { type: "error", message: `Muse did not take that: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
         return;
