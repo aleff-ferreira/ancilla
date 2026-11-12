@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.28.2
+
+### New
+
+- **Unified Assistant model routing (`Follow assistant`) with live mid-call switching.** Selecting a subscription, account, or model for your companion under **Assistant, Persona** or **Settings, Assistant** now governs live **Voice** calls, web browsing, background tasks, and research together (`brain.kind = "assistant"`), while keeping **New threads** and **Chat** thread model selection completely separate (with optional independent Voice overrides still available in **Settings, Voice**). Changing the assistant's model during an active voice call now switches the underlying CLI session in-place via `session/setModel` on the very next spoken turn—or transitions seamlessly across providers while carrying a conversation recap—without hanging up or losing context.
+
+### Fixed
+
+- **Muse 1.4.15+ empty `bundledCatalog` responses and false model warnings.** When `muse serve` on Muse 1.4.15+ answers `model/list` with `source: "bundledCatalog"` and `models: []`, Ancilla now enriches the catalog from Muse's non-secret `<museHome>/model-catalog/*.json` (`schema_version: 2`) cache when present or upgrades authenticated accounts (verified via `muse auth status`) to `source: "providerCatalog"` with `muse-wonder-1.0`, `muse-wonder-full-1.0`, `muse-ember-1.0`, `muse-spark-1.3`, and `muse-spark-1.2`, removing false *"Built-in model list"* and *"Not in Muse's list"* warnings across Settings, Assistant, Voice, and Composer pickers.
+
 ## 0.28.1
 
 ### New
