@@ -183,7 +183,21 @@ export class WorkspaceVoiceTools {
 
           if (action === "read") {
             if (!pathArg) return { ok: false, text: "Provide a relative file path to read." };
-            const file = await readProjectFile(proj.cwd, proj.displayCwd, pathArg);
+            let file: Awaited<ReturnType<typeof readProjectFile>>;
+            try {
+              file = await readProjectFile(proj.cwd, proj.displayCwd, pathArg);
+            } catch (err) {
+              if (err instanceof FileError && /not found|does not exist|no such file/i.test(err.message)) {
+                const base = pathArg.split(/[\\/]/).filter(Boolean).pop() ?? "";
+                const found = base.length >= 3 ? await searchProjectFiles(proj.cwd, base, 8) : [];
+                const exactBase = found.filter((f) => (f.path.split("/").pop() ?? "").toLowerCase() === base.toLowerCase());
+                const fallbackPath = exactBase.length === 1 ? exactBase[0]!.path : found.length === 1 ? found[0]!.path : null;
+                if (!fallbackPath) throw err;
+                file = await readProjectFile(proj.cwd, proj.displayCwd, fallbackPath);
+              } else {
+                throw err;
+              }
+            }
             if (file.content === undefined) {
               return { ok: true, text: `${proj.name}/${file.path}: ${file.kind} (${file.mediaType}, ${formatSize(file.size)}).` };
             }

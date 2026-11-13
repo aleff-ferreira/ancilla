@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useController } from "../../app/context.js";
-import { callIsLive, closeCall, readVoiceStatus, startCall, useCallSession } from "./call.js";
+import { activeVoiceProject, callIsLive, closeCall, readVoiceStatus, startCall, useCallSession } from "./call.js";
 import { wantAssistantTab } from "./nav.js";
 import { warmVoice } from "./warm.js";
 
@@ -11,7 +11,8 @@ import { warmVoice } from "./warm.js";
  */
 
 const KNOWN_FOR_MS = 20_000;
-let known: { at: number; available: boolean; mode: "hands-free" | "push-to-talk" } | null = null;
+let known: { at: number; available: boolean; mode: "hands-free" | "push-to-talk"; defaultProject: string | null } | null = null;
+let bootWarmed = false;
 
 /** Whether a call can be made: true or false once it is known, null before. */
 export function useVoiceAvailable(): boolean | null {
@@ -29,8 +30,19 @@ export function useVoiceAvailable(): boolean | null {
     let cancelled = false;
     void readVoiceStatus(controller).then((status) => {
       if (cancelled) return;
-      known = status ? { at: Date.now(), available: status.available, mode: status.settings.mode } : null;
+      known = status
+        ? {
+            at: Date.now(),
+            available: status.available,
+            mode: status.settings.mode,
+            defaultProject: status.settings.defaultProject,
+          }
+        : null;
       setAvailable(status ? status.available : false);
+      if (status?.available && !status.engines.loaded && !bootWarmed) {
+        bootWarmed = true;
+        warmVoice(controller, true);
+      }
     });
     return () => {
       cancelled = true;
@@ -42,6 +54,7 @@ export function useVoiceAvailable(): boolean | null {
 /** Forgets what was read about the install, for after it changed. */
 export function forgetVoiceStatus(): void {
   known = null;
+  bootWarmed = false;
 }
 
 /** The click on "Talk": starts a call, or takes the person to where the voice is installed when it is not. `warm` is for the moment before it: a pointer over the button, or the focus on it. */
@@ -64,7 +77,8 @@ export function useTalk(): { talk: () => void; warm: () => void; live: boolean; 
       controller.navigate({ kind: "assistant" });
       return;
     }
-    startCall(controller, { mode: known?.mode ?? "hands-free" });
+    const project = activeVoiceProject(controller.store?.get()) ?? known?.defaultProject ?? null;
+    startCall(controller, { mode: known?.mode ?? "hands-free", project });
   }, [controller, live, available]);
   return { talk, warm, live, available };
 }

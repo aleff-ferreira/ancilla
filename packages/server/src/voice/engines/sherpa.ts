@@ -18,11 +18,18 @@ export interface OnlineStreamLike {
   setOption(key: string, value: string): void;
 }
 
+export interface RecognizerResultLike {
+  text: string;
+  tokens?: string[];
+  ys_probs?: number[];
+  ys_log_probs?: number[];
+}
+
 export interface OnlineRecognizerLike {
   createStream(): OnlineStreamLike;
   isReady(stream: OnlineStreamLike): boolean;
   decode(stream: OnlineStreamLike): void;
-  getResult(stream: OnlineStreamLike): { text: string };
+  getResult(stream: OnlineStreamLike): RecognizerResultLike;
 }
 
 export interface OfflineStreamLike {
@@ -32,7 +39,8 @@ export interface OfflineStreamLike {
 export interface OfflineRecognizerLike {
   createStream(): OfflineStreamLike;
   decode(stream: OfflineStreamLike): void;
-  getResult(stream: OfflineStreamLike): { text: string };
+  decodeAsync?(stream: OfflineStreamLike): Promise<void>;
+  getResult(stream: OfflineStreamLike): RecognizerResultLike;
 }
 
 export interface VadLike {

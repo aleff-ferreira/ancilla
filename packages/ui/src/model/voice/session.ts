@@ -41,8 +41,8 @@ export interface CallIO {
   socketUrl(): string | null;
   openSocket(url: string): SocketLike;
   /** Starts the microphone; `onFrame` gets 32 ms of 16 kHz audio and how loud it was. Rejects when the person says no. */
-  startMic(onFrame: (pcm: Int16Array, rms: number) => void): Promise<MicHandle>;
-  createPlayer(sampleRate: number): Player;
+  startMic(onFrame: (pcm: Int16Array, rms: number, peak?: number) => void): Promise<MicHandle>;
+  createPlayer(sampleRate: number, onIdle?: (utterance: number, played: number) => void): Player;
   /** Lets go of the audio machinery once the call is over. */
   dispose?(): void;
 }
@@ -57,6 +57,15 @@ const OPEN = 1;
 const MAX_BUFFERED = 1_000_000;
 const REPORT_EVERY_MS = 100;
 const MAX_RECONNECTS = 2;
+const PRE_ROLL_FRAMES = 10;
+const MAX_PRE_READY_VOICE_FRAMES = 150;
+/**
+ * Peak amplitude (of 32 768, ~0.008 float) above quiet room noise that marks genuine pre-ready speech onset so quiet room
+ * ambience stays in `preRollFrames` without triggering an early flush or exhausting `MAX_PRE_READY_VOICE_FRAMES`.
+ */
+const PRE_READY_VOICE_PEAK = 262;
+/** Trailing frames (~800 ms) retained after pre-ready speech so intra-sentence pauses remain contiguous. */
+const PRE_READY_HANGOVER_FRAMES = 25;
 /**
  * A frame whose loudest sample is this small (of 32 768) is digital silence: a room, even a quiet one, is louder than
  * that through any microphone, so a line this flat is a microphone that is muted, blocked or not the one being spoken into.
@@ -64,6 +73,21 @@ const MAX_RECONNECTS = 2;
 const SILENT_PEAK = 2;
 /** How many frames of 32 ms of it, in a row, are worth saying so: a little over six seconds. */
 const SILENT_FRAMES = 190;
+
+function framePeakInt16(pcm: Int16Array, reportedPeak?: number): number {
+  let peak = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const v = pcm[i] as number;
+    const size = v < 0 ? -v : v;
+    if (size > peak) peak = size;
+  }
+  if (reportedPeak !== undefined && Number.isFinite(reportedPeak)) {
+    const abs = Math.abs(reportedPeak);
+    const scaled = abs <= 1 ? Math.round(abs * 32767) : Math.round(abs);
+    if (scaled > peak) peak = scaled;
+  }
+  return peak;
+}
 
 function micMessage(error: unknown): string {
   const name = error instanceof Error ? error.name : "";
@@ -90,7 +114,13 @@ export class CallSession {
   private closing = false;
   private reconnects = 0;
   private micLevel = 0;
-  private echoCancelled = true;
+  private echoCancelled = false;
+  private micSettled = false;
+  private helloSent = false;
+  private preRollFrames: Int16Array[] = [];
+  private preReadyFrames: Int16Array[] = [];
+  private preReadyHasVoice = false;
+  private preReadyHangover = 0;
   /** Why the microphone could not be opened at all, in words for the person; null when it was. */
   private openProblem: string | null = null;
   private micState: MicState = "live";
@@ -135,11 +165,15 @@ export class CallSession {
       this.set({ ...this.state, status: "failed", error: "This version of Ancilla has no voice." });
       return;
     }
-    // The microphone first: its permission prompt belongs to the click that started the call.
+    // Start the microphone and open the socket in parallel within the click gesture; `hello` waits until both settle.
     const micReady = this.io
-      .startMic((pcm, rms) => this.onMicFrame(pcm, rms))
+      .startMic((pcm, rms, peak) => this.onMicFrame(pcm, rms, peak))
       .then(
         (mic) => {
+          if (this.closing) {
+            mic.stop();
+            return false;
+          }
           this.mic = mic;
           this.echoCancelled = mic.echoCancelled;
           this.micLabel = mic.label ?? "";
@@ -152,14 +186,18 @@ export class CallSession {
           return true;
         },
         (error: unknown) => {
+          this.echoCancelled = false;
           this.openProblem = micMessage(error);
           this.showMicProblem();
           return false;
         },
-      );
-    await micReady;
-    if (this.closing) return;
+      )
+      .finally(() => {
+        this.micSettled = true;
+        this.maybeSendHello();
+      });
     this.open(url);
+    await micReady;
   }
 
   /** The words for why the microphone is not being heard, or null when it is: what the call shows under its face. */
@@ -180,7 +218,7 @@ export class CallSession {
    * driver, a privacy switch or a device that is not the one being spoken into may only deliver zeros, so what arrives is
    * watched as well. Counted only while the person has not muted it themselves, which is no problem.
    */
-  private listenForSilence(pcm: Int16Array): void {
+  private listenForSilence(peak: number): void {
     if (this.state.muted) {
       this.quiet = 0;
       if (this.silent) {
@@ -188,12 +226,6 @@ export class CallSession {
         this.showMicProblem();
       }
       return;
-    }
-    let peak = 0;
-    for (let i = 0; i < pcm.length; i++) {
-      const v = pcm[i] as number;
-      const size = v < 0 ? -v : v;
-      if (size > peak) peak = size;
     }
     if (peak <= SILENT_PEAK) {
       this.quiet += 1;
@@ -210,16 +242,54 @@ export class CallSession {
     }
   }
 
+  private maybeSendHello(): void {
+    if (this.helloSent || !this.micSettled || this.closing) return;
+    const socket = this.socket;
+    if (!socket || socket.readyState !== OPEN) return;
+    this.helloSent = true;
+    this.sendMessage({
+      type: "hello",
+      v: PROTOCOL_VERSION,
+      mode: this.state.mode,
+      lang: this.options.lang,
+      echoCancelled: this.echoCancelled,
+      resume: null,
+      thread: null,
+      project: this.options.project,
+    });
+  }
+
+  private clearPreReady(): void {
+    this.preRollFrames = [];
+    this.preReadyFrames = [];
+    this.preReadyHasVoice = false;
+    this.preReadyHangover = 0;
+  }
+
+  private flushPreReady(): void {
+    const socket = this.socket;
+    const hadVoice = this.preReadyHasVoice;
+    const frames = hadVoice && !this.state.muted ? [...this.preRollFrames, ...this.preReadyFrames] : [];
+    this.clearPreReady();
+    if (!socket || socket.readyState !== OPEN || frames.length === 0) return;
+    for (const frame of frames) {
+      if (socket.bufferedAmount > MAX_BUFFERED) break;
+      socket.send(encodeMicFrame(frame));
+    }
+  }
+
   private open(url: string): void {
+    this.helloSent = false;
     const socket = this.io.openSocket(url);
     socket.binaryType = "arraybuffer";
     this.socket = socket;
     socket.onopen = () => {
-      this.sendMessage({ type: "hello", v: PROTOCOL_VERSION, mode: this.state.mode, lang: this.options.lang, echoCancelled: this.echoCancelled, resume: null, thread: null, project: this.options.project });
+      this.maybeSendHello();
     };
     socket.onmessage = (event) => this.onData(event.data);
     socket.onerror = () => undefined;
     socket.onclose = (event) => this.onSocketClosed(event.code, event.reason);
+    if (socket.readyState === OPEN) this.maybeSendHello();
   }
 
   private onData(data: unknown): void {
@@ -239,7 +309,9 @@ export class CallSession {
     switch (message.type) {
       case "ready":
         this.player?.close();
-        this.player = this.io.createPlayer(message.sampleRate);
+        this.player = this.io.createPlayer(message.sampleRate, (utterance, played) => {
+          if (utterance > 0) this.sendMessage({ type: "playback", utterance, samples: played });
+        });
         this.reconnects = 0;
         this.startReports();
         break;
@@ -258,6 +330,9 @@ export class CallSession {
         break;
     }
     this.set(reduceServer(this.state, message, this.clock()));
+    if (message.type === "ready") {
+      this.flushPreReady();
+    }
   }
 
   /** Tells the server how much of the reply has been played, so that it paces itself and knows what was heard. */
@@ -271,11 +346,38 @@ export class CallSession {
     }, REPORT_EVERY_MS);
   }
 
-  private onMicFrame(pcm: Int16Array, rms: number): void {
+  private onMicFrame(pcm: Int16Array, rms: number, reportedPeak?: number): void {
+    const peak = framePeakInt16(pcm, reportedPeak);
     this.micLevel = Math.min(1, rms * 6);
-    this.listenForSilence(pcm);
+    this.listenForSilence(peak);
+    if (this.state.muted || this.state.micPaused) return;
+    if (this.state.status !== "ready") {
+      const copy = pcm.slice();
+      const voiced = peak > PRE_READY_VOICE_PEAK;
+      if (!this.preReadyHasVoice) {
+        if (voiced) {
+          this.preReadyHasVoice = true;
+          this.preReadyHangover = PRE_READY_HANGOVER_FRAMES;
+          this.preReadyFrames.push(copy);
+        } else {
+          this.preRollFrames.push(copy);
+          if (this.preRollFrames.length > PRE_ROLL_FRAMES) this.preRollFrames.shift();
+        }
+      } else if (voiced) {
+        this.preReadyHangover = PRE_READY_HANGOVER_FRAMES;
+        if (this.preReadyFrames.length < MAX_PRE_READY_VOICE_FRAMES) {
+          this.preReadyFrames.push(copy);
+        }
+      } else if (this.preReadyHangover > 0) {
+        this.preReadyHangover -= 1;
+        if (this.preReadyFrames.length < MAX_PRE_READY_VOICE_FRAMES) {
+          this.preReadyFrames.push(copy);
+        }
+      }
+      return;
+    }
     const socket = this.socket;
-    if (!socket || socket.readyState !== OPEN || this.state.muted || this.state.status !== "ready") return;
+    if (!socket || socket.readyState !== OPEN) return;
     if (socket.bufferedAmount > MAX_BUFFERED) return;
     socket.send(encodeMicFrame(pcm));
   }
@@ -307,6 +409,7 @@ export class CallSession {
   }
 
   private releaseMachine(): void {
+    this.clearPreReady();
     this.mic?.stop();
     this.mic = null;
     this.player?.close();
@@ -334,8 +437,16 @@ export class CallSession {
 
   setMuted(on: boolean): void {
     if (on === this.state.muted) return;
-    this.set({ ...this.state, muted: on, talking: false });
+    if (on) this.clearPreReady();
+    this.set({ ...this.state, muted: on, talking: false, ...(on ? {} : { micPaused: false, micPausedReason: null }) });
     this.sendMessage({ type: "mute", on });
+  }
+
+  /** Resumes hands-free listening after continuous background audio paused capture. */
+  resumeMic(): void {
+    if (this.state.status !== "ready") return;
+    this.set({ ...this.state, micPaused: false, micPausedReason: null });
+    this.sendMessage({ type: "resume_mic" });
   }
 
   setMode(mode: CallMode): void {

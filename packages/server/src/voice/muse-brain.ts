@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { ReasoningEffort } from "@ancilla/daemon";
 import type { BrainCapabilities, BrainEvent, BrainProvider, BrainRequest, ChatMessage } from "./brain.js";
 
 /**
@@ -18,14 +19,19 @@ export interface MuseBrainHost {
     providerId?: string | null;
     title: string;
     modelId?: string | null;
-  }): Promise<{ sessionId: string }>;
+  }): Promise<{ sessionId: string; modelId?: string | null }>;
   /**
    * Makes sure a thread this conversation already had is loaded on its Muse host, as opening it on the screen does: a host
    * that started again since the thread was last used holds none, and refuses every command to a thread it does not hold.
    * False when the thread cannot be used (it is gone, belongs to another provider/account, or another client holds it);
    * an error when the host cannot be reached.
    */
-  openSession?(sessionId: string, expected?: { providerId?: string | null; account?: string | null }): Promise<boolean>;
+  openSession?(
+    sessionId: string,
+    expected?: { providerId?: string | null; account?: string | null },
+  ): Promise<boolean | { ok: boolean; modelId?: string | null }>;
+  /** Pre-spawns the voice host for `cwd` ahead of the first turn without creating an orphan thread. */
+  warmHost?(cwd: string, account: string | null, providerId?: string | null): Promise<void>;
   /** Puts a thread on a model, doing nothing when it is on it already; absent where a thread's model cannot be changed. A refusal is an error. */
   setModel?(sessionId: string, modelId: string): Promise<void>;
   startTurn(input: {
@@ -33,7 +39,7 @@ export interface MuseBrainHost {
     text: string;
     displayText: string;
     commandId: string;
-    reasoningEffort?: "low" | "medium" | "high";
+    reasoningEffort?: ReasoningEffort;
   }): Promise<{ turnId: string }>;
   interruptTurn(sessionId: string, turnId: string): Promise<void>;
   needsUser(sessionId: string): boolean;
@@ -60,12 +66,25 @@ export interface MuseBrainOptions {
   sessionId?: string | null;
   /** Called when a thread was made, so the conversation can remember it. */
   onSession?: (sessionId: string) => void;
+  /** Called when the underlying session confirms or heals its active model id. */
+  onModelResolved?: (modelId: string | null) => void;
+  /** Called when early `agentMessage` settlement bypasses a trailing `eot_gate` stall. */
+  onEarlySettle?: (savedMs: number) => void;
   /** How long a turn may go without a word from Muse before it is given up on. */
   idleMs?: number;
+  /** Grace window after `agentMessage` `item/completed` (with zero open tools/approvals) before settling early. Default 100 ms. */
+  earlySettleGraceMs?: number;
+  /** Compaction threshold on session prompt tokens before rotating to a fresh compacted voice session. Default 48_000. */
+  maxSessionInputTokens?: number;
   /** The Muse model the thread answers with; null or absent leaves the thread on whatever Muse chose. */
   model?: string | null;
-  /** Reasoning effort per voice turn; defaults to "medium" so voice turns stay responsive while still supporting tool reasoning. */
-  reasoningEffort?: "low" | "medium" | "high";
+  /** Reasoning effort per voice turn; defaults to "minimal" on short conversational turns and "low" otherwise. */
+  reasoningEffort?: ReasoningEffort;
+}
+
+function unpackOpened(res: boolean | { ok: boolean; modelId?: string | null }): { ok: boolean; modelId: string | null } {
+  if (typeof res === "boolean") return { ok: res, modelId: null };
+  return { ok: res.ok, modelId: typeof res.modelId === "string" && res.modelId !== "" ? res.modelId : null };
 }
 
 /**
@@ -81,6 +100,8 @@ function isNotLoaded(error: unknown): boolean {
 
 const DEFAULT_IDLE_MS = 90_000;
 const MAX_APPROVAL_WAIT_MS = 10 * 60_000;
+const DEFAULT_EARLY_SETTLE_GRACE_MS = 100;
+const DEFAULT_MAX_SESSION_INPUT_TOKENS = 48_000;
 
 const BACKGROUND_TASK_TOOLS = new Set(["delegate_task", "propose_change", "browse", "use_connector"]);
 
@@ -111,23 +132,90 @@ function freshMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   return messages.slice(from).filter((m) => m.role !== "system");
 }
 
+function extractShownUserText(m: Extract<ChatMessage, { role: "user" }>): string {
+  if (typeof m.rawUserText === "string" && m.rawUserText.trim() !== "") return m.rawUserText;
+  const blocks = m.content.split(/\n\n+/);
+  if (blocks.length <= 1) return m.content;
+  let idx = 0;
+  while (idx < blocks.length - 1) {
+    const b = (blocks[idx] ?? "").trim();
+    if (
+      b.startsWith("[") ||
+      b.startsWith("Memory ") ||
+      b.startsWith("Relevant ") ||
+      b.startsWith("Right now") ||
+      b.startsWith("Background tasks:") ||
+      b.startsWith("Active ")
+    ) {
+      idx++;
+    } else {
+      break;
+    }
+  }
+  return blocks.slice(idx).join("\n\n");
+}
+
+function extractTextToolSection(systemContent: string): { section: string; names: string[] } | null {
+  const marker = "\n\nYou can use tools. To use one, write it on a line of its own";
+  const at = systemContent.indexOf(marker);
+  if (at < 0) return null;
+  const section = systemContent.slice(at + 2);
+  const names: string[] = [];
+  for (const line of section.split("\n")) {
+    const m = /^-\s+([A-Za-z_][\w.-]*):/.exec(line);
+    if (m?.[1]) names.push(m[1]);
+  }
+  return names.length > 0 ? { section, names } : null;
+}
+
+function extractTurnDeltaLines(systemContent: string): string[] {
+  const deltas: string[] = [];
+  for (const line of systemContent.split("\n")) {
+    const trimmed = line.trim();
+    if (
+      trimmed.startsWith("The local time is ") ||
+      trimmed.startsWith("The user is speaking ") ||
+      trimmed.startsWith("The user mixed ") ||
+      trimmed.startsWith("[Live Call State")
+    ) {
+      deltas.push(trimmed);
+    }
+  }
+  return deltas;
+}
+
+interface LingeringTurn {
+  sessionId: string;
+  turnId: string;
+  settledAt: number;
+  done: Promise<void>;
+  cancel: () => void;
+}
+
 export class MuseThreadBrain implements BrainProvider {
   readonly id = "muse-thread";
   readonly capabilities: BrainCapabilities = { tools: false, speculative: false, local: false };
   private sessionId: string | null;
   private model: string | null;
-  /** The model confirmed active on the underlying session after `startSession` or `setModel` succeeded. */
+  /** The model confirmed active on the underlying session after `startSession`, `openSession`, or `setModel` succeeded. */
   private confirmedModel: string | null;
   /** One-time context note injected on the next turn after a mid-call model or provider switch. */
   private switchedToModel: string | null = null;
   /** The rules of the call have been told to the thread. */
   private told = false;
+  private readonly toldToolNames = new Set<string>();
   /** The thread was made for this call, so earlier turns of the conversation have to be told to it. */
   private fresh: boolean;
   /** The thread is on the model chosen for the call (or none was chosen), so it need not be asked again. */
   private modelSet: boolean;
   /** The thread is loaded on its host: it was made for this call, or it has been opened. */
   private opened = false;
+  /** Deduplicated in-flight `session()` resolution so `warm()` and `stream()` never double-open or double-start. */
+  private sessionInFlight: Promise<string> | null = null;
+  /** Set when session prompt tokens exceed the compaction threshold so the next turn rotates cleanly. */
+  private rotateOnNextTurn = false;
+  /** Prior turn that settled early on `agentMessage` completion while Muse's `eot_gate` was still finishing. */
+  private lingeringTurn: LingeringTurn | null = null;
   /** Something the person should be told that does not stop the answer, said with the next one. */
   private notice: string | null = null;
 
@@ -141,7 +229,28 @@ export class MuseThreadBrain implements BrainProvider {
 
   get label(): string {
     const who = this.options.providerLabel ?? "Muse";
-    return this.model ? `${who} (${this.model})` : who;
+    const shownModel = this.model ?? this.confirmedModel;
+    return shownModel ? `${who} (${shownModel})` : who;
+  }
+
+  get activeModel(): string | null {
+    return this.confirmedModel ?? this.model;
+  }
+
+  get currentSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  async warm(): Promise<void> {
+    if (this.sessionId !== null && !this.opened) {
+      await this.session().catch(() => undefined);
+      return;
+    }
+    if (this.sessionId === null && this.options.host.warmHost) {
+      await this.options.host
+        .warmHost(this.options.cwd, this.options.account ?? null, this.options.providerId ?? "muse")
+        .catch(() => undefined);
+    }
   }
 
   /** Switches the active model of an open voice call without dropping the call. */
@@ -158,6 +267,7 @@ export class MuseThreadBrain implements BrainProvider {
         this.opened = false;
         this.fresh = true;
         this.told = false;
+        this.toldToolNames.clear();
       }
       this.switchedToModel = `${who}'s default model`;
       return;
@@ -167,67 +277,107 @@ export class MuseThreadBrain implements BrainProvider {
     this.switchedToModel = `${who} (${normalized})`;
   }
 
+  /** Updates live model state when the user or host changes the session's model outside voice settings. */
+  syncExternalModel(sessionId: string, modelId: string): void {
+    const normalized = modelId.trim();
+    if (!normalized || this.sessionId !== sessionId) return;
+    if (normalized === this.confirmedModel && normalized === this.model) return;
+    const who = this.options.providerLabel ?? "Muse";
+    this.model = normalized;
+    this.confirmedModel = normalized;
+    this.modelSet = true;
+    this.switchedToModel = `${who} (${normalized})`;
+  }
+
   /** Marks a brand-new provider thread opened mid-call so its first turn knows a live switch just occurred. */
   announceInitialSwitch(targetLabel: string): void {
     this.switchedToModel = targetLabel;
   }
 
   /** The thread to talk in: the conversation's own, loaded and on the model chosen, or a new one when it cannot be used. */
-  private async session(): Promise<string> {
+  private session(): Promise<string> {
+    if (this.sessionInFlight) return this.sessionInFlight;
+    const run = this.resolveSession().finally(() => {
+      if (this.sessionInFlight === run) this.sessionInFlight = null;
+    });
+    this.sessionInFlight = run;
+    return run;
+  }
+
+  private async resolveSession(): Promise<string> {
     const { host } = this.options;
-    const model = this.model;
     const who = this.options.providerLabel ?? "Muse";
+    if (this.rotateOnNextTurn && this.sessionId !== null) {
+      this.rotateOnNextTurn = false;
+      this.lingeringTurn?.cancel();
+      this.lingeringTurn = null;
+      this.sessionId = null;
+      this.opened = false;
+      this.fresh = true;
+      this.told = false;
+      this.toldToolNames.clear();
+    }
+    const model = this.model;
     if (this.sessionId !== null && !this.opened) {
-      // A thread the conversation already had is not loaded on a Muse host that started again since it was last used (the
-      // desktop app starts one with each launch), and the host refuses every command to it. It is loaded, as opening it on
-      // the screen does, once for the call; one that cannot be used is replaced by a new thread, told what was said before.
-      const usable = host.openSession
-        ? await host.openSession(this.sessionId, {
-            providerId: this.options.providerId ?? "muse",
-            account: this.options.account ?? null,
-          })
-        : true;
-      if (usable) this.opened = true;
-      else {
+      const openedRes = host.openSession
+        ? unpackOpened(
+            await host.openSession(this.sessionId, {
+              providerId: this.options.providerId ?? "muse",
+              account: this.options.account ?? null,
+            }),
+          )
+        : { ok: true, modelId: null };
+      if (openedRes.ok) {
+        this.opened = true;
+        if (openedRes.modelId && this.confirmedModel === null) {
+          this.confirmedModel = openedRes.modelId;
+          this.options.onModelResolved?.(this.confirmedModel);
+        }
+      } else {
         host.log(`voice: the conversation's ${who} thread ${this.sessionId} cannot be used, so a new one was started`);
         this.sessionId = null;
         this.fresh = true;
         this.told = false;
+        this.toldToolNames.clear();
       }
     }
     if (this.sessionId === null) {
-      const { sessionId } = await host.startSession({
+      const created = await host.startSession({
         cwd: this.options.cwd,
         account: this.options.account ?? null,
         ...(this.options.providerId ? { providerId: this.options.providerId } : {}),
         title: this.options.title,
         ...(model ? { modelId: model } : {}),
       });
-      this.sessionId = sessionId;
+      this.sessionId = created.sessionId;
       this.opened = true;
-      // A thread that began on the model is on it.
       this.modelSet = true;
-      this.confirmedModel = model;
-      this.options.onSession?.(sessionId);
+      const resolvedFromHost = typeof created.modelId === "string" && created.modelId !== "" ? created.modelId : null;
+      this.confirmedModel = resolvedFromHost ?? model;
+      if (resolvedFromHost && model && resolvedFromHost !== model) {
+        this.model = resolvedFromHost;
+      }
+      this.options.onSession?.(created.sessionId);
+      if (this.confirmedModel) this.options.onModelResolved?.(this.confirmedModel);
     }
     if (!this.modelSet && model) {
-      // A thread the conversation already had is put on the model chosen now, once; a thread that is on it is left alone.
-      // When Muse will not, the call still answers, on the model the thread has, and says so: a call that cannot change
-      // model is a lesser thing than one that does not answer.
       this.modelSet = true;
       if (host.setModel) {
         try {
           await host.setModel(this.sessionId, model);
           this.confirmedModel = model;
+          this.options.onModelResolved?.(model);
         } catch (error) {
           const why = (error instanceof Error ? error.message : String(error)).trim().replace(/[.\s]+$/, "");
           this.notice = `${who} would not put this thread on ${model}: ${why}. It answers on the model the thread already has.`;
           this.model = this.confirmedModel;
           this.switchedToModel = null;
+          this.options.onModelResolved?.(this.confirmedModel);
           host.log(`voice: ${this.notice}`);
         }
       } else {
         this.confirmedModel = model;
+        this.options.onModelResolved?.(model);
       }
     }
     return this.sessionId;
@@ -237,7 +387,12 @@ export class MuseThreadBrain implements BrainProvider {
    * The text to send for this request, and the person's own words from it for the thread to show. Nothing is marked as told
    * here: that is done once Muse has taken the prompt, so a prompt that did not get there does not use up the rules.
    */
-  private promptFor(messages: readonly ChatMessage[]): { text: string; shown: string } | null {
+  private promptFor(messages: readonly ChatMessage[]): {
+    text: string;
+    shown: string;
+    toolNames: string[];
+    hasToolResult: boolean;
+  } | null {
     const fresh = freshMessages(messages);
     if (fresh.length === 0) return null;
     const who = this.options.providerLabel ?? "Muse";
@@ -249,30 +404,126 @@ export class MuseThreadBrain implements BrainProvider {
     }
     let shown = "";
     let startedBackgroundTask = false;
+    let hasToolResult = false;
     for (const m of fresh) {
       if (m.role === "user") {
         parts.push(m.content);
-        shown = m.content.split("\n").pop() ?? m.content;
+        shown = extractShownUserText(m);
       } else if (m.role === "tool") {
-        parts.push(`[Result of ${m.name}] ${m.content}`);
+        hasToolResult = true;
+        const spokenSuffix = m.spokenNarration
+          ? `\n[Already spoken aloud: "${m.spokenNarration}" — do not repeat this confirmation unless adding new facts.]`
+          : "";
+        parts.push(`[Result of ${m.name}] ${m.content}${spokenSuffix}`);
         shown = shown || `(${m.name} finished)`;
         if (BACKGROUND_TASK_TOOLS.has(m.name)) startedBackgroundTask = true;
       }
     }
     if (startedBackgroundTask) {
-      parts.push("(The background task is now managed independently in its own session. Give a brief spoken confirmation in one or two plain sentences and finish this turn immediately — do not read or edit project files for that task in this voice thread.)");
+      parts.push(
+        "(The background task is now managed independently in its own session. Give a brief spoken confirmation in one or two plain sentences and finish this turn immediately — do not read or edit project files for that task in this voice thread.)",
+      );
     }
     let text = parts.join("\n\n");
     const activeIdentity = this.confirmedModel ? ` Active model: ${who} (${this.confirmedModel}).` : "";
+    const system = messages.find((m): m is Extract<ChatMessage, { role: "system" }> => m.role === "system");
+    const systemContent = system?.content ?? "";
+    const toolSection = extractTextToolSection(systemContent);
+
     if (!this.told) {
-      const system = messages.find((m) => m.role === "system");
-      const earlier = this.fresh ? messages.slice(0, messages.length - fresh.length).filter((m) => m.role === "user" || m.role === "assistant") : [];
-      const recap = earlier.length === 0 ? "" : `Earlier in this conversation:\n${earlier.slice(-12).map((m) => `${m.role === "user" ? "User" : "You"}: ${clip((m as { content: string }).content, 300)}`).join("\n")}\n\n`;
-      text = `${RULES}${activeIdentity}\n${system && system.role === "system" ? system.content : ""}\n\n${recap}${text}`;
-    } else {
-      text = `${REMINDER}${activeIdentity ? `\n(${activeIdentity.trim()})` : ""}\n${text}`;
+      const earlier = this.fresh
+        ? messages.slice(0, messages.length - fresh.length).filter((m) => m.role === "user" || m.role === "assistant")
+        : [];
+      const recap =
+        earlier.length === 0
+          ? ""
+          : `Earlier in this conversation:\n${earlier
+              .slice(-12)
+              .map((m) => `${m.role === "user" ? "User" : "You"}: ${clip((m as { content: string }).content, 300)}`)
+              .join("\n")}\n\n`;
+      text = `${RULES}${activeIdentity}\n${systemContent}\n\n${recap}${text}`;
+      return { text, shown, toolNames: toolSection?.names ?? [], hasToolResult };
     }
-    return { text, shown };
+
+    const headerLines: string[] = [REMINDER];
+    if (activeIdentity) headerLines.push(`(${activeIdentity.trim()})`);
+    const deltas = extractTurnDeltaLines(systemContent);
+    if (deltas.length > 0) {
+      headerLines.push(`(${deltas.join(" | ")})`);
+    }
+    const newTools = toolSection ? toolSection.names.some((name) => !this.toldToolNames.has(name)) : false;
+    if (toolSection && newTools) {
+      headerLines.push(toolSection.section);
+    }
+    text = `${headerLines.join("\n")}\n${text}`;
+    return { text, shown, toolNames: toolSection?.names ?? [], hasToolResult };
+  }
+
+  private chooseEffort(shown: string, hasToolResult: boolean): ReasoningEffort {
+    if (this.options.reasoningEffort) return this.options.reasoningEffort;
+    if (!hasToolResult) {
+      const words = shown.trim().split(/\s+/).filter(Boolean).length;
+      if (words > 0 && words <= 12) return "minimal";
+    }
+    return "low";
+  }
+
+  private trackLingeringCompletion(sessionId: string, turnId: string): void {
+    this.lingeringTurn?.cancel();
+    const settledAt = Date.now();
+    let resolveDone: () => void = () => undefined;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unwatchBg: (() => void) | null = null;
+    let finished = false;
+    const finish = (fromHost: boolean): void => {
+      if (finished) return;
+      finished = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      unwatchBg?.();
+      unwatchBg = null;
+      if (fromHost) {
+        const saved = Math.max(0, Date.now() - settledAt);
+        this.options.onEarlySettle?.(saved);
+      }
+      if (this.lingeringTurn?.turnId === turnId) {
+        this.lingeringTurn = null;
+      }
+      resolveDone();
+    };
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    unwatchBg = this.options.host.watch(sessionId, (method, params) => {
+      if (method === "turn/completed" && params["turnId"] === turnId) {
+        finish(true);
+      } else if (method === "session/tokenUsage") {
+        this.noteTokenUsage(params);
+      }
+    });
+    timer = setTimeout(() => finish(false), 15_000);
+    timer.unref?.();
+    this.lingeringTurn = {
+      sessionId,
+      turnId,
+      settledAt,
+      done,
+      cancel: () => finish(false),
+    };
+  }
+
+  private noteTokenUsage(params: Record<string, unknown>): { inputTokens: number; outputTokens: number } | null {
+    const usage = (params["usage"] ?? null) as Record<string, unknown> | null;
+    const inputTokens = Number(params["promptTokens"] ?? usage?.["inputTokens"] ?? 0);
+    const outputTokens = Number(usage?.["outputTokens"] ?? 0);
+    if (!Number.isFinite(inputTokens) || inputTokens <= 0) return null;
+    const maxTokens = this.options.maxSessionInputTokens ?? DEFAULT_MAX_SESSION_INPUT_TOKENS;
+    if (inputTokens > maxTokens) {
+      this.rotateOnNextTurn = true;
+    }
+    return { inputTokens, outputTokens: Number.isFinite(outputTokens) && outputTokens >= 0 ? outputTokens : 0 };
   }
 
   async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
@@ -280,6 +531,31 @@ export class MuseThreadBrain implements BrainProvider {
     if (freshMessages(request.messages).length === 0) {
       yield { type: "error", message: "There was nothing to say to Muse.", retryable: false };
       return;
+    }
+    if (this.lingeringTurn) {
+      const lingering = this.lingeringTurn;
+      let timedOut = false;
+      await Promise.race([
+        lingering.done,
+        new Promise<void>((resolve) => {
+          const t = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, 250);
+          t.unref?.();
+        }),
+      ]);
+      if (timedOut && this.lingeringTurn === lingering) {
+        await host.interruptTurn(lingering.sessionId, lingering.turnId).catch(() => undefined);
+        await Promise.race([
+          lingering.done,
+          new Promise<void>((resolve) => {
+            const t = setTimeout(resolve, 250);
+            t.unref?.();
+          }),
+        ]);
+        if (this.lingeringTurn === lingering) lingering.cancel();
+      }
     }
     let sessionId: string;
     try {
@@ -294,7 +570,8 @@ export class MuseThreadBrain implements BrainProvider {
     }
     if (request.signal.aborted) return;
     // Made only now: a thread that was replaced is a new one, which has to be told what was said before.
-    const prompt = this.promptFor(request.messages) as { text: string; shown: string };
+    const prompt = this.promptFor(request.messages);
+    if (!prompt) return;
 
     // Everything Muse says about this thread is queued as it comes, and read in order below.
     const queue: Array<{ method: string; params: Record<string, unknown> }> = [];
@@ -309,7 +586,9 @@ export class MuseThreadBrain implements BrainProvider {
     const interrupt = (): void => {
       if (interrupted || !turnId) return;
       interrupted = true;
-      host.interruptTurn(sessionId, turnId).catch((error: unknown) => host.log(`voice: Muse's turn could not be interrupted: ${error instanceof Error ? error.message : String(error)}`));
+      host.interruptTurn(sessionId, turnId).catch((error: unknown) =>
+        host.log(`voice: Muse's turn could not be interrupted: ${error instanceof Error ? error.message : String(error)}`),
+      );
     };
     const onAbort = (): void => {
       interrupt();
@@ -318,7 +597,7 @@ export class MuseThreadBrain implements BrainProvider {
     request.signal.addEventListener("abort", onAbort, { once: true });
     try {
       try {
-        const effort = this.options.reasoningEffort ?? "medium";
+        const effort = this.chooseEffort(prompt.shown, prompt.hasToolResult);
         const send = () =>
           host.startTurn({
             sessionId,
@@ -331,13 +610,14 @@ export class MuseThreadBrain implements BrainProvider {
         try {
           ack = await send();
         } catch (error) {
-          // The host started again in the middle of the call, or let the thread go: it refused the prompt, so loading the
-          // thread and sending it once more cannot say it twice. Only once; what is refused after that is the answer.
-          if (!(isNotLoaded(error) && host.openSession && (await host.openSession(sessionId)))) throw error;
+          if (!(isNotLoaded(error) && host.openSession && unpackOpened(await host.openSession(sessionId)).ok)) {
+            throw error;
+          }
           ack = await send();
         }
         turnId = ack.turnId;
         this.told = true;
+        for (const name of prompt.toolNames) this.toldToolNames.add(name);
         this.switchedToModel = null;
       } catch (error) {
         yield { type: "error", message: `Muse did not take that: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
@@ -350,22 +630,48 @@ export class MuseThreadBrain implements BrainProvider {
       const kinds = new Map<string, string>();
       const spoken = new Set<string>();
       const early = new Map<string, string[]>();
+      const openNonMessageItems = new Set<string>();
+      let completedAgentMessageAt: number | null = null;
       let lastWordAt = Date.now();
       let approvalWaitStartedAt: number | null = null;
       const idleMs = this.options.idleMs ?? DEFAULT_IDLE_MS;
+      const graceMs = this.options.earlySettleGraceMs ?? DEFAULT_EARLY_SETTLE_GRACE_MS;
+
       for (;;) {
         while (queue.length > 0) {
           const { method, params } = queue.shift() as { method: string; params: Record<string, unknown> };
           lastWordAt = Date.now();
+          if (method === "session/tokenUsage") {
+            const u = this.noteTokenUsage(params);
+            if (u) yield { type: "usage", inputTokens: u.inputTokens, outputTokens: u.outputTokens };
+            continue;
+          }
+          if (method === "session/modelChanged") {
+            const changedModel = typeof params["modelId"] === "string" ? params["modelId"].trim() : "";
+            if (changedModel) {
+              this.confirmedModel = changedModel;
+              this.model = changedModel;
+              this.options.onModelResolved?.(changedModel);
+            }
+            continue;
+          }
           const item = (params["item"] ?? null) as Record<string, unknown> | null;
-          const itemTurn = item && typeof item["turnId"] === "string" ? item["turnId"] : null;
+          const itemTurn =
+            item && typeof item["turnId"] === "string"
+              ? item["turnId"]
+              : typeof params["turnId"] === "string"
+                ? params["turnId"]
+                : null;
           if (item && itemTurn !== null && itemTurn !== turnId) continue;
           if (method === "item/started" || method === "item/updated" || method === "item/completed") {
             if (!item) continue;
-            const id = String(item["itemId"] ?? "");
-            const kind = String(item["kind"] ?? "");
-            kinds.set(id, kind);
+            const id = String(item["itemId"] ?? item["id"] ?? "");
+            const kind = String(item["kind"] ?? item["type"] ?? "");
+            if (id) kinds.set(id, kind);
             if (kind === "agentMessage") {
+              if (method === "item/started" || method === "item/updated") {
+                completedAgentMessageAt = null;
+              }
               const buffered = early.get(id);
               if (buffered) {
                 early.delete(id);
@@ -375,37 +681,51 @@ export class MuseThreadBrain implements BrainProvider {
                 }
               }
               // A message that arrived whole (nothing streamed it) is said as it is.
-              if (method === "item/completed" && !spoken.has(id) && typeof item["text"] === "string" && item["text"] !== "") {
-                spoken.add(id);
-                yield { type: "text", delta: item["text"] };
+              if (method === "item/completed") {
+                if (!spoken.has(id) && typeof item["text"] === "string" && item["text"] !== "") {
+                  spoken.add(id);
+                  yield { type: "text", delta: item["text"] };
+                }
+                completedAgentMessageAt = Date.now();
               }
-            } else if (
-              !host.onApprovalRequested &&
-              kind !== "" &&
-              kind !== "reasoning" &&
-              kind !== "userMessage" &&
-              method !== "item/completed" &&
-              host.needsUser(sessionId)
-            ) {
-              interrupt();
-              yield { type: "error", message: "Muse wants to do something that needs your approval, which a call cannot give. It is waiting on the screen.", retryable: false };
-              return;
+            } else if (kind !== "" && kind !== "userMessage" && kind !== "reasoning") {
+              if (method === "item/completed") {
+                if (id) openNonMessageItems.delete(id);
+              } else {
+                completedAgentMessageAt = null;
+                if (id) openNonMessageItems.add(id);
+                if (!host.onApprovalRequested && host.needsUser(sessionId)) {
+                  interrupt();
+                  yield {
+                    type: "error",
+                    message: "Muse wants to do something that needs your approval, which a call cannot give. It is waiting on the screen.",
+                    retryable: false,
+                  };
+                  return;
+                }
+              }
             }
-          } else if (method === "item/delta") {
-            const id = String(params["itemId"] ?? "");
+          } else if (method === "item/delta" || method === "item/agentMessage/delta") {
+            const id = String(params["itemId"] ?? params["id"] ?? "");
             const delta = typeof params["delta"] === "string" ? params["delta"] : "";
             if (delta === "") continue;
             const kind = kinds.get(id);
             if (kind === "agentMessage") {
+              completedAgentMessageAt = null;
               spoken.add(id);
               yield { type: "text", delta };
             } else if (kind === undefined) {
               early.set(id, [...(early.get(id) ?? []), delta]);
             }
           } else if (method === "approval/requested") {
+            completedAgentMessageAt = null;
             if (!host.onApprovalRequested) {
               interrupt();
-              yield { type: "error", message: "Muse asked for an approval, which a call cannot give. It is waiting on the screen.", retryable: false };
+              yield {
+                type: "error",
+                message: "Muse asked for an approval, which a call cannot give. It is waiting on the screen.",
+                retryable: false,
+              };
               return;
             }
             const approvalId = String(params["approvalId"] ?? "");
@@ -428,7 +748,11 @@ export class MuseThreadBrain implements BrainProvider {
               return;
             } else {
               const error = params["error"] as { message?: unknown } | undefined;
-              yield { type: "error", message: typeof error?.message === "string" && error.message !== "" ? error.message : `Muse's turn ended early (${terminal}).`, retryable: terminal === "failed" };
+              yield {
+                type: "error",
+                message: typeof error?.message === "string" && error.message !== "" ? error.message : `Muse's turn ended early (${terminal}).`,
+                retryable: terminal === "failed",
+              };
             }
             return;
           }
@@ -445,15 +769,26 @@ export class MuseThreadBrain implements BrainProvider {
           }
         } else {
           approvalWaitStartedAt = null;
+          if (completedAgentMessageAt !== null && openNonMessageItems.size === 0) {
+            const elapsed = Date.now() - completedAgentMessageAt;
+            if (elapsed >= graceMs) {
+              this.trackLingeringCompletion(sessionId, turnId);
+              yield { type: "done", reason: "stop" };
+              return;
+            }
+          }
           if (Date.now() - lastWordAt > idleMs) {
             interrupt();
             yield { type: "error", message: "Muse took too long to answer.", retryable: true };
             return;
           }
         }
-        // Wait for the next word from Muse, or for a second to pass so that silence is noticed.
+        const waitMs =
+          !awaitingApproval && completedAgentMessageAt !== null && openNonMessageItems.size === 0
+            ? Math.max(5, graceMs - (Date.now() - completedAgentMessageAt))
+            : 1000;
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(done, 1000);
+          const timer = setTimeout(done, waitMs);
           function done(): void {
             clearTimeout(timer);
             wake = null;
@@ -464,9 +799,6 @@ export class MuseThreadBrain implements BrainProvider {
         });
       }
     } finally {
-      for (const approvalId of waitingApprovals) {
-        host.onApprovalResolved?.(approvalId);
-      }
       request.signal.removeEventListener("abort", onAbort);
       unwatch();
     }

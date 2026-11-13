@@ -51,8 +51,11 @@ export interface CallView {
   metrics: TurnMetrics[];
   engine: string;
   voice: string;
+  model: string;
   sampleRate: number;
   resumed: boolean;
+  micPaused: boolean;
+  micPausedReason: string | null;
   /** Why the call is not working, in words for the person. */
   error: string | null;
   endedReason: string | null;
@@ -77,8 +80,11 @@ export function initialCall(mode: CallMode = "hands-free"): CallView {
     metrics: [],
     engine: "",
     voice: "",
+    model: "",
     sampleRate: 0,
     resumed: false,
+    micPaused: false,
+    micPausedReason: null,
     error: null,
     endedReason: null,
     micProblem: null,
@@ -97,7 +103,24 @@ function withLine(lines: CallLine[], update: (lines: CallLine[]) => CallLine[]):
 export function reduceServer(view: CallView, message: ServerMessage, now: number): CallView {
   switch (message.type) {
     case "ready":
-      return { ...view, status: "ready", engine: message.engine, voice: message.voice, sampleRate: message.sampleRate, resumed: message.resumed, error: null };
+      return {
+        ...view,
+        status: "ready",
+        engine: message.engine,
+        voice: message.voice,
+        model: message.model ?? view.model,
+        sampleRate: message.sampleRate,
+        resumed: message.resumed,
+        error: null,
+      };
+    case "model":
+      return { ...view, model: message.label };
+    case "mic_paused":
+      return {
+        ...view,
+        micPaused: message.paused,
+        micPausedReason: message.paused ? (message.reason ?? "Hands-free microphone paused after continuous background audio.") : null,
+      };
     case "state":
       return { ...view, phase: message.state, ducked: message.state === "speaking" ? view.ducked : false };
     case "level":
@@ -146,7 +169,17 @@ export function reduceServer(view: CallView, message: ServerMessage, now: number
       return fatal ? { ...view, status: "failed", error: message.message } : { ...view, notice: { level: "warn", text: message.message } };
     }
     case "ended":
-      return { ...view, status: view.status === "failed" ? "failed" : "ended", endedReason: message.reason, phase: "idle", partial: "", heard: false, approval: null };
+      return {
+        ...view,
+        status: view.status === "failed" ? "failed" : "ended",
+        endedReason: message.reason,
+        phase: "idle",
+        partial: "",
+        heard: false,
+        approval: null,
+        micPaused: false,
+        micPausedReason: null,
+      };
   }
 }
 
@@ -175,6 +208,7 @@ export function phaseLabel(view: CallView): string {
   if (view.status === "failed") return "Could not start";
   if (view.status === "ended") return "Call ended";
   if (view.muted) return "Muted";
+  if (view.micPaused) return "Mic paused";
   // A call that listens to nothing must not say "Listening": what the assistant is doing still shows while it works or speaks.
   if (view.micProblem !== null && view.phase !== "speaking" && view.phase !== "thinking") return "Can't hear the microphone";
   switch (view.phase) {

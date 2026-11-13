@@ -9,7 +9,7 @@ import { asksAboutMemory, asksForEverything, rankMemories, scopeKey, visibleScop
 import { resolve, type Resolution } from "./resolve.js";
 import { FTS_DDL, LATEST_VERSION, migrate, schemaVersion } from "./schema.js";
 import { looksSecret } from "./secrets.js";
-import { STOPWORDS, containment, digest, identifiersOf, squash, tokenSet } from "./text.js";
+import { STOPWORDS, containment, digest, fold, identifiersOf, squash, stem, tokenSet } from "./text.js";
 import {
   GLOBAL,
   type AssembledContext,
@@ -248,11 +248,11 @@ function toGoal(r: Row): Goal {
   return { id: String(r.id), text: String(r.text), priority: Number(r.priority), status: r.status as Goal["status"], createdAt: Number(r.created_at), updatedAt: Number(r.updated_at) };
 }
 
-/** The words a question is searched by: letters and digits, no filler, no duplicates. */
+/** The words a question is searched by: diacritic-folded letters and digits, no filler, no duplicates. */
 function queryWords(text: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const w of text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []) {
+  for (const w of fold(text).match(/[a-z0-9]+/g) ?? []) {
     if (w.length < 2 || STOPWORDS.has(w) || seen.has(w)) continue;
     seen.add(w);
     out.push(w);
@@ -262,6 +262,15 @@ function queryWords(text: string): string[] {
 }
 
 const WHY = /\bwhy do you (?:think|believe|know|say)\b|\bhow do you know\b|\bwhere did you (?:get|learn|read)\b|\bwhat(?:'s| is) your (?:source|evidence)\b|\bsource for\b|\bprove it\b/i;
+
+function monotonicWallClock(): () => number {
+  let last = 0;
+  return () => {
+    const now = Date.now();
+    if (now > last) last = now;
+    return last;
+  };
+}
 
 export class MemoryStore {
   readonly path: string;
@@ -275,7 +284,7 @@ export class MemoryStore {
   private constructor(path: string, db: DatabaseSync, options: StoreOptions) {
     this.path = path;
     this.db = db;
-    this.clock = options.now ?? Date.now;
+    this.clock = options.now ?? monotonicWallClock();
     this.fts = options.fts !== false;
   }
 
@@ -322,6 +331,12 @@ export class MemoryStore {
   private setUpIndex(): void {
     if (!this.fts) return;
     try {
+      const existing = this.db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'memory_fts'")
+        .get() as { sql?: string } | undefined;
+      if (existing?.sql && /\bporter\b/i.test(existing.sql)) {
+        this.db.exec("DROP TABLE IF EXISTS memory_fts");
+      }
       this.db.exec(FTS_DDL);
     } catch {
       this.fts = false;
@@ -1472,7 +1487,30 @@ export class MemoryStore {
     const scopeParams = keys ?? [];
     const statusSql = history ? "i.status != 'deleted'" : "i.status NOT IN ('deleted','superseded')";
     if (this.fts) {
-      const match = words.map((w) => `"${w.replace(/"/g, "")}"`).join(" OR ");
+      const clauses: string[] = [];
+      const seenClauses = new Set<string>();
+      const pushClause = (c: string): void => {
+        if (!seenClauses.has(c)) {
+          seenClauses.add(c);
+          clauses.push(c);
+        }
+      };
+      for (const w of words) {
+        const clean = w.replace(/"/g, "");
+        if (!clean) continue;
+        pushClause(`"${clean}"`);
+        if (/^[a-z0-9]+$/.test(clean)) {
+          const s = stem(clean);
+          if (s !== clean && s.length >= 3) pushClause(`${s}*`);
+          if (clean.length >= 4) pushClause(`${clean}*`);
+          if (s.endsWith("ment") && s.length >= 8) pushClause(`${s.slice(0, -4)}*`);
+          if ((s.endsWith("cao") || s.endsWith("cion")) && s.length >= 7) {
+            pushClause(`${s.slice(0, s.endsWith("cion") ? -4 : -3)}*`);
+          }
+        }
+      }
+      if (clauses.length === 0) return [];
+      const match = clauses.join(" OR ");
       const rows = this.all(`SELECT i.id AS id, bm25(memory_fts) AS rank FROM memory_fts JOIN memory_items i ON i.id = memory_fts.ref WHERE memory_fts MATCH ? AND i.assistant_id = ? AND ${statusSql}${scopeSql} ORDER BY rank LIMIT ${limit}`, [match, ASSISTANT_ID, ...scopeParams]);
       return rows.map((r) => ({ id: String(r.id), rank: Number(r.rank) }));
     }

@@ -59,6 +59,14 @@ export interface VoiceHost {
    * "remember that..." said aloud is remembered; it is told where the words came from.
    */
   context(text: string, source: "voice" | "text"): Promise<string | null> | string | null;
+  /** Pure speculative context lookup on `end_candidate` that warms the memory cache without writing to SQLite or mutating `lastQuery`. */
+  previewContext?(text: string, source: "voice" | "text"): Promise<{ text: string | null; cacheHit?: boolean }>;
+  /** Whether the most recent `context()` call hit the speculative memory cache warmed on `end_candidate`. */
+  wasLastContextCacheHit?(): boolean;
+  /** Live call state injected into the system prompt so the voice brain never hallucinates stale CLI banner identities. */
+  liveState?(): { activeModel?: string | null; project?: string | null; recentSwitch?: string | null } | null;
+  /** Dynamic active vocabulary (persona, user, models, projects, tasks, workspace files) for phonetic ASR grounding. */
+  vocabulary?(): readonly string[];
   record(entry: TranscriptEntry): void;
   tools(): ToolSpec[];
   runTool(call: ToolCall, context: { turn: number; signal: AbortSignal }): Promise<ToolResult>;

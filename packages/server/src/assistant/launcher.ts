@@ -148,20 +148,25 @@ export class AuthorizationHub {
 
 const DENY_PATTERNS: readonly RegExp[] = [
   /^(?:no|nope|nah|cancel|cancel it|stop|don'?t|do not|never|deny|decline|reject|not now|wait|hold on)\b/i,
+  /\b(?:don'?t|do not|not yet|better not)\b/i,
   /\b(?:don'?t|do not)\s+(?:launch|run|start|open|allow|approve|do)\b/i,
-  /^(?:n[aã]o|cancela|cancelar|para|pare|espera|agora n[aã]o|nega|recusa)\b/i,
+  /^(?:n[aã]o|cancela|cancelar|para|pare|espera|agora n[aã]o|melhor n[aã]o|deixa quieto|nega|recusa|no lo abras|mejor no|det[eé]n|espera un momento)\b/i,
   /\bn[aã]o\s+(?:abre|abra|roda|rode|inicia|inicie|autorizo|aprovo|faz|fa[cç]a)\b/i,
+  /\bno\s+(?:abras|ejecutes|inicies|hagas|autorizo|apruebo)\b/i,
 ];
 
 const ALLOW_PATTERNS: readonly RegExp[] = [
   /^(?:yes|yeah|yep|yup|sure|allow|allow it|approve|approve it|authorize|authorize it|authorized)\b/i,
-  /^(?:go ahead|do it|just do it|proceed|continue)\b/i,
+  /^(?:go ahead|do it|just do it|proceed|continue|let'?s go|ship it)\b/i,
   /^(?:just\s+)?(?:launch|run|start|open)\s+(?:it|that|this|the\s+(?:server|app|page|project|localhost|local\s+host|site))\b/i,
   /^(?:yes[, ]+)?(?:please\s+)?(?:go ahead(?:\s+and)?\s+)?(?:launch|run|start|open|allow|approve)\b/i,
   /^(?:sim|claro|pode|pode\s+(?:abrir|rodar|iniciar|executar|fazer|ir|prosseguir)|autorizo|autorizado|aprovo|aprovado|vai\s+em\s+frente|manda\s+ver|roda\s+isso|abre\s+isso)\b/i,
+  /^(?:s[ií]|adelante|hazlo|ejec[uú]talo|[aá]brelo|autorizo|autorizado|apruebo|aprobado|puedes\s+(?:abrir|iniciar|ejecutar|hacerlo)|dale)\b/i,
 ];
 
-const BACKCHANNEL_ONLY = /^(?:mm+-?hm+|uh-?huh|um+|uh+|ah+|oh+|hm+|ok|okay)$/i;
+const BACKCHANNEL_ONLY = /^(?:mm+-?hm+|uh-?huh|um+|uh+|ah+|oh+|hm+|ok|okay|alright|beleza|t[aá]|bom|vale|bueno)$/i;
+const CONVERSATIONAL_PREFIX = /^(?:(?:ok|okay|alright|well|so|hey|beleza|t[aá]\s+bom|t[aá]|bom|ent[aã]o|olha|vale|bueno|bien|pues)\b[,.;:\s-]*)+/i;
+const CONVERSATIONAL_SUFFIX = /[,.;:\s-]*(?:please|thanks|thank you|now|right now|por favor|valeu|obrigad[oa]|agora|gracias|ahora)\s*$/i;
 
 /**
  * Classifies a short user utterance directed at an already-displayed authorization prompt.
@@ -169,17 +174,25 @@ const BACKCHANNEL_ONLY = /^(?:mm+-?hm+|uh-?huh|um+|uh+|ah+|oh+|hm+|ok|okay)$/i;
  */
 export function parseUserAuthorizationIntent(raw: string): "allow" | "deny" | null {
   const trimmed = raw.trim();
-  if (trimmed === "" || trimmed.length > 140 || trimmed.includes("?")) return null;
+  if (trimmed === "" || trimmed.length > 140 || trimmed.includes("?") || trimmed.includes("¿")) return null;
   const clean = trimmed
     .replace(/^[,.;:!¡¿"'“”‘’()\-–—\s]+|[,.;:!¡¿"'“”‘’()\-–—\s]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
   if (clean === "" || BACKCHANNEL_ONLY.test(clean)) return null;
-  for (const deny of DENY_PATTERNS) {
-    if (deny.test(clean)) return "deny";
+  const stripped = clean.replace(CONVERSATIONAL_PREFIX, "").replace(CONVERSATIONAL_SUFFIX, "").trim();
+  const candidates = stripped !== "" && stripped !== clean ? [clean, stripped] : [clean];
+  for (const candidate of candidates) {
+    if (BACKCHANNEL_ONLY.test(candidate)) continue;
+    for (const deny of DENY_PATTERNS) {
+      if (deny.test(candidate)) return "deny";
+    }
   }
-  for (const allow of ALLOW_PATTERNS) {
-    if (allow.test(clean)) return "allow";
+  for (const candidate of candidates) {
+    if (BACKCHANNEL_ONLY.test(candidate)) continue;
+    for (const allow of ALLOW_PATTERNS) {
+      if (allow.test(candidate)) return "allow";
+    }
   }
   return null;
 }

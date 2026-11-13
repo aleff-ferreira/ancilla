@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -194,6 +195,65 @@ export async function readCachedMuseCatalog(options: MuseCatalogLookupOptions): 
   return fallbackMatch;
 }
 
+const syncCatalogCache = new Map<string, { at: number; models: string[] | null }>();
+
+export function readCachedMuseCatalogSync(modelCatalogDir: string, providerId = "meta"): string[] | null {
+  const cacheKey = `${modelCatalogDir}::${providerId}`;
+  const now = Date.now();
+  const hit = syncCatalogCache.get(cacheKey);
+  if (hit && now - hit.at < 30_000) return hit.models;
+
+  let entries;
+  try {
+    entries = readdirSync(modelCatalogDir, { withFileTypes: true });
+  } catch {
+    syncCatalogCache.set(cacheKey, { at: now, models: null });
+    return null;
+  }
+
+  const jsonFiles: Array<{ path: string; mtimeMs: number }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const full = join(modelCatalogDir, entry.name);
+    try {
+      jsonFiles.push({ path: full, mtimeMs: statSync(full).mtimeMs });
+    } catch {
+      // Ignore transient disappearances.
+    }
+  }
+  jsonFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  for (const file of jsonFiles) {
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = asRecord(JSON.parse(readFileSync(file.path, "utf8")));
+    } catch {
+      continue;
+    }
+    if (!parsed) continue;
+    const fileProvider = str(parsed["provider_id"]) ?? str(parsed["providerId"]) ?? "meta";
+    if (fileProvider !== providerId) continue;
+    const rawRows = Array.isArray(parsed["rows"])
+      ? parsed["rows"]
+      : Array.isArray(parsed["models"])
+        ? parsed["models"]
+        : null;
+    if (!rawRows || rawRows.length === 0) continue;
+    const models = rawRows
+      .map((r) => mapCatalogRow(r, fileProvider, null, null))
+      .filter((r): r is Record<string, unknown> => r !== null)
+      .map((r) => String(r["modelId"]))
+      .filter(Boolean);
+    if (models.length > 0) {
+      syncCatalogCache.set(cacheKey, { at: now, models });
+      return models;
+    }
+  }
+
+  syncCatalogCache.set(cacheKey, { at: now, models: null });
+  return null;
+}
+
 const META_MUSE_CODE_MODELS: ReadonlyArray<{
   modelId: string;
   isDefault: boolean;
@@ -237,6 +297,8 @@ const META_MUSE_CODE_MODELS: ReadonlyArray<{
     tiers: ["minimal", "low", "medium", "high", "xhigh"],
   },
 ];
+
+export const META_MUSE_CODE_MODEL_IDS: readonly string[] = META_MUSE_CODE_MODELS.map((m) => m.modelId);
 
 export function buildAuthenticatedMuseFallbackCatalog(options: {
   providerId?: string | null;

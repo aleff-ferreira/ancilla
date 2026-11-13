@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isProviderId } from "@ancilla/daemon";
 import { ValidationError } from "../assistant/profile.js";
@@ -226,6 +226,8 @@ export interface VoiceSettingsView extends VoiceSettings {
 export class VoiceSettingsStore {
   private settings: VoiceSettings = { ...DEFAULT_VOICE_SETTINGS };
   private secrets: Record<string, string> = {};
+  private loadedFromDiskAt: number | null = null;
+  private updatedAtRuntime = false;
 
   constructor(
     private readonly dir: string | null,
@@ -243,7 +245,10 @@ export class VoiceSettingsStore {
     if (settingsPath && existsSync(settingsPath)) {
       try {
         const raw = JSON.parse(readText(settingsPath)) as unknown;
-        if (isObject(raw)) this.settings = applySettingsPatch({ ...DEFAULT_VOICE_SETTINGS }, { ...raw, apiKey: undefined, speechKey: undefined });
+        if (isObject(raw)) {
+          this.settings = applySettingsPatch({ ...DEFAULT_VOICE_SETTINGS }, { ...raw, apiKey: undefined, speechKey: undefined });
+          this.loadedFromDiskAt = statSync(settingsPath).mtimeMs;
+        }
       } catch (error) {
         this.log(`voice: the settings file could not be read, so the defaults are used: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -261,6 +266,10 @@ export class VoiceSettingsStore {
 
   get(): VoiceSettings {
     return this.settings;
+  }
+
+  diskSnapshotAge(): { loadedFromDiskAt: number | null; updatedAtRuntime: boolean } {
+    return { loadedFromDiskAt: this.loadedFromDiskAt, updatedAtRuntime: this.updatedAtRuntime };
   }
 
   /** What identifies a model for its key: the same address and model name share one. */
@@ -324,6 +333,7 @@ export class VoiceSettingsStore {
     const speechKey = isObject(patch) ? patch["speechKey"] : undefined;
     if (speechKey !== undefined && speechKey !== null && typeof speechKey !== "string") throw new ValidationError("speechKey", "speechKey must be text");
     this.settings = next;
+    this.updatedAtRuntime = true;
     let dirtySecrets = false;
     if (typeof key === "string") {
       const id = this.keyOf(next.brain);

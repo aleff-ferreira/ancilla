@@ -155,6 +155,13 @@ export async function resolveMuseInDistro(
   return firstLine ?? null;
 }
 
+function shellQuoteArg(arg: string): string {
+  if (/^[A-Za-z0-9_./:@=-]+$/.test(arg)) {
+    return arg;
+  }
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
 export function planServe(options: {
   platform?: string;
   distro?: string;
@@ -166,19 +173,24 @@ export function planServe(options: {
   sandboxDisabled?: boolean;
   /** Pass `muse serve --disable-sandbox --trust-workspace`, the `muse --yolo` posture for the host. */
   yoloEnabled?: boolean;
+  /** Additional CLI arguments appended to `muse serve` (e.g. lean voice host flags). */
+  extraServeArgs?: readonly string[];
 }): ServePlan {
   const platform = options.platform ?? process.platform;
+  const extra = options.extraServeArgs ?? [];
   const serveArgs = [
     "serve",
     ...(options.sandboxDisabled || options.yoloEnabled ? ["--disable-sandbox"] : []),
     ...(options.yoloEnabled ? ["--trust-workspace"] : []),
+    ...extra,
   ];
   if (platform === "win32" && options.runtime !== "native") {
     const distro = options.distro ?? FALLBACK_DISTRO;
     if (options.musePath) {
+      const execFlag = extra.length > 0 ? "-e" : "--";
       return {
         command: "wsl",
-        args: ["-d", distro, "--", options.musePath, ...serveArgs],
+        args: ["-d", distro, execFlag, options.musePath, ...serveArgs],
         cwd: options.cwd,
         viaWsl: true,
         distro,
@@ -186,7 +198,7 @@ export function planServe(options: {
     }
     return {
       command: "wsl",
-      args: ["-d", distro, "--", "sh", "-lc", ["muse", ...serveArgs].join(" ")],
+      args: ["-d", distro, "--", "sh", "-lc", ["muse", ...serveArgs].map(shellQuoteArg).join(" ")],
       cwd: options.cwd,
       viaWsl: true,
       distro,

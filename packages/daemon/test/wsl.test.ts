@@ -133,6 +133,33 @@ describe("serve planning", () => {
     const native = planServe({ platform: "linux", cwd: "/work/proj", sandboxDisabled: true, yoloEnabled: true });
     assert.deepEqual(native.args, ["serve", "--disable-sandbox", "--trust-workspace"]);
   });
+
+  it("preserves JSON extraServeArgs via wsl -e or single-quoted sh -lc", () => {
+    const extraServeArgs = [
+      "--preset",
+      "empty",
+      "-c",
+      'runtime_capabilities={"plugin:tbh-reminders:reminder:memory-reminder":{"enabled":false}}',
+    ];
+    const direct = planServe({
+      platform: "win32",
+      distro: "Ubuntu",
+      musePath: "/home/harjot/.local/bin/muse",
+      cwd: "D:\\work\\ancilla",
+      extraServeArgs,
+    });
+    assert.deepEqual(direct.args, ["-d", "Ubuntu", "-e", "/home/harjot/.local/bin/muse", "serve", ...extraServeArgs]);
+
+    const loginShell = planServe({ platform: "win32", distro: "Ubuntu", cwd: "D:\\work\\ancilla", extraServeArgs });
+    assert.deepEqual(loginShell.args, [
+      "-d",
+      "Ubuntu",
+      "--",
+      "sh",
+      "-lc",
+      `muse serve --preset empty -c 'runtime_capabilities={"plugin:tbh-reminders:reminder:memory-reminder":{"enabled":false}}'`,
+    ]);
+  });
 });
 
 describe("environment probe", () => {

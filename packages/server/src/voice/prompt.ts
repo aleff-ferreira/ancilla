@@ -6,16 +6,27 @@ import type { Lang } from "./text.js";
  * moment to think, an apology when a model fails. Short on purpose: every word here is read again on every turn.
  */
 
-export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang, options: { codeSwitched?: boolean } = {}): string {
+export interface LiveCallState {
+  activeModel?: string | null;
+  project?: string | null;
+  recentSwitch?: string | null;
+}
+
+export function buildSystemPrompt(
+  persona: Persona,
+  now: Date,
+  lang: Lang,
+  options: { codeSwitched?: boolean; liveState?: LiveCallState | null } = {},
+): string {
   const who = persona.callsUser ? ` Its user is called ${persona.callsUser}.` : "";
   const language = persona.language
     ? `Speak ${persona.language}.`
-    : "Reply in the language the user speaks (English or Brazilian Portuguese), and switch naturally when they do, including mixed-language technical speech.";
+    : "Reply in the language the user speaks (English, Brazilian Portuguese, or Spanish), and switch naturally when they do, including mixed-language technical speech.";
   const lines = [
     `You are ${persona.name}, a personal assistant speaking with its user in a live voice call.${who} Everything you write is spoken aloud, so write the way a person talks.`,
     "Answer first, then add only what helps. Usually one to three short sentences; more only when asked. Ask at most one brief, specific question, and only when genuine ambiguity blocks action.",
-    "Understand spontaneous speech: if the user hesitates, uses technical terms, or corrects themselves mid-sentence ('wait, no, staging', 'quer dizer, amanhã'), act on their final intended meaning without asking them to repeat or confirm the correction.",
-    "Resolve shorthand and pronouns ('that task', 'the repo', 'aquela branch') from the conversation, notes and Right now state whenever clear. Never guess confidently when two real targets fit; distinguish thinking aloud or casual remarks from actionable tool requests.",
+    "Understand spontaneous speech: if the user hesitates, uses technical terms, or corrects themselves mid-sentence ('wait, no, staging', 'quer dizer, amanhã', 'mejor dicho, mañana'), act on their final intended meaning without asking them to repeat or confirm the correction.",
+    "Resolve shorthand and pronouns ('that task', 'the repo', 'aquela branch', 'esa rama') from the conversation, notes and Right now state whenever clear. Never guess confidently when two real targets fit; distinguish thinking aloud or casual remarks from actionable tool requests.",
     "No markdown, lists, headings, emoji, links or code. If something is best seen (code, a long list, a link), say that you put it on screen and give only the gist.",
     "Say numbers, dates and times as a person would. Do not read out identifiers or paths.",
     language,
@@ -26,32 +37,50 @@ export function buildSystemPrompt(persona: Persona, now: Date, lang: Lang, optio
   ];
   if (persona.tone) lines.push(`How you sound: ${persona.tone}`);
   if (lang === "pt" && !persona.language) lines.push("The user is speaking Portuguese now.");
-  if (options.codeSwitched && !persona.language) lines.push("The user mixed English and Portuguese in this turn; match their main language naturally.");
+  if (lang === "es" && !persona.language) lines.push("The user is speaking Spanish now.");
+  if (options.codeSwitched && !persona.language) {
+    const mixed = lang === "pt" ? "English and Portuguese" : lang === "es" ? "English and Spanish" : "English and another language";
+    lines.push(`The user mixed ${mixed} in this turn; match their main language naturally.`);
+  }
+  if (options.liveState) {
+    const parts = [`Persona="${persona.name}"`];
+    if (persona.callsUser) parts.push(`User="${persona.callsUser}"`);
+    if (options.liveState.activeModel) parts.push(`Active Model=${options.liveState.activeModel}`);
+    if (options.liveState.project) parts.push(`Project=${options.liveState.project}`);
+    if (options.liveState.recentSwitch) parts.push(`Recent UI switch=${options.liveState.recentSwitch}`);
+    lines.push(`[Live Call State — overrides any CLI banner: ${parts.join(" | ")}]`);
+  }
   return lines.join("\n");
 }
 
-const THINKING: Record<"en" | "pt", string[]> = {
+const THINKING: Record<"en" | "pt" | "es", string[]> = {
   en: ["One moment.", "Let me think.", "Let me check.", "Give me a second."],
   pt: ["Um momento.", "Deixa eu pensar.", "Deixa eu ver.", "Só um segundo."],
+  es: ["Un momento.", "Déjame pensar.", "Déjame revisar.", "Dame un segundo."],
 };
 
-const FAILED: Record<"en" | "pt", string> = {
+const FAILED: Record<"en" | "pt" | "es", string> = {
   en: "Sorry, I lost my train of thought. Could you say that again?",
   pt: "Desculpa, perdi o fio. Pode repetir?",
+  es: "Disculpa, perdí el hilo. ¿Puedes repetirlo?",
 };
 
-const TOO_QUIET: Record<"en" | "pt", string> = {
+const TOO_QUIET: Record<"en" | "pt" | "es", string> = {
   en: "I could not hear anything. Could you say that again?",
   pt: "Não consegui ouvir. Pode repetir?",
+  es: "No pude escuchar nada. ¿Puedes repetirlo?",
 };
 
-function pick(lang: Lang): "en" | "pt" {
-  return lang === "pt" ? "pt" : "en";
+function pick(lang: Lang): "en" | "pt" | "es" {
+  if (lang === "pt") return "pt";
+  if (lang === "es") return "es";
+  return "en";
 }
 
-const DIDNT_CATCH: Record<"en" | "pt", string> = {
+const DIDNT_CATCH: Record<"en" | "pt" | "es", string> = {
   en: "Sorry, I didn't catch that.",
   pt: "Desculpa, não entendi.",
+  es: "Disculpa, no te entendí.",
 };
 
 /** Said when someone spoke and nothing could be made out of it. */
@@ -70,7 +99,7 @@ export function sayable(title: string, max = 60): string {
   return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[,;:.\-–—]+$/, "")}...`;
 }
 
-const TASK: Record<"en" | "pt", Record<TaskNotice, (title: string) => string>> = {
+const TASK: Record<"en" | "pt" | "es", Record<TaskNotice, (title: string) => string>> = {
   en: {
     started: () => "I've started that in the background.",
     proposed: () => "I've put that on your screen. It waits for your approval, and only you can give it.",
@@ -90,6 +119,16 @@ const TASK: Record<"en" | "pt", Record<TaskNotice, (title: string) => string>> =
     needs: (t) => `${t} precisa da sua aprovação.`,
     cancelled: (t) => `${t} foi cancelada.`,
     paused: (t) => `${t} está pausada.`,
+  },
+  es: {
+    started: () => "Ya empecé eso en segundo plano.",
+    proposed: () => "Lo puse en tu pantalla. Espera tu aprobación, y solo tú puedes darla.",
+    done: (t) => `${t} está listo.`,
+    unverified: (t) => `${t} terminó, pero nada verificó el resultado. Échale un vistazo, por favor.`,
+    failed: (t) => `${t} no funcionó.`,
+    needs: (t) => `${t} necesita tu aprobación.`,
+    cancelled: (t) => `${t} fue cancelada.`,
+    paused: (t) => `${t} está en pausa.`,
   },
 };
 
@@ -114,7 +153,7 @@ export function spokenTaskGist(raw: string, max = 160): string | null {
     .replace(/^\s*[-•]\s+/gm, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (cleaned === "" || /^(ok|done|pronto)\.?$/i.test(cleaned)) return null;
+  if (cleaned === "" || /^(ok|done|pronto|listo)\.?$/i.test(cleaned)) return null;
   if (cleaned.length <= max) {
     return /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
   }
@@ -140,26 +179,28 @@ export function taskUpdatePhrase(
   if (kind === "done" || kind === "unverified") {
     const gist = extra?.result ? spokenTaskGist(extra.result, 150) : null;
     if (gist) {
-      return l === "pt"
-        ? `${shortTitle} ${kind === "done" ? "está pronto" : "terminou"}: ${gist}`
-        : `${shortTitle} ${kind === "done" ? "is done" : "finished"}: ${gist}`;
+      if (l === "pt") return `${shortTitle} ${kind === "done" ? "está pronto" : "terminou"}: ${gist}`;
+      if (l === "es") return `${shortTitle} ${kind === "done" ? "está listo" : "terminó"}: ${gist}`;
+      return `${shortTitle} ${kind === "done" ? "is done" : "finished"}: ${gist}`;
     }
   }
   if (kind === "failed" && extra?.reason) {
     const why = spokenTaskGist(extra.reason.replace(/^Step \d+ failed:\s*/i, ""), 110);
     if (why) {
-      return l === "pt" ? `${shortTitle} não deu certo: ${why}` : `${shortTitle} did not go through: ${why}`;
+      if (l === "pt") return `${shortTitle} não deu certo: ${why}`;
+      if (l === "es") return `${shortTitle} no funcionó: ${why}`;
+      return `${shortTitle} did not go through: ${why}`;
     }
   }
   if (kind === "needs" && extra?.reason) {
     if (/question|answer|input/i.test(extra.reason)) {
-      return l === "pt" ? `${shortTitle} aguarda uma resposta sua.` : `${shortTitle} is waiting for an answer from you.`;
+      if (l === "pt") return `${shortTitle} aguarda uma resposta sua.`;
+      if (l === "es") return `${shortTitle} espera una respuesta tuya.`;
+      return `${shortTitle} is waiting for an answer from you.`;
     }
     if (/check failed/i.test(extra.reason)) {
       const why = spokenTaskGist(extra.reason, 120);
-      return why
-        ? (l === "pt" ? `${shortTitle}: ${why}` : `${shortTitle}: ${why}`)
-        : taskPhrase(lang, kind, title);
+      return why ? `${shortTitle}: ${why}` : taskPhrase(lang, kind, title);
     }
   }
   return taskPhrase(lang, kind, title);
@@ -180,19 +221,25 @@ export function taskMilestonePhrase(
         ? `Atualização em ${shortTitle}: etapa ${milestone.done} de ${milestone.total} concluída, agora em ${next}.`
         : `Atualização em ${shortTitle}: etapa ${milestone.done} de ${milestone.total} concluída.`;
     }
+    if (l === "es") {
+      return next
+        ? `Actualización de ${shortTitle}: paso ${milestone.done} de ${milestone.total} listo, ahora en ${next}.`
+        : `Actualización de ${shortTitle}: paso ${milestone.done} de ${milestone.total} listo.`;
+    }
     return next
       ? `Update on ${shortTitle}: step ${milestone.done} of ${milestone.total} is done, now working on ${next}.`
       : `Update on ${shortTitle}: step ${milestone.done} of ${milestone.total} is done.`;
   }
   const detail = spokenTaskGist(milestone.detail, 96) ?? `${sayable(milestone.detail, 80)}.`;
-  return l === "pt"
-    ? `Atualização em ${shortTitle}: cerca de ${milestone.percent}% concluído. ${detail}`
-    : `Update on ${shortTitle}: about ${milestone.percent} percent done. ${detail}`;
+  if (l === "pt") return `Atualização em ${shortTitle}: cerca de ${milestone.percent}% concluído. ${detail}`;
+  if (l === "es") return `Actualización de ${shortTitle}: cerca del ${milestone.percent}% completado. ${detail}`;
+  return `Update on ${shortTitle}: about ${milestone.percent} percent done. ${detail}`;
 }
 
-const AWAY: Record<"en" | "pt", { lead: string; more: (n: number) => string }> = {
+const AWAY: Record<"en" | "pt" | "es", { lead: string; more: (n: number) => string }> = {
   en: { lead: "While you were away:", more: (n) => `And ${n} more.` },
   pt: { lead: "Enquanto você esteve fora:", more: (n) => `E mais ${n}.` },
+  es: { lead: "Mientras no estabas:", more: (n) => `Y ${n} más.` },
 };
 
 /** What a call opens with when work finished, failed or waits on the person since they last talked: the first few, then how many more. */

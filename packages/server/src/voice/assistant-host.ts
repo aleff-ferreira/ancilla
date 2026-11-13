@@ -1,3 +1,5 @@
+import { readdirSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { AuthorizationHub, PendingAuthorizationView } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import { awaitsApproval, TERMINAL_TASK, type Task } from "../assistant/tasks.js";
@@ -84,6 +86,10 @@ export interface AssistantVoiceHostDeps {
   isPreAuthorized?: () => boolean;
   /** Shared user authorization hub for inline call-card prompts. */
   authorizations?: AuthorizationHub | null;
+  /** Live model identity and recent switch metadata for system-prompt grounding. */
+  liveState?: () => { activeModel?: string | null; recentSwitch?: string | null };
+  /** Known model identifiers available to the user for phonetic grounding. */
+  knownModels?: () => readonly string[];
   log: (line: string) => void;
 }
 
@@ -109,6 +115,7 @@ export class AssistantVoiceHost implements VoiceHost {
   private readonly harnessTools: HarnessTools | null;
   private readonly workspaceTools: WorkspaceVoiceTools | null;
   private readonly authHub: AuthorizationHub | null;
+  private cachedProjectFiles: { cwd: string; at: number; files: string[] } | null = null;
 
   constructor(private readonly deps: AssistantVoiceHostDeps) {
     this.authHub = deps.authorizations ?? deps.workspace?.authorizations ?? null;
@@ -133,7 +140,12 @@ export class AssistantVoiceHost implements VoiceHost {
 
   private lang(): Lang {
     const forced = this.persona().language;
-    if (forced) return forced.toLowerCase().startsWith("pt") ? "pt" : "en";
+    if (forced) {
+      const lower = forced.toLowerCase();
+      if (lower.startsWith("pt")) return "pt";
+      if (lower.startsWith("es") || lower.includes("spanish") || lower.includes("español")) return "es";
+      return "en";
+    }
     return this.userLang;
   }
 
@@ -156,12 +168,118 @@ export class AssistantVoiceHost implements VoiceHost {
     if (guess !== "unknown") this.userLang = guess;
     try {
       // Meaning search is given a short wait: a call is about the next half second, and the words decide when it is late.
-      const prefix = (await this.deps.assistant.prepareTurnAsync({ sessionId: this.deps.conversationId, text, project: null, account: null }, { timeoutMs: VOICE_MEANING_TIMEOUT_MS })).prefix;
+      const prefix = (
+        await this.deps.assistant.prepareTurnAsync(
+          { sessionId: this.deps.conversationId, text, project: this.deps.project(), account: null },
+          { timeoutMs: VOICE_MEANING_TIMEOUT_MS },
+        )
+      ).prefix;
       return this.withRightNow(prefix);
     } catch (error) {
       this.deps.log(`voice: the notes for a turn could not be chosen: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
+  }
+
+  async previewContext(text: string, _source: "voice" | "text"): Promise<{ text: string | null; cacheHit?: boolean }> {
+    try {
+      const res = await this.deps.assistant.previewAsync(
+        { sessionId: this.deps.conversationId, text, project: this.deps.project(), account: null },
+        { timeoutMs: VOICE_MEANING_TIMEOUT_MS },
+      );
+      return { text: this.withRightNow(res.prefix), cacheHit: res.cacheHit };
+    } catch {
+      return { text: null, cacheHit: false };
+    }
+  }
+
+  wasLastContextCacheHit(): boolean {
+    return this.deps.assistant.wasLastContextCacheHit;
+  }
+
+  liveState(): { activeModel?: string | null; project?: string | null; recentSwitch?: string | null } {
+    const extra = this.deps.liveState?.();
+    return {
+      activeModel: extra?.activeModel ?? null,
+      project: this.deps.project(),
+      recentSwitch: extra?.recentSwitch ?? null,
+    };
+  }
+
+  vocabulary(): readonly string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const add = (value: string | null | undefined): void => {
+      const v = value?.trim();
+      if (!v || v.length < 2 || v.length > 80) return;
+      const key = v.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(v);
+    };
+    const p = this.persona();
+    add("Ancilla");
+    add(p.name);
+    add(p.callsUser);
+    for (const m of ["muse-wonder-full-1.0", "muse-wonder-1.0", "muse-spark-1.3", ...(this.deps.knownModels?.() ?? [])]) {
+      add(m);
+    }
+    const cwd = this.deps.project();
+    if (cwd) add(basename(cwd));
+    try {
+      for (const proj of this.deps.workspace?.projects() ?? []) {
+        add(proj.name);
+        add(basename(proj.cwd));
+      }
+    } catch {
+      /* optional */
+    }
+    try {
+      for (const task of this.deps.assistant.tasks.list("all", 12)) add(task.title);
+    } catch {
+      /* optional */
+    }
+    if (cwd) {
+      const now = Date.now();
+      if (!this.cachedProjectFiles || this.cachedProjectFiles.cwd !== cwd || now - this.cachedProjectFiles.at > 15_000) {
+        const skipEntry = (name: string): boolean =>
+          name.startsWith(".") ||
+          name === "node_modules" ||
+          name === "dist" ||
+          name === "build" ||
+          name === "target" ||
+          name === "coverage" ||
+          name === "out" ||
+          name === "vendor";
+        try {
+          const top = readdirSync(cwd, { withFileTypes: true })
+            .filter((e) => !skipEntry(e.name))
+            .slice(0, 40);
+          const files: string[] = top.map((e) => e.name);
+          let scannedDirs = 0;
+          for (const entry of top) {
+            if (!entry.isDirectory() || scannedDirs >= 12 || files.length >= 100) continue;
+            scannedDirs += 1;
+            try {
+              const children = readdirSync(join(cwd, entry.name), { withFileTypes: true })
+                .filter((c) => !skipEntry(c.name))
+                .slice(0, 20);
+              for (const child of children) {
+                files.push(`${entry.name}/${child.name}`);
+                if (files.length >= 100) break;
+              }
+            } catch {
+              /* unreadable subdir */
+            }
+          }
+          this.cachedProjectFiles = { cwd, at: now, files };
+        } catch {
+          this.cachedProjectFiles = { cwd, at: now, files: [] };
+        }
+      }
+      for (const f of this.cachedProjectFiles.files) add(f);
+    }
+    return out;
   }
 
   private readonly needsSessionUser = (sessionId: string): boolean => this.deps.assistant.sessionNeedsUser(sessionId);

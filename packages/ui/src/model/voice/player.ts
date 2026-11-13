@@ -33,6 +33,7 @@ interface Piece {
  */
 export class PlaybackLedger {
   private pieces: Piece[] = [];
+  private readonly retired = new Map<number, number>();
   private end = 0;
   private latest = 0;
 
@@ -49,7 +50,7 @@ export class PlaybackLedger {
 
   /** Samples of `utterance` heard by `now` (the time at the speaker, so output latency is already taken off). */
   played(utterance: number, now: number): number {
-    let total = 0;
+    let total = this.retired.get(utterance) ?? 0;
     for (const p of this.pieces) {
       if (p.utterance !== utterance) continue;
       total += Math.max(0, Math.min(p.samples, Math.floor((now - p.start) * this.rate)));
@@ -71,13 +72,27 @@ export class PlaybackLedger {
     const utterance = this.latest;
     const played = this.played(utterance, now);
     this.pieces = [];
+    this.retired.clear();
     this.end = 0;
     return { utterance, played };
   }
 
   /** Forgets pieces that finished long ago, so that a long call does not keep every sentence. */
   trim(now: number): void {
-    this.pieces = this.pieces.filter((p) => p.start + p.samples / this.rate > now - 5);
+    const keep: Piece[] = [];
+    for (const p of this.pieces) {
+      if (p.start + p.samples / this.rate > now - 5) {
+        keep.push(p);
+      } else {
+        this.retired.set(p.utterance, (this.retired.get(p.utterance) ?? 0) + p.samples);
+      }
+    }
+    this.pieces = keep;
+    while (this.retired.size > 8) {
+      const oldest = this.retired.keys().next().value;
+      if (oldest === undefined) break;
+      this.retired.delete(oldest);
+    }
   }
 }
 
@@ -91,11 +106,14 @@ export class WebPlayer implements Player {
   private readonly gain: GainNode;
   private readonly analyser: AnalyserNode;
   private readonly sources = new Set<AudioBufferSourceNode>();
+  private readonly scheduledSamples = new Map<number, number>();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly scratch: Uint8Array<ArrayBuffer>;
 
   constructor(
     private readonly ctx: AudioContext,
     private readonly rate: number,
+    private readonly onIdle?: (utterance: number, played: number) => void,
   ) {
     this.ledger = new PlaybackLedger(rate);
     this.gain = ctx.createGain();
@@ -114,6 +132,16 @@ export class WebPlayer implements Player {
 
   enqueue(utterance: number, pcm: Int16Array): void {
     if (pcm.length === 0) return;
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.scheduledSamples.set(utterance, (this.scheduledSamples.get(utterance) ?? 0) + pcm.length);
+    while (this.scheduledSamples.size > 8) {
+      const oldest = this.scheduledSamples.keys().next().value;
+      if (oldest === undefined) break;
+      this.scheduledSamples.delete(oldest);
+    }
     const buffer = this.ctx.createBuffer(1, pcm.length, this.rate);
     const channel = buffer.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) channel[i] = (pcm[i] as number) / 32768;
@@ -124,8 +152,23 @@ export class WebPlayer implements Player {
     source.start(start);
     this.sources.add(source);
     source.onended = () => {
-      this.sources.delete(source);
+      if (!this.sources.delete(source)) return;
       source.disconnect();
+      if (this.sources.size === 0 && this.onIdle) {
+        const playedNow = this.played(utterance);
+        this.onIdle(utterance, playedNow);
+        const total = this.scheduledSamples.get(utterance) ?? 0;
+        const lagSec = this.ctx.outputLatency || this.ctx.baseLatency || 0;
+        if (playedNow < total && lagSec > 0) {
+          if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+          this.idleTimer = setTimeout(() => {
+            this.idleTimer = null;
+            if (this.sources.size === 0 && this.current() === utterance && this.onIdle) {
+              this.onIdle(utterance, this.played(utterance));
+            }
+          }, Math.min(500, Math.ceil(lagSec * 1000) + 12));
+        }
+      }
     };
     this.ledger.trim(this.ctx.currentTime);
   }
@@ -139,6 +182,11 @@ export class WebPlayer implements Player {
   }
 
   stop(): { utterance: number; played: number } {
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    this.scheduledSamples.clear();
     const out = this.ledger.clear(this.heardAt());
     for (const source of this.sources) {
       try {

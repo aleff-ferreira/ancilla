@@ -12,5 +12,7 @@
   <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
   <key>NSNetworkVolumesUsageDescription</key>
   <string>Ancilla runs Muse Code in the project folders you add, and shows their files.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Ancilla uses your microphone during voice calls with your assistant.</string>
 </dict>
 </plist>

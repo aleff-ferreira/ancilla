@@ -39,6 +39,8 @@ export class VoiceSocketServer {
 
   /** Completes the handshake on a request the server has already let through. */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const tcp = socket as Duplex & { setNoDelay?: (noDelay?: boolean) => void };
+    tcp.setNoDelay?.(true);
     this.wss.handleUpgrade(req, socket, head, (ws) => this.onConnection(ws));
   }
 
@@ -60,6 +62,7 @@ export class VoiceSocketServer {
   private onConnection(ws: WebSocket): void {
     this.open.add(ws);
     const service = this.service();
+    void service?.warm();
     let handle: CallHandle | null = null;
     let starting = false;
     let gone = false;

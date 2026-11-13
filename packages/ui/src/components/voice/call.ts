@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { AncillaController } from "../../model/controller.js";
+import type { AppState } from "../../model/store.js";
 import type { CallView } from "../../model/voice/callState.js";
 import { browserCallIO } from "../../model/voice/browser.js";
 import type { CallMode } from "../../model/voice/protocol.js";
@@ -50,11 +51,25 @@ export interface TalkOptions {
   project?: string | null;
 }
 
+/** Resolves the workspace project active on screen (open thread, new-thread draft, or last used project). */
+export function activeVoiceProject(state: AppState | null | undefined): string | null {
+  if (!state) return null;
+  const route = state.route;
+  if (route?.kind === "thread") {
+    const cwd = state.sessions?.[route.sessionId]?.cwd;
+    if (cwd) return cwd;
+  } else if (route?.kind === "new" && route.cwd) {
+    return route.cwd;
+  }
+  return state.prefs?.lastProject ?? state.projects?.[0]?.cwd ?? null;
+}
+
 /** Starts a call. Does nothing when one is already live. Must be called from the click that asked for it: the browser ties the microphone prompt and the audio to that gesture. */
 export function startCall(controller: AncillaController, options: TalkOptions = {}): CallSession {
   if (active && callIsLive(active)) return active;
   const io = browserCallIO(() => controller.voiceSocketUrl());
-  const session = new CallSession(io, { mode: options.mode ?? "hands-free", lang: null, project: options.project ?? null });
+  const project = options.project !== undefined ? options.project : activeVoiceProject(controller.store?.get());
+  const session = new CallSession(io, { mode: options.mode ?? "hands-free", lang: null, project });
   active = session;
   notify();
   void session.start();

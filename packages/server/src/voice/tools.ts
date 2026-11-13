@@ -6,6 +6,7 @@ import { awaitsApproval, parseTaskSpec, TERMINAL_TASK } from "../assistant/tasks
 import { ConflictError, NotFoundError, ValidationError } from "../assistant/store.js";
 import { isRestrictedAssistantUrl } from "../browser/sites.js";
 import type { ToolCall, ToolSpec } from "./brain.js";
+import { scoreNameMatch } from "./harness.js";
 import type { ToolResult } from "./host.js";
 import { sayable, taskPhrase } from "./prompt.js";
 import type { Lang } from "./text.js";
@@ -186,6 +187,16 @@ export class VoiceTools {
     const matches = tasks.list("all", 200).filter((t) => t.id.startsWith(id) || t.id.endsWith(id));
     if (matches.length === 1) return matches[0] as Task;
     if (matches.length > 1) throw new ConflictError("More than one task fits that. Use the full id from list_tasks.");
+    const scored = tasks
+      .list("all", 50)
+      .map((task) => ({ task, score: scoreNameMatch(task.title, id) }))
+      .filter((entry) => entry.score >= 0.65)
+      .sort((a, b) => b.score - a.score);
+    if (scored.length === 1) return scored[0]!.task;
+    if (scored.length > 1) {
+      if (scored[0]!.score - scored[1]!.score >= 0.08) return scored[0]!.task;
+      throw new ConflictError("More than one task fits that. Use the full id from list_tasks.");
+    }
     throw new NotFoundError("That task");
   }
 
@@ -379,7 +390,7 @@ export class VoiceTools {
         case "recall": {
           const query = str(args["query"], 400);
           if (query === "") return { ok: false, text: "Say what to look up." };
-          const found = await assistant.previewAsync({ sessionId: this.deps.conversationId, text: query, project: null, account: null }, { timeoutMs: 600 });
+          const found = await assistant.previewAsync({ sessionId: this.deps.conversationId, text: query, project: this.deps.project(), account: null }, { timeoutMs: 600 });
           return { ok: true, text: found.memories.length === 0 ? "Nothing is remembered about that." : found.text };
         }
         default:

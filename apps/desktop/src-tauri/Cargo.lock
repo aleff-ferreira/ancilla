@@ -36,6 +36,7 @@ dependencies = [
 name = "ancilla"
 version = "0.28.2"
 dependencies = [
+ "glib",
  "serde",
  "serde_json",
  "tauri",
@@ -47,6 +48,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "webkit2gtk",
 ]
 
 [[package]]

@@ -14,7 +14,12 @@ export const STOPWORDS = new Set(
   ("a an the and or but if then else of to in on at by for with from as is are was were be been being am do does did done have has had " +
     "i me my mine we us our you your it its this that these those there here so than too very can could should would will shall may might must " +
     "not no yes just also about into over under up down out off again more most some any all each other such only own same what which who whom " +
-    "when where why how please thanks thank").split(" "),
+    "when where why how please thanks thank " +
+    "o os um uma uns umas da dos das na nos nas por para com sem que se mas ou como mais muito tambem eu meu minha meus minhas voce voces " +
+    "seu sua seus suas isso isto esse essa este esta aquilo aquele aquela sao estou estao foi tenho pelo pela pelos pelas sobre entre " +
+    "qual quais quem onde quando porque " +
+    "el la los las un una unos unas del al en con pero muy yo mi mis tu tus su sus esto eso ese esa es soy eres estan fue tengo tiene " +
+    "cual cuales quien donde cuando").split(" "),
 );
 
 /** Lower case, accents folded, and the odd quote marks made plain, so that two spellings of one thing compare equal. */
@@ -31,6 +36,10 @@ export function fold(text: string): string {
 export function stem(word: string): string {
   let w = word;
   if (w.length <= 3) return w;
+  if (w.endsWith("coes") && w.length > 6) return `${w.slice(0, -4)}cao`;
+  if (w.endsWith("oes") && w.length > 5) return `${w.slice(0, -3)}ao`;
+  if (w.endsWith("ais") && w.length > 5) return `${w.slice(0, -3)}al`;
+  if (w.endsWith("eis") && w.length > 5) return `${w.slice(0, -3)}el`;
   if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
   if (w.endsWith("sses")) return w.slice(0, -2);
   if (w.endsWith("ing") && w.length > 5) {
@@ -59,7 +68,10 @@ export function expandContractions(text: string): string {
     .replace(/\b(\w+)'(?:ll|ve|re|d|m)\b/g, "$1");
 }
 
-const NEGATORS = new Set(["never", "not", "no", "avoid", "without", "stop", "cannot", "nothing", "none", "neither", "nor", "forbidden"]);
+const NEGATORS = new Set([
+  "never", "not", "no", "avoid", "without", "stop", "cannot", "nothing", "none", "neither", "nor", "forbidden",
+  "nao", "nunca", "jamais", "jamas", "sem", "sin", "proibido", "prohibido", "evitar", "evite", "nada", "nenhum", "nenhuma", "ningun", "ninguno", "ninguna",
+]);
 
 /** How many words of refusal a statement carries: an odd count means it says the opposite of an even one. */
 export function negations(text: string): number {
@@ -157,12 +169,17 @@ export function identifiersOf(text: string): string[] {
 
 /** A question is about the past when it says so: "what was", "back then", "last month", "three weeks ago". */
 export function isPastQuestion(text: string): boolean {
-  return /\b(?:was|were|had|did|used to|back then|at that time|ago|last (?:week|month|year)|previously|yesterday|as of)\b/i.test(text);
+  const folded = fold(text);
+  return /\b(?:was|were|had|did|used to|back then|at that time|ago|last (?:week|month|year)|previously|yesterday|as of|ontem|ayer|semana pas+ada|mes pas+ado|ano pas+ado|antigamente|anteriormente)\b/i.test(folded);
 }
 
 const PAST_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const UNIT_MS: Record<string, number> = { day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000, year: 365 * 86_400_000 };
-const NUMBER_WORDS: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+const NUMBER_WORDS: Record<string, number> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10,
+  un: 1, una: 1, dos: 2, cuatro: 4, siete: 7, ocho: 8, nueve: 9, diez: 10,
+};
 
 /**
  * The moment a question about the past is about, or null when it names none: an ISO date, "yesterday", "last week",
@@ -186,13 +203,13 @@ export function parseAsOf(text: string, now: number, offsetMinutes = 0): number 
     const count = /^\d+$/.test(ago[1] as string) ? Number(ago[1]) : (NUMBER_WORDS[ago[1] as string] ?? 1);
     return now - count * (UNIT_MS[ago[2] as string] as number);
   }
-  if (/\byesterday\b/.test(t)) return endOf(y, m, d - 1);
-  if (/\blast week\b/.test(t)) {
+  if (/\b(?:yesterday|ontem|ayer)\b/.test(t)) return endOf(y, m, d - 1);
+  if (/\b(?:last week|semana pas+ada)\b/.test(t)) {
     const sinceMonday = (local.getUTCDay() + 6) % 7;
     return Date.UTC(y, m, d - sinceMonday) - off - 1;
   }
-  if (/\blast month\b/.test(t)) return endOf(y, m, 0);
-  if (/\blast year\b/.test(t)) return endOf(y - 1, 11, 31);
+  if (/\b(?:last month|mes pas+ado)\b/.test(t)) return endOf(y, m, 0);
+  if (/\b(?:last year|ano pas+ado)\b/.test(t)) return endOf(y - 1, 11, 31);
   const named = new RegExp(`\\b(${PAST_MONTHS.join("|")})(?:,? (\\d{4}))?\\b`).exec(t);
   if (named) {
     // "may" is also a verb: it counts as a month only with a year or after a word that says "in" or "of".
@@ -235,12 +252,12 @@ export function parseWhen(text: string, now: number, offsetMinutes = 0): When | 
 
   let time: { hour: number; minute: number } | null = null;
   let timeText = "";
-  const t = /\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/.exec(lower);
+  const t = /\b(?:at|as|a las)\s+(\d{1,2})(?::(\d{2})|h(\d{2})?)?\s*(am|pm)?\b/.exec(lower);
   if (t) {
     let hour = Number(t[1]);
-    const minute = t[2] ? Number(t[2]) : 0;
-    if (t[3] === "pm" && hour < 12) hour += 12;
-    if (t[3] === "am" && hour === 12) hour = 0;
+    const minute = t[2] ? Number(t[2]) : t[3] ? Number(t[3]) : 0;
+    if (t[4] === "pm" && hour < 12) hour += 12;
+    if (t[4] === "am" && hour === 12) hour = 0;
     if (hour <= 23 && minute <= 59) {
       time = { hour, minute };
       timeText = t[0];
@@ -255,17 +272,23 @@ export function parseWhen(text: string, now: number, offsetMinutes = 0): When | 
     const minute = m[5] !== undefined ? Number(m[5]) : time?.minute ?? 0;
     return { at: make(Number(m[1]), Number(m[2]) - 1, Number(m[3]), hour, minute), matched: m[0] };
   }
-  m = /\bin\s+(\d+|an?|one|two|three|four|five|six|seven|eight|nine|ten)\s+(minute|hour|day|week|month)s?\b/.exec(lower);
+  m = /\b(?:in|em|en)\s+(\d+|an?|um|uma|un|una|one|two|dois|duas|dos|three|tres|four|quatro|cuatro|five|cinco|six|seis|seven|sete|siete|eight|oito|ocho|nine|nove|nueve|ten|dez|diez)\s+(minute|minuto|hour|hora|day|dia|week|semana|month|mes)(?:s|es)?\b/.exec(lower);
   if (m) {
-    const words: Record<string, number> = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
-    const n = /^\d+$/.test(m[1] as string) ? Number(m[1]) : (words[m[1] as string] ?? 1);
-    const unit = { minute: 60_000, hour: HOUR, day: DAY, week: 7 * DAY, month: 30 * DAY }[m[2] as "minute"];
+    const n = /^\d+$/.test(m[1] as string) ? Number(m[1]) : (NUMBER_WORDS[m[1] as string] ?? 1);
+    const unitMap: Record<string, number> = {
+      minute: 60_000, minuto: 60_000,
+      hour: HOUR, hora: HOUR,
+      day: DAY, dia: DAY,
+      week: 7 * DAY, semana: 7 * DAY,
+      month: 30 * DAY, mes: 30 * DAY,
+    };
+    const unit = unitMap[m[2] as string] ?? DAY;
     return { at: now + n * unit, matched: m[0] };
   }
-  if (/\bday after tomorrow\b/.test(lower)) return done(at(y, mo, d + 2), "day after tomorrow");
-  if (/\btomorrow\b/.test(lower)) return done(at(y, mo, d + 1), "tomorrow");
-  if (/\btonight\b/.test(lower)) return done(at(y, mo, d, 20), "tonight");
-  if (/\btoday\b/.test(lower)) return done(at(y, mo, d, 17), "today");
+  if (/\b(?:day after tomorrow|depois de amanha|pasado manana)\b/.test(lower)) return done(at(y, mo, d + 2), "day after tomorrow");
+  if (/\b(?:tomorrow|amanha|manana)\b/.test(lower)) return done(at(y, mo, d + 1), "tomorrow");
+  if (/\b(?:tonight|hoje a noite|esta noche)\b/.test(lower)) return done(at(y, mo, d, 20), "tonight");
+  if (/\b(?:today|hoje|hoy)\b/.test(lower)) return done(at(y, mo, d, 17), "today");
   m = /\bnext\s+(week|month|year)\b/.exec(lower);
   if (m) {
     if (m[1] === "week") return done(at(y, mo, d + 7), m[0]);

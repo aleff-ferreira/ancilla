@@ -31,6 +31,13 @@ export interface TurnMetrics {
   firstAudioMs: number | null;
   totalMs: number | null;
   bargeIn: boolean;
+  endpointReason?: string | null;
+  asrRefineMs?: number | null;
+  asrConfidence?: number | null;
+  snapshotHit?: boolean | null;
+  contextCacheHit?: boolean | null;
+  eotGateSavedMs?: number | null;
+  groundedEntities?: string[] | null;
 }
 
 export type ClientMessage =
@@ -39,13 +46,16 @@ export type ClientMessage =
   | { type: "interrupt"; utterance: number; samples: number }
   | { type: "text"; text: string }
   | { type: "mute"; on: boolean }
+  | { type: "resume_mic" }
   | { type: "ptt"; down: boolean }
   | { type: "decide"; id: string; allow: boolean }
   | { type: "end" }
   | { type: "ping"; t: number };
 
 export type ServerMessage =
-  | { type: "ready"; session: string; sampleRate: number; engine: string; voice: string; lang: string | null; resumed: boolean }
+  | { type: "ready"; session: string; sampleRate: number; engine: string; voice: string; lang: string | null; resumed: boolean; model?: string }
+  | { type: "model"; label: string }
+  | { type: "mic_paused"; paused: boolean; reason: string | null }
   | { type: "state"; state: CallPhase }
   | { type: "level"; speaking: boolean }
   | { type: "partial"; turn: number; text: string }

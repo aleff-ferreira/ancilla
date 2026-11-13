@@ -23,6 +23,10 @@ export function httpSpeechVoices(): Voice[] {
     { id: "pt:alloy", name: "Alloy (neutra)", lang: "pt" },
     { id: "pt:coral", name: "Coral (expressiva)", lang: "pt" },
     { id: "pt:echo", name: "Echo (calma)", lang: "pt" },
+    { id: "es:nova", name: "Nova (cálida)", lang: "es" },
+    { id: "es:alloy", name: "Alloy (neutral)", lang: "es" },
+    { id: "es:coral", name: "Coral (expresiva)", lang: "es" },
+    { id: "es:echo", name: "Echo (calmada)", lang: "es" },
   ];
 }
 
@@ -137,6 +141,7 @@ export interface HttpWhisperAsrOptions {
 }
 
 class HttpWhisperStream implements AsrStream {
+  onPartial?: (result: AsrResult) => void;
   private readonly chunks: Float32Array[] = [];
   private totalSamples = 0;
   private latestText = "";
@@ -149,6 +154,7 @@ class HttpWhisperStream implements AsrStream {
   constructor(
     private readonly lang: string | null,
     private readonly opts: Required<Pick<HttpWhisperAsrOptions, "baseUrl" | "model">> & HttpWhisperAsrOptions,
+    private readonly vocabulary: readonly string[] = [],
   ) {}
 
   accept(samples: Float32Array): void {
@@ -168,19 +174,15 @@ class HttpWhisperStream implements AsrStream {
       this.totalSamples >= 6_400 &&
       now - this.lastRequestAt >= interval
     ) {
-      this.startTranscription();
+      void this.startTranscription();
     }
     return { text: this.latestText };
   }
 
-  async flush(): Promise<void> {
+  flush(): void {
     if (this.disposed || this.totalSamples < 1_600) return;
-    if (this.inflight && this.inflight.samples === this.totalSamples) {
-      await this.inflight.promise;
-      return;
-    }
-    if (this.transcribedSamples < this.totalSamples) {
-      await this.startTranscription();
+    if (!this.inflight && this.transcribedSamples < this.totalSamples) {
+      void this.startTranscription();
     }
   }
 
@@ -188,10 +190,10 @@ class HttpWhisperStream implements AsrStream {
     if (this.disposed || this.totalSamples < 1_600) return { text: this.latestText, endpoint: true };
     if (this.inflight && this.inflight.samples === this.totalSamples) {
       const text = await this.inflight.promise;
-      return { text, endpoint: true };
+      return { text, endpoint: true, snapshotHit: true };
     }
     if (this.transcribedSamples === this.totalSamples) {
-      return { text: this.latestText, endpoint: true };
+      return { text: this.latestText, endpoint: true, snapshotHit: true };
     }
     const text = await this.startTranscription();
     return { text, endpoint: true };
@@ -211,8 +213,10 @@ class HttpWhisperStream implements AsrStream {
     const promise = this.requestTranscript(snapshotChunks)
       .then((text) => {
         if (!this.disposed && snapshotSamples >= this.transcribedSamples) {
+          const changed = text !== this.latestText;
           this.latestText = text;
           this.transcribedSamples = snapshotSamples;
+          if (changed) this.onPartial?.({ text: this.latestText });
         }
         return this.latestText;
       })
@@ -237,6 +241,9 @@ class HttpWhisperStream implements AsrStream {
     form.append("response_format", "json");
     const langCode = this.lang ? this.lang.toLowerCase().split("-")[0] : null;
     if (langCode && /^[a-z]{2}$/.test(langCode)) form.append("language", langCode);
+    if (this.vocabulary.length > 0) {
+      form.append("prompt", this.vocabulary.slice(0, 24).join(", "));
+    }
 
     const headers: Record<string, string> = {};
     const key = this.opts.apiKey?.();
@@ -265,8 +272,8 @@ export class HttpWhisperAsr implements AsrEngine {
     this.id = `http-asr:${opts.model}`;
   }
 
-  open(lang: string | null): AsrStream {
-    return new HttpWhisperStream(lang, this.opts);
+  open(lang: string | null, options?: { vocabulary?: readonly string[] }): AsrStream {
+    return new HttpWhisperStream(lang, this.opts, options?.vocabulary ?? []);
   }
 }
 

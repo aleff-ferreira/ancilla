@@ -20,23 +20,34 @@ export interface SpeechDeps {
   aheadMs: number;
   /** Called when the first sound of the reply is on its way to the speakers. */
   onFirstAudio: () => void;
+  /** Called whenever a queued segment begins sending audio (including after an interim thinking filler drained). */
+  onAudioActive?: () => void;
+  /** Called when all currently queued audio has finished playing while `finish()` has not yet been called. */
+  onQueueDrained?: () => void;
   log: (line: string) => void;
 }
 
 const FRAME_MS = 40;
 
+interface QueuedSegment {
+  text: string;
+  trackInLedger: boolean;
+}
+
 export class SpeechOut {
   readonly ledger = new SpokenLedger();
-  private readonly queue: string[] = [];
+  private readonly queue: QueuedSegment[] = [];
   private readonly abortController = new AbortController();
   private sent = 0;
   private played = 0;
   private chunk = 0;
+  private segmentIndex = 0;
   private working = false;
   private ended = false;
   private firstSent = false;
   private wake: (() => void) | null = null;
   private cancelFallback: (() => void) | null = null;
+  private cancelDrainFallback: (() => void) | null = null;
   private readonly waiters: Array<() => void> = [];
   private aborted = false;
   private lastReportAt = 0;
@@ -65,20 +76,27 @@ export class SpeechOut {
     return this.firstSent;
   }
 
-  /** The text of the reply that is queued or said so far. */
+  /** The text of the reply that is queued or said so far (excluding non-ledger fillers). */
   get spokenText(): string {
-    return [...this.ledger.segments.map((s) => s.text), ...this.queue].join(" ");
+    return [
+      ...this.ledger.segments.map((s) => s.text),
+      ...this.queue.filter((q) => q.trackInLedger).map((q) => q.text),
+    ].join(" ");
   }
 
-  enqueue(text: string): void {
+  enqueue(text: string, options?: { trackInLedger?: boolean }): void {
     if (this.aborted || this.ended || text.trim() === "") return;
-    this.queue.push(text);
+    this.cancelDrainFallback?.();
+    this.cancelDrainFallback = null;
+    this.queue.push({ text, trackInLedger: options?.trackInLedger !== false });
     if (!this.working) void this.run();
   }
 
   /** No more text will come: resolves once all of it has been said and played (or the voice was cut off). */
   async finish(): Promise<void> {
     this.ended = true;
+    this.cancelDrainFallback?.();
+    this.cancelDrainFallback = null;
     if (!this.working && this.queue.length === 0) this.settleIfDone();
     return new Promise<void>((resolve) => {
       this.waiters.push(resolve);
@@ -104,13 +122,14 @@ export class SpeechOut {
       this.wake = null;
       wake();
     }
+    this.checkQueueDrain();
     this.settleIfDone();
   }
 
   /** The words of the reply the person heard, given what the speakers had played. */
   heard(playedSamples = this.played): { text: string; complete: boolean } {
     const h = this.ledger.heard(playedSamples);
-    return { text: h.text, complete: h.complete && this.queue.length === 0 };
+    return { text: h.text, complete: h.complete && this.queue.filter((q) => q.trackInLedger).length === 0 };
   }
 
   abort(): void {
@@ -120,12 +139,33 @@ export class SpeechOut {
     this.abortController.abort();
     this.cancelFallback?.();
     this.cancelFallback = null;
+    this.cancelDrainFallback?.();
+    this.cancelDrainFallback = null;
     if (this.wake) {
       const wake = this.wake;
       this.wake = null;
       wake();
     }
     for (const w of this.waiters.splice(0)) w();
+  }
+
+  private checkQueueDrain(): void {
+    if (this.aborted || this.ended || this.working || this.queue.length > 0 || !this.firstSent) return;
+    if (this.played >= this.sent) {
+      this.cancelDrainFallback?.();
+      this.cancelDrainFallback = null;
+      this.deps.onQueueDrained?.();
+      return;
+    }
+    if (!this.cancelDrainFallback && this.deps.onQueueDrained) {
+      const remainingMs = ((this.sent - this.played) / this.deps.tts.sampleRate) * 1000 + 80;
+      this.cancelDrainFallback = this.deps.scheduler.after(remainingMs, () => {
+        this.cancelDrainFallback = null;
+        if (this.aborted || this.ended || this.working || this.queue.length > 0) return;
+        this.played = this.sent;
+        this.deps.onQueueDrained?.();
+      });
+    }
   }
 
   private settleIfDone(): void {
@@ -155,13 +195,17 @@ export class SpeechOut {
     const rate = tts.sampleRate;
     try {
       while (this.queue.length > 0 && !this.aborted) {
-        const text = this.queue.shift() as string;
+        const seg = this.queue.shift() as QueuedSegment;
+        const { text, trackInLedger } = seg;
+        const firstChunk = this.segmentIndex === 0;
+        this.segmentIndex += 1;
         const { voice, speed } = this.deps.voiceFor(text);
         this.deps.send({ type: "speaking", utterance: this.utterance, turn: this.turn, text, samples: Math.round(text.length * 0.06 * rate) });
         let samples = 0;
         let cut = false;
+        let segmentStartedAudio = false;
         const startedAt = this.sent;
-        for await (const pcm of tts.synthesize(text, { voice, speed, signal: this.abortController.signal })) {
+        for await (const pcm of tts.synthesize(text, { voice, speed, signal: this.abortController.signal, firstChunk })) {
           if (this.aborted) {
             cut = true;
             break;
@@ -190,6 +234,10 @@ export class SpeechOut {
             this.deps.sendAudio(encodeAudioOut(this.utterance, this.chunk++, this.sent, piece));
             this.sent += piece.length;
             samples += piece.length;
+            if (!segmentStartedAudio) {
+              segmentStartedAudio = true;
+              this.deps.onAudioActive?.();
+            }
             if (!this.firstSent) {
               this.firstSent = true;
               this.firstAudioAt = this.lastReportAt = scheduler.now();
@@ -199,20 +247,25 @@ export class SpeechOut {
         }
         if (cut || this.aborted) {
           // The sentence was cut while it was being made: what was sent of it counts in proportion.
-          if (samples > 0) {
+          if (samples > 0 && trackInLedger) {
             const estimate = Math.max(samples, Math.round(text.length * 0.06 * rate));
             this.ledger.add(wordsHeard(text, samples / estimate) || text.split(" ")[0] || text, samples);
           }
           break;
         }
-        this.ledger.add(text, this.sent - startedAt);
+        if (trackInLedger) {
+          this.ledger.add(text, this.sent - startedAt);
+        }
       }
     } catch (error) {
       if (!this.aborted) this.deps.log(`the voice failed on a sentence: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       this.working = false;
       if (this.queue.length > 0 && !this.aborted) void this.run();
-      else this.settleIfDone();
+      else {
+        this.checkQueueDrain();
+        this.settleIfDone();
+      }
     }
   }
 }

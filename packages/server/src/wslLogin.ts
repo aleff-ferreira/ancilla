@@ -93,6 +93,11 @@ export class WslHomes {
     return pending;
   }
 
+  /** Synchronously returns a previously resolved WSL home path if cached, without spawning `wsl.exe`. */
+  peek(distro: string): string | null {
+    return this.homes.get(distro) ?? null;
+  }
+
   /** A failed look is not held against the distro any more: the next `get` asks again. A good answer stays. */
   forgetFailure(distro: string): void { this.retryAt.delete(distro); }
 

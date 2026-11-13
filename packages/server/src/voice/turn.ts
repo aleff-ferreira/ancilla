@@ -56,7 +56,7 @@ export const DEFAULT_TURN_CONFIG: TurnConfig = {
   onProb: 0.5,
   offProb: 0.35,
   onsetFrames: 3,
-  minSpeechMs: 200,
+  minSpeechMs: 160,
   // Generous on purpose: the detector is slow to believe a short first word ("What", "Hey") and a first word that is cut
   // off is a sentence misheard. What comes before the speech is silence, which costs nothing to hand to the recogniser.
   preRollMs: 700,
@@ -72,7 +72,7 @@ export const DEFAULT_TURN_CONFIG: TurnConfig = {
   bargeInNoTextMs: 420,
   duckAfterMs: 96,
   backchannelMaxMs: 1000,
-  postAgentGraceMs: 240,
+  postAgentGraceMs: 220,
 };
 
 export type AgentActivity = "idle" | "thinking" | "speaking";
@@ -95,10 +95,22 @@ export type TurnEvent =
 
 type Mode = "quiet" | "speech" | "trailing";
 
+const ANSWER_WORDS = new Set([
+  "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright",
+  "sim", "claro", "isso", "pode", "beleza",
+  "si", "sí", "vale", "claro", "dale",
+]);
+
+function isPolarityAnswer(text: string): boolean {
+  const clean = text.trim().toLowerCase().replace(/^[.,!?;:¡¿\s]+|[.,!?;:¡¿\s]+$/g, "");
+  return ANSWER_WORDS.has(clean);
+}
+
 export class TurnTaker {
   private mode: Mode = "quiet";
   private agent: AgentActivity = "idle";
   private agentStoppedAt = -Infinity;
+  private expectAnswer = false;
 
   // Onset: speech that has begun but is not yet declared.
   private onsetCount = 0;
@@ -154,6 +166,11 @@ export class TurnTaker {
     return this.mode === "trailing" ? this.silenceMs : 0;
   }
 
+  /** Timestamp (ms) at which the current open speech turn started. */
+  get currentSpeechStart(): number {
+    return this.speechStart;
+  }
+
   /** What the recogniser has heard of the turn in progress, or of the overlap while the assistant speaks. */
   transcript(t: number, text: string): TurnEvent[] {
     if (this.mode === "quiet") {
@@ -168,6 +185,11 @@ export class TurnTaker {
   /** The verdict of a model that listens to the end of the audio, as the chance that the turn is over (0 to 1). */
   semanticEnd(probability: number | null): void {
     this.semantic = probability;
+  }
+
+  /** Marks whether the assistant just asked a question or awaits approval, so "Yes"/"Yeah"/"Sim" is not dropped as a backchannel. */
+  setExpectAnswer(expect: boolean): void {
+    this.expectAnswer = expect;
   }
 
   /** One voice-activity frame, ending at time `t` (milliseconds). */
@@ -229,6 +251,18 @@ export class TurnTaker {
     }
     if (!voiced) {
       if (this.onsetCount > 0 && speaking) out.push({ type: "overlap_end", t });
+      if (!speaking && this.onsetCount >= cfg.onsetFrames && this.onsetVoicedMs >= cfg.minSpeechMs) {
+        if (afterAgent) {
+          // Hold a confirmed short utterance (e.g. "Yes"/"Sim") spoken inside the post-agent grace window until grace ends.
+          return;
+        }
+        this.beginSpeech(t, out);
+        this.mode = "trailing";
+        this.silenceMs = cfg.frameMs;
+        this.resumeFrames = 0;
+        this.candidateSent = false;
+        return;
+      }
       this.onsetCount = 0;
       this.onsetVoicedMs = 0;
       if (this.ducked && t - this.duckedAt > 400) {
@@ -268,13 +302,13 @@ export class TurnTaker {
       this.interrupt(t, "keyword", out);
       return out;
     }
-    if (text !== "" && isBackchannel(text) && sustained < cfg.backchannelMaxMs) {
+    if (text !== "" && isBackchannel(text) && !(this.expectAnswer && isPolarityAnswer(text)) && sustained < cfg.backchannelMaxMs) {
       // A sound of listening: noted, the voice comes back up, and the rest of the sound is not read as speech.
       out.push({ type: "backchannel", t, text });
       out.push(...this.dropOverlap(t));
       return out;
     }
-    if (text !== "" && sustained >= cfg.bargeInMinMs && !isBackchannel(text)) {
+    if (text !== "" && sustained >= cfg.bargeInMinMs && (!isBackchannel(text) || (this.expectAnswer && isPolarityAnswer(text)))) {
       this.interrupt(t, "speech", out);
       return out;
     }
@@ -337,16 +371,17 @@ export class TurnTaker {
     let need: number;
     let reason: TurnEndReason;
     if (this.semantic !== null) {
-      // A model that heard the audio: sure it is over, answer sooner; sure it is not, wait.
-      if (this.semantic >= 0.85) [need, reason] = [Math.round(cfg.silenceCompleteMs * 0.75), "model"];
+      // A model that heard the audio: sure it is over, answer sooner (unless the words themselves end mid-repair/connective); sure it is not, wait.
+      if (reading.verdict === "incomplete") [need, reason] = [cfg.silenceIncompleteMs, "incomplete"];
       else if (this.semantic <= 0.25) [need, reason] = [cfg.silenceIncompleteMs, "model"];
-      else if (reading.verdict === "incomplete") [need, reason] = [cfg.silenceIncompleteMs, "incomplete"];
+      else if (this.semantic >= 0.85) [need, reason] = [Math.round(cfg.silenceCompleteMs * 0.75), "model"];
       else [need, reason] = [cfg.silenceUnknownMs, "model"];
     } else if (reading.command) [need, reason] = [cfg.silenceCommandMs, "command"];
     else if (reading.verdict === "complete") [need, reason] = [cfg.silenceCompleteMs, "complete"];
     else if (reading.verdict === "incomplete") [need, reason] = [cfg.silenceIncompleteMs, "incomplete"];
     else [need, reason] = [cfg.silenceUnknownMs, "unknown"];
-    const looksOver = this.semantic !== null ? this.semantic >= 0.7 : reading.verdict === "complete";
+    const looksOver =
+      reading.verdict !== "incomplete" && (this.semantic !== null ? this.semantic >= 0.7 : reading.verdict === "complete");
     if (!this.candidateSent && looksOver && this.silenceMs >= cfg.candidateAfterMs && this.silenceMs < need) {
       this.candidateSent = true;
       out.push({ type: "end_candidate", t, silenceMs: this.silenceMs });

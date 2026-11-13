@@ -14,6 +14,13 @@ export class TurnTrace {
   firstToken: number | null = null;
   firstAudio: number | null = null;
   bargeIn = false;
+  endpointReason: string | null = null;
+  asrRefineMs: number | null = null;
+  asrConfidence: number | null = null;
+  snapshotHit: boolean | null = null;
+  contextCacheHit: boolean | null = null;
+  eotGateSavedMs: number | null = null;
+  groundedEntities: string[] | null = null;
 
   constructor(readonly turn: number) {}
 
@@ -30,6 +37,13 @@ export class TurnTrace {
       firstAudioMs: this.since(this.firstAudio),
       totalMs: this.since(this.firstAudio),
       bargeIn: this.bargeIn,
+      ...(this.endpointReason !== null ? { endpointReason: this.endpointReason } : {}),
+      ...(this.asrRefineMs !== null ? { asrRefineMs: Math.round(this.asrRefineMs) } : {}),
+      ...(this.asrConfidence !== null ? { asrConfidence: Math.round(this.asrConfidence * 1000) / 1000 } : {}),
+      ...(this.snapshotHit !== null ? { snapshotHit: this.snapshotHit } : {}),
+      ...(this.contextCacheHit !== null ? { contextCacheHit: this.contextCacheHit } : {}),
+      ...(this.eotGateSavedMs !== null ? { eotGateSavedMs: Math.round(this.eotGateSavedMs) } : {}),
+      ...(this.groundedEntities && this.groundedEntities.length > 0 ? { groundedEntities: [...this.groundedEntities] } : {}),
     };
   }
 }

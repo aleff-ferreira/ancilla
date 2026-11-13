@@ -349,6 +349,7 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
   const showBubble = Boolean(
     view &&
       ((live && view.approval !== null) ||
+        (live && view.micPaused) ||
         statusText !== null ||
         view.micProblem !== null ||
         (captionsOpen && (hasSpeechLines || activeTasks.length > 0))),
@@ -387,6 +388,11 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
             <div className="flex min-w-0 items-center gap-1.5 text-xs">
               <span className="truncate font-semibold text-fg">{name}</span>
               <span className="truncate text-subtle">· {phaseLabel(view)}</span>
+              {view.model ? (
+                <span className="max-w-[116px] truncate rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-muted" title={view.model}>
+                  {view.model}
+                </span>
+              ) : null}
               {live && view.status === "ready" && lastMetric?.firstAudioMs != null ? (
                 <span className="shrink-0 text-2xs text-subtle">({(lastMetric.firstAudioMs / 1000).toFixed(1)}s)</span>
               ) : null}
@@ -423,6 +429,18 @@ function FloatingAssistant(props: { session: CallSession | null; view: CallView 
           ) : null}
           {view.micProblem ? (
             <p className="rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">{view.micProblem}</p>
+          ) : null}
+          {live && view.micPaused && session ? (
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">
+              <span className="min-w-0 flex-1 truncate">{view.micPausedReason ?? "Hands-free mic paused on background audio."}</span>
+              <button
+                type="button"
+                className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-2xs font-semibold text-accent-fg hover:opacity-90"
+                onClick={() => session.resumeMic()}
+              >
+                Resume mic
+              </button>
+            </div>
           ) : null}
           {view.status === "failed" && view.error?.includes("not installed") ? (
             <p className="text-xs text-muted">Open Assistant, then Voice, to install it.</p>
@@ -890,6 +908,11 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
             <span className="truncate text-sm font-semibold tracking-[-0.01em] text-fg">{name}</span>
+            {view.model ? (
+              <span className="max-w-[136px] truncate rounded bg-sunken px-1.5 py-0.5 font-mono text-[10px] text-muted" title={view.model}>
+                {view.model}
+              </span>
+            ) : null}
             <DotsSixIcon size={13} className="shrink-0 text-subtle/70" aria-hidden="true" />
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-muted" role="status" aria-live="polite">
@@ -975,6 +998,18 @@ function MovableCard(props: { session: CallSession; view: CallView }) {
         </p>
       ) : null}
       {view.micProblem ? <p className="mx-4 mt-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">{view.micProblem}</p> : null}
+      {live && view.micPaused ? (
+        <div className="mx-4 mt-2 flex items-center justify-between gap-2 rounded-lg bg-warn-soft px-2.5 py-1.5 text-xs text-warn-text">
+          <span className="min-w-0 flex-1 truncate">{view.micPausedReason ?? "Hands-free mic paused on background audio."}</span>
+          <button
+            type="button"
+            className="shrink-0 rounded-md bg-accent px-2.5 py-1 text-2xs font-semibold text-accent-fg hover:opacity-90"
+            onClick={() => session.resumeMic()}
+          >
+            Resume mic
+          </button>
+        </div>
+      ) : null}
       {view.status === "failed" && view.error?.includes("not installed") ? (
         <p className="mx-4 mt-1.5 text-xs text-muted">Open Assistant, then Voice, to install it.</p>
       ) : null}

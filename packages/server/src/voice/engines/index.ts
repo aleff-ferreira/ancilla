@@ -93,7 +93,11 @@ export interface SherpaEngineSet extends VoiceEngineSet {
 /** Chooses how many threads each model gets from the machine it runs on. */
 export function defaultThreads(): { asr: number; refine: number; tts: number } {
   const cores = Math.max(1, availableParallelism());
-  return { asr: Math.max(2, Math.min(4, Math.floor(cores / 4))), refine: Math.max(2, Math.min(4, Math.floor(cores / 4))), tts: Math.max(1, Math.min(3, Math.floor(cores / 6))) };
+  return {
+    asr: Math.max(2, Math.min(4, Math.floor(cores / 4))),
+    refine: Math.max(2, Math.min(4, Math.floor(cores / 4))),
+    tts: cores >= 12 ? 3 : cores >= 4 ? 2 : 1,
+  };
 }
 
 export function createSherpaEngines(layout: VoicePackLayout, options: SherpaEngineOptions = {}): SherpaEngineSet {
@@ -109,7 +113,13 @@ export function createSherpaEngines(layout: VoicePackLayout, options: SherpaEngi
     finalThreads: options.threads ?? threads.refine,
     log: options.log,
   });
-  const tts = new SherpaTts({ runtimeDir: layout.runtimeDir, modelDir: join(layout.modelsDir, MODEL_FOLDERS.tts), threads: threads.tts, steps: options.ttsSteps ?? 4, log: options.log });
+  const tts = new SherpaTts({
+    runtimeDir: layout.runtimeDir,
+    modelDir: join(layout.modelsDir, MODEL_FOLDERS.tts),
+    threads: options.threads ?? threads.tts,
+    steps: options.ttsSteps ?? 4,
+    log: options.log,
+  });
   const vad = new SherpaVad(sherpa, join(layout.modelsDir, MODEL_FOLDERS.vad));
   return { engines: { vad, asr, tts }, asr, tts, report, dispose: () => asr.dispose() };
 }

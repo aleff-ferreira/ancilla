@@ -1058,6 +1058,39 @@ fn main() {
                     .initialization_script(OVERLAY_SCRIPT);
             }
             let window = builder.build()?;
+            #[cfg(target_os = "linux")]
+            {
+                let _ = window.with_webview(|webview| {
+                    use glib::prelude::Cast;
+                    use webkit2gtk::{
+                        PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+                        UserMediaPermissionRequestExt, WebViewExt,
+                    };
+                    let wv = webview.inner();
+                    if let Some(settings) = wv.settings() {
+                        settings.set_enable_media_stream(true);
+                    }
+                    wv.connect_permission_request(|wv, request| {
+                        let Some(media_req) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                            return false;
+                        };
+                        let allowed_local = wv
+                            .uri()
+                            .and_then(|u| Url::parse(u.as_str()).ok())
+                            .map(|url| {
+                                matches!(url.scheme(), "http" | "https")
+                                    && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
+                            })
+                            .unwrap_or(false);
+                        if allowed_local && media_req.is_for_audio_device() && !media_req.is_for_video_device() {
+                            request.allow();
+                        } else {
+                            request.deny();
+                        }
+                        true
+                    });
+                });
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let target = match boot_server(&handle) {

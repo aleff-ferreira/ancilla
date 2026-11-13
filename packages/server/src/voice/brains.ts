@@ -33,6 +33,10 @@ export interface BrainContext {
   museSession: string | null;
   /** Called when a Muse thread was made for the conversation. */
   rememberMuseSession: (sessionId: string) => void;
+  /** Called when the underlying CLI session confirms or changes its active model. */
+  onModelResolved?: (modelId: string | null, label: string) => void;
+  /** Called when a Muse turn settles early on `agentMessage` completion before `turn/completed`. */
+  onEarlySettle?: (savedMs: number) => void;
 }
 
 export interface ResolvedApiAccount {
@@ -148,6 +152,8 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       sessionId: context.museSession,
       onSession: context.rememberMuseSession,
       model: choice.model,
+      ...(context.onModelResolved ? { onModelResolved: (m) => context.onModelResolved?.(m, thread.label) } : {}),
+      ...(context.onEarlySettle ? { onEarlySettle: context.onEarlySettle } : {}),
     });
     return { brain: withTextTools(thread), problem: null, thread };
   }
@@ -184,6 +190,8 @@ export function makeBrain(settings: VoiceSettings, context: BrainContext, deps: 
       sessionId: context.museSession,
       onSession: context.rememberMuseSession,
       model: choice.model,
+      ...(context.onModelResolved ? { onModelResolved: (m) => context.onModelResolved?.(m, thread.label) } : {}),
+      ...(context.onEarlySettle ? { onEarlySettle: context.onEarlySettle } : {}),
     });
     return { brain: withTextTools(thread), problem: null, thread };
   }

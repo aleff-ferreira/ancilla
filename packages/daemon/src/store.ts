@@ -109,8 +109,11 @@ export interface SessionRecord {
   providerId: ProviderId;
   /** The profile a session was created under; null for the provider's default login. Set once, never changed. */
   accountId: string | null;
+  /** Managed host posture (`coding` or `voice`) when pinned to a dedicated host; null for standard coding sessions. */
+  hostPosture: HostPosture | null;
 }
 
+export type HostPosture = "coding" | "voice";
 export type SettledOverride = "settled" | "active";
 
 export interface TurnRecord {
@@ -139,6 +142,8 @@ export interface RecordSessionInput {
   providerId?: ProviderId;
   /** Creation account; later touches never overwrite it. */
   accountId?: string | null;
+  /** Managed host posture (`coding` or `voice`); preserved once set. */
+  hostPosture?: HostPosture | null;
 }
 
 export interface SessionPatch {
@@ -153,6 +158,7 @@ export interface SessionPatch {
   settledOverride?: SettledOverride | null;
   settledAt?: string | null;
   unsettledAt?: string | null;
+  hostPosture?: HostPosture | null;
 }
 
 export const PLACEHOLDER_TITLE = "New thread";
@@ -354,6 +360,7 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "sessions", column: "provider_id", ddl: "ALTER TABLE sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'muse'" },
   { table: "projects", column: "default_provider_id", ddl: "ALTER TABLE projects ADD COLUMN default_provider_id TEXT NOT NULL DEFAULT 'muse'" },
   { table: "usage", column: "provider_id", ddl: "ALTER TABLE usage ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'muse'" },
+  { table: "sessions", column: "host_posture", ddl: "ALTER TABLE sessions ADD COLUMN host_posture TEXT" },
 ];
 
 type Row = Record<string, string | number | null>;
@@ -1573,8 +1580,8 @@ export class AncillaStore {
       this.db
         .prepare(
           `INSERT INTO sessions (id, project_id, title, title_source, status, turn_count, model_id, chosen_model_id, origin,
-             archived, sandbox_disabled, provider_id, account_id, created_at, updated_at, activity_at)
-           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+             archived, sandbox_disabled, provider_id, account_id, host_posture, created_at, updated_at, activity_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.id,
@@ -1588,6 +1595,7 @@ export class AncillaStore {
           input.sandboxDisabled === undefined || input.sandboxDisabled === null ? null : input.sandboxDisabled ? 1 : 0,
           normalizeProviderId(input.providerId),
           input.accountId ?? null,
+          input.hostPosture === "coding" || input.hostPosture === "voice" ? input.hostPosture : null,
           input.createdAt ?? now,
           now,
           input.activityAt ?? input.createdAt ?? now,
@@ -1595,6 +1603,9 @@ export class AncillaStore {
       return this.getSession(input.id) as SessionRecord;
     }
     const patch: SessionPatch = {};
+    if (existing.hostPosture === null && (input.hostPosture === "coding" || input.hostPosture === "voice")) {
+      patch.hostPosture = input.hostPosture;
+    }
     if (input.title !== undefined) {
       const incoming = input.titleSource ?? "auto";
       if (TITLE_RANK[incoming] >= TITLE_RANK[existing.titleSource]) {
@@ -1692,6 +1703,10 @@ export class AncillaStore {
     if (patch.unsettledAt !== undefined) {
       sets.push("unsettled_at = ?");
       values.push(patch.unsettledAt);
+    }
+    if (patch.hostPosture !== undefined) {
+      sets.push("host_posture = ?");
+      values.push(patch.hostPosture);
     }
     if (sets.length > 0) {
       sets.push("updated_at = ?");
@@ -1952,6 +1967,7 @@ export class AncillaStore {
       sandboxDisabled: row["sandbox_disabled"] === null || row["sandbox_disabled"] === undefined ? null : Number(row["sandbox_disabled"]) === 1,
       providerId: normalizeProviderId(row["provider_id"]),
       accountId: row["account_id"] === null || row["account_id"] === undefined ? null : String(row["account_id"]),
+      hostPosture: row["host_posture"] === "coding" || row["host_posture"] === "voice" ? row["host_posture"] : null,
     };
   }
 }

@@ -31,6 +31,7 @@ export type ClientMessage =
   | { type: "mute"; on: boolean }
   | { type: "ptt"; down: boolean }
   | { type: "decide"; id: string; allow: boolean }
+  | { type: "resume_mic" }
   | { type: "end" }
   | { type: "ping"; t: number };
 
@@ -54,10 +55,19 @@ export interface TurnMetrics {
   firstAudioMs: number | null;
   totalMs: number | null;
   bargeIn: boolean;
+  endpointReason?: string;
+  asrRefineMs?: number;
+  asrConfidence?: number;
+  snapshotHit?: boolean;
+  contextCacheHit?: boolean;
+  eotGateSavedMs?: number;
+  groundedEntities?: string[];
 }
 
 export type ServerMessage =
-  | { type: "ready"; session: string; sampleRate: number; engine: string; voice: string; lang: string | null; resumed: boolean }
+  | { type: "ready"; session: string; sampleRate: number; engine: string; voice: string; lang: string | null; resumed: boolean; model?: string | null }
+  | { type: "model"; label: string }
+  | { type: "mic_paused"; paused: boolean; reason: string | null }
   | { type: "state"; state: CallState }
   | { type: "level"; speaking: boolean }
   | { type: "partial"; turn: number; text: string }
@@ -130,6 +140,8 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       if (id === null || id.trim() === "" || typeof value["allow"] !== "boolean") return null;
       return { type: "decide", id: id.trim(), allow: value["allow"] };
     }
+    case "resume_mic":
+      return { type: "resume_mic" };
     case "end":
       return { type: "end" };
     case "ping": {

@@ -8,7 +8,7 @@ import { describe, it } from "node:test";
 import { runInNewContext } from "node:vm";
 import { emptyLine, initialCall, phaseLabel, reduceServer, withTyped, type CallView } from "../src/model/voice/callState.js";
 import { CAPTURE_FRAME_SAMPLES, CAPTURE_PROCESSOR, CAPTURE_WORKLET_SOURCE } from "../src/model/voice/capture.js";
-import { PlaybackLedger, type Player } from "../src/model/voice/player.js";
+import { PlaybackLedger, WebPlayer, type Player } from "../src/model/voice/player.js";
 import { AUDIO_IN, AUDIO_OUT, decodeAudioOut, encodeMicFrame, parseServerMessage, type ServerMessage } from "../src/model/voice/protocol.js";
 import { micName } from "../src/model/voice/browser.js";
 import { CallSession, type CallIO, type MicHandle, type MicState, type SocketLike } from "../src/model/voice/session.js";
@@ -539,5 +539,148 @@ describe("a call, from the page", () => {
     assert.equal(r.session.view.status, "failed");
     assert.match(r.session.view.error ?? "", /not installed/);
     assert.equal(r.mic.stopped, true, "the microphone is let go when the call could not start");
+  });
+
+  it("preserves cumulative played samples across >5s PlaybackLedger trims so long replies never deadlock", () => {
+    const ledger = new PlaybackLedger(24_000);
+    // Schedule 8 seconds of audio across 8 one-second chunks for utterance 1.
+    for (let i = 0; i < 8; i++) {
+      ledger.schedule(1, 24_000, i * 0.5, 0.04);
+    }
+    ledger.trim(7.5);
+    assert.equal(ledger.played(1, 7.5), Math.floor((7.5 - 0.04) * 24_000));
+    ledger.trim(12);
+    assert.equal(ledger.played(1, 12), 8 * 24_000, "retired chunks remain accounted for after trim()");
+  });
+
+  it("flushes voiced pre-ready frames once ready arrives, tracks model updates, and pauses/resumes hands-free mic", async () => {
+    const r = rig();
+    await r.session.start();
+    r.socket.open();
+    // Feed 2 quiet pre-roll frames and 2 voiced frames while waiting for `ready`.
+    r.feed(new Int16Array(512), 0);
+    r.feed(new Int16Array(512), 0);
+    const voiced = new Int16Array(512).fill(4000);
+    r.feed(voiced, 0.12);
+    r.feed(voiced, 0.12);
+    assert.equal(r.socket.frames(), 0, "still zero wire frames before ready");
+    r.socket.say({ ...READY, model: "Muse (muse-spark)" });
+    assert.equal(r.session.view.model, "Muse (muse-spark)");
+    assert.equal(r.socket.frames(), 4, "pre-roll + voiced frames flushed on ready");
+
+    r.socket.say({ type: "model", label: "Muse (muse-wonder-full)" });
+    assert.equal(r.session.view.model, "Muse (muse-wonder-full)");
+
+    r.socket.say({ type: "mic_paused", paused: true, reason: "Continuous background audio." });
+    assert.equal(r.session.view.micPaused, true);
+    assert.equal(phaseLabel(r.session.view), "Mic paused");
+    const beforePausedFeed = r.socket.frames();
+    r.feed(voiced, 0.12);
+    assert.equal(r.socket.frames(), beforePausedFeed, "no audio sent while micPaused");
+
+    r.session.resumeMic();
+    assert.deepEqual(r.socket.texts().pop(), { type: "resume_mic" });
+    r.socket.say({ type: "mic_paused", paused: false, reason: null });
+    assert.equal(r.session.view.micPaused, false);
+    r.session.end();
+  });
+
+  it("keeps quiet room ambience out of pre-ready flush and never overflows preReadyFrames before real speech", async () => {
+    const ambient = new Int16Array(512).fill(60); // normal quiet mic noise (> SILENT_PEAK=2, <= PRE_READY_VOICE_PEAK=262)
+    const quietOnly = rig();
+    await quietOnly.session.start();
+    quietOnly.socket.open();
+    for (let i = 0; i < 200; i++) quietOnly.feed(ambient, 0.002);
+    quietOnly.socket.say(READY);
+    assert.equal(quietOnly.socket.frames(), 0, "quiet room noise alone flushes zero frames on ready");
+    quietOnly.session.end();
+
+    const delayedSpeech = rig();
+    await delayedSpeech.session.start();
+    delayedSpeech.socket.open();
+    for (let i = 0; i < 200; i++) delayedSpeech.feed(ambient, 0.002);
+    const voiced = new Int16Array(512).fill(4000);
+    delayedSpeech.feed(voiced, 0.12);
+    delayedSpeech.feed(voiced, 0.12);
+    delayedSpeech.feed(voiced, 0.12);
+    delayedSpeech.socket.say(READY);
+    assert.equal(delayedSpeech.socket.frames(), 13, "10 rolling pre-roll frames + 3 voiced frames survive 200 ambient frames");
+    delayedSpeech.session.end();
+  });
+
+  it("ignores stale source.onended after WebPlayer.stop() and settles outputLatency tail on idle", async () => {
+    const sources: Array<{ onended: (() => void) | null; stopped: boolean; disconnected: boolean }> = [];
+    let currentTime = 0;
+    let outputLatency = 0;
+    const fakeCtx = {
+      get currentTime() {
+        return currentTime;
+      },
+      get outputLatency() {
+        return outputLatency;
+      },
+      baseLatency: 0,
+      destination: {},
+      createGain: () => ({
+        connect: () => undefined,
+        disconnect: () => undefined,
+        gain: { setTargetAtTime: () => undefined },
+      }),
+      createAnalyser: () => ({
+        fftSize: 512,
+        connect: () => undefined,
+        disconnect: () => undefined,
+        getByteTimeDomainData: (arr: Uint8Array) => arr.fill(128),
+      }),
+      createBuffer: (_ch: number, len: number) => {
+        const ch0 = new Float32Array(len);
+        return { getChannelData: () => ch0 };
+      },
+      createBufferSource: () => {
+        const node = {
+          buffer: null as unknown,
+          onended: null as (() => void) | null,
+          stopped: false,
+          disconnected: false,
+          connect: () => undefined,
+          start: () => undefined,
+          stop() {
+            this.stopped = true;
+          },
+          disconnect() {
+            this.disconnected = true;
+          },
+        };
+        sources.push(node);
+        return node;
+      },
+    } as unknown as AudioContext;
+
+    const idleEvents: Array<{ utterance: number; played: number }> = [];
+    const player = new WebPlayer(fakeCtx, 24_000, (utterance, played) => {
+      idleEvents.push({ utterance, played });
+    });
+
+    player.enqueue(1, new Int16Array(2400));
+    const capturedEnded = sources[0]!.onended;
+    assert.equal(typeof capturedEnded, "function");
+    player.stop();
+    // Simulate browser firing an already-queued onended task after stop() cleared sources.
+    capturedEnded?.();
+    assert.equal(idleEvents.length, 0, "stale onended after stop() must not emit bogus idle");
+
+    // Verify outputLatency tail follow-up reports full played sample count once hardware latency drains.
+    outputLatency = 0.04;
+    currentTime = 0;
+    player.enqueue(2, new Int16Array(2400)); // scheduled 0.04..0.14
+    currentTime = 0.14; // heardAt = 0.10 -> 1440 of 2400 samples heard at exact source end
+    sources[1]!.onended?.();
+    assert.equal(idleEvents.length, 1);
+    assert.ok(idleEvents[0]!.played < 2400);
+    currentTime = 0.20; // heardAt = 0.16 -> all 2400 samples heard
+    await tick(70);
+    assert.equal(idleEvents.at(-1)?.utterance, 2);
+    assert.equal(idleEvents.at(-1)?.played, 2400);
+    player.close();
   });
 });

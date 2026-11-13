@@ -3,15 +3,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseUserAuthorizationIntent } from "../assistant/launcher.js";
 import type { BrainEvent, BrainProvider, ChatMessage, ToolCall } from "./brain.js";
-import { pickVoice, toFloat, type AsrStream, type Engines } from "./engines.js";
-import type { HostEvent, VoiceHost } from "./host.js";
+import { pickVoice, toFloat, type AsrResult, type AsrStream, type Engines } from "./engines.js";
+import { groundUtterance } from "./grounding.js";
+import type { HostEvent, ToolResult, VoiceHost } from "./host.js";
 import { TurnTrace } from "./metrics.js";
+import { normalizeSpokenTechnical } from "./normalize.js";
 import { buildSystemPrompt, didntCatchPhrase, failedPhrase, thinkingPhrase } from "./prompt.js";
+import { ProsodyTracker, frameRms } from "./prosody.js";
 import type { CallMode, ClientMessage, ServerMessage } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import type { Scheduler } from "./scheduler.js";
 import { SpeechOut } from "./speech.js";
 import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
+import { selectToolsForTurn } from "./tool-router.js";
 import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEvent } from "./turn.js";
 
 /**
@@ -53,7 +57,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   turn: DEFAULT_TURN_CONFIG,
   ringMs: 2000,
   partialEveryMs: 120,
-  flushAfterSilenceMs: 160,
+  flushAfterSilenceMs: 224,
   aheadMs: 2400,
   fillerAfterMs: 1500,
   mergeWindowMs: 1200,
@@ -75,6 +79,10 @@ export interface SessionDeps {
   log: (line: string) => void;
   config?: Partial<SessionConfig>;
   id?: string;
+  /** Optional dynamic label for the active brain/model, sent on `ready`. */
+  modelLabel?: () => string;
+  /** Drains any recent `eot_gate` latency savings measured by `MuseThreadBrain`. */
+  takeEarlySettleSavedMs?: () => number | null;
   /** Called once when the call ends, whichever side ended it, so that whatever holds the connection can let it go. */
   onClosed?: (reason: string) => void;
 }
@@ -82,9 +90,34 @@ export interface SessionDeps {
 const INPUT_RATE = 16;
 
 const ECHO_NEVER_SUPPRESS = new Set([
+  "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright", "actually",
   "no", "nope", "not", "cancel", "never", "stop", "wait", "hold", "pause",
-  "nao", "não", "pare", "para", "espera", "espere", "cancela", "cancele",
+  "sim", "claro", "isso", "nao", "não", "pare", "para", "espera", "espere", "cancela", "cancele",
+  "si", "sí", "vale", "deten", "detén",
 ]);
+
+function hasContiguousSubphrase(words: readonly string[], heard: readonly string[], minLen: number): boolean {
+  if (heard.length < minLen || words.length < minLen) return false;
+  for (let i = 0; i + minLen <= heard.length; i++) {
+    if (hasContiguousPhrase(words, heard.slice(i, i + minLen))) return true;
+  }
+  return false;
+}
+
+function medianValue(values: readonly number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function containsPersonaWakeWord(text: string, personaName: string): boolean {
+  const cleanPersona = personaName.trim().toLowerCase();
+  if (cleanPersona.length < 3) return false;
+  const lower = text.toLowerCase();
+  if (lower.includes(cleanPersona)) return true;
+  return lower.includes("ancilla") || lower.includes("glados");
+}
 
 function hasContiguousPhrase(words: readonly string[], phrase: readonly string[]): boolean {
   if (phrase.length === 0 || words.length < phrase.length) return false;
@@ -141,13 +174,16 @@ interface Reply {
   aborted: boolean;
   fillerUsed: boolean;
   cancelFiller: (() => void) | null;
+  cancelTrailingFlush: (() => void) | null;
   sentFirstToken: boolean;
   completedTools: string[];
 }
 
 export class VoiceSession {
   private readonly cfg: SessionConfig;
+  private readonly customPostAgentGrace: boolean;
   private readonly ring: SampleRing;
+  private readonly prosody = new ProsodyTracker();
   private taker: TurnTaker;
   private chain: Promise<void> = Promise.resolve();
   private carry = new Float32Array(0);
@@ -156,6 +192,7 @@ export class VoiceSession {
 
   private mode: CallMode = "hands-free";
   private muted = false;
+  private micAutoPaused = false;
   private pttDown = false;
   private closed = false;
   private started = false;
@@ -170,18 +207,24 @@ export class VoiceSession {
   private lastPartialAt = -Infinity;
   private lastLevelAt = 0;
   private lastSpeaking = false;
+  private turnFrameRms: number[] = [];
+  private foregroundRms = 0;
+  private continuousTurnMs = 0;
 
   private agent: AgentActivity = "idle";
+  private assistantAskedQuestion = false;
   private reply: Reply | null = null;
   private replyCounter = 0;
   private utteranceCounter = 0;
   private turnCounter = 0;
   private history: ChatMessage[] = [];
+  private readonly recentToolNames = new Set<string>();
   private lastTurnEndAt = -Infinity;
-  private pendingMerge: { text: string; turn: number } | null = null;
+  private pendingMerge: { text: string; turn: number; count: number } | null = null;
   private speculativeContext: { text: string; promise: Promise<string | null> } | null = null;
   private abortedToolNotes: string[] = [];
   private echoDismissedAtSample = 0;
+  private consumedUpToSample = 0;
   private echoDismissedUntilQuiet = false;
   private recentSpoken: Array<{ at: number; words: string[] }> = [];
   private readonly pendingSay: HostEvent[] = [];
@@ -195,11 +238,21 @@ export class VoiceSession {
   readonly id: string;
 
   constructor(private readonly deps: SessionDeps) {
+    this.customPostAgentGrace = deps.config?.turn?.postAgentGraceMs !== undefined;
     this.cfg = { ...DEFAULT_SESSION_CONFIG, ...(deps.config ?? {}) };
     this.cfg.turn = { ...this.cfg.turn, frameMs: deps.engines.vad.frameSamples / INPUT_RATE };
     this.ring = new SampleRing(Math.round(this.cfg.ringMs * INPUT_RATE));
     this.taker = new TurnTaker(this.cfg.turn);
     this.id = deps.id ?? `call-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  private syncExpectAnswer(): void {
+    this.taker.setExpectAnswer(this.assistantAskedQuestion || Boolean(this.deps.host.pendingApproval?.()));
+  }
+
+  private updateQuestionState(text: string): void {
+    this.assistantAskedQuestion = text.includes("?");
+    this.syncExpectAnswer();
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -221,8 +274,20 @@ export class VoiceSession {
     }
     this.mode = hello.mode;
     this.echoCancelled = hello.echoCancelled;
+    if (!this.customPostAgentGrace) {
+      this.cfg.turn = { ...this.cfg.turn, postAgentGraceMs: hello.echoCancelled ? 80 : 220 };
+      this.taker = new TurnTaker(this.cfg.turn);
+    }
     this.lang = hello.lang;
-    this.userLang = hello.lang ? (hello.lang.toLowerCase().startsWith("pt") ? "pt" : hello.lang.toLowerCase().startsWith("en") ? "en" : "unknown") : "unknown";
+    this.userLang = hello.lang
+      ? hello.lang.toLowerCase().startsWith("pt")
+        ? "pt"
+        : hello.lang.toLowerCase().startsWith("es")
+          ? "es"
+          : hello.lang.toLowerCase().startsWith("en")
+            ? "en"
+            : "unknown"
+      : "unknown";
     const { engines, host } = this.deps;
     try {
       const warm = [engines.asr.warm?.(), engines.tts.warm?.()].filter((x): x is Promise<void> => x !== undefined);
@@ -231,14 +296,26 @@ export class VoiceSession {
       this.deps.log(`the voice engines could not be warmed: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.history = host.history(hello.thread);
+    const lastHist = this.history[this.history.length - 1];
+    this.updateQuestionState(lastHist && lastHist.role === "assistant" ? lastHist.content : "");
     this.unsubscribe = host.subscribe((event) => this.onHostEvent(event));
     if (host.subscribeApprovals) {
       this.unsubscribeApprovals = host.subscribeApprovals((request) => {
+        this.syncExpectAnswer();
         this.send({ type: "approval", request });
       });
     }
     const voice = pickVoice(engines.tts.voices, this.langCode(), host.persona().voice);
-    this.send({ type: "ready", session: this.id, sampleRate: engines.tts.sampleRate, engine: `${engines.asr.id} + ${engines.tts.id}`, voice: voice?.id ?? "", lang: this.lang, resumed: this.history.length > 0 });
+    this.send({
+      type: "ready",
+      session: this.id,
+      sampleRate: engines.tts.sampleRate,
+      engine: `${engines.asr.id} + ${engines.tts.id}`,
+      voice: voice?.id ?? "",
+      lang: this.lang,
+      resumed: this.history.length > 0,
+      model: this.deps.modelLabel?.() ?? this.deps.brain.label,
+    });
     const pendingApproval = host.pendingApproval?.() ?? null;
     if (pendingApproval) {
       this.send({
@@ -271,7 +348,7 @@ export class VoiceSession {
 
   /** A frame of microphone audio (16 kHz mono). */
   onAudio(pcm: Int16Array): void {
-    if (this.closed || !this.started || this.muted) return;
+    if (this.closed || !this.started || this.muted || this.micAutoPaused) return;
     this.debugAudio?.write(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
     const samples = toFloat(pcm);
     const merged = new Float32Array(this.carry.length + samples.length);
@@ -335,9 +412,30 @@ export class VoiceSession {
           if (message.on) {
             this.disposeStream();
             this.taker = new TurnTaker(this.cfg.turn);
+            this.syncExpectAnswer();
+            this.prosody.reset();
+            this.continuousTurnMs = 0;
             this.carry = new Float32Array(0);
             this.send({ type: "state", state: "idle" });
           } else {
+            if (this.micAutoPaused) {
+              this.micAutoPaused = false;
+              this.send({ type: "mic_paused", paused: false, reason: null });
+            }
+            this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
+          }
+        });
+        break;
+      case "resume_mic":
+        this.enqueue(async () => {
+          if (!this.micAutoPaused) return;
+          this.micAutoPaused = false;
+          this.continuousTurnMs = 0;
+          this.carry = new Float32Array(0);
+          this.taker = new TurnTaker(this.cfg.turn);
+          this.syncExpectAnswer();
+          this.send({ type: "mic_paused", paused: false, reason: null });
+          if (!this.muted) {
             this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
           }
         });
@@ -367,6 +465,8 @@ export class VoiceSession {
       r.aborted = true;
       r.abort.abort();
       r.cancelFiller?.();
+      r.cancelTrailingFlush?.();
+      r.cancelTrailingFlush = null;
       r.speech.abort();
     }
     this.reply = null;
@@ -433,10 +533,39 @@ export class VoiceSession {
       return;
     }
     const prob = await this.deps.engines.vad.process(frame);
+    const rms = frameRms(frame);
     this.ring.append(frame);
     if (this.echoDismissedUntilQuiet) {
       if (prob >= this.cfg.turn.offProb) this.echoDismissedAtSample = this.ring.total;
       else this.echoDismissedUntilQuiet = false;
+    }
+    if (this.taker.inTurn) {
+      if (prob >= this.cfg.turn.offProb) {
+        this.prosody.observeVoicedFrame(frame);
+        this.turnFrameRms.push(rms);
+      } else {
+        this.taker.semanticEnd(this.prosody.estimateEndProbability());
+      }
+      this.continuousTurnMs += this.cfg.turn.frameMs;
+      if (this.continuousTurnMs >= 40_000 && wordsOf(this.userText).length >= 35) {
+        this.micAutoPaused = true;
+        this.continuousTurnMs = 0;
+        this.speculativeContext = null;
+        this.disposeStream();
+        this.taker = new TurnTaker(this.cfg.turn);
+        this.syncExpectAnswer();
+        this.prosody.reset();
+        this.turnFrameRms = [];
+        this.send({
+          type: "mic_paused",
+          paused: true,
+          reason: "Hands-free mic paused after 40s of continuous background audio.",
+        });
+        this.send({ type: "state", state: "idle" });
+        return;
+      }
+    } else {
+      this.continuousTurnMs = 0;
     }
     const t = this.nowMs();
     const fed = await this.handleEvents(this.taker.frame(t, prob), t);
@@ -478,18 +607,40 @@ export class VoiceSession {
         case "overlap_end":
           if (this.stream && !this.taker.inTurn) this.disposeStream();
           break;
-        case "speech_start":
+        case "speech_start": {
+          this.prosody.reset();
+          this.turnFrameRms = [];
+          this.continuousTurnMs = 0;
+          const lookbackMs = Math.max(
+            this.cfg.turn.onsetFrames * this.cfg.turn.frameMs,
+            ev.t - this.taker.currentSpeechStart,
+          );
+          const onsetSamples = Math.round(lookbackMs * INPUT_RATE);
+          const recent = this.ring.read(Math.max(this.consumedUpToSample, this.ring.total - onsetSamples));
+          const fSize = this.deps.engines.vad.frameSamples;
+          for (let off = 0; off + fSize <= recent.length; off += fSize) {
+            const sub = recent.subarray(off, off + fSize);
+            const subRms = frameRms(sub);
+            if (subRms > 0.005) {
+              this.prosody.observeVoicedFrame(sub);
+              this.turnFrameRms.push(subRms);
+            }
+          }
           this.onSpeechStart(ev.t);
           if (!this.stream) {
             await this.openStream(Math.round(ev.audioFrom * INPUT_RATE));
             fed = true;
           }
           break;
+        }
         case "turn_end":
           await this.onTurnEnd(ev);
           break;
         case "noise":
           this.speculativeContext = null;
+          this.prosody.reset();
+          this.turnFrameRms = [];
+          this.continuousTurnMs = 0;
           this.disposeStream();
           break;
         case "duck":
@@ -512,10 +663,21 @@ export class VoiceSession {
         case "backchannel":
           break;
         case "end_candidate": {
-          // Pre-warm memory and harness context while the endpoint pause is still running, reusing it if the turn ends on these words.
-          const candidate = this.userText.trim();
-          if (candidate !== "" && !this.pendingMerge && this.speculativeContext?.text !== candidate) {
-            this.speculativeContext = { text: candidate, promise: Promise.resolve(this.deps.host.context(candidate, "voice")) };
+          // Pure speculative memory/context pre-warm while the endpoint pause is running (never writes to SQLite or mutates lastQuery).
+          const candidate = normalizeSpokenTechnical(this.userText.trim());
+          if (
+            candidate !== "" &&
+            !this.pendingMerge &&
+            this.speculativeContext?.text !== candidate &&
+            this.deps.host.previewContext
+          ) {
+            this.speculativeContext = {
+              text: candidate,
+              promise: Promise.resolve(this.deps.host.previewContext(candidate, "voice")).then(
+                (r) => r.text,
+                () => null,
+              ),
+            };
           }
           break;
         }
@@ -525,25 +687,40 @@ export class VoiceSession {
     return fed;
   }
 
+  private lastMergedTurn: { turn: number; count: number } = { turn: 0, count: 0 };
+
   private onSpeechStart(_t: number): void {
     const now = this.deps.scheduler.now();
     const r = this.reply;
     const awaitingInFlightMuse = this.deps.host.pendingApproval?.()?.inFlightMuse === true;
     if (r && !r.speech.started && !r.aborted && r.userText !== null && !awaitingInFlightMuse) {
-      // The person is speaking again before they were answered. Soon after the last turn it is the same turn, carried on.
-      if (now - this.lastTurnEndAt <= this.cfg.mergeWindowMs) this.pendingMerge = { text: r.userText, turn: r.turn };
+      // The person is speaking again before they were answered. Soon after the last turn it is the same turn, carried on,
+      // capped at 2 merges and 450 characters so ambient chatter never snowballs indefinitely.
+      if (now - this.lastTurnEndAt <= this.cfg.mergeWindowMs) {
+        const prevCount = this.lastMergedTurn.turn === r.turn ? this.lastMergedTurn.count : 0;
+        if (prevCount < 2 && r.userText.length <= 450) {
+          this.pendingMerge = { text: r.userText, turn: r.turn, count: prevCount + 1 };
+        }
+      }
       this.cancelPendingReply();
     }
     this.send({ type: "state", state: "listening" });
   }
 
   private async openStream(fromSample: number): Promise<void> {
-    const stream = await this.deps.engines.asr.open(this.lang);
+    const stream = await this.deps.engines.asr.open(this.lang, {
+      vocabulary: this.deps.host.vocabulary?.(),
+    });
     this.stream = stream;
+    stream.onPartial = (result) => {
+      this.enqueue(async () => {
+        if (this.stream === stream) await this.applyPartialResult(stream, result.text);
+      });
+    };
     this.userText = "";
     this.flushed = false;
     this.lastPartialAt = this.deps.scheduler.now();
-    const pre = this.ring.read(Math.max(fromSample, this.echoDismissedAtSample));
+    const pre = this.ring.read(Math.max(fromSample, this.echoDismissedAtSample, this.consumedUpToSample));
     if (pre.length > 0) await stream.accept(pre);
   }
 
@@ -552,6 +729,7 @@ export class VoiceSession {
     this.stream = null;
     this.userText = "";
     if (s) {
+      s.onPartial = undefined;
       try {
         s.dispose();
       } catch (error) {
@@ -567,25 +745,30 @@ export class VoiceSession {
     if (now - this.lastPartialAt < this.cfg.partialEveryMs) return;
     this.lastPartialAt = now;
     const result = await stream.partial();
-    if (this.stream !== stream || result.text === this.userText) return;
-    this.userText = result.text;
+    await this.applyPartialResult(stream, result.text);
+  }
+
+  private async applyPartialResult(stream: AsrStream, nextText: string): Promise<void> {
+    if (this.stream !== stream || nextText === this.userText) return;
+    this.userText = nextText;
     const t = this.nowMs();
     if (this.agent === "speaking" && !this.taker.inTurn) {
       // Something over the assistant's voice that is the assistant's voice coming back is not the person.
-      if (this.looksLikeEcho(result.text)) {
+      if (this.looksLikeEcho(nextText)) {
         this.echoDismissedAtSample = this.ring.total;
         this.echoDismissedUntilQuiet = true;
         await this.handleEvents(this.taker.dismissOverlap(t), t);
         return;
       }
     }
-    await this.handleEvents(this.taker.transcript(t, result.text), t);
-    if (this.taker.inTurn && result.text.trim() !== "") this.send({ type: "partial", turn: this.turnCounter + 1, text: result.text });
+    await this.handleEvents(this.taker.transcript(t, nextText), t);
+    if (this.taker.inTurn && nextText.trim() !== "") this.send({ type: "partial", turn: this.turnCounter + 1, text: nextText });
   }
 
   private looksLikeEcho(text: string): boolean {
     const heard = wordsOf(text);
     if (heard.length === 0) return false;
+    if (this.assistantAskedQuestion && heard.length <= 2 && parseUserAuthorizationIntent(text) !== null) return false;
     const now = this.deps.scheduler.now();
     if (heard.length < 3) {
       if (isStopIntent(text) || isBackchannel(text) || heard.some((w) => ECHO_NEVER_SUPPRESS.has(w))) return false;
@@ -594,9 +777,17 @@ export class VoiceSession {
       if (heard.length === 1) {
         const w = heard[0] ?? "";
         if (w.length < 4) return false;
-        return recent.some((s) => now - s.at < 2500 && ((s.words.length === 1 && s.words[0] === w) || s.words[0] === w));
+        return recent.some(
+          (s) =>
+            now - s.at < 2500 &&
+            (s.words[0] === w || s.words[s.words.length - 1] === w),
+        );
       }
       return recent.some((s) => hasContiguousPhrase(s.words, heard));
+    }
+    if (this.echoCancelled) {
+      const recent = this.recentSpoken.filter((s) => now - s.at < 2500);
+      return recent.some((s) => hasContiguousSubphrase(s.words, heard, 2));
     }
     const spoken = new Set(this.recentSpoken.filter((s) => now - s.at < 8000).flatMap((s) => s.words));
     if (spoken.size === 0) return false;
@@ -609,31 +800,94 @@ export class VoiceSession {
     const stream = this.stream;
     this.stream = null;
     this.lastTurnEndAt = now;
-    let text = "";
+    const speechEndSample = Math.max(0, this.ring.total - Math.round(ev.silenceMs * INPUT_RATE));
+    if (speechEndSample > this.consumedUpToSample) this.consumedUpToSample = speechEndSample;
+    const turnMedianRms = medianValue(this.turnFrameRms);
+    this.turnFrameRms = [];
+    this.prosody.reset();
+    this.continuousTurnMs = 0;
+
+    let asrResult: AsrResult | null = null;
     let asrDoneAt = now;
     if (stream) {
+      stream.onPartial = undefined;
       try {
-        text = (await stream.finish()).text.trim();
+        asrResult = await stream.finish();
       } finally {
         stream.dispose();
       }
       asrDoneAt = this.deps.scheduler.now();
     }
+    const rawText = (asrResult?.text ?? "").trim();
     this.userText = "";
     const prewarmed = this.speculativeContext;
     this.speculativeContext = null;
-    if (text === "") {
+    if (rawText === "") {
       this.pendingMerge = null;
       this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
       // Someone clearly spoke and nothing could be made of it: say so, rather than let them wonder if they were heard.
       if (ev.speechMs >= 700 && this.agent === "idle" && !this.reply && stream) this.sayDirect(didntCatchPhrase(this.replyLang()), false);
       return;
     }
+
+    const normalized = normalizeSpokenTechnical(rawText);
+    const grounded = groundUtterance({
+      text: normalized,
+      streamingText: asrResult?.streamingText ? normalizeSpokenTechnical(asrResult.streamingText) : undefined,
+      tokens: asrResult?.tokens,
+      tokenLogProbs: asrResult?.tokenLogProbs,
+      vocabulary: this.deps.host.vocabulary?.() ?? [],
+    });
+    const text = grounded.text.trim();
+
+    if (
+      this.mode === "hands-free" &&
+      this.agent === "idle" &&
+      !this.reply &&
+      !this.pendingMerge &&
+      !this.assistantAskedQuestion &&
+      !this.deps.host.pendingApproval?.() &&
+      isBackchannel(text) &&
+      ev.speechMs < 750
+    ) {
+      this.send({ type: "state", state: "listening" });
+      return;
+    }
+
+    if (
+      this.mode === "hands-free" &&
+      this.foregroundRms >= 0.02 &&
+      turnMedianRms > 0 &&
+      turnMedianRms < 0.28 * this.foregroundRms &&
+      grounded.meanLogProb !== null &&
+      grounded.meanLogProb < -1.15 &&
+      !containsPersonaWakeWord(text, this.deps.host.persona().name)
+    ) {
+      this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
+      return;
+    }
+
+    if (grounded.garbled && this.agent === "idle" && !this.reply) {
+      this.pendingMerge = null;
+      this.sayDirect(didntCatchPhrase(this.replyLang()), false);
+      return;
+    }
+
+    if (turnMedianRms >= 0.015 && (grounded.meanLogProb === null || grounded.meanLogProb > -0.9)) {
+      this.foregroundRms = this.foregroundRms === 0 ? turnMedianRms : this.foregroundRms * 0.75 + turnMedianRms * 0.25;
+    }
+
     const trace = new TurnTrace(this.turnCounter + 1);
     trace.speechEnd = now - ev.silenceMs;
     trace.turnEnd = now;
     trace.asrFinal = asrDoneAt;
-    this.beginUserTurn(text, "voice", trace, prewarmed);
+    trace.endpointReason = ev.reason;
+    if (asrResult?.refineMs !== undefined) trace.asrRefineMs = asrResult.refineMs;
+    if (asrResult?.snapshotHit !== undefined) trace.snapshotHit = asrResult.snapshotHit;
+    if (grounded.meanLogProb !== null) trace.asrConfidence = Math.exp(Math.max(-10, grounded.meanLogProb));
+    if (grounded.groundedEntities.length > 0) trace.groundedEntities = grounded.groundedEntities;
+
+    this.beginUserTurn(text, "voice", trace, prewarmed, grounded.candidateNote);
   }
 
   private async onPushToTalk(down: boolean): Promise<void> {
@@ -649,18 +903,41 @@ export class VoiceSession {
     }
     const stream = this.stream;
     this.stream = null;
+    if (this.ring.total > this.consumedUpToSample) this.consumedUpToSample = this.ring.total;
     if (!stream) return;
-    let text = "";
+    stream.onPartial = undefined;
+    let asrResult: AsrResult | null = null;
     try {
-      text = (await stream.finish()).text.trim();
+      asrResult = await stream.finish();
     } finally {
       stream.dispose();
     }
-    if (text !== "") {
+    const rawText = (asrResult?.text ?? "").trim();
+    this.userText = "";
+    if (rawText !== "") {
+      const normalized = normalizeSpokenTechnical(rawText);
+      const grounded = groundUtterance({
+        text: normalized,
+        streamingText: asrResult?.streamingText ? normalizeSpokenTechnical(asrResult.streamingText) : undefined,
+        tokens: asrResult?.tokens,
+        tokenLogProbs: asrResult?.tokenLogProbs,
+        vocabulary: this.deps.host.vocabulary?.() ?? [],
+      });
+      if (grounded.garbled && this.agent === "idle" && !this.reply) {
+        this.pendingMerge = null;
+        this.sayDirect(didntCatchPhrase(this.replyLang()), false);
+        return;
+      }
+      const text = grounded.text.trim();
       const now = this.deps.scheduler.now();
       const trace = new TurnTrace(this.turnCounter + 1);
       trace.speechEnd = trace.turnEnd = trace.asrFinal = now;
-      this.beginUserTurn(text, "voice", trace);
+      trace.endpointReason = "ptt";
+      if (asrResult?.refineMs !== undefined) trace.asrRefineMs = asrResult.refineMs;
+      if (asrResult?.snapshotHit !== undefined) trace.snapshotHit = asrResult.snapshotHit;
+      if (grounded.meanLogProb !== null) trace.asrConfidence = Math.exp(Math.max(-10, grounded.meanLogProb));
+      if (grounded.groundedEntities.length > 0) trace.groundedEntities = grounded.groundedEntities;
+      this.beginUserTurn(text, "voice", trace, null, grounded.candidateNote);
     }
   }
 
@@ -672,24 +949,36 @@ export class VoiceSession {
     source: "voice" | "text",
     trace: TurnTrace | null,
     prewarmed: { text: string; promise: Promise<string | null> } | null = null,
+    candidateNote: string | null = null,
   ): void {
     if (text === "") return;
     // The person has the floor, in words that could be made out (a cough does not take it): what the call would have opened
     // with is not said now, over the topic they chose, as if it were fresh.
     this.openingSay = null;
     this.speculativeContext = null;
+    this.assistantAskedQuestion = false;
+    this.syncExpectAnswer();
+
+    if (
+      this.pendingMerge &&
+      ((isStopIntent(text) && wordsOf(text).length <= 3) || this.pendingMerge.text.length + 1 + text.length > 450)
+    ) {
+      this.pendingMerge = null;
+    }
+
     let turn: number;
     let said = text;
     if (this.pendingMerge) {
       // The same turn carried on: the earlier words go first, under the same number.
       said = `${this.pendingMerge.text} ${text}`.replace(/\s+/g, " ").trim();
       turn = this.pendingMerge.turn;
+      this.lastMergedTurn = { turn, count: this.pendingMerge.count };
       this.pendingMerge = null;
       const last = this.history[this.history.length - 1];
       if (last && last.role === "user") this.history.pop();
-      if (trace) trace.turn;
     } else {
       turn = ++this.turnCounter;
+      this.lastMergedTurn = { turn: 0, count: 0 };
     }
     const lang = guessLanguage(said);
     if (lang !== "unknown") this.userLang = lang;
@@ -723,8 +1012,15 @@ export class VoiceSession {
       this.cancelPendingReply();
     }
 
-    const contextPromise = source === "voice" && prewarmed && prewarmed.text === said ? prewarmed.promise : null;
-    this.startReply(turn, said, source, trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null, contextPromise);
+    const contextPromise = source === "voice" && prewarmed ? prewarmed.promise : null;
+    this.startReply(
+      turn,
+      said,
+      source,
+      trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null,
+      contextPromise,
+      candidateNote,
+    );
   }
 
   private newReply(turn: number, userText: string | null, source: Reply["source"], trace: TurnTrace | null): Reply {
@@ -742,6 +1038,14 @@ export class VoiceSession {
       voiceFor: (text) => this.voiceFor(text),
       aheadMs: this.cfg.aheadMs,
       onFirstAudio: () => this.onFirstAudio(reply),
+      onAudioActive: () => {
+        if (!reply.aborted && this.reply === reply) this.setAgent("speaking");
+      },
+      onQueueDrained: () => {
+        if (!reply.aborted && this.reply === reply && !reply.sentFirstToken && this.agent === "speaking") {
+          this.setAgent("thinking");
+        }
+      },
       log: (line) => this.deps.log(line),
     });
     const reply: Reply = {
@@ -758,6 +1062,7 @@ export class VoiceSession {
       aborted: false,
       fillerUsed: false,
       cancelFiller: null,
+      cancelTrailingFlush: null,
       sentFirstToken: false,
       completedTools: [],
     };
@@ -766,7 +1071,10 @@ export class VoiceSession {
 
   private replyLang(): Lang {
     const forced = this.deps.host.persona().language;
-    if (forced) return forced.toLowerCase().startsWith("pt") ? "pt" : "en";
+    if (forced) {
+      const lower = forced.toLowerCase();
+      return lower.startsWith("pt") ? "pt" : lower.startsWith("es") ? "es" : "en";
+    }
     return this.userLang;
   }
 
@@ -808,11 +1116,14 @@ export class VoiceSession {
     source: "voice" | "text",
     trace: TurnTrace | null,
     prewarmedContext: Promise<string | null> | null = null,
+    candidateNote: string | null = null,
   ): void {
     if (this.reply && !this.reply.aborted) {
       const prev = this.reply;
       prev.aborted = true;
       prev.cancelFiller?.();
+      prev.cancelTrailingFlush?.();
+      prev.cancelTrailingFlush = null;
       prev.abort.abort();
       prev.speech.abort();
       this.reply = null;
@@ -821,7 +1132,7 @@ export class VoiceSession {
     this.reply = reply;
     this.setAgent("thinking");
     reply.cancelFiller = this.deps.scheduler.after(this.cfg.fillerAfterMs, () => this.onFillerDue(reply));
-    void this.runReply(reply, text, source, prewarmedContext).catch((error) => {
+    void this.runReply(reply, text, source, prewarmedContext, candidateNote).catch((error) => {
       this.deps.log(`a reply failed: ${error instanceof Error ? error.message : String(error)}`);
       this.failReply(reply);
     });
@@ -831,8 +1142,7 @@ export class VoiceSession {
     if (this.reply !== reply || reply.aborted || reply.sentFirstToken || reply.fillerUsed || reply.speech.started) return;
     reply.fillerUsed = true;
     const phrase = thinkingPhrase(this.replyLang(), reply.turn);
-    reply.full += `${phrase} `;
-    reply.speech.enqueue(phrase);
+    reply.speech.enqueue(phrase, { trackInLedger: false });
   }
 
   private failReply(reply: Reply): void {
@@ -842,95 +1152,145 @@ export class VoiceSession {
     reply.speech.enqueue(phrase);
   }
 
+  private clearTrailingFlush(reply: Reply): void {
+    reply.cancelTrailingFlush?.();
+    reply.cancelTrailingFlush = null;
+  }
+
   private async runReply(
     reply: Reply,
     text: string,
     source: "voice" | "text",
     prewarmedContext: Promise<string | null> | null = null,
+    candidateNote: string | null = null,
   ): Promise<void> {
     const { brain, host, scheduler } = this.deps;
-    let approvalOutcomeNote: string | null = null;
-    const pending = host.pendingApproval?.() ?? null;
-    if (pending && !pending.inFlightMuse && reply.turn > pending.createdTurn && host.decideApproval) {
-      const intent = parseUserAuthorizationIntent(text);
-      if (intent !== null) {
-        if (intent === "allow" && source === "voice" && !this.echoCancelled) {
-          this.send({
-            type: "notice",
-            level: "warn",
-            text: "Echo cancellation is off on this microphone: click the button on the call card (or type) to approve.",
-          });
-          approvalOutcomeNote = `[Spoken approval for "${pending.title}" was not executed because browser echo cancellation is off on this microphone. Tell the user to click ${pending.allowLabel} on the call card (or type "go ahead") to approve it.]`;
-        } else {
-          const res = await host.decideApproval(pending.id, intent === "allow");
-          if (reply.aborted) return;
-          this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
-          approvalOutcomeNote = `[The user ${intent === "allow" ? "authorized" : "declined"} the pending request "${pending.title}". Outcome: ${res.message}]`;
+    try {
+      let approvalOutcomeNote: string | null = null;
+      const pending = host.pendingApproval?.() ?? null;
+      if (pending && !pending.inFlightMuse && reply.turn > pending.createdTurn && host.decideApproval) {
+        const intent = parseUserAuthorizationIntent(text);
+        if (intent !== null) {
+          if (intent === "allow" && source === "voice" && !this.echoCancelled) {
+            this.send({
+              type: "notice",
+              level: "warn",
+              text: "Echo cancellation is off on this microphone: click the button on the call card (or type) to approve.",
+            });
+            approvalOutcomeNote = `[Spoken approval for "${pending.title}" was not executed because browser echo cancellation is off on this microphone. Tell the user to click ${pending.allowLabel} on the call card (or type "go ahead") to approve it.]`;
+          } else {
+            const res = await host.decideApproval(pending.id, intent === "allow");
+            if (reply.aborted) return;
+            this.send({ type: "notice", level: res.ok ? "info" : "warn", text: res.message });
+            approvalOutcomeNote = `[The user ${intent === "allow" ? "authorized" : "declined"} the pending request "${pending.title}". Outcome: ${res.message}]`;
+          }
         }
       }
-    }
-    const context = await (prewarmedContext ?? host.context(text, source));
-    if (reply.aborted) return;
-    const priorToolNote =
-      this.abortedToolNotes.length > 0
-        ? `[Tool actions already completed earlier in this turn before the user continued speaking — do not repeat them: ${this.abortedToolNotes.splice(0).join("; ")}]`
-        : null;
-    const fullContext = [approvalOutcomeNote, priorToolNote, context].filter((part): part is string => Boolean(part && part.trim() !== "")).join("\n\n");
-    const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), { codeSwitched: hasCodeSwitch(text) });
-    const base: ChatMessage[] = [
-      { role: "system", content: system },
-      ...this.history.slice(-this.cfg.maxHistory),
-      { role: "user", content: fullContext !== "" ? `${fullContext}\n\n${text}` : text },
-    ];
-    this.history.push({ role: "user", content: text });
-    const tools = host.tools();
-    const rounds: ChatMessage[] = [];
-    let round = 0;
-    let failed = false;
-    for (;;) {
-      round++;
-      const calls: ToolCall[] = [];
-      let roundText = "";
-      for await (const event of brain.stream({ messages: [...base, ...rounds], tools: round > this.cfg.maxToolRounds ? [] : tools, signal: reply.abort.signal })) {
+      if (prewarmedContext) {
+        await prewarmedContext.catch(() => null);
         if (reply.aborted) return;
-        this.onBrainEvent(reply, event, calls, (t) => (roundText += t));
-        if (event.type === "error") failed = true;
       }
+      const context = await host.context(text, source);
       if (reply.aborted) return;
-      if (failed) break;
-      if (calls.length === 0) {
-        reply.full += roundText;
-        break;
+      if (reply.trace && host.wasLastContextCacheHit) {
+        reply.trace.contextCacheHit = host.wasLastContextCacheHit();
       }
-      reply.full += roundText;
-      rounds.push({ role: "assistant", content: roundText, toolCalls: calls });
-      for (const call of calls) {
+      const priorToolNote =
+        this.abortedToolNotes.length > 0
+          ? `[Tool actions already completed earlier in this turn before the user continued speaking — do not repeat them: ${this.abortedToolNotes.splice(0).join("; ")}]`
+          : null;
+      const fullContext = [approvalOutcomeNote, priorToolNote, candidateNote, context]
+        .filter((part): part is string => Boolean(part && part.trim() !== ""))
+        .join("\n\n");
+      const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), {
+        codeSwitched: hasCodeSwitch(text),
+        liveState: host.liveState?.() ?? null,
+      });
+      const base: ChatMessage[] = [
+        { role: "system", content: system },
+        ...this.history.slice(-this.cfg.maxHistory),
+        { role: "user", content: fullContext !== "" ? `${fullContext}\n\n${text}` : text, rawUserText: text },
+      ];
+      this.history.push({ role: "user", content: text });
+      const tools = selectToolsForTurn(text, host.tools(), [...this.recentToolNames]);
+      const rounds: ChatMessage[] = [];
+      let round = 0;
+      let failed = false;
+      for (;;) {
+        round++;
+        const calls: ToolCall[] = [];
+        const startedTools = new Map<string, { promise: Promise<ToolResult>; accounted: boolean }>();
+        let roundText = "";
+        for await (const event of brain.stream({
+          messages: [...base, ...rounds],
+          tools: round > this.cfg.maxToolRounds ? [] : tools,
+          signal: reply.abort.signal,
+        })) {
+          if (reply.aborted) return;
+          this.onBrainEvent(reply, event, calls, startedTools, (t) => (roundText += t));
+          if (event.type === "error") failed = true;
+        }
+        this.clearTrailingFlush(reply);
         if (reply.aborted) return;
-        const result = await host.runTool(call, { turn: reply.turn, signal: reply.abort.signal });
-        const summary = `${call.name} -> ${result.text.replace(/\s+/g, " ").trim().slice(0, 140)}`;
-        if (reply.aborted) {
-          this.noteAbortedToolOutcome(summary);
-          return;
+        const savedMs = this.deps.takeEarlySettleSavedMs?.() ?? null;
+        if (savedMs !== null && reply.trace) {
+          reply.trace.eotGateSavedMs = (reply.trace.eotGateSavedMs ?? 0) + savedMs;
         }
-        reply.completedTools.push(summary);
-        if (result.narration && !reply.sentFirstToken) {
-          reply.sentFirstToken = true;
-          for (const piece of new SpeechChunker(() => this.replyLang()).push(result.narration + " ")) reply.speech.enqueue(piece);
-          reply.full += `${result.narration} `;
+        if (failed) break;
+        if (calls.length === 0) {
+          reply.full += roundText;
+          break;
         }
-        rounds.push({ role: "tool", toolCallId: call.id, name: call.name, content: result.text });
+        reply.full += roundText;
+        rounds.push({ role: "assistant", content: roundText, toolCalls: calls });
+        for (const call of calls) {
+          const started = startedTools.get(call.id);
+          if (reply.aborted && !started) return;
+          const result = await (started ? started.promise : host.runTool(call, { turn: reply.turn, signal: reply.abort.signal }));
+          const summary = `${call.name} -> ${result.text.replace(/\s+/g, " ").trim().slice(0, 140)}`;
+          if (reply.aborted) {
+            if (!started || !started.accounted) {
+              if (started) started.accounted = true;
+              this.noteAbortedToolOutcome(summary);
+            }
+            return;
+          }
+          if (started) started.accounted = true;
+          reply.completedTools.push(summary);
+          if (result.narration && !reply.sentFirstToken) {
+            reply.sentFirstToken = true;
+            for (const piece of new SpeechChunker(() => this.replyLang()).push(result.narration + " ")) reply.speech.enqueue(piece);
+            reply.full += `${result.narration} `;
+          }
+          rounds.push({
+            role: "tool",
+            toolCallId: call.id,
+            name: call.name,
+            content: result.text,
+            ...(result.narration ? { spokenNarration: result.narration } : {}),
+          });
+        }
       }
+      this.clearTrailingFlush(reply);
+      if (reply.aborted) return;
+      if (failed) this.failReply(reply);
+      for (const piece of reply.chunker.flush()) reply.speech.enqueue(piece);
+      this.send({ type: "assistant", turn: reply.turn, text: reply.full.trim(), done: true });
+      await reply.speech.finish();
+      if (reply.aborted || this.reply !== reply) return;
+      this.finishReply(reply);
+    } finally {
+      this.clearTrailingFlush(reply);
     }
-    if (reply.aborted) return;
-    if (failed) this.failReply(reply);
-    for (const piece of reply.chunker.flush()) reply.speech.enqueue(piece);
-    this.send({ type: "assistant", turn: reply.turn, text: reply.full.trim(), done: true });
-    await reply.speech.finish();
-    if (reply.aborted || this.reply !== reply) return;
-    this.finishReply(reply);
   }
 
-  private onBrainEvent(reply: Reply, event: BrainEvent, calls: ToolCall[], addText: (t: string) => string): void {
+  private onBrainEvent(
+    reply: Reply,
+    event: BrainEvent,
+    calls: ToolCall[],
+    startedTools: Map<string, { promise: Promise<ToolResult>; accounted: boolean }>,
+    addText: (t: string) => string,
+  ): void {
     switch (event.type) {
       case "text": {
         if (!reply.sentFirstToken || !reply.trace?.firstToken) {
@@ -940,12 +1300,43 @@ export class VoiceSession {
         reply.cancelFiller?.();
         const soFar = addText(event.delta);
         for (const piece of reply.chunker.push(event.delta)) reply.speech.enqueue(piece);
-        this.send({ type: "assistant", turn: reply.turn, text: (reply.full + soFar).trim(), done: false });
+        this.clearTrailingFlush(reply);
+        reply.cancelTrailingFlush = this.deps.scheduler.after(180, () => {
+          reply.cancelTrailingFlush = null;
+          if (reply.aborted || this.reply !== reply) return;
+          for (const piece of reply.chunker.flushTrailingSentence()) reply.speech.enqueue(piece);
+        });
+        const currentText = (reply.full + soFar).trim();
+        if (currentText.includes("?") && !this.assistantAskedQuestion) {
+          this.updateQuestionState(currentText);
+        }
+        this.send({ type: "assistant", turn: reply.turn, text: currentText, done: false });
         break;
       }
-      case "tool":
+      case "tool": {
         calls.push(event.call);
+        this.recentToolNames.add(event.call.name);
+        if (this.recentToolNames.size > 12) {
+          const oldest = this.recentToolNames.values().next().value;
+          if (oldest !== undefined) this.recentToolNames.delete(oldest);
+        }
+        const entry = {
+          accounted: false,
+          promise: this.deps.host.runTool(event.call, { turn: reply.turn, signal: reply.abort.signal }),
+        };
+        entry.promise.then(
+          (res) => {
+            if (reply.aborted && !entry.accounted) {
+              entry.accounted = true;
+              const summary = `${event.call.name} -> ${res.text.replace(/\s+/g, " ").trim().slice(0, 140)}`;
+              this.noteAbortedToolOutcome(summary);
+            }
+          },
+          () => undefined,
+        );
+        startedTools.set(event.call.id, entry);
         break;
+      }
       case "error":
         this.deps.log(`the model failed: ${event.message}`);
         this.send({ type: "notice", level: "warn", text: event.message });
@@ -964,6 +1355,7 @@ export class VoiceSession {
   private finishReply(reply: Reply): void {
     const text = reply.full.trim();
     if (text !== "") this.history.push({ role: "assistant", content: text });
+    this.updateQuestionState(text);
     this.deps.host.record({ turn: reply.turn, role: "assistant", text, source: reply.source === "event" ? "event" : "voice", at: this.deps.scheduler.now() });
     this.reply = null;
     this.setAgent("idle");
@@ -988,6 +1380,7 @@ export class VoiceSession {
     r.aborted = true;
     r.abort.abort();
     r.cancelFiller?.();
+    this.clearTrailingFlush(r);
     r.speech.abort();
     if (r.completedTools.length > 0) this.abortedToolNotes.push(...r.completedTools);
     this.reply = null;
@@ -1002,11 +1395,13 @@ export class VoiceSession {
     r.aborted = true;
     r.abort.abort();
     r.cancelFiller?.();
+    this.clearTrailingFlush(r);
     const heard = r.speech.heard().text;
     r.speech.abort();
     this.reply = null;
     const toolNote = r.completedTools.length > 0 ? `[completed before interruption: ${r.completedTools.join("; ")}] ` : "";
     if (wasSpeaking) {
+      this.updateQuestionState(heard.trim() !== "" ? heard : r.full.trim());
       this.send({ type: "interrupted", utterance: r.speech.utterance, heard });
       if (heard.trim() !== "") this.history.push({ role: "assistant", content: `${heard.trim()} ${toolNote}[the user interrupted here]` });
       else this.history.push({ role: "assistant", content: `${toolNote}[the user interrupted before you said anything]` });
@@ -1043,7 +1438,7 @@ export class VoiceSession {
   }
 
   private async maybeSpeakPending(): Promise<void> {
-    if ((this.pendingSay.length === 0 && this.openingSay === null) || this.reply || this.agent !== "idle" || this.taker.inTurn || this.muted) return;
+    if ((this.pendingSay.length === 0 && this.openingSay === null) || this.reply || this.agent !== "idle" || this.taker.inTurn || this.muted || this.micAutoPaused) return;
     if (this.taker.quietForMs(this.nowMs()) < this.cfg.proactiveQuietMs) return;
     // What was waiting when the call opened comes first; it is said once.
     if (this.openingSay !== null) {
@@ -1061,6 +1456,7 @@ export class VoiceSession {
     const reply = this.newReply(this.turnCounter, null, "event", null);
     this.reply = reply;
     reply.full = text;
+    if (text.includes("?")) this.updateQuestionState(text);
     for (const piece of new SpeechChunker(() => this.replyLang()).push(`${text} `)) reply.speech.enqueue(piece);
     this.send({ type: "assistant", turn: reply.turn, text, done: true });
     void reply.speech.finish().then(() => {
@@ -1069,6 +1465,7 @@ export class VoiceSession {
         this.history.push({ role: "assistant", content: text });
         this.deps.host.record({ turn: reply.turn, role: "assistant", text, source: "event", at: this.deps.scheduler.now() });
       }
+      this.updateQuestionState(text);
       this.reply = null;
       this.setAgent("idle");
     });

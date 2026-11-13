@@ -32,6 +32,12 @@ const ASKS = [
   /\blast time (?:we|i)\b|\bearlier (?:we|i|you)\b|\bpreviously (?:we|i|you)\b|\bwe (?:discussed|agreed|decided)\b/i,
   /\bwhat do you know about me\b|\bwho am i\b/i,
   /\bas i (?:told|said|mentioned)\b|\bremind me what\b/i,
+  /\b(?:voc[êe] )?(?:ainda )?(?:se )?lembra\b/iu,
+  /\bqual (?:[ée]|era) (?:o |a )?(?:meu|minha|nosso|nossa)\b/iu,
+  /\bo que voc[êe] sabe sobre mim\b|\bquem sou eu\b/iu,
+  /\b(?:te )?acuerdas\b|\brecuerdas\b/iu,
+  /\bcu[áa]l (?:es|era) (?:mi|nuestro|nuestra)\b/iu,
+  /\bqu[ée] sabes (?:de|sobre) m[íi]\b|\bqui[ée]n soy\b/iu,
 ];
 
 /** The question is about what the assistant remembers, so an empty answer must be said, not filled in. */
@@ -46,6 +52,12 @@ const BROAD = [
   /\bwhat have i (?:told|said to) you\b/i,
   /\btell me (?:everything|all) you (?:remember|know)\b/i,
   /\bwhat (?:do|did) you (?:remember|have saved)\b/i,
+  /\bo que voc[êe] sabe sobre mim\b/iu,
+  /\bquem sou eu\b/iu,
+  /\bquais s[ãa]o (?:as )?minhas (?:regras|prefer[êe]ncias|restri[cç][õo]es|metas)\b/iu,
+  /\bqu[ée] sabes (?:de|sobre) m[íi]\b/iu,
+  /\bqui[ée]n soy\b/iu,
+  /\bcu[áa]les son mis (?:reglas|preferencias|restricciones|metas)\b/iu,
 ];
 
 /** The question asks for everything remembered, so whatever is shown answers it, and only an empty block is "nothing". */

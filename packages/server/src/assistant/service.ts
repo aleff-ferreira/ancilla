@@ -327,7 +327,7 @@ export class AssistantService {
   }
 
   private now(): number {
-    return this.deps.now ? this.deps.now() : Date.now();
+    return this.deps.now ? this.deps.now() : this.store.now();
   }
 
   close(): void {
@@ -474,6 +474,12 @@ export class AssistantService {
     }
   }
 
+  private lastContextCacheHit = false;
+
+  get wasLastContextCacheHit(): boolean {
+    return this.lastContextCacheHit;
+  }
+
   private context(input: TurnInput, queryText: string, profile: AssistantProfile, asOf: number | null, meaning: MeaningOptions | null): AssembledContext & { epoch: number } {
     const epoch = this.store.epoch();
     // A block made with meaning depends on which vectors existed then, so it is keyed by that too.
@@ -481,7 +487,11 @@ export class AssistantService {
     const key = [epoch, input.sessionId, input.project ?? "", input.account ?? "", profile.contextBudgetTokens, asOf ?? "", digest(queryText), by].join("|");
     const now = this.now();
     const hit = this.cache.get(key);
-    if (hit && hit.epoch === epoch && now - hit.at < CACHE_TTL_MS) return hit.out;
+    if (hit && hit.epoch === epoch && now - hit.at < CACHE_TTL_MS) {
+      this.lastContextCacheHit = true;
+      return hit.out;
+    }
+    this.lastContextCacheHit = false;
     const query = {
       text: queryText,
       thread: input.sessionId,
@@ -498,30 +508,40 @@ export class AssistantService {
   }
 
   /** What the model would be told for this question, without sending anything: so the user can see it. Words only; see `previewAsync`. */
-  preview(input: TurnInput): AssembledContext & { epoch: number; wouldAdd: boolean } {
-    return this.previewWith(input, null);
+  preview(input: TurnInput): AssembledContext & { epoch: number; wouldAdd: boolean; prefix: string | null; cacheHit: boolean } {
+    const previous = this.lastQuery.get(input.sessionId) ?? "";
+    const withPrevious = `${input.text} ${previous}`;
+    const followUpText = words(input.text) < SHORT_QUESTION_WORDS && previous ? withPrevious : null;
+    return this.previewWith(input, null, followUpText);
   }
 
-  /** `preview`, with meaning search when it is set up: what a turn would really be told. */
-  async previewAsync(input: TurnInput, options: { timeoutMs?: number } = {}): Promise<AssembledContext & { epoch: number; wouldAdd: boolean }> {
-    return this.previewWith(input, await this.meaningFor(input.text, options.timeoutMs ?? MEANING_TIMEOUT_MS));
+  /** `preview`, with meaning search when it is set up: what a turn would really be told, without mutating SQLite or `lastQuery`. */
+  async previewAsync(
+    input: TurnInput,
+    options: { timeoutMs?: number } = {},
+  ): Promise<AssembledContext & { epoch: number; wouldAdd: boolean; prefix: string | null; cacheHit: boolean }> {
+    const previous = this.lastQuery.get(input.sessionId) ?? "";
+    const withPrevious = `${input.text} ${previous}`;
+    const followUpText = words(input.text) < SHORT_QUESTION_WORDS && previous ? withPrevious : null;
+    const meaningText = totalWords(input.text) <= MEANING_FOLLOW_UP_WORDS && previous ? withPrevious : input.text;
+    return this.previewWith(input, await this.meaningFor(meaningText, options.timeoutMs ?? MEANING_TIMEOUT_MS), followUpText);
   }
 
-  private previewWith(input: TurnInput, meaning: MeaningOptions | null): AssembledContext & { epoch: number; wouldAdd: boolean } {
+  private previewWith(
+    input: TurnInput,
+    meaning: MeaningOptions | null,
+    followUpText: string | null = null,
+  ): AssembledContext & { epoch: number; wouldAdd: boolean; prefix: string | null; cacheHit: boolean } {
     const profile = this.store.getProfile();
     const asOf = isPastQuestion(input.text) ? parseAsOf(input.text, this.now(), this.deps.offsetMinutes ? this.deps.offsetMinutes() : 0) : null;
-    const query = {
-      text: input.text,
-      thread: input.sessionId,
-      ...(input.project ? { project: input.project } : {}),
-      ...(input.account ? { account: input.account } : {}),
-      budgetTokens: profile.contextBudgetTokens,
-      now: this.now(),
-      ...(asOf !== null ? { asOf } : {}),
-    };
-    const out = meaning ? this.store.retrieveWith(query, withMeaningVectors(this.store, meaning)) : this.store.retrieve(query);
+    let out = this.context(input, input.text, profile, asOf, meaning);
+    let cacheHit = this.lastContextCacheHit;
+    if (followUpText !== null && !foundByQuery(out)) {
+      out = this.context(input, followUpText, profile, asOf, meaning);
+      cacheHit = cacheHit && this.lastContextCacheHit;
+    }
     const inject = profile.enabled && (out.memories.length > 0 || out.noEvidence || hasIdentity(profile, this.store.activeGoals()));
-    return { ...out, wouldAdd: inject };
+    return { ...out, wouldAdd: inject, prefix: inject ? out.text : null, cacheHit };
   }
 
   // ------------------------------------------------------------------------------------------------ meaning search
@@ -549,7 +569,7 @@ export class AssistantService {
       gap: emb.settings.standoutLead,
       most: emb.settings.most,
     });
-    const key = `${model}|${text}`;
+    const key = `${model}|${digest(text)}`;
     const known = this.queryVectors.get(key);
     if (known) return options(known);
     const controller = new AbortController();

@@ -146,7 +146,10 @@ export class FakeAsr implements AsrEngine {
     this.sentences = new Map(Object.entries(sentences).map(([k, v]) => [Number(k), v]));
   }
 
-  open(): AsrStream {
+  lastVocabulary: readonly string[] = [];
+
+  open(_lang: string | null = null, options?: { vocabulary?: readonly string[] }): AsrStream {
+    this.lastVocabulary = options?.vocabulary ?? [];
     const s = new FakeAsrStream(this.sentences, this.finalDelayMs, this.scheduler);
     this.streams.push(s);
     return s;

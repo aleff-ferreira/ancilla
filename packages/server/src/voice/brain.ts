@@ -20,13 +20,15 @@ export interface ToolCall {
   name: string;
   /** The arguments as JSON text, as the model wrote them: they are parsed, and checked, by whoever runs the tool. */
   arguments: string;
+  /** Optional provider thought signature (such as Gemini 2.5 thinking parts) preserved across tool rounds. */
+  thoughtSignature?: string;
 }
 
 export type ChatMessage =
   | { role: "system"; content: string }
-  | { role: "user"; content: string }
+  | { role: "user"; content: string; rawUserText?: string }
   | { role: "assistant"; content: string; toolCalls?: ToolCall[] }
-  | { role: "tool"; toolCallId: string; name: string; content: string };
+  | { role: "tool"; toolCallId: string; name: string; content: string; spokenNarration?: string };
 
 export type BrainEvent =
   | { type: "text"; delta: string }
@@ -59,6 +61,7 @@ export interface BrainProvider {
   readonly id: string;
   readonly label: string;
   readonly capabilities: BrainCapabilities;
+  warm?(): Promise<void>;
   stream(request: BrainRequest): AsyncIterable<BrainEvent>;
 }
 
@@ -160,6 +163,12 @@ interface WireToolCall {
   function?: { name?: string; arguments?: string };
 }
 
+function formatToolContent(m: Extract<ChatMessage, { role: "tool" }>): string {
+  return m.spokenNarration
+    ? `${m.content}\n[Already spoken aloud: "${m.spokenNarration}" — do not repeat this confirmation unless adding new facts.]`
+    : m.content;
+}
+
 function wireMessages(messages: ChatMessage[]): unknown[] {
   return messages.map((m) => {
     switch (m.role) {
@@ -168,7 +177,7 @@ function wireMessages(messages: ChatMessage[]): unknown[] {
           ? { role: "assistant", content: m.content === "" ? null : m.content, tool_calls: m.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.arguments } })) }
           : { role: "assistant", content: m.content };
       case "tool":
-        return { role: "tool", tool_call_id: m.toolCallId, content: m.content };
+        return { role: "tool", tool_call_id: m.toolCallId, content: formatToolContent(m) };
       default:
         return { role: m.role, content: m.content };
     }
@@ -359,7 +368,7 @@ function anthropicMessages(messages: ChatMessage[]): { system: string | null; me
       for (const tc of m.toolCalls ?? []) blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: parseObjectArgs(tc.arguments) });
       push("assistant", blocks);
     } else if (m.role === "tool") {
-      push("user", [{ type: "tool_result", tool_use_id: m.toolCallId, content: m.content }]);
+      push("user", [{ type: "tool_result", tool_use_id: m.toolCallId, content: formatToolContent(m) }]);
     }
   }
   if (out.length === 0 || out[0]?.role !== "user") out.unshift({ role: "user", content: [{ type: "text", text: "Continue." }] });
@@ -389,8 +398,20 @@ export class AnthropicProvider implements BrainProvider {
       stream: true,
       temperature: request.temperature ?? o.temperature ?? 0.7,
     };
-    if (shaped.system) body["system"] = shaped.system;
-    if (request.tools.length > 0) body["tools"] = request.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+    if (shaped.system) {
+      body["system"] =
+        shaped.system.length >= 1024
+          ? [{ type: "text", text: shaped.system, cache_control: { type: "ephemeral" } }]
+          : shaped.system;
+    }
+    if (request.tools.length > 0) {
+      body["tools"] = request.tools.map((t, idx) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.parameters,
+        ...(request.tools.length >= 2 && idx === request.tools.length - 1 ? { cache_control: { type: "ephemeral" } } : {}),
+      }));
+    }
 
     let response: Response;
     try {
@@ -533,7 +554,7 @@ export interface GoogleGenAiOptions {
 
 type GeminiPart =
   | { text: string }
-  | { functionCall: { name: string; args: Record<string, unknown> } }
+  | { functionCall: { name: string; args: Record<string, unknown> }; thoughtSignature?: string }
   | { functionResponse: { name: string; response: Record<string, unknown> } };
 
 function geminiMessages(messages: ChatMessage[]): {
@@ -557,11 +578,14 @@ function geminiMessages(messages: ChatMessage[]): {
       const parts: GeminiPart[] = [];
       if (m.content !== "") parts.push({ text: m.content });
       for (const tc of m.toolCalls ?? []) {
-        parts.push({ functionCall: { name: tc.name, args: parseObjectArgs(tc.arguments) } });
+        parts.push({
+          functionCall: { name: tc.name, args: parseObjectArgs(tc.arguments) },
+          ...(tc.thoughtSignature ? { thoughtSignature: tc.thoughtSignature } : {}),
+        });
       }
       push("model", parts);
     } else if (m.role === "tool") {
-      push("user", [{ functionResponse: { name: m.name, response: { output: m.content } } }]);
+      push("user", [{ functionResponse: { name: m.name, response: { output: formatToolContent(m) } } }]);
     }
   }
   if (contents.length === 0 || contents[0]?.role !== "user") {
@@ -588,6 +612,7 @@ export class GoogleGenAiProvider implements BrainProvider {
     const o = this.options;
     const doFetch = o.fetchImpl ?? fetch;
     const base = (o.baseUrl ?? "https://generativelanguage.googleapis.com/v1beta").replace(/\/+$/, "");
+    const bareModel = o.model.replace(/^models\//, "");
     const modelPath = o.model.startsWith("models/") ? o.model : `models/${o.model}`;
     const shaped = geminiMessages(request.messages);
 
@@ -596,6 +621,7 @@ export class GoogleGenAiProvider implements BrainProvider {
       generationConfig: {
         temperature: request.temperature ?? o.temperature ?? 0.7,
         ...(request.maxTokens || o.defaultMaxTokens ? { maxOutputTokens: request.maxTokens ?? o.defaultMaxTokens } : {}),
+        ...(/^gemini-2\.5-flash/i.test(bareModel) ? { thinkingConfig: { thinkingBudget: 0 } } : {}),
       },
     };
     if (shaped.systemInstruction) body["systemInstruction"] = shaped.systemInstruction;
@@ -685,12 +711,20 @@ export class GoogleGenAiProvider implements BrainProvider {
           }
           const candidates = Array.isArray(evt["candidates"]) ? evt["candidates"] : [];
           const first = candidates[0] as {
-            content?: { parts?: Array<{ text?: string; functionCall?: { name?: string; args?: unknown } }> };
+            content?: {
+              parts?: Array<{
+                text?: string;
+                thought?: boolean;
+                thoughtSignature?: string;
+                functionCall?: { name?: string; args?: unknown };
+              }>;
+            };
             finishReason?: string;
           } | undefined;
           if (!first) continue;
           if (first.finishReason) finishReason = first.finishReason;
           for (const part of first.content?.parts ?? []) {
+            if (part.thought === true) continue;
             if (typeof part.text === "string" && part.text !== "") {
               const visible = think.push(part.text);
               if (visible !== "") yield { type: "text", delta: visible };
@@ -699,6 +733,9 @@ export class GoogleGenAiProvider implements BrainProvider {
                 id: `gcall_${++callIdx}_${Math.random().toString(36).slice(2, 8)}`,
                 name: part.functionCall.name,
                 arguments: JSON.stringify(part.functionCall.args ?? {}),
+                ...(typeof part.thoughtSignature === "string" && part.thoughtSignature !== ""
+                  ? { thoughtSignature: part.thoughtSignature }
+                  : {}),
               });
             }
           }
@@ -746,6 +783,41 @@ export function textToolInstructions(tools: readonly ToolSpec[]): string {
   ].join("\n");
 }
 
+function findMarkerClose(buffer: string): number {
+  let inString = false;
+  let escaped = false;
+  let braceDepth = 0;
+  for (let i = 0; i < buffer.length; i++) {
+    const ch = buffer[i] as string;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      braceDepth += 1;
+      continue;
+    }
+    if (ch === "}") {
+      if (braceDepth > 0) braceDepth -= 1;
+      continue;
+    }
+    if (braceDepth === 0 && ch === "]" && buffer[i + 1] === "]") {
+      return i;
+    }
+  }
+  return -1;
+}
+
 /**
  * Finds the tool lines in a stream of text and takes them out, so that they are never spoken. `push` returns the text to
  * keep; `finish` returns what is left and the calls found. A marker that never closes, or does not parse, is dropped.
@@ -755,6 +827,8 @@ export class TextToolFilter {
   private inside = false;
   private readonly calls: ToolCall[] = [];
   private counter = 0;
+
+  constructor(private readonly knownTools?: ReadonlySet<string>) {}
 
   push(delta: string): string {
     this.buffer += delta;
@@ -773,24 +847,72 @@ export class TextToolFilter {
         this.buffer = this.buffer.slice(at + MARKER_OPEN.length);
         this.inside = true;
       }
-      const end = this.buffer.indexOf(MARKER_CLOSE);
-      if (end < 0) return out;
-      this.take(this.buffer.slice(0, end));
+      const end = findMarkerClose(this.buffer);
+      if (end < 0) {
+        // If `knownTools` is provided and the opening word after `[[` cannot possibly be a known tool, flush as plain text.
+        if (this.knownTools && this.buffer.length >= 2) {
+          const headMatch = /^\s*([A-Za-z_][\w.-]{0,63})\s/.exec(this.buffer);
+          if (headMatch && !this.knownTools.has(headMatch[1] as string)) {
+            out += MARKER_OPEN;
+            this.inside = false;
+            continue;
+          }
+          if (/^\s*[^A-Za-z_\s]/.test(this.buffer)) {
+            out += MARKER_OPEN;
+            this.inside = false;
+            continue;
+          }
+        }
+        if (this.buffer.length > 2400 && this.knownTools) {
+          const headMatch = /^\s*([A-Za-z_][\w.-]{0,63})\b/.exec(this.buffer);
+          if (!headMatch || !this.knownTools.has(headMatch[1] as string)) {
+            out += MARKER_OPEN + this.buffer;
+            this.buffer = "";
+            this.inside = false;
+          }
+        }
+        return out;
+      }
+      const candidate = this.buffer.slice(0, end);
       this.buffer = this.buffer.slice(end + MARKER_CLOSE.length);
       this.inside = false;
+      if (!this.take(candidate)) {
+        if (this.knownTools) {
+          out += `${MARKER_OPEN}${candidate}${MARKER_CLOSE}`;
+        }
+      }
     }
   }
 
+  drainCalls(): ToolCall[] {
+    return this.calls.splice(0);
+  }
+
   finish(): { text: string; calls: ToolCall[] } {
-    const text = this.inside ? "" : this.buffer;
+    let text = "";
+    if (!this.inside) {
+      text = this.buffer;
+    } else {
+      const lastClose = this.buffer.lastIndexOf(MARKER_CLOSE);
+      if (lastClose >= 0 && this.take(this.buffer.slice(0, lastClose))) {
+        text = this.buffer.slice(lastClose + MARKER_CLOSE.length);
+      } else if (this.knownTools) {
+        const headMatch = /^\s*([A-Za-z_][\w.-]{0,63})\b/.exec(this.buffer);
+        if (!headMatch || !this.knownTools.has(headMatch[1] as string)) {
+          text = MARKER_OPEN + this.buffer;
+        }
+      }
+    }
     this.buffer = "";
     this.inside = false;
     return { text, calls: this.calls.splice(0) };
   }
 
-  private take(body: string): void {
+  private take(body: string): boolean {
     const m = /^\s*([A-Za-z_][\w.-]{0,63})\s*([\s\S]*)$/.exec(body);
-    if (!m) return;
+    if (!m) return false;
+    const name = m[1] as string;
+    if (this.knownTools && !this.knownTools.has(name)) return false;
     const args = (m[2] ?? "").trim();
     let json = args === "" ? "{}" : args;
     try {
@@ -808,7 +930,8 @@ export class TextToolFilter {
       });
       json = mended ?? "{}";
     }
-    this.calls.push({ id: `text_${++this.counter}`, name: m[1] as string, arguments: json });
+    this.calls.push({ id: `text_${++this.counter}`, name, arguments: json });
+    return true;
   }
 }
 
@@ -821,15 +944,22 @@ export function withTextTools(inner: BrainProvider): BrainProvider {
       return inner.label;
     },
     capabilities: { ...inner.capabilities, tools: true },
+    ...(inner.warm ? { warm: () => inner.warm!() } : {}),
     async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
-      const filter = new TextToolFilter();
+      const knownTools = new Set(request.tools.map((t) => t.name));
+      const filter = new TextToolFilter(knownTools);
       const hint = textToolInstructions(request.tools);
       const messages = request.messages.map((m, i) => (i === 0 && m.role === "system" && hint !== "" ? { ...m, content: `${m.content}\n\n${hint}` } : m));
       let reason: "stop" | "tool" | "length" = "stop";
+      let emittedTool = false;
       for await (const event of inner.stream({ ...request, tools: [], messages })) {
         if (event.type === "text") {
           const text = filter.push(event.delta);
           if (text !== "") yield { type: "text", delta: text };
+          for (const call of filter.drainCalls()) {
+            emittedTool = true;
+            yield { type: "tool", call };
+          }
         } else if (event.type === "done") {
           reason = event.reason;
         } else {
@@ -838,8 +968,11 @@ export function withTextTools(inner: BrainProvider): BrainProvider {
       }
       const rest = filter.finish();
       if (rest.text !== "") yield { type: "text", delta: rest.text };
-      for (const call of rest.calls) yield { type: "tool", call };
-      yield { type: "done", reason: rest.calls.length > 0 ? "tool" : reason };
+      for (const call of rest.calls) {
+        emittedTool = true;
+        yield { type: "tool", call };
+      }
+      yield { type: "done", reason: emittedTool ? "tool" : reason };
     },
   };
 }
@@ -881,6 +1014,7 @@ export function withToolFallback(inner: BrainProvider, options: { key: string; n
     id: inner.id,
     label: inner.label,
     capabilities: inner.capabilities,
+    ...(inner.warm ? { warm: () => inner.warm!() } : {}),
     toolMode: mode,
     setToolMode: set,
     async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {

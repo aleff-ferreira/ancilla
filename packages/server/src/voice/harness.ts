@@ -51,13 +51,29 @@ export interface HarnessReader {
 const QUERY_NOISE_WORDS = new Set([
   "project",
   "projects",
+  "projeto",
+  "projetos",
+  "proyecto",
+  "proyectos",
   "thread",
   "threads",
   "trail",
   "trails",
   "tread",
   "treads",
+  "conversa",
+  "conversas",
+  "hilo",
+  "hilos",
+  "task",
+  "tasks",
+  "tarefa",
+  "tarefas",
+  "tarea",
+  "tareas",
   "folder",
+  "pasta",
+  "carpeta",
   "repo",
   "repository",
   "the",
@@ -68,7 +84,34 @@ const QUERY_NOISE_WORDS = new Set([
   "at",
   "called",
   "named",
+  "do",
+  "da",
+  "de",
+  "no",
+  "na",
+  "del",
+  "en",
+  "chamado",
+  "chamada",
+  "llamado",
+  "llamada",
 ]);
+
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const prev = new Uint16Array(b.length + 1);
+  const curr = new Uint16Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + cost);
+    }
+    prev.set(curr);
+  }
+  return prev[b.length]!;
+}
 
 function tokenizeName(raw: string, stripNoise: boolean): string[] {
   const normalized = raw
@@ -115,6 +158,10 @@ function tokenSimilarity(cand: string, q: string): number {
   }
   if (shorter.length >= 4 && editDistanceAtMostOne(cand, q)) {
     return 0.82;
+  }
+  if (shorter.length >= 4) {
+    const ratio = 1 - levenshteinDistance(cand, q) / longer.length;
+    if (ratio >= 0.75) return Number((ratio * 0.92).toFixed(4));
   }
   if (shorter.length >= 5 && longer.includes(shorter)) {
     return 0.72;

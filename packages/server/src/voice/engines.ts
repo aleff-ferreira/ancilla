@@ -23,6 +23,16 @@ export interface AsrResult {
   text: string;
   /** The recogniser has no more to add to this stretch of audio. */
   endpoint?: boolean;
+  /** Unrefined reading from the streaming transducer when offline refinement ran. */
+  streamingText?: string;
+  /** Decoded word/subword tokens when provided by the recogniser. */
+  tokens?: readonly string[];
+  /** Per-token log probabilities (<= 0) when provided by the recogniser. */
+  tokenLogProbs?: readonly number[];
+  /** Milliseconds spent in offline refinement after turn end. */
+  refineMs?: number;
+  /** True when `finish()` reused a zero-cost non-destructive snapshot decoded during `flush()`. */
+  snapshotHit?: boolean;
 }
 
 /** One stretch of speech, fed to a recogniser as it arrives. */
@@ -31,6 +41,8 @@ export interface AsrStream {
   accept(samples: Float32Array): MaybePromise<void>;
   /** What has been heard so far; it may be revised by the next call. */
   partial(): MaybePromise<AsrResult>;
+  /** Optional push callback invoked immediately whenever a new partial transcript is decoded. */
+  onPartial?: (result: AsrResult) => void;
   /**
    * The person has gone quiet: gives the recogniser the trailing silence it needs to say the last words it was waiting
    * to be sure of, without ending the stream (the person may go on).
@@ -44,7 +56,7 @@ export interface AsrStream {
 export interface AsrEngine {
   readonly id: string;
   /** Names the language to hear (BCP 47 such as "pt-BR"), or null to let the model decide. */
-  open(lang: string | null): MaybePromise<AsrStream>;
+  open(lang: string | null, options?: { vocabulary?: readonly string[] }): MaybePromise<AsrStream>;
   /** Loads the model and runs it once, so that the first words of a call are not the slowest. */
   warm?(): Promise<void>;
 }
@@ -52,7 +64,7 @@ export interface AsrEngine {
 export interface Voice {
   id: string;
   name: string;
-  /** Primary language subtag: "en", "pt". */
+  /** Primary language subtag: "en", "pt", "es". */
   lang: string;
 }
 
@@ -65,7 +77,7 @@ export interface TtsEngine {
    * Says one sentence. Audio comes out in pieces as soon as it exists; the iterator ends when the sentence is said, and
    * stops early when `signal` is aborted.
    */
-  synthesize(text: string, options: { voice: string; speed: number; signal: AbortSignal }): AsyncIterable<Int16Array>;
+  synthesize(text: string, options: { voice: string; speed: number; signal: AbortSignal; firstChunk?: boolean }): AsyncIterable<Int16Array>;
   warm?(): Promise<void>;
 }
 
@@ -91,12 +103,19 @@ export function toPcm16(samples: Float32Array): Int16Array {
   return out;
 }
 
-/** Picks the voice for a language: the first one that speaks it, else the first there is. */
+/** Picks the voice for a language: preserves speaker style across languages (`en:M3` -> `pt:M3`), else first for `lang`. */
 export function pickVoice(voices: readonly Voice[], lang: string | null, preferred: string | null): Voice | null {
   if (voices.length === 0) return null;
   if (preferred) {
     const found = voices.find((v) => v.id === preferred && (lang === null || v.lang === lang));
     if (found) return found;
+    if (lang && preferred.includes(":")) {
+      const style = preferred.split(":")[1];
+      if (style) {
+        const sibling = voices.find((v) => v.id === `${lang}:${style}` && v.lang === lang);
+        if (sibling) return sibling;
+      }
+    }
   }
   if (lang) {
     const found = voices.find((v) => v.lang === lang);

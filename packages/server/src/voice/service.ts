@@ -1,11 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AuthorizationHub } from "../assistant/launcher.js";
 import type { AssistantService } from "../assistant/service.js";
 import { makeBrain, makeBrowseBrain, type BrainContext, type BrainFactoryDeps, type ChosenBrain, type MuseExecRunner, type ResolvedApiAccount } from "./brains.js";
 import type { BrainProvider, BrainRequest } from "./brain.js";
-import type { MuseBrainHost } from "./muse-brain.js";
+import type { MuseBrainHost, MuseThreadBrain } from "./muse-brain.js";
 import { AssistantVoiceHost, TaskHub } from "./assistant-host.js";
 import type { VoiceConnectors } from "./tools.js";
 import type { HarnessReader } from "./harness.js";
@@ -86,6 +86,8 @@ export interface VoiceServiceDeps {
   providerName?: (providerId: string, accountId: string | null) => string;
   /** Default provider/account configured on a project folder when the assistant is set to Follow project. */
   projectDefault?: (cwd: string | null) => { providerId: string; accountId: string | null; modelId: string | null } | null;
+  /** Cached Muse model IDs (`<museHome>/model-catalog/*.json` plus optional static Muse 1.4.15+ IDs unless `diskOnly` is set). */
+  museCatalogModels?: (accountId?: string | null, options?: { diskOnly?: boolean }) => readonly string[];
   /** The assistant's own browser, which the `browse` tool starts web tasks on; without it the tool is not offered. */
   browse?: { available(): Promise<{ ok: boolean; reason?: string }> } | null;
   /** The connected accounts, which the `use_connector` tool starts tasks on; without any the tool is not offered. */
@@ -125,6 +127,8 @@ interface ActiveCall {
   session: VoiceSession;
   socket: CallSocket;
   ended: boolean;
+  getThread: () => MuseThreadBrain | undefined;
+  getBrainLabel: () => string;
 }
 
 const DEFAULT_IDLE_UNLOAD_MS = 10 * 60_000;
@@ -198,19 +202,52 @@ export class VoiceService {
     return { runtimeDir, modelsDir: s.modelsDir ?? join(this.voiceDir(), "models") };
   }
 
+  private fallbackProject(ensureDir = false): string | null {
+    if (this.deps.dataDir === ":memory:") return null;
+    const dir = join(this.deps.dataDir, "assistant-workspace");
+    if (ensureDir) {
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        /* best effort */
+      }
+    }
+    return dir;
+  }
+
   /**
    * Resolves the active voice settings against the Assistant profile's unified model preference whenever the voice brain is
-   * set to follow the assistant (`kind === "assistant"`) or left at its untouched default (`{ kind: "muse", model: null }`).
+   * set to follow the assistant (`kind === "assistant"`), left at its untouched default (`{ kind: "muse", model: null }`),
+   * or pinned to a stale Muse model on disk that is absent from the cached catalog or predates the Assistant profile.
    */
   effectiveSettings(projectHint?: string | null): VoiceSettings {
-    const raw = this.settings.get();
+    let raw = this.settings.get();
+    const profile = this.deps.assistant(false)?.store.getProfile() ?? null;
+    if (raw.brain.kind === "muse" && raw.brain.model !== null) {
+      const catalog = this.deps.museCatalogModels?.(raw.brain.accountId ?? null, { diskOnly: true }) ?? [];
+      const age = this.settings.diskSnapshotAge();
+      const invalidInCatalog = !age.updatedAtRuntime && catalog.length > 0 && !catalog.includes(raw.brain.model);
+      const staleDiskFile =
+        !age.updatedAtRuntime &&
+        age.loadedFromDiskAt !== null &&
+        profile !== null &&
+        profile.model.providerId !== null &&
+        age.loadedFromDiskAt + 50 < profile.updatedAt;
+      if (invalidInCatalog || staleDiskFile) {
+        raw = { ...raw, brain: { kind: "assistant" } };
+      }
+    }
     if (
       raw.brain.kind === "assistant" ||
       (raw.brain.kind === "muse" && raw.brain.model === null && !raw.brain.accountId)
     ) {
-      const pref = this.deps.assistant(false)?.store.getProfile().model ?? null;
+      const pref = profile?.model ?? null;
       const targetProject =
-        projectHint ?? raw.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
+        projectHint ??
+        raw.defaultProject ??
+        this.deps.lastProject?.() ??
+        this.deps.workspace?.projects()[0]?.cwd ??
+        this.fallbackProject(false);
       const resolved =
         pref && pref.providerId !== null
           ? pref
@@ -245,7 +282,11 @@ export class VoiceService {
     const layout = this.layout();
     const pack = inspectPack(layout);
     const settings = this.settings.view();
-    const project = settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
+    const project =
+      settings.defaultProject ??
+      this.deps.lastProject?.() ??
+      this.deps.workspace?.projects()[0]?.cwd ??
+      this.fallbackProject(false);
     const effective = this.effectiveSettings(project);
     const chosen = makeBrain(
       effective,
@@ -375,6 +416,26 @@ export class VoiceService {
     return (this.engines ?? this.loading) as Promise<VoiceEngineSet>;
   }
 
+  /** Alias for `prewarm()` invoked opportunistically on WebSocket connect and UI boot. */
+  warm(): Promise<void> {
+    return this.prewarm();
+  }
+
+  /** Syncs an external model switch on the underlying Muse session into any open voice call bound to that session. */
+  onMuseSessionModelChanged(sessionId: string, modelId: string | null): void {
+    const active = this.active;
+    if (!active || active.ended) return;
+    const thread = active.getThread();
+    if (!thread || thread.currentSessionId !== sessionId) return;
+    if (modelId !== null) thread.syncExternalModel(sessionId, modelId);
+    else thread.switchModel(null);
+    try {
+      active.socket.sendText(serialize({ type: "model", label: active.getBrainLabel() }));
+    } catch {
+      /* socket may have closed */
+    }
+  }
+
   /** Loads the models ahead of a call, so that the first words are not the slowest. Never throws. */
   async prewarm(): Promise<void> {
     try {
@@ -447,10 +508,65 @@ export class VoiceService {
     const store = new ConversationStore(assistant.store);
     this.expire(store);
     const settings = this.settings.get();
-    const project = hello.project ?? settings.defaultProject ?? this.deps.lastProject?.() ?? this.deps.workspace?.projects()[0]?.cwd ?? null;
+    const project =
+      hello.project ??
+      settings.defaultProject ??
+      this.deps.lastProject?.() ??
+      this.deps.workspace?.projects()[0]?.cwd ??
+      this.fallbackProject(true);
     const latest = store.latest();
     const conversation =
       hello.thread && store.exists(hello.thread) ? hello.thread : latest && Date.now() - latest.updatedAt < RESUME_WITHIN_MS ? latest.id : store.create(project);
+    let activeSettings = this.effectiveSettings(project);
+    let activeSig = JSON.stringify(activeSettings.brain);
+    let recentSwitchLabel: string | null = null;
+    let lastEarlySettleSavedMs: number | null = null;
+    const emitModelLabel = (label: string): void => {
+      try {
+        socket.sendText(serialize({ type: "model", label }));
+      } catch {
+        /* socket may have closed */
+      }
+    };
+    const handleModelResolved = (resolvedModelId: string | null, label: string): void => {
+      emitModelLabel(label);
+      const raw = this.settings.get();
+      if (
+        resolvedModelId &&
+        raw.brain.kind === "muse" &&
+        raw.brain.model !== null &&
+        raw.brain.model !== resolvedModelId
+      ) {
+        try {
+          this.settings.update({
+            brain: {
+              ...raw.brain,
+              model: resolvedModelId,
+            },
+          });
+          activeSettings = this.effectiveSettings(project);
+          activeSig = JSON.stringify(activeSettings.brain);
+          this.deps.log(`voice: healed stale Muse model in voice.json from ${raw.brain.model} to ${resolvedModelId}`);
+        } catch {
+          /* best effort */
+        }
+      }
+    };
+    let activeChosen = makeBrain(
+      activeSettings,
+      {
+        project,
+        name: assistant.store.getProfile().name,
+        museSession: store.museSession(conversation),
+        rememberMuseSession: (sessionId) => store.setMuseSession(conversation, sessionId),
+        onModelResolved: handleModelResolved,
+        onEarlySettle: (savedMs) => {
+          lastEarlySettleSavedMs = savedMs;
+        },
+      },
+      this.brainDeps(),
+    );
+    void activeChosen.brain.warm?.();
     const host = new AssistantVoiceHost({
       assistant,
       conversations: store,
@@ -463,15 +579,10 @@ export class VoiceService {
       ...(this.deps.connectors ? { connectors: this.deps.connectors } : {}),
       ...(this.deps.workspace ? { workspace: this.deps.workspace } : {}),
       ...(this.deps.authorizations ? { authorizations: this.deps.authorizations } : {}),
+      liveState: () => ({ activeModel: activeChosen.brain.label, recentSwitch: recentSwitchLabel }),
+      knownModels: () => this.deps.museCatalogModels?.() ?? [],
       log: (line) => this.deps.log(line),
     });
-    let activeSettings = this.effectiveSettings(project);
-    let activeSig = JSON.stringify(activeSettings.brain);
-    let activeChosen = makeBrain(
-      activeSettings,
-      { project, name: assistant.store.getProfile().name, museSession: store.museSession(conversation), rememberMuseSession: (sessionId) => store.setMuseSession(conversation, sessionId) },
-      this.brainDeps(),
-    );
     let pendingHttpSwitchLabel: string | null = null;
     const self = this;
     const liveBrain: BrainProvider = {
@@ -484,6 +595,7 @@ export class VoiceService {
       get capabilities() {
         return activeChosen.brain.capabilities;
       },
+      warm: () => activeChosen.brain.warm?.() ?? Promise.resolve(),
       stream: async function* (request: BrainRequest) {
         const lastMsg = request.messages[request.messages.length - 1];
         const isNewTurn = !lastMsg || lastMsg.role !== "tool";
@@ -503,6 +615,8 @@ export class VoiceService {
               activeChosen.thread.switchModel(nextCli.model);
               activeSettings = latestSettings;
               activeSig = latestSig;
+              recentSwitchLabel = activeChosen.brain.label;
+              emitModelLabel(activeChosen.brain.label);
               self.deps.log(`voice: switched live call model on ${nextCli.providerId} to ${nextCli.model ?? "default"}`);
             } else {
               const nextChosen = makeBrain(
@@ -512,12 +626,18 @@ export class VoiceService {
                   name: assistant.store.getProfile().name,
                   museSession: null,
                   rememberMuseSession: (sessionId) => store.setMuseSession(conversation, sessionId),
+                  onModelResolved: handleModelResolved,
+                  onEarlySettle: (savedMs) => {
+                    lastEarlySettleSavedMs = savedMs;
+                  },
                 },
                 self.brainDeps(),
               );
               activeChosen = nextChosen;
               activeSettings = latestSettings;
               activeSig = latestSig;
+              recentSwitchLabel = nextChosen.brain.label;
+              emitModelLabel(nextChosen.brain.label);
               if (nextChosen.thread) {
                 nextChosen.thread.announceInitialSwitch(nextChosen.brain.label);
               } else {
@@ -561,11 +681,26 @@ export class VoiceService {
       log: (line) => this.deps.log(`voice: ${line}`),
       config: { speed: settings.speed, debug: process.env["ANCILLA_VOICE_DEBUG"] === "1" },
       id,
+      modelLabel: () => activeChosen.brain.label,
+      takeEarlySettleSavedMs: () => {
+        const v = lastEarlySettleSavedMs;
+        lastEarlySettleSavedMs = null;
+        return v;
+      },
       onClosed: (reason) => {
         if (opened) void this.endCall(opened, reason);
       },
     });
-    const call: ActiveCall = { id, conversation, since: Date.now(), session, socket, ended: false };
+    const call: ActiveCall = {
+      id,
+      conversation,
+      since: Date.now(),
+      session,
+      socket,
+      ended: false,
+      getThread: () => activeChosen.thread,
+      getBrainLabel: () => activeChosen.brain.label,
+    };
     opened = call;
     this.active = call;
     try {

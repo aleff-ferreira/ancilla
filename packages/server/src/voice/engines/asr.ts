@@ -35,6 +35,7 @@ interface Pending {
 
 class WorkerStream implements AsrStream {
   latest = "";
+  onPartial?: (result: AsrResult) => void;
   private done = false;
 
   constructor(
@@ -61,7 +62,14 @@ class WorkerStream implements AsrStream {
     this.owner.forget(this.id);
     if (!value) return { text: this.latest };
     this.owner.noteFinal(value);
-    return { text: value.text };
+    return {
+      text: value.text,
+      ...(value.streamingText !== undefined ? { streamingText: value.streamingText } : {}),
+      ...(value.tokens ? { tokens: value.tokens } : {}),
+      ...(value.tokenLogProbs ? { tokenLogProbs: value.tokenLogProbs } : {}),
+      refineMs: value.refineMs,
+      ...(value.snapshotHit !== undefined ? { snapshotHit: value.snapshotHit } : {}),
+    };
   }
 
   dispose(): void {
@@ -77,6 +85,7 @@ export class SherpaAsr implements AsrEngine {
   readonly id: string;
   private worker: Worker | null = null;
   private starting: Promise<void> | null = null;
+  private warmPromise: Promise<void> | null = null;
   private nextReq = 1;
   private nextStream = 1;
   private readonly pending = new Map<number, Pending>();
@@ -93,18 +102,46 @@ export class SherpaAsr implements AsrEngine {
     return this.lastFinal;
   }
 
-  async open(lang: string | null): Promise<AsrStream> {
+  async open(lang: string | null, options?: { vocabulary?: readonly string[] }): Promise<AsrStream> {
     await this.ensure();
     const id = this.nextStream++;
-    await this.request((req) => ({ op: "open", req, id, lang }));
+    const vocabulary: string[] = [];
+    if (options?.vocabulary) {
+      const seen = new Set<string>();
+      for (const raw of options.vocabulary) {
+        if (typeof raw !== "string") continue;
+        const clean = raw.replace(/[\r\n\t]+/g, " ").trim();
+        if (clean.length < 2 || clean.length > 80) continue;
+        const key = clean.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        vocabulary.push(clean);
+        if (vocabulary.length >= 64) break;
+      }
+    }
+    await this.request((req) => ({
+      op: "open",
+      req,
+      id,
+      lang,
+      ...(vocabulary.length > 0 ? { vocabulary } : {}),
+    }));
     const stream = new WorkerStream(this, id);
     this.streams.set(id, stream);
     return stream;
   }
 
-  async warm(): Promise<void> {
-    await this.ensure();
-    await this.request((req) => ({ op: "warm", req }));
+  warm(): Promise<void> {
+    if (this.warmPromise) return this.warmPromise;
+    const run = (async () => {
+      await this.ensure();
+      await this.request((req) => ({ op: "warm", req }));
+    })();
+    run.catch(() => {
+      if (this.warmPromise === run) this.warmPromise = null;
+    });
+    this.warmPromise = run;
+    return run;
   }
 
   /** Stops the worker and lets go of the models' memory. */
@@ -112,6 +149,7 @@ export class SherpaAsr implements AsrEngine {
     const worker = this.worker;
     this.worker = null;
     this.starting = null;
+    this.warmPromise = null;
     this.fail(new Error("the recogniser was shut down"));
     if (worker) await worker.terminate();
   }
@@ -157,12 +195,14 @@ export class SherpaAsr implements AsrEngine {
       this.options.log?.(`the recogniser stopped: ${error.message}`);
       if (this.worker === worker) this.worker = null;
       this.starting = null;
+      this.warmPromise = null;
       this.fail(error);
     });
     worker.on("exit", (code) => {
       if (this.worker === worker) {
         this.worker = null;
         this.starting = null;
+        this.warmPromise = null;
         this.fail(new Error(`the recogniser exited (code ${code})`));
       }
     });
@@ -191,7 +231,10 @@ export class SherpaAsr implements AsrEngine {
       }
       case "partial": {
         const stream = this.streams.get(message.id);
-        if (stream) stream.latest = message.text;
+        if (stream) {
+          stream.latest = message.text;
+          stream.onPartial?.({ text: message.text });
+        }
         return;
       }
       case "log":

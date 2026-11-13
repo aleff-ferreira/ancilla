@@ -342,7 +342,7 @@ CREATE INDEX avatar_packs_updated ON avatar_packs (updated_at DESC);
 ];
 
 /** The full text index. Kept apart from the migrations because it is built by hand, and rebuilt when it cannot be trusted. */
-export const FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(ref UNINDEXED, text, tokenize = 'porter unicode61 remove_diacritics 2')`;
+export const FTS_DDL = `CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(ref UNINDEXED, text, tokenize = 'unicode61 remove_diacritics 2')`;
 
 export const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 

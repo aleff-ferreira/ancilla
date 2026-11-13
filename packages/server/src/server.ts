@@ -49,6 +49,7 @@ import {
   type ResearchRunView,
   type Project,
   type ServeTarget,
+  type HostPosture,
   type ReasoningEffort,
   type SessionRecord,
   type SessionSkill,
@@ -75,7 +76,13 @@ import {
 } from "@ancilla/daemon";
 import { ApiAgentHost } from "./providers/apiAgentHost.js";
 import { extractLoginFailureMessage, parseProviderLoginOutput } from "./providers/loginParser.js";
-import { buildAuthenticatedMuseFallbackCatalog, isMuse1415OrNewer, readCachedMuseCatalog } from "./providers/museCatalog.js";
+import {
+  META_MUSE_CODE_MODEL_IDS,
+  buildAuthenticatedMuseFallbackCatalog,
+  isMuse1415OrNewer,
+  readCachedMuseCatalog,
+  readCachedMuseCatalogSync,
+} from "./providers/museCatalog.js";
 import { ProfileIsolator, detectAmbientKeyOverrides } from "./providers/profiles.js";
 import { OpenAiCompatibleProvider, AnthropicProvider, GoogleGenAiProvider } from "./voice/brain.js";
 import { crossSiteApiRequest, isLoopbackBind, normalizeHost, parseAllowHosts, safeDecode, safeEqual, trustedHost, trustedHostSet } from "./admission.js";
@@ -985,6 +992,8 @@ export class AncillaServer {
   private readonly planUsageByAccount = new Map<string, SubscriptionUsage>();
   /** The reasoning effort each session is known to be running at, so a turn only re-sets it when it changes. */
   private readonly effortApplied = new Map<string, ReasoningEffort>();
+  /** The approval mode each session is known to be running at, so a turn only re-sets it when it changes. */
+  private readonly approvalModeApplied = new Map<string, ApprovalMode>();
   private lastHostError: string | null = null;
   /**
    * Per-session notification health. #42 reported live notifications stopping mid-session while the
@@ -1128,6 +1137,7 @@ export class AncillaServer {
   private readonly staleAfterLoginHosts = new WeakSet<ManagedHost>();
   private readonly hasCustomHostFactory: boolean;
   private readonly museCliAuthCache = new Map<string, { at: number; ok: boolean }>();
+  private voiceExtraFlagsUnsupported = false;
 
   constructor(options: ServerOptions = {}) {
     this.hasCustomHostFactory = options.hostFactory !== undefined;
@@ -1505,45 +1515,66 @@ export class AncillaServer {
       ...base,
       startSession: async ({ cwd, account, providerId, title, modelId }) => {
         const effectiveProvider = providerId ? this.normalizeProviderId(providerId) : "muse";
+        const posture: HostPosture = effectiveProvider === "muse" ? "voice" : "coding";
         const created = await this.startSession(
           normalizeCwd(cwd),
           yolo() ? "allowAll" : undefined,
           modelId ?? undefined,
           account,
           effectiveProvider,
+          posture,
         );
         const sessionId = String(created["sessionId"]);
+        const reportedModelId = typeof created["modelId"] === "string" && created["modelId"] !== "" ? created["modelId"] : null;
         try {
           this.store.updateSession(sessionId, { title, titleSource: "user" });
         } catch (error) {
           this.log(`a call's thread could not be named: ${errorInfo(error).message}`);
         }
-        return { sessionId };
+        return { sessionId, modelId: reportedModelId };
       },
       openSession: async (sessionId, expected) => {
+        const found = this.store.findSession(sessionId);
         if (expected) {
-          const found = this.store.findSession(sessionId);
-          if (!found) return false;
+          if (!found) return { ok: false, modelId: null };
           if (expected.providerId && this.normalizeProviderId(found.session.providerId) !== this.normalizeProviderId(expected.providerId)) {
-            return false;
+            return { ok: false, modelId: null };
           }
           if (expected.account !== undefined && (found.session.accountId ?? null) !== (expected.account ?? null)) {
-            return false;
+            return { ok: false, modelId: null };
+          }
+        }
+        if (
+          found &&
+          this.normalizeProviderId(found.session.providerId) === "muse" &&
+          found.session.hostPosture !== "voice" &&
+          !this.sessionHosts.has(sessionId)
+        ) {
+          try {
+            this.store.updateSession(sessionId, { hostPosture: "voice" });
+          } catch {
+            // Best-effort posture migration before loading onto the dedicated voice host.
           }
         }
         const ok = (await base.openSession?.(sessionId)) ?? true;
         if (ok && yolo()) {
           const managed = await this.hostForSession(sessionId).catch(() => null);
           if (managed) {
-            await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+            await this.applyApprovalMode(managed.manager, sessionId, "allowAll").catch(() => undefined);
           }
         }
-        return ok;
+        const modelId = ok ? (this.store.findSession(sessionId)?.session.modelId ?? null) : null;
+        return { ok, modelId };
+      },
+      warmHost: async (cwd, account, providerId) => {
+        const effectiveProvider = providerId ? this.normalizeProviderId(providerId) : "muse";
+        const posture: HostPosture = effectiveProvider === "muse" ? "voice" : "coding";
+        await this.hostFor(normalizeCwd(cwd), account, effectiveProvider, posture);
       },
       startTurn: async ({ sessionId, text, displayText, reasoningEffort }) => {
         const managed = await this.hostForSession(sessionId);
         if (yolo()) {
-          await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          await this.applyApprovalMode(managed.manager, sessionId, "allowAll").catch(() => undefined);
         }
         if (reasoningEffort && isReasoningEffort(reasoningEffort)) {
           await this.applyEffort(managed.manager, sessionId, reasoningEffort).catch(() => undefined);
@@ -1702,6 +1733,77 @@ export class AncillaServer {
           } catch {
             return null;
           }
+        },
+        museCatalogModels: (accountId, options) => {
+          const out: string[] = [];
+          const seen = new Set<string>();
+          const pushAll = (items: readonly string[]): void => {
+            for (const id of items) {
+              if (!seen.has(id)) {
+                seen.add(id);
+                out.push(id);
+              }
+            }
+          };
+          let hasMuse1415Host = false;
+          const dirs: string[] = [];
+          const pushDir = (dir: string): void => {
+            if (!dirs.includes(dir)) dirs.push(dir);
+          };
+          const platform = this.options.platform ?? process.platform;
+          const home = this.options.home ?? homedir();
+          for (const h of this.hosts.values()) {
+            if (h.providerId === "muse" && (accountId === undefined || h.accountId === (accountId ?? null))) {
+              if (isMuse1415OrNewer(h.serverVersion)) hasMuse1415Host = true;
+              if (h.museHome) {
+                let modelCatalogDir = join(h.museHome, "model-catalog");
+                try {
+                  const remoteDir = `${h.museHome.replace(/[\\/]+$/, "")}/model-catalog`;
+                  modelCatalogDir = resolveUserPath(remoteDir, {
+                    platform,
+                    home,
+                    distro: this.wslDistro(),
+                  }).local;
+                } catch {
+                  // Fall back to direct path join when museHome cannot be resolved via resolveUserPath.
+                }
+                pushDir(modelCatalogDir);
+              }
+            }
+          }
+          if (!this.hasCustomHostFactory && !accountId) {
+            if (platform === "win32") {
+              const wslHome = this.wslHomes.peek(this.wslDistro());
+              if (wslHome) {
+                for (const rel of [".local/share/muse/model-catalog", ".config/muse/model-catalog"]) {
+                  try {
+                    pushDir(
+                      resolveUserPath(`${wslHome.replace(/\/+$/, "")}/${rel}`, {
+                        platform,
+                        home,
+                        distro: this.wslDistro(),
+                      }).local,
+                    );
+                  } catch {
+                    // Ignore unmappable WSL home paths.
+                  }
+                }
+              }
+            }
+            pushDir(join(this.options.home, ".local", "share", "muse", "model-catalog"));
+            pushDir(join(this.options.home, ".config", "muse", "model-catalog"));
+          }
+          for (const dir of dirs) {
+            const models = readCachedMuseCatalogSync(dir);
+            if (models && models.length > 0) {
+              pushAll(models);
+              break;
+            }
+          }
+          if (!options?.diskOnly && (hasMuse1415Host || !this.hasCustomHostFactory)) {
+            pushAll(META_MUSE_CODE_MODEL_IDS);
+          }
+          return out;
         },
       });
     }
@@ -2037,7 +2139,7 @@ export class AncillaServer {
         const managed = await this.hostForSession(sessionId);
         // A host of this server that has held the thread since it was made or opened has it loaded.
         if (this.sessionHosts.get(sessionId) === managed.key && this.hosts.get(managed.key) === managed) {
-          if (yolo()) await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          if (yolo()) await this.applyApprovalMode(managed.manager, sessionId, "allowAll").catch(() => undefined);
           return true;
         }
         if (!this.mayLoadUnloaded(sessionId, managed)) return false;
@@ -2046,8 +2148,21 @@ export class AncillaServer {
           const reply = asRecord(await managed.manager.resumeSession(sessionId, true));
           if (this.hosts.get(managed.key) === managed) this.sessionHosts.set(sessionId, managed.key);
           this.liveFor(sessionId).readOnlyReason = null;
-          await this.restoreChosenModel(managed.manager, sessionId, found.session.chosenModelId ?? null, asRecord(reply?.["session"]));
-          if (yolo()) await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          const restored = await this.restoreChosenModel(
+            managed.manager,
+            sessionId,
+            found.session.chosenModelId ?? null,
+            asRecord(reply?.["session"]),
+          );
+          const resumedModel = restored ? str(restored["modelId"]) : null;
+          if (resumedModel && !found.session.modelId) {
+            try {
+              this.store.updateSession(sessionId, { modelId: resumedModel });
+            } catch {
+              // Best-effort sync of host-reported model onto session record.
+            }
+          }
+          if (yolo()) await this.applyApprovalMode(managed.manager, sessionId, "allowAll").catch(() => undefined);
           return true;
         } catch (error) {
           // Only a thread that is gone, or that another Muse client holds, cannot be used; a host that cannot be reached is an error.
@@ -2067,7 +2182,7 @@ export class AncillaServer {
       startTurn: async ({ sessionId, text, displayText }) => {
         const managed = await this.hostForSession(sessionId);
         if (yolo()) {
-          await managed.manager.setSessionApprovalMode(sessionId, "allowAll").catch(() => undefined);
+          await this.applyApprovalMode(managed.manager, sessionId, "allowAll").catch(() => undefined);
         }
         this.wake(sessionId);
         const live = this.liveFor(sessionId);
@@ -4420,10 +4535,11 @@ export class AncillaServer {
     return cwd;
   }
 
-  /** One host per (provider, account, workspace). Muse keeps today's exact key format so health & test fixtures stay identical. */
-  private hostKey(cwd: string, accountId: string | null, providerId: ProviderId = "muse"): string {
+  /** One host per (provider, account, workspace, posture). Muse coding hosts keep today's exact key format so health & test fixtures stay identical. */
+  private hostKey(cwd: string, accountId: string | null, providerId: ProviderId = "muse", posture: HostPosture = "coding"): string {
     if (providerId === "muse") {
-      return `${accountId ?? "default"}::${this.hostPathFor(cwd) || "__default__"}`;
+      const base = `${accountId ?? "default"}::${this.hostPathFor(cwd) || "__default__"}`;
+      return posture === "voice" ? `voice::${base}` : base;
     }
     const workspaceKey = providerId === "api" ? (cwd ? normalizeCwd(cwd) : "") : this.cliHostPathFor(cwd, providerId);
     return `${providerId}::${accountId ?? "default"}::${workspaceKey || "__default__"}`;
@@ -4815,6 +4931,7 @@ export class AncillaServer {
       // A trial is no pick, and it must not leave an older one standing either (a pin the thread started with,
       // say): that would be put back over it on the next resume. Cleared, the host's own model wins.
       this.store.updateSession(sessionId, trial ? { modelId, chosenModelId: null } : { modelId, chosenModelId: modelId });
+      this.voiceService?.onMuseSessionModelChanged(sessionId, modelId);
       if (trial) {
         // The id comes off the wire: quoted, so a line break in it cannot split the record.
         this.log(`${sessionId} tries ${JSON.stringify(modelId)}, which ${source ? `Muse's ${source} list` : "Muse's list"} does not name; kept for this session only`);
@@ -4852,11 +4969,13 @@ export class AncillaServer {
     modelId?: string,
     accountId: string | null = null,
     providerId: ProviderId = "muse",
+    posture: HostPosture = "coding",
   ): Promise<Record<string, unknown>> {
     const project = this.store.upsertProject(cwd);
     // The thread must be visible where it lands: the owning project when the folder is one of a project's folders.
     this.store.revealProject(cwd);
-    const host = await this.hostFor(cwd, accountId, providerId);
+    const effectivePosture: HostPosture = providerId === "muse" ? posture : "coding";
+    const host = await this.hostFor(cwd, accountId, providerId, effectivePosture);
     const workspaceRoot =
       providerId === "muse"
         ? this.hostPathFor(cwd)
@@ -4868,6 +4987,9 @@ export class AncillaServer {
       approvalMode,
       modelId,
     });
+    if (approvalMode) {
+      this.approvalModeApplied.set(started.sessionId, approvalMode);
+    }
     const raw = asRecord(asRecord(started.raw)?.["session"]);
     const record = this.store.recordSession({
       id: started.sessionId,
@@ -4880,6 +5002,7 @@ export class AncillaServer {
       sandboxDisabled: providerId === "muse" ? host.target.args.includes("--disable-sandbox") : null,
       providerId,
       accountId,
+      ...(effectivePosture === "voice" ? { hostPosture: "voice" as const } : {}),
     });
     this.sessionHosts.set(started.sessionId, host.key);
     if (accountId) {
@@ -6325,7 +6448,7 @@ export class AncillaServer {
     return up.find((host) => host.key === this.hostKey("", accountId, providerId)) ?? up[0] ?? null;
   }
 
-  /** The host that has the session loaded, else the one its workspace, provider and account start. */
+  /** The host that has the session loaded, else the one its workspace, provider, account and posture start. */
   private async hostForSession(sessionId: string): Promise<ManagedHost> {
     const key = this.sessionHosts.get(sessionId);
     const loaded = key ? this.hosts.get(key) : undefined;
@@ -6333,10 +6456,13 @@ export class AncillaServer {
       return loaded;
     }
     const found = this.store.findSession(sessionId);
+    const providerId = this.normalizeProviderId(found?.session.providerId);
+    const posture: HostPosture = providerId === "muse" && found?.session.hostPosture === "voice" ? "voice" : "coding";
     return this.hostFor(
       found?.cwd ?? "",
       found?.session.accountId ?? null,
-      this.normalizeProviderId(found?.session.providerId),
+      providerId,
+      posture,
     );
   }
 
@@ -6354,7 +6480,13 @@ export class AncillaServer {
     return !this.isBusy(sessionId);
   }
 
-  private async hostFor(cwd: string, accountId: string | null = null, providerId: ProviderId = "muse"): Promise<ManagedHost> {
+  private async hostFor(
+    cwd: string,
+    accountId: string | null = null,
+    providerId: ProviderId = "muse",
+    posture: HostPosture = "coding",
+  ): Promise<ManagedHost> {
+    const effectivePosture: HostPosture = providerId === "muse" ? posture : "coding";
     if (providerId === "muse") {
       await this.ensureLinuxMuseStorage(accountId);
       await this.museRuntime();
@@ -6368,7 +6500,7 @@ export class AncillaServer {
     if (this.closed) {
       throw new HttpError(503, "Ancilla is shutting down.");
     }
-    const key = this.hostKey(cwd, accountId, providerId);
+    const key = this.hostKey(cwd, accountId, providerId, effectivePosture);
     const existing = this.hosts.get(key);
     if (existing) {
       return existing;
@@ -6380,7 +6512,7 @@ export class AncillaServer {
     const token: StartToken = { handle: null, abandoned: false, closing: false };
     const startup =
       providerId === "muse"
-        ? this.spawnHost(key, cwd, accountId, token)
+        ? this.spawnHost(key, cwd, accountId, token, effectivePosture)
         : this.spawnProviderHost(key, cwd, accountId, providerId, token);
     this.starting.set(key, startup);
     this.startTokens.set(key, token);
@@ -6397,9 +6529,16 @@ export class AncillaServer {
     }
   }
 
-  private async spawnHost(key: string, cwd: string, accountId: string | null, token: StartToken): Promise<ManagedHost> {
+  private async spawnHost(
+    key: string,
+    cwd: string,
+    accountId: string | null,
+    token: StartToken,
+    posture: HostPosture = "coding",
+  ): Promise<ManagedHost> {
     const quotaAccountGeneration = accountId ? this.quotaAccountGenerations.get(accountId) ?? 0 : 0;
-    const target = await this.serveTargetFor(cwd, accountId);
+    const usedVoiceExtraFlags = posture === "voice" && !this.voiceExtraFlagsUnsupported;
+    let target = await this.serveTargetFor(cwd, accountId, posture, !usedVoiceExtraFlags);
     if (accountId) this.removedQuotaAccounts.delete(accountId);
     let quotaCacheScope = await this.quotaCacheScope(accountId);
     if (!quotaCacheScope && await this.readsWslLogin(accountId)) {
@@ -6410,23 +6549,60 @@ export class AncillaServer {
     }
     // The awaits above can outlast the restart or the shutdown that gave up on this start: nothing is spawned for it.
     this.assertStartWanted(token);
-    const handle = this.options.hostFactory(target);
+    let handle = this.options.hostFactory(target);
     token.handle = handle;
     let started: { fingerprintWarning?: unknown; initializeResult?: unknown } | null;
     try {
       started = (await handle.start(ANCILLA_VERSION)) as typeof started;
     } catch (error) {
-      this.assertStartWanted(token);
-      this.lastHostError = error instanceof Error ? error.message : String(error);
-      this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
-      // A start the ceiling ended is a gateway timeout, not a refusal; the answer names the setting that moves it.
-      if (error instanceof HostStartTimeoutError) {
-        throw new HttpError(
-          504,
-          `Could not start Muse: ${this.lastHostError} The limit is ${HOST_START_TIMEOUT_ENV} (or "hostStartTimeoutMs" in runtime.json), in milliseconds; 0 turns it off.`,
+      if (
+        posture === "voice" &&
+        usedVoiceExtraFlags &&
+        !(error instanceof HostStartTimeoutError) &&
+        !token.abandoned &&
+        !this.closed
+      ) {
+        token.handle = null;
+        closeInBackground(handle);
+        this.log(
+          `voice host rejected extended CLI flags (${error instanceof Error ? error.message : String(error)}); retrying with degraded voice flags`,
         );
+        target = await this.serveTargetFor(cwd, accountId, posture, true);
+        this.assertStartWanted(token);
+        handle = this.options.hostFactory(target);
+        token.handle = handle;
+        try {
+          started = (await handle.start(ANCILLA_VERSION)) as typeof started;
+          this.voiceExtraFlagsUnsupported = true;
+        } catch (retryError) {
+          if (!token.closing) {
+            token.closing = true;
+            closeInBackground(handle);
+          }
+          this.assertStartWanted(token);
+          this.lastHostError = retryError instanceof Error ? retryError.message : String(retryError);
+          this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
+          if (retryError instanceof HostStartTimeoutError) {
+            throw new HttpError(
+              504,
+              `Could not start Muse: ${this.lastHostError} The limit is ${HOST_START_TIMEOUT_ENV} (or "hostStartTimeoutMs" in runtime.json), in milliseconds; 0 turns it off.`,
+            );
+          }
+          throw new HttpError(502, `Could not start Muse: ${this.lastHostError}`);
+        }
+      } else {
+        this.assertStartWanted(token);
+        this.lastHostError = error instanceof Error ? error.message : String(error);
+        this.emit("ancilla", { type: "host", key, state: "failed", message: this.lastHostError });
+        // A start the ceiling ended is a gateway timeout, not a refusal; the answer names the setting that moves it.
+        if (error instanceof HostStartTimeoutError) {
+          throw new HttpError(
+            504,
+            `Could not start Muse: ${this.lastHostError} The limit is ${HOST_START_TIMEOUT_ENV} (or "hostStartTimeoutMs" in runtime.json), in milliseconds; 0 turns it off.`,
+          );
+        }
+        throw new HttpError(502, `Could not start Muse: ${this.lastHostError}`);
       }
-      throw new HttpError(502, `Could not start Muse: ${this.lastHostError}`);
     }
     if (token.abandoned || this.closed) {
       // It answered after the restart or the shutdown that gave up on it: it is closed, and no one is told it exists.
@@ -6516,6 +6692,7 @@ export class AncillaServer {
       }
       this.sessionHosts.delete(sessionId);
       this.effortApplied.delete(sessionId);
+      this.approvalModeApplied.delete(sessionId);
       // What was tried on the retired host is over with it: the next resume reads the model from the new one.
       this.modelTrials.delete(sessionId);
       affected.add(sessionId);
@@ -6773,7 +6950,12 @@ export class AncillaServer {
     });
   }
 
-  private async serveTargetFor(cwd: string, accountId: string | null = null): Promise<ServeTarget> {
+  private async serveTargetFor(
+    cwd: string,
+    accountId: string | null = null,
+    posture: HostPosture = "coding",
+    degradeVoiceFlags = false,
+  ): Promise<ServeTarget> {
     let profileEnv: Record<string, string> | null = null;
     if (accountId) {
       let profile;
@@ -6785,12 +6967,26 @@ export class AncillaServer {
       profileEnv = this.aonia.envFor(profile);
     }
     // Sandbox posture is fixed at spawn: every host carries the settings as they stand now.
+    // Dedicated voice hosts never pass `--trust-workspace` and run with `--preset empty`, write/shell disabled, and reminders off.
     const sandboxDisabled = this.store.getSandboxSettings().disabled;
-    const yoloEnabled = this.store.getYoloSettings().enabled;
+    const yoloEnabled = posture === "voice" ? false : this.store.getYoloSettings().enabled;
+    const extraServeArgs: readonly string[] =
+      posture === "voice" && !degradeVoiceFlags && !this.voiceExtraFlagsUnsupported
+        ? [
+            "--preset",
+            "empty",
+            "--disable-write",
+            "--disable-shell",
+            "--disable-request-user-input",
+            "-c",
+            'runtime_capabilities={"plugin:tbh-reminders:reminder:memory-reminder":{"enabled":false},"plugin:tbh-reminders:reminder:skill-reminder":{"enabled":false},"plugin:tbh-reminders:reminder:goal-reminder":{"enabled":false},"plugin:tbh-reminders:reminder:todo-reminder":{"enabled":false},"plugin:tbh-reminders:reminder:scope-reminder":{"enabled":false},"plugin:tbh-reminders:reminder:verify-reminder":{"enabled":false}}',
+          ]
+        : [];
     const serveArgs = [
       "serve",
       ...(sandboxDisabled || yoloEnabled ? ["--disable-sandbox"] : []),
       ...(yoloEnabled ? ["--trust-workspace"] : []),
+      ...extraServeArgs,
     ];
     if (this.options.platform !== "win32") {
       return {
@@ -6828,6 +7024,7 @@ export class AncillaServer {
       cwd: this.spawnCwdFor(cwd),
       sandboxDisabled,
       yoloEnabled,
+      ...(extraServeArgs.length > 0 ? { extraServeArgs } : {}),
     });
     // An account's folders and runtime.json's variables cross into WSL for this host only.
     const env = profileEnv ? this.wslEnvFor(profileEnv, PROFILE_WSLENV) : this.wslEnvFor();
@@ -7075,6 +7272,8 @@ export class AncillaServer {
         live.pendingApprovals.clear();
         live.pendingInputs.clear();
         this.sessionHosts.delete(sessionId);
+        this.effortApplied.delete(sessionId);
+        this.approvalModeApplied.delete(sessionId);
         this.modelTrials.delete(sessionId);
         break;
       }
@@ -7091,6 +7290,7 @@ export class AncillaServer {
             sessionId,
             trial ? { modelId, chosenModelId: null } : byUser ? { modelId, chosenModelId: modelId } : { modelId },
           );
+          this.voiceService?.onMuseSessionModelChanged(sessionId, modelId);
         }
         break;
       }
@@ -7580,6 +7780,21 @@ export class AncillaServer {
    * (muse-code-sdk#6) but honours the session default, so that is what carries it. A host without the method
    * leaves the turn's own effort to do what it can; a session that is not loaded fails the turn the same way.
    */
+  private async applyApprovalMode(manager: SessionManager, sessionId: string, mode: ApprovalMode): Promise<void> {
+    if (this.approvalModeApplied.get(sessionId) === mode) {
+      return;
+    }
+    try {
+      await manager.setSessionApprovalMode(sessionId, mode);
+      this.approvalModeApplied.set(sessionId, mode);
+    } catch (error) {
+      const kind = errorInfo(error).kind;
+      if (kind === "sessionNotLoaded" || kind === "sessionStreamMismatch" || kind === "sessionNotFound") {
+        throw error;
+      }
+    }
+  }
+
   private async applyEffort(manager: SessionManager, sessionId: string, effort: ReasoningEffort): Promise<void> {
     if (this.effortApplied.get(sessionId) === effort) {
       return;

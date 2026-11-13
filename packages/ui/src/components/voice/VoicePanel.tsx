@@ -69,7 +69,7 @@ const DEFAULT_VOICE_STATUS: VoiceStatusView = {
     voice: null,
     speed: 1,
     refine: true,
-    ttsSteps: 5,
+    ttsSteps: 4,
     brain: { kind: "muse", model: null, accountId: null },
     speech: { kind: "local" },
     proactive: false,
@@ -720,17 +720,25 @@ function Sound(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
           className="h-8 rounded-lg bg-sunken px-2 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus"
         >
           <option value="">Automatic</option>
-          {["en", "pt"].map((lang) => (
-            <optgroup key={lang} label={lang === "en" ? "English" : "Portuguese"}>
-              {voices
-                .filter((v) => v.lang === lang)
-                .map((v) => (
+          {(
+            [
+              ["en", "English"],
+              ["pt", "Portuguese"],
+              ["es", "Spanish"],
+            ] as const
+          ).map(([lang, label]) => {
+            const matching = voices.filter((v) => v.lang === lang);
+            if (matching.length === 0 && lang === "es") return null;
+            return (
+              <optgroup key={lang} label={label}>
+                {matching.map((v) => (
                   <option key={v.id} value={v.id}>
                     {v.name}
                   </option>
                 ))}
-            </optgroup>
-          ))}
+              </optgroup>
+            );
+          })}
         </select>
       </Row>
       <Row label={`Speed: ${speed.toFixed(2)}×`}>
@@ -760,6 +768,7 @@ function Sound(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
 
 function Conversations(props: { settings: VoiceSettingsView; save: (patch: Record<string, unknown>) => Promise<void>; changed: () => void }) {
   const controller = useController();
+  const projects = useApp((s) => s.projects);
   const [list, setList] = useState<VoiceConversationView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [rev, setRev] = useState(0);
@@ -793,6 +802,23 @@ function Conversations(props: { settings: VoiceSettingsView; save: (patch: Recor
   const now = Date.now();
   return (
     <Section title="Conversations it keeps">
+      {projects.length > 0 ? (
+        <Row label="Default project" description="Used when you start a call from outside a project thread.">
+          <select
+            aria-label="Default project"
+            value={props.settings.defaultProject ?? ""}
+            onChange={(e) => void props.save({ defaultProject: e.target.value === "" ? null : e.target.value })}
+            className="h-8 max-w-full rounded-lg bg-sunken px-2 text-sm text-fg outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          >
+            <option value="">Active or last project</option>
+            {projects.map((p) => (
+              <option key={p.cwd} value={p.cwd}>
+                {p.displayName} ({p.cwd})
+              </option>
+            ))}
+          </select>
+        </Row>
+      ) : null}
       <Row label="Keep for" description="Only the words are kept, never the sound. Older conversations are deleted when you start a call. What it remembered from them (in Memory) is separate.">
         <Pick<number | null>
           value={props.settings.keepDays}

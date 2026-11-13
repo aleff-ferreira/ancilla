@@ -39,7 +39,8 @@ export function browserCallIO(socketUrl: () => string | null): CallIO & { dispos
         }
         const source = audio.createMediaStreamSource(stream);
         const node = new AudioWorkletNode(audio, CAPTURE_PROCESSOR, { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1 });
-        node.port.onmessage = (event: MessageEvent<{ pcm: ArrayBuffer; rms: number }>) => onFrame(new Int16Array(event.data.pcm), event.data.rms);
+        node.port.onmessage = (event: MessageEvent<{ pcm: ArrayBuffer; rms: number; peak?: number }>) =>
+          onFrame(new Int16Array(event.data.pcm), event.data.rms, event.data.peak);
         source.connect(node);
         const track = stream.getAudioTracks()[0];
         const settings = track?.getSettings();
@@ -79,7 +80,7 @@ export function browserCallIO(socketUrl: () => string | null): CallIO & { dispos
         throw error;
       }
     },
-    createPlayer: (sampleRate): Player => new WebPlayer(ensureContext(), sampleRate),
+    createPlayer: (sampleRate, onIdle): Player => new WebPlayer(ensureContext(), sampleRate, onIdle),
     dispose: () => {
       const closing = context;
       context = null;
