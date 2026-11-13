@@ -18,8 +18,8 @@ Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.28.2:** unified Assistant model routing (`Follow assistant`) across live voice calls, web browsing, background tasks, and research—with live mid-call model switching on the very next spoken turn while keeping Chat threads independent—plus verified Muse 1.4.15+ `providerCatalog` enrichment with zero false *"Built-in model list"* warnings.
-> [Read the release notes](docs/CHANGELOG.md#0282).
+> **New in 0.29.0:** overhauled voice mode responsiveness and speech comprehension—with dedicated lean Muse voice hosts, early `eot_gate` settlement, acoustic prosody turn-taking, pre-ready mic buffering, clause-level English/Portuguese/Spanish TTS, active-vocabulary phonetic grounding, spoken technical path/port/identifier normalization, ambient bystander and broadcast shielding, multilingual self-repaired memory capture, and macOS/Linux desktop microphone permissions.
+> [Read the release notes](docs/CHANGELOG.md#0290).
 
 > **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
 > supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is
