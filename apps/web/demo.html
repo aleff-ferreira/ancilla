@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<!-- ==========================================================================
+  Ancilla UI Demo Harness:
+  Standalone browser playground rendering the Ancilla interface with synthetic mock models.
+  Targeted for local development via `npm run demo` and separate from production index.html.
+=========================================================================== -->
+<html lang="en" dir="ltr">
+  <head> <!-- Ancilla Demo Head Shell -->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FBFDFC" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0D1211" />
+    <title>Ancilla Demo</title> <!-- Ancilla Demo Workspace Title -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <script type="text/javascript">
+      // Synchronously configure theme and display scaling before the initial layout render
+      (function applyDemoDisplaySettings() {
+        const queryParams = new URLSearchParams(window.location.search);
+        const requestedTheme = queryParams.get("theme");
+        const activeTheme = (requestedTheme === "light" || requestedTheme === "dark")
+          ? requestedTheme
+          : (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+        document.documentElement.dataset.theme = activeTheme;
+
+        const zoomScale = parseFloat(queryParams.get("zoom") || "");
+        if (Number.isFinite(zoomScale) && zoomScale > 0 && zoomScale !== 1) {
+          document.documentElement.style.zoom = String(zoomScale);
+        } // Set zoom factor when positive and non-default
+      })(); // End applyDemoDisplaySettings
+    </script> <!-- End demo display settings script -->
+  </head> <!-- End head element -->
+  <body class="ancilla-demo-body">
+    <div id="root" class="ancilla-demo-root"></div>
+    <script type="module" src="/src/demo/main.tsx"></script> <!-- Demo entrypoint script -->
+  </body> <!-- End demo body element -->
+</html> <!-- End demo html document -->

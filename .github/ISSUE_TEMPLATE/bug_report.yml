@@ -1,0 +1,83 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in Ancilla
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please search existing issues before opening a new one.
+        **Security Disclosures**: Please report security vulnerabilities privately via [Private Vulnerability Reporting](https://github.com/aleff-ferreira/ancilla/security/advisories/new).
+        **Privacy Warning**: Please redact personal credentials, access tokens, `auth.json` files, and private workspace paths before pasting logs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem Summary
+      description: Provide a clear description of what occurred versus what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Open project directory ...
+        2. Send prompt ...
+        3. Observe error ...
+    validations:
+      required: true
+  - type: input
+    id: ancilla-version
+    attributes:
+      label: Ancilla Version
+      description: The version string displayed in Settings (e.g., 0.29.0).
+      placeholder: "0.29.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: client-target
+    attributes:
+      label: Application Target
+      options:
+        - Desktop Application (Tauri)
+        - Web Application (Local Daemon)
+        - Web Application (Remote Self-Hosted Daemon)
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: os-details
+    attributes:
+      label: Operating System Details
+      placeholder: "Windows 11 24H2, macOS 15.5, Ubuntu 24.04 LTS"
+  - type: dropdown
+    id: agent-provider
+    attributes:
+      label: Agent Host & Provider
+      options:
+        - Meta Muse (Native Windows)
+        - Meta Muse (WSL2 Ubuntu)
+        - Meta Muse (macOS / Linux)
+        - Anthropic Claude Code
+        - OpenAI Codex
+        - Agent Client Protocol (ACP)
+        - Ancilla Standalone Assistant
+  - type: input
+    id: provider-version
+    attributes:
+      label: CLI / Provider Version
+      description: The output of your agent CLI version check (e.g., `muse --version` or `claude --version`).
+  - type: textarea
+    id: diagnostic-logs
+    attributes:
+      label: Diagnostic Logs
+      description: Relevant output from server output or browser developer tools console (sanitized of sensitive information).
+      render: text

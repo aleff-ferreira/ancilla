@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "category": "DeveloperTool",
+    "shortDescription": "Ancilla desktop application bundle for macOS",
+    "targets": ["app", "dmg"],
+    "macOS": {
+      "frameworks": [],
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    }
+  }
+}

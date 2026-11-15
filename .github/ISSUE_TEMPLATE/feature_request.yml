@@ -1,0 +1,41 @@
+name: Feature Request
+description: Propose a new feature, workflow improvement, or enhancement for Ancilla
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem-context
+    attributes:
+      label: Problem & Motivation
+      description: What challenge are you trying to solve, or what workflow is currently cumbersome?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution & User Workflow
+      description: Describe how the feature should behave. Include user interface mockups or workflow examples if applicable.
+    validations:
+      required: true
+  - type: dropdown
+    id: target-subsystem
+    attributes:
+      label: Impacted Subsystem
+      options:
+        - UI & Transcript View
+        - Server & REST/SSE API
+        - Daemon & Process Supervision
+        - Multi-Provider Integrations (Muse, Claude, Codex, ACP)
+        - Deep Research Engine
+        - Assistant Framework & Persona Memory
+        - Desktop Shell & Packaging
+        - Documentation & Developer Tooling
+  - type: textarea
+    id: considered-alternatives
+    attributes:
+      label: Alternatives & Workarounds
+      description: List any alternative designs, workarounds, or external tools you have considered.
+  - type: input
+    id: environment-context
+    attributes:
+      label: Target Environment
+      description: Relevant operating system, deployment mode, or tooling context.

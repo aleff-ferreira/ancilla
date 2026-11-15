@@ -1,0 +1,25 @@
+{
+  "name": "ancilla",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "version": "0.29.0",
+  "description": "Ancilla - open-source desktop + web ADE for Meta's Muse Code CLI",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "prepare": "node scripts/install-hooks.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
+    "version:check": "node scripts/bump-version.mjs --check",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present && npm run test:scripts",
+    "test:scripts": "node --test \"scripts/test/*.test.mjs\"",
+    "notices": "node scripts/third-party-notices.mjs",
+    "notices:check": "node scripts/third-party-notices.mjs --check",
+    "attribution:check": "node scripts/check-attribution.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

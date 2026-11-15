@@ -1,0 +1,770 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { createElement, type ComponentType } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { AccountMeters, MeterDetails, PlanMeter, PlanPill, quotaAvailabilityLabel } from "../src/components/usage/PlanMeter.js";
+import { ControllerProvider } from "../src/app/context.js";
+import { TooltipProvider } from "../src/components/ui/overlays.js";
+import { nearCapHint } from "../src/components/home/Home.js";
+import type { AncillaController } from "../src/model/controller.js";
+import { emptyFold, type ThreadFold } from "../src/model/fold.js";
+import { PLAN_SYNC_MS, backgroundTasks, bindingRow, contextualPlanAccountId, formatReset, lastKnownRow, legacyPlanAccounts, mergePlanAccounts, planAccount, planAge, planReadFailed, planSyncDue, planView, startPlanPolling, startPlanSync } from "../src/model/plan.js";
+import { defaultPrefs, initialState, Store, type AppState } from "../src/model/store.js";
+import type { MspItem, PlanAccountUsage, PlanUsage, ProjectView } from "../src/types.js";
+import { session } from "./crew-fixtures.js";
+
+const FIXED_CLOCK_TIMESTAMP = 1_850_000_000_000;
+const NOW = FIXED_CLOCK_TIMESTAMP;
+
+describe("subscription plan meter view model", () => {
+  it("returns null when no active plan usage record is provided", () => {
+    const rendered = planView(null, FIXED_CLOCK_TIMESTAMP);
+    assert.strictEqual(rendered, null);
+  });
+
+  it("formats short window duration and active countdowns", () => {
+    const sampleRecord: PlanUsage = {
+      tier: "high_usage",
+      observedAtMs: FIXED_CLOCK_TIMESTAMP - 60_000,
+      window: {
+        windowDurationMins: 300,
+        usedPercent: 72.4,
+        resetsAtMs: FIXED_CLOCK_TIMESTAMP + (2 * 60 + 14) * 60_000,
+      },
+      weekly: {
+        windowDurationMins: null,
+        usedPercent: 94,
+        resetsAtMs: FIXED_CLOCK_TIMESTAMP - 1,
+      },
+    };
+    const view = planView(sampleRecord, FIXED_CLOCK_TIMESTAMP);
+    assert.strictEqual(view?.tier, "High usage");
+    assert.strictEqual(view?.stale, true, "a passed reset makes this observation stale");
+    assert.deepEqual(view?.rows, [
+      { key: "window", label: "5-hour window", percent: 72, barPercent: 72, remainingPercent: 28, tone: "warn", resetsAtMs: FIXED_CLOCK_TIMESTAMP + (2 * 60 + 14) * 60_000, expired: false, current: true, standing: "current", resets: "Resets in 2h 14m" },
+      { key: "weekly", label: "Weekly limit", percent: 94, barPercent: 94, remainingPercent: 6, tone: "danger", resetsAtMs: FIXED_CLOCK_TIMESTAMP - 1, expired: true, current: false, standing: "ended", resets: "Reset just now" },
+    ]);
+  });
+
+  it("calculates reading age relative to observation timestamp", () => {
+    const computeAge = (offsetMs: number) => {
+      const usageData: PlanUsage = {
+        tier: "high_usage",
+        weekly: { usedPercent: 1, windowDurationMins: null, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 60_000 },
+        observedAtMs: FIXED_CLOCK_TIMESTAMP - offsetMs,
+        window: { usedPercent: 0, windowDurationMins: 300, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 60_000 },
+      };
+      return planView(usageData, FIXED_CLOCK_TIMESTAMP)?.age;
+    };
+    assert.strictEqual(planAge(FIXED_CLOCK_TIMESTAMP, FIXED_CLOCK_TIMESTAMP), "just now");
+    assert.strictEqual(computeAge(3 * 24 * 60 * 60_000), "3d");
+    assert.strictEqual(computeAge(3 * 60 * 60_000), "3h");
+    assert.strictEqual(computeAge(4 * 60_000), "4m");
+    assert.strictEqual(computeAge(5_000), "just now");
+  });
+
+  it("preserves over-quota percentages, caps the bar and marks an old reading as stale", () => {
+    const twoHoursAgo = FIXED_CLOCK_TIMESTAMP - 120 * 60_000;
+    const overflowUsage: PlanUsage = {
+      tier: "everyday",
+      weekly: { resetsAtMs: FIXED_CLOCK_TIMESTAMP + 1_000, usedPercent: 3, windowDurationMins: null },
+      observedAtMs: twoHoursAgo,
+      window: { windowDurationMins: 90, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 1_000, usedPercent: 140 },
+    };
+    const view = planView(overflowUsage, FIXED_CLOCK_TIMESTAMP);
+    assert.strictEqual(view?.stale, true);
+    assert.strictEqual(view?.rows[0]?.percent, 140);
+    assert.strictEqual(view?.rows[0]?.barPercent, 100);
+    assert.strictEqual(view?.rows[0]?.remainingPercent, 0);
+    assert.strictEqual(view?.rows[0]?.label, "90-minute window");
+    assert.strictEqual(view?.rows[1]?.percent, 3);
+    assert.strictEqual(view?.rows[1]?.tone, "ok");
+  });
+
+  it("rejects invalid readings and does not infer a five-hour duration", () => {
+    const usage = {
+      tier: "everyday", observedAtMs: FIXED_CLOCK_TIMESTAMP,
+      window: { usedPercent: 25, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 60_000, windowDurationMins: null },
+      weekly: { usedPercent: 30, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 60_000, windowDurationMins: null },
+    };
+    assert.equal(planView(usage, FIXED_CLOCK_TIMESTAMP)?.rows[0]?.label, "Current window");
+    assert.equal(planView({ ...usage, observedAtMs: NaN }, FIXED_CLOCK_TIMESTAMP), null);
+    assert.equal(planView({ ...usage, window: { ...usage.window, usedPercent: Infinity } }, FIXED_CLOCK_TIMESTAMP), null);
+    assert.equal(planView({ ...usage, window: { ...usage.window, usedPercent: -3 } }, FIXED_CLOCK_TIMESTAMP), null, "invalid negative usage must not be invented as zero");
+  });
+
+  it("omits raw numeric identifier tiers while formatting known plan tier titles", () => {
+    const probeTierTitle = (tierIdentifier: string) => {
+      const payload: PlanUsage = {
+        tier: tierIdentifier,
+        weekly: { windowDurationMins: null, usedPercent: 0, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 1 },
+        window: { windowDurationMins: 300, usedPercent: 0, resetsAtMs: FIXED_CLOCK_TIMESTAMP + 1 },
+        observedAtMs: FIXED_CLOCK_TIMESTAMP,
+      };
+      return planView(payload, FIXED_CLOCK_TIMESTAMP)?.tier;
+    };
+    assert.strictEqual(probeTierTitle("power_usage"), "Power usage");
+    assert.strictEqual(probeTierTitle("27681527378179523"), null);
+  });
+});
+
+describe("subscription quota presentation", () => {
+  it("shows reported percentages, bounded accessible bars and reset stamps", () => {
+    const view = planView({ tier: "high_usage", observedAtMs: NOW - 60_000,
+      window: { usedPercent: 125, resetsAtMs: NOW + 60_000, windowDurationMins: 300 },
+      weekly: { usedPercent: 40, resetsAtMs: NOW + 120_000, windowDurationMins: null } }, NOW)!;
+    const html = renderToStaticMarkup(createElement(MeterDetails, { view, title: "Work" }));
+    assert.match(html, /5-hour window/);
+    assert.match(html, /Weekly limit/);
+    assert.match(html, /125% used/);
+    assert.match(html, /aria-valuenow="100"/);
+    assert.match(html, /aria-valuetext="125% used as last reported by Muse"/);
+    assert.match(html, /0% remaining at reading/);
+    assert.match(html, /60% remaining at reading/);
+    assert.match(html, /Muse runtime/);
+    assert.match(html, /dateTime=/);
+  });
+
+  it("does not imply replenished allowance when a reset stamp passes", () => {
+    const view = planView({ tier: "high", observedAtMs: NOW - 60_000,
+      window: { usedPercent: 92, resetsAtMs: NOW - 1, windowDurationMins: 300 },
+      weekly: { usedPercent: 40, resetsAtMs: NOW - 1, windowDurationMins: null } }, NOW)!;
+    const html = renderToStaticMarkup(createElement(MeterDetails, { view, title: "Default login" }));
+    assert.match(html, /Last report: 92% used, before it ended\./);
+    assert.match(html, /Window ended/);
+    assert.match(html, /Ended just now/);
+    assert.match(html, /Week reset/);
+    assert.match(html, /Reset just now/);
+    assert.match(html, /The 5-hour window has ended and a new one starts with your next message, so usage in it is unknown until then\./);
+    assert.match(html, /The weekly limit has reset since this report, so usage in the new week is unknown until Meta reports it\./);
+    assert.doesNotMatch(html, /remaining at reading/);
+    assert.doesNotMatch(html, /role="progressbar"/);
+    assert.doesNotMatch(html, /Previous reading|Current usage unknown|until it is refreshed/);
+  });
+});
+
+describe("the last report", () => {
+  const DAY = 24 * 60 * 60_000;
+
+  it("is kept however old, and says what it means and how to get a current one", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: quota(92, NOW - 40 * DAY), status: "not-reported" })] });
+    assert.match(html, /Window ended/);
+    assert.match(html, /Week reset/);
+    assert.match(html, /Last report: 92% used, before it ended\./);
+    assert.match(html, /Last report: 40% used, before it reset\./);
+    assert.match(html, /Reported 40d ago/);
+    assert.match(html, /These are the last numbers reported for this account, 40d ago\./);
+    assert.match(html, /The 5-hour window has ended and a new one starts with your next message/);
+    assert.match(html, /The weekly limit has reset since this report/);
+    assert.match(html, /Meta sends usage numbers only while a 5-hour window is running, and a window starts with your first message\./);
+    assert.match(html, /send a message in a thread that uses this account, then choose Refresh/);
+    assert.match(html, /href="https:\/\/dev\.meta\.ai\/usage"/);
+    assert.match(html, /target="_blank"/);
+    assert.match(html, /rel="noreferrer"/);
+    // The sentence under the limits is about the reply, not about a failure to read.
+    assert.match(html, /Meta confirms your plan but is not sending usage numbers right now/);
+    assert.doesNotMatch(html, /role="progressbar"|Current usage unknown|Previous reading|did not report/);
+  });
+
+  it("shows the last report of a window that is still open with a muted bar, not as the live meter", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 55, { usage: quota(55, NOW - 90 * 60_000), status: "unavailable" })] });
+    assert.match(html, /Last report: 55% used/);
+    assert.match(html, /Usage may be higher now\./);
+    assert.match(html, /aria-hidden="true"[^>]*><div class="h-full rounded-full opacity-40/);
+    assert.match(html, /Resets in 3h 30m/);
+    assert.doesNotMatch(html, /role="progressbar"|remaining at reading|has ended and a new one starts|has reset since this report/);
+    assert.match(html, /Could not refresh this account/);
+  });
+
+  it("says where Refresh cannot help, and still points to Meta's page", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: quota(92, NOW - 5 * 60 * 60_000), source: "runtime", status: "runtime-only", checkedAtMs: null })] });
+    assert.match(html, /Muse reports again when it next sends usage, and Refresh cannot update it\./);
+    assert.doesNotMatch(html, /then choose Refresh/);
+    assert.match(html, /href="https:\/\/dev\.meta\.ai\/usage"/);
+  });
+
+  it("keeps a current reading free of the note, and uses the live meter", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 40)] });
+    assert.match(html, /role="progressbar"/);
+    assert.doesNotMatch(html, /last numbers reported|Last report|dev\.meta\.ai/);
+  });
+
+  it("is what the pill falls back to: an open window before an ended one, the highest, the short window on a tie", () => {
+    const lastOf = (usage: PlanUsage) => lastKnownRow(planView(usage, NOW, account(null, 0, { status: "unavailable" }))!);
+    const old = NOW - 31 * 60_000;
+    assert.equal(lastOf(limits(10, 97, old))?.key, "weekly");
+    assert.equal(lastOf(limits(50, 50, old))?.key, "window", "a tie goes to the short window");
+    const windowEnded = (usage: PlanUsage): PlanUsage => ({ ...usage, window: { ...usage.window, resetsAtMs: NOW - 1 } });
+    assert.equal(lastOf(windowEnded(limits(97, 10, old)))?.key, "weekly", "an open window comes before one that has ended, whatever the percentages");
+    const bothEnded = lastOf(limits(30, 12, NOW - 40 * DAY));
+    assert.equal(bothEnded?.key, "window");
+    assert.equal(bothEnded?.standing, "ended", "an old report is still kept for the pill");
+    assert.equal(bothEnded?.percent, 30);
+  });
+
+  it("never lets an old report bind a limit, so it cannot make a suggestion", () => {
+    const view = planView(limits(10, 97, NOW - 40 * DAY), NOW, account(null, 10, { status: "not-reported" }))!;
+    assert.equal(bindingRow(view), null);
+    assert.ok(view.rows.every((row) => row.standing === "ended"));
+    const hint = nearCapHint({ ...project, defaultAccountId: null }, [accountView], [account(null, 10, { usage: limits(10, 97, NOW - 40 * DAY), status: "not-reported" })], NOW);
+    assert.equal(hint, null);
+  });
+});
+
+const accountView = { id: "work", name: "Work", hasLogin: true, email: "work@example.test", lastUsedAt: null };
+const project: ProjectView = { cwd: "/work", displayName: "work", pinned: false, activityAt: "2026-09-28T00:00:00Z", defaultAccountId: "work", folders: [{ cwd: "/work", displayName: "work" }] };
+function quota(percent: number, at = NOW): PlanUsage {
+  return { tier: "1234567", observedAtMs: at,
+    window: { usedPercent: percent, resetsAtMs: at + 300 * 60_000, windowDurationMins: 300 },
+    weekly: { usedPercent: 40, resetsAtMs: at + 7 * 24 * 60 * 60_000, windowDurationMins: null } };
+}
+function account(accountId: string | null, percent: number, patch: Partial<PlanAccountUsage> = {}): PlanAccountUsage {
+  return { accountId, usage: quota(percent), planName: "Muse Plus", source: "meta", status: "ready", checkedAtMs: NOW, ...patch };
+}
+function app(patch: Partial<AppState> = {}): AppState {
+  return { ...initialState(defaultPrefs()), ...patch };
+}
+function render(Component: ComponentType, patch: Partial<AppState>): string {
+  const controller = { store: new Store(app(patch)) } as AncillaController;
+  const previous = Date.now;
+  Date.now = () => NOW;
+  try {
+    return renderToStaticMarkup(createElement(ControllerProvider, { controller, children: createElement(TooltipProvider, { children: createElement(Component) }) }));
+  } finally { Date.now = previous; }
+}
+
+describe("subscription account accuracy", () => {
+  it("retains the default login when the newest report belongs to a named account", () => {
+    const state = app({ accounts: [accountView], planUsage: quota(87, NOW + 10), planUsageAccountId: "work",
+      planUsageAccounts: [account(null, 15), account("work", 87)] });
+    assert.equal(planAccount(state, null).usage?.window.usedPercent, 15);
+    assert.equal(planAccount(state, "work").usage?.window.usedPercent, 87);
+    assert.match(render(PlanMeter, state), /15% used/);
+    assert.doesNotMatch(render(PlanMeter, state), /87% used/);
+    assert.match(render(PlanMeter, state), /Subscription account/);
+    assert.match(render(PlanMeter, state), /Muse Plus/);
+  });
+
+  it("keeps the default login visible among other accounts when Work is selected", () => {
+    const html = render(AccountMeters, { accounts: [accountView], planUsageSelectedAccountId: "work",
+      planUsageAccounts: [account(null, 15), account("work", 87)] });
+    assert.match(html, /Default login subscription/);
+    assert.match(html, /15% used/);
+    assert.doesNotMatch(html, /Work subscription/);
+  });
+
+  it("uses the current thread or project account in the sidebar", () => {
+    const state = app({ projects: [project], sessions: { s1: session("s1", "Work thread", { accountId: "work" }) },
+      accounts: [accountView], planUsageAccounts: [account(null, 15), account("work", 87)] });
+    assert.equal(contextualPlanAccountId({ ...state, route: { kind: "thread", sessionId: "s1" } }), "work");
+    assert.equal(contextualPlanAccountId({ ...state, route: { kind: "new", cwd: "/work" } }), "work");
+    assert.equal(contextualPlanAccountId({ ...state, route: { kind: "usage" }, planUsageSelectedAccountId: null }), null);
+    const html = render(PlanPill, { ...state, route: { kind: "thread", sessionId: "s1" } });
+    assert.match(html, /Plan usage\. Work\./);
+    assert.match(html, /87%<\/button>/);
+    assert.doesNotMatch(html, /15%/);
+  });
+
+  it("never assigns a legacy named account reading to the default login", () => {
+    const reading = quota(75);
+    const legacy = legacyPlanAccounts({ usage: reading, byAccount: { work: reading }, accountId: "work", status: "ready" }, []);
+    assert.equal(legacy.find((entry) => entry.accountId === null)?.usage, null);
+    assert.equal(legacy.find((entry) => entry.accountId === "work")?.usage, reading);
+    const retained = legacyPlanAccounts({ usage: reading, byAccount: { work: reading }, accountId: "work" }, [account(null, 11)]);
+    assert.equal(retained.find((entry) => entry.accountId === null)?.usage?.window.usedPercent, 11);
+  });
+
+  it("shows missing limits, missing subscription and sign-in requirements distinctly without invented zeroes", () => {
+    for (const [status, text] of [["not-reported", "did not report subscription limits"], ["no-subscription", "no Muse subscription"], ["login-required", "Meta no longer accepts this login. Sign in again to see its subscription limits."]] as const) {
+      // No plan name here: with one, a window Meta has not reported yet has words of its own (below).
+      const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status, planName: null })] });
+      assert.match(html, new RegExp(text));
+      assert.doesNotMatch(html, /0%|progressbar/);
+    }
+  });
+
+  it("says what is true when Meta confirms the plan but has sent no usage numbers yet", () => {
+    const bare = account(null, 0, { usage: null, source: null, status: "not-reported" });
+    const label = quotaAvailabilityLabel(bare);
+    assert.match(label, /Meta confirms your plan but has not sent any usage numbers yet/);
+    assert.match(label, /before the first use in a new usage window/);
+    assert.match(label, /send a message in a thread that uses this account, then choose Refresh/);
+    assert.doesNotMatch(label, /any thread/, "a message on another account cannot start this account's window");
+    assert.match(label, /If no numbers appear after that, Meta has not sent any for this account\./, "it does not promise that Refresh fixes it");
+    assert.match(label, /unknown, not zero usage/);
+    // The same words serve a named account.
+    assert.equal(quotaAvailabilityLabel(account("work", 0, { usage: null, source: null, status: "not-reported" })), label);
+    assert.doesNotMatch(label, /did not report/, "it does not read like a malfunction");
+    const html = render(PlanMeter, { planUsageAccounts: [bare] });
+    assert.match(html, /Meta confirms your plan but has not sent any usage numbers yet/);
+    assert.match(html, /Muse Plus/);
+    assert.match(html, /Refresh/);
+    assert.doesNotMatch(html, /0%|progressbar/);
+  });
+
+  it("keeps its other words for a window that was never checked or has no plan name", () => {
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", planName: null })),
+      "Meta did not report subscription limits for this account. Missing values are unknown, not zero usage.");
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", checkedAtMs: null })),
+      "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown.");
+    assert.equal(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "not-reported", checkedAtMs: null, planName: null })),
+      "Subscription limits have not been reported for this account. Refresh to check; missing values are unknown.");
+    // Other statuses keep their words, plan name or not.
+    assert.match(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "no-subscription" })), /no Muse subscription/);
+    assert.match(quotaAvailabilityLabel(account(null, 0, { usage: null, source: null, status: "unavailable" })), /Could not read/);
+  });
+
+  it("says plainly that Meta no longer accepts a login, and still offers the way to sign in again", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status: "login-required" })] });
+    assert.match(html, /Meta no longer accepts this login\. Sign in again to see its subscription limits\./);
+    assert.match(html, /Open sign-in settings/);
+    assert.match(html, /Sign-in needed/);
+    assert.doesNotMatch(html, /Sign in to this Muse account/);
+  });
+
+  it("offers the way to sign in only where a sign-in is what is missing", () => {
+    for (const status of ["not-reported", "no-subscription", "unavailable", "runtime-only"] as const) {
+      const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status })] });
+      assert.doesNotMatch(html, /Open sign-in settings/, status);
+    }
+  });
+
+  it("does not claim Meta refused a login that nothing was ever sent to Meta for", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 0, { usage: null, source: null, status: "login-required", checkedAtMs: null })] });
+    assert.match(html, /Sign in to this Muse account to check its subscription limits\./);
+    assert.doesNotMatch(html, /Meta no longer accepts/);
+    assert.match(html, /Open sign-in settings/);
+    const bare = render(PlanMeter, { defaultLogin: { hasLogin: false } as AppState["defaultLogin"] });
+    assert.doesNotMatch(bare, /Meta no longer accepts/);
+  });
+
+  it("renders stale, saved, failed and omitted readings as the last report, without current meters", () => {
+    for (const record of [
+      account(null, 92, { usage: quota(92, NOW - 31 * 60_000) }),
+      account(null, 92, { source: "saved", status: "runtime-only" }),
+      account(null, 92, { status: "unavailable" }),
+      account(null, 92, { status: "not-reported" }),
+    ]) {
+      const html = render(PlanMeter, { planUsageAccounts: [record] });
+      assert.match(html, /Last report: 92% used/);
+      assert.match(html, /These are the last numbers reported for this account/);
+      assert.doesNotMatch(html, /role="progressbar"|remaining at reading|Current usage unknown|Previous reading/);
+      const pill = render(PlanPill, { planUsageAccounts: [record] });
+      assert.match(pill, /92%<span[^>]*> · (31m|now)<\/span><\/button>/, "the pill keeps the last report, marked with its age");
+      assert.doesNotMatch(pill, /<\/svg><\/button>/, "the pill is never left empty");
+    }
+  });
+
+  it("keeps a valid weekly reading when only the short window has expired", () => {
+    const reading = quota(92);
+    reading.window.resetsAtMs = NOW - 1;
+    const record = account(null, 92, { usage: reading });
+    const html = render(PlanMeter, { planUsageAccounts: [record] });
+    assert.match(html, /Last report: 92% used, before it ended\./);
+    assert.equal((html.match(/role="progressbar"/g) ?? []).length, 1);
+    assert.match(html, /40% used as last reported by Meta/);
+  });
+
+  it("makes near-cap suggestions only from fresh readings for the actual account identities", () => {
+    const records = [account(null, 91), account("work", 12)];
+    assert.equal(nearCapHint(project, [accountView], records, NOW), null);
+    // Work's figure is the limit that binds: its weekly 40% is higher than its 12% window.
+    assert.match(nearCapHint({ ...project, defaultAccountId: null }, [accountView], records, NOW) ?? "", /Default login at 91%, Work at 40% weekly/);
+    assert.equal(nearCapHint({ ...project, defaultAccountId: null }, [accountView], [{ ...records[0], status: "unavailable" }, records[1]], NOW), null);
+    assert.equal(nearCapHint({ ...project, defaultAccountId: null }, [accountView], records, NOW + 31 * 60_000), null);
+  });
+
+  it("describes authoritative and runtime sources accurately", () => {
+    assert.match(quotaAvailabilityLabel(account(null, 0)), /reported by Meta/);
+    assert.match(quotaAvailabilityLabel(account(null, 0, { source: "runtime", status: "runtime-only" })), /Muse runtime/);
+    assert.match(quotaAvailabilityLabel(account(null, 0, { source: null, usage: null, status: "runtime-only" })), /has not reported/);
+  });
+});
+
+describe("subscription report races", () => {
+  it("adopts direct account metadata when the same observation arrived as an event first", () => {
+    const reported = account(null, 15);
+    const event = { ...reported, planName: null, source: "runtime", status: "runtime-only", checkedAtMs: null } as PlanAccountUsage;
+    assert.deepEqual(mergePlanAccounts([event], [], [reported]), [reported]);
+  });
+
+  it("keeps an intervening runtime correction when an equal-time Meta response has different values", () => {
+    const before = account(null, 10, { usage: quota(10, NOW - 100), checkedAtMs: NOW - 100 });
+    const reported = account(null, 15);
+    const event = account(null, 30, { source: "runtime", status: "runtime-only", checkedAtMs: NOW - 100 });
+    assert.deepEqual(mergePlanAccounts([event], [before], [reported]), [event]);
+  });
+
+  it("preserves a later runtime observation and its unchanged direct-check time", () => {
+    const before = account(null, 15, { checkedAtMs: NOW - 100 });
+    const event = { ...before, usage: quota(30, NOW + 50), source: "runtime", status: "runtime-only" } as PlanAccountUsage;
+    assert.deepEqual(mergePlanAccounts([event], [before], [account(null, 20)]), [event]);
+    assert.equal(event.checkedAtMs, NOW - 100);
+  });
+
+  it("allows a newer account check to invalidate a prior reading", () => {
+    const before = account(null, 15);
+    const report = account(null, 15, { checkedAtMs: NOW + 500, status: "not-reported" });
+    assert.deepEqual(mergePlanAccounts([before], [before], [report]), [report]);
+  });
+});
+
+describe("quota reset duration formatting", () => {
+  it("renders countdown in hours for intermediate windows and transitions to day units", () => {
+    const ONE_HOUR_MS = 3_600_000;
+    assert.strictEqual(formatReset(72 * ONE_HOUR_MS), "3d");
+    assert.strictEqual(formatReset(77 * ONE_HOUR_MS), "3d 5h");
+    assert.strictEqual(formatReset(47 * ONE_HOUR_MS), "47h");
+    assert.strictEqual(formatReset(2 * ONE_HOUR_MS + 17 * 60_000), "2h 17m");
+  });
+
+  it("counts whole minutes under an hour, rounded up, and never shows seconds", () => {
+    // The clock ticks once a minute, so a seconds figure would be stale for up to a minute.
+    assert.equal(formatReset(12 * 60_000 + 40_000), "13m");
+    assert.equal(formatReset(30_000), "<1m");
+    assert.equal(formatReset(1), "<1m");
+    assert.equal(formatReset(60_000), "1m");
+    assert.equal(formatReset(60_001), "2m");
+    assert.equal(formatReset(59 * 60_000), "59m");
+    assert.equal(formatReset(59 * 60_000 + 30_000), "1h", "rounding up rolls over into the hour instead of printing 60m");
+    assert.equal(formatReset(60 * 60_000), "1h");
+    assert.doesNotMatch(formatReset(12 * 60_000 + 40_000), /\ds/);
+  });
+
+  it("puts the minute countdown into the row text", () => {
+    const reading = (ms: number) => planView({ tier: "high", observedAtMs: NOW,
+      window: { usedPercent: 10, resetsAtMs: NOW + ms, windowDurationMins: 300 },
+      weekly: { usedPercent: 10, resetsAtMs: NOW + 2 * 24 * 60 * 60_000, windowDurationMins: null } }, NOW)?.rows[0]?.resets;
+    assert.equal(reading(12 * 60_000 + 40_000), "Resets in 13m");
+    assert.equal(reading(30_000), "Resets in <1m");
+  });
+});
+
+/** Both limits set apart, the way a short window and a weekly cap really differ. */
+function limits(window: number, weekly: number, at = NOW): PlanUsage {
+  return { ...quota(window, at), weekly: { usedPercent: weekly, resetsAtMs: at + 3 * 24 * 60 * 60_000, windowDurationMins: null } };
+}
+function windowPassed(reading: PlanUsage): PlanUsage {
+  return { ...reading, window: { ...reading.window, resetsAtMs: NOW - 1 } };
+}
+
+describe("binding limit", () => {
+  it("is the highest current limit, the short window on a tie, and none when nothing is current", () => {
+    assert.equal(bindingRow(planView(limits(10, 97), NOW)!)?.key, "weekly");
+    assert.equal(bindingRow(planView(limits(80, 40), NOW)!)?.key, "window");
+    assert.equal(bindingRow(planView(limits(50, 50), NOW)!)?.key, "window", "a tie goes to the short window");
+    assert.equal(bindingRow(planView(windowPassed(limits(10, 97)), NOW)!)?.key, "weekly", "an expired window cannot bind");
+    assert.equal(bindingRow(planView(windowPassed(limits(97, 10)), NOW)!)?.key, "weekly", "its old percentage does not outrank a current limit");
+    assert.equal(bindingRow(planView(limits(10, 97, NOW - 31 * 60_000), NOW)!), null, "an old reading binds nothing");
+    assert.equal(bindingRow(planView(limits(10, 97), NOW, account(null, 10, { status: "unavailable" }))!), null);
+  });
+
+  it("drives the sidebar pill: the weekly figure, marked, in its own tone", () => {
+    const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: limits(10, 97) })] });
+    assert.match(html, /97% wk<\/button>/);
+    assert.match(html, /text-danger-text/);
+    assert.doesNotMatch(html, /10%<\/button>/);
+    assert.match(html, /The pill shows the weekly limit/);
+    assert.match(html, /5-hour window: 10% used/);
+    assert.match(html, /Weekly limit: 97% used, resets in 3d/);
+  });
+
+  it("keeps the window figure, unmarked, when the window binds or ties", () => {
+    const window = render(PlanPill, { planUsageAccounts: [account(null, 80, { usage: limits(80, 40) })] });
+    assert.match(window, /80%<\/button>/);
+    assert.match(window, /text-warn-text/);
+    assert.doesNotMatch(window, /wk<|The pill shows the weekly limit/);
+    assert.match(render(PlanPill, { planUsageAccounts: [account(null, 50, { usage: limits(50, 50) })] }), /50%<\/button>/);
+  });
+
+  it("shows the weekly figure instead of a dash when only the short window has expired", () => {
+    const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: windowPassed(limits(10, 97)) })] });
+    assert.match(html, /97% wk<\/button>/);
+    assert.doesNotMatch(html, /—<\/button>/);
+    assert.match(html, /5-hour window: last reported 10% used, ended just now/);
+  });
+
+  it("keeps the last report, muted and marked with its age, when no limit is current", () => {
+    const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: limits(10, 97, NOW - 31 * 60_000) })] });
+    assert.match(html, /97% wk<span[^>]*> · 31m<\/span><\/button>/);
+    assert.doesNotMatch(html, /<\/svg><\/button>/, "the pill is never left empty");
+    assert.match(html, /No limit is current, so the pill shows the last report, the weekly limit/);
+    assert.match(html, /5-hour window: last reported 10% used, resets in 4h 29m/);
+    assert.match(html, /Send a message in a thread that uses this account to get current numbers/);
+    assert.match(html, /text-subtle/);
+    assert.doesNotMatch(html, /text-danger-text/, "an old figure does not take the alarm colour of a current one");
+  });
+
+  it("keeps even a very old report in the pill", () => {
+    const html = render(PlanPill, { planUsageAccounts: [account(null, 10, { usage: limits(30, 12, NOW - 40 * 24 * 60 * 60_000) })] });
+    assert.match(html, /30%<span[^>]*> · 40d<\/span><\/button>/);
+    assert.match(html, /5-hour window: last reported 30% used, ended 39d \d+h ago/);
+  });
+
+  it("is what the new-thread hint compares, so a weekly cap is not missed", () => {
+    const high = account(null, 10, { usage: limits(10, 91) });
+    const roomy = account("work", 12, { usage: limits(12, 5) });
+    const hint = (records: PlanAccountUsage[], now = NOW) => nearCapHint({ ...project, defaultAccountId: null }, [accountView], records, now);
+    assert.equal(hint([high, roomy]), "Last reported: Default login at 91% weekly, Work at 12%.");
+    assert.match(hint([account(null, 10, { usage: windowPassed(limits(10, 90)) }), roomy]) ?? "", /Default login at 90% weekly/);
+    assert.equal(hint([high, roomy], NOW + 31 * 60_000), null, "an old reading still makes no suggestion");
+    assert.equal(hint([account(null, 10, { usage: limits(10, 60) }), roomy]), null, "below 80% on every limit there is nothing to suggest");
+  });
+});
+
+describe("wording by source", () => {
+  it("does not promise a refresh for a reading only the Muse runtime reports", () => {
+    const runtime = account(null, 92, { usage: quota(92, NOW - 31 * 60_000), source: "runtime", status: "runtime-only", checkedAtMs: null });
+    const html = render(PlanMeter, { planUsageAccounts: [runtime] });
+    assert.doesNotMatch(html, /refresh needed|until it is refreshed|then choose Refresh/);
+    assert.match(html, /Muse reports again when it next sends usage, and Refresh cannot update it\./);
+    const passed = render(PlanMeter, { planUsageAccounts: [{ ...runtime, usage: windowPassed(quota(92)) }] });
+    assert.match(passed, /Ended just now/);
+    assert.doesNotMatch(passed, /refresh needed|until it is refreshed|then choose Refresh/);
+    assert.match(passed, /Refresh cannot update it/);
+  });
+
+  it("keeps the refresh wording where Refresh asks Meta again", () => {
+    const html = render(PlanMeter, { planUsageAccounts: [account(null, 92, { usage: windowPassed(quota(92)) })] });
+    assert.match(html, /Ended just now/);
+    assert.match(html, /then choose Refresh/);
+    assert.doesNotMatch(html, /Refresh cannot update it|waiting for Muse/);
+    for (const record of [
+      account(null, 92, { usage: quota(92, NOW - 31 * 60_000), status: "unavailable" }),
+      // Muse reported newer numbers on an account Ancilla also checks directly: the next check replaces them.
+      account(null, 92, { usage: quota(92, NOW - 31 * 60_000), source: "runtime", status: "runtime-only" }),
+    ]) {
+      const stale = render(PlanMeter, { planUsageAccounts: [record] });
+      assert.match(stale, /then choose Refresh/);
+      assert.doesNotMatch(stale, /Refresh cannot update it/);
+    }
+  });
+
+  it("works out whether Refresh can help from what the server knows about the account", () => {
+    const usage = quota(10);
+    const refreshable = (patch: Partial<PlanAccountUsage>) => planView(usage, NOW, account(null, 10, patch))?.refreshable;
+    assert.equal(planView(usage, NOW)?.refreshable, true, "without an account the plain wording stays");
+    assert.equal(refreshable({}), true);
+    assert.equal(refreshable({ status: "unavailable", checkedAtMs: null, source: "runtime" }), true, "a failed read is retried by Refresh");
+    assert.equal(refreshable({ source: "runtime", status: "runtime-only" }), true, "an account with a direct check");
+    assert.equal(refreshable({ source: "runtime", status: "runtime-only", checkedAtMs: null }), false);
+    assert.equal(refreshable({ source: "saved", status: "runtime-only", checkedAtMs: null }), false);
+    assert.equal(refreshable({ source: "meta", status: "runtime-only", checkedAtMs: null }), false, "Meta's numbers, but no check to repeat");
+    const passed = planView(windowPassed(usage), NOW, account(null, 10, { source: "runtime", status: "runtime-only", checkedAtMs: null }));
+    // What the line under a window that has ended says no longer depends on the source: the note below the limits does.
+    assert.equal(passed?.rows[0]?.resets, "Ended just now");
+    assert.equal(planView(windowPassed(usage), NOW)?.rows[0]?.resets, "Ended just now");
+    assert.equal(passed?.refreshable, false);
+    assert.equal(planView(windowPassed(usage), NOW)?.refreshable, true);
+  });
+
+  it("words a Meta reading whose login lost its token as one that cannot be refreshed, and not as a runtime reading", () => {
+    // The server keeps the last Meta reading, with no check time, when there is no token left to check with.
+    const lost = account(null, 92, { usage: quota(92, NOW - 31 * 60_000), source: "meta", status: "runtime-only", checkedAtMs: null });
+    assert.match(quotaAvailabilityLabel(lost), /^Last reported by Meta\. A current account check is unavailable/);
+    const html = render(PlanMeter, { planUsageAccounts: [lost] });
+    assert.match(html, /Meta account/);
+    assert.doesNotMatch(html, /Muse runtime|until it is refreshed/);
+    assert.match(html, /Refresh cannot update it/);
+  });
+
+  it("words a report from a server that predates direct checks as a runtime reading, since that server never asked Meta", () => {
+    const old = quota(92, NOW - 31 * 60_000);
+    const [legacy] = legacyPlanAccounts({ usage: old, byAccount: {}, accountId: null }, []);
+    assert.equal(legacy?.checkedAtMs, null);
+    const html = render(PlanMeter, { planUsageAccounts: [legacy!] });
+    assert.match(html, /Refresh cannot update it/);
+    assert.doesNotMatch(html, /then choose Refresh/);
+    // A failed read is still worth retrying, wherever the report came from.
+    const [failed] = legacyPlanAccounts({ usage: old, byAccount: {}, accountId: null, status: "unavailable" }, []);
+    assert.match(render(PlanMeter, { planUsageAccounts: [failed!] }), /then choose Refresh/);
+  });
+});
+
+describe("reading age label", () => {
+  const html = (ms: number) => renderToStaticMarkup(createElement(MeterDetails, { view: planView(quota(10, NOW - ms), NOW)!, title: "Work" }));
+  const DAY = 24 * 60 * 60_000;
+
+  it("uses the short age the pill uses, never a calendar date", () => {
+    assert.match(html(45_000), /Reported just now/);
+    assert.match(html(60 * 60_000), /Reported 1h ago/);
+    assert.match(html(28 * 60 * 60_000), /Reported 28h ago/);
+    assert.match(html(40 * DAY), /Reported 40d ago/);
+    assert.doesNotMatch(html(40 * DAY), /[A-Z][a-z]{2} \d{1,2} ago/);
+  });
+
+  it("agrees with planAge, which the pill tooltip reads, at every age", () => {
+    for (const ms of [45_000, 4 * 60_000, 60 * 60_000, 28 * 60 * 60_000, 36 * DAY]) {
+      const age = planAge(NOW - ms, NOW);
+      assert.match(html(ms), age === "just now" ? /Reported just now/ : new RegExp(`Reported ${age} ago`));
+    }
+  });
+});
+
+describe("background plan sync", () => {
+  it("is due only while the window is in sight, once the interval has passed", () => {
+    assert.equal(PLAN_SYNC_MS, 5 * 60_000);
+    assert.equal(planSyncDue("hidden", NOW - 3 * PLAN_SYNC_MS, NOW), false, "never while hidden, however long ago");
+    assert.equal(planSyncDue("visible", NOW - PLAN_SYNC_MS + 1, NOW), false);
+    assert.equal(planSyncDue("visible", NOW - PLAN_SYNC_MS, NOW), true);
+    assert.equal(planSyncDue("visible", NOW - 40 * 60_000, NOW), true, "back in sight after a long idle stretch");
+    assert.equal(planSyncDue("visible", NOW + 60_000, NOW), true, "a clock moved back is not waited out");
+  });
+
+  it("is due after a minute when the last read failed, and never while hidden", () => {
+    assert.equal(planSyncDue("visible", NOW - 60_000, NOW), false);
+    assert.equal(planSyncDue("visible", NOW - 60_000, NOW, true), true);
+    assert.equal(planSyncDue("visible", NOW - 59_999, NOW, true), false);
+    assert.equal(planSyncDue("hidden", NOW - 3 * PLAN_SYNC_MS, NOW, true), false);
+  });
+
+  it("calls a read failed when the request failed or Meta could not be asked for an account", () => {
+    assert.equal(planReadFailed(app()), false);
+    assert.equal(planReadFailed(app({ planUsageStatus: "ready", planUsageAccounts: [account(null, 10), account("work", 20, { status: "runtime-only" })] })), false);
+    assert.equal(planReadFailed(app({ planUsageStatus: "unavailable" })), true);
+    assert.equal(planReadFailed(app({ planUsageAccounts: [account(null, 10), account("work", 20, { status: "unavailable" })] })), true);
+    assert.equal(planReadFailed(app({ planUsageAccounts: [account(null, 10, { status: "login-required", usage: null, source: null })] })), false, "a login that needs signing in is not a failure to retry");
+  });
+});
+
+/** The page, the clock and the controller a plan upkeep runs against, driven by hand. */
+function upkeepRig(patch: Partial<AppState> = {}) {
+  let now = NOW;
+  let state = app({ boot: "ready", env: { museFound: true } as unknown as AppState["env"], ...patch });
+  const timers = new Map<number, { handler: () => void; ms: number }>();
+  const listeners = new Set<() => void>();
+  const reads: ({ background?: boolean } | undefined)[] = [];
+  const page = {
+    visibilityState: "visible",
+    addEventListener: (_type: "visibilitychange", listener: () => void) => { listeners.add(listener); },
+    removeEventListener: (_type: "visibilitychange", listener: () => void) => { listeners.delete(listener); },
+  };
+  const controller = {
+    store: { get: () => state },
+    loadPlanUsage: (options?: { background?: boolean }) => { reads.push(options); return Promise.resolve(); },
+  };
+  let nextTimer = 1;
+  const clock = {
+    now: () => now,
+    setInterval: (handler: () => void, ms: number) => { timers.set(nextTimer, { handler, ms }); return nextTimer++; },
+    clearInterval: (handle: unknown) => { timers.delete(handle as number); },
+  };
+  return {
+    page, controller, clock, reads, timers, listeners,
+    /** Time passes, and the timer fires as often as it is due. */
+    tick(ms: number) { now += ms; for (const timer of [...timers.values()]) timer.handler(); },
+    patch(next: Partial<AppState>) { state = { ...state, ...next }; },
+    /** The window goes out of sight or comes back, and says so. */
+    show(visibility: "visible" | "hidden") { page.visibilityState = visibility; for (const listener of [...listeners]) listener(); },
+  };
+}
+
+describe("the sidebar's plan sync", () => {
+  const QUIET = { background: true };
+
+  it("reads quietly once the interval has passed, then waits for the next one", () => {
+    const rig = upkeepRig();
+    const stop = startPlanSync(rig.controller, rig.page, rig.clock);
+    assert.deepEqual([...rig.timers.values()].map((timer) => timer.ms), [60_000], "it looks at the clock once a minute");
+    assert.equal(rig.listeners.size, 1);
+    for (let minute = 1; minute < 5; minute++) rig.tick(60_000);
+    assert.deepEqual(rig.reads, [], "nothing before five minutes");
+    rig.tick(60_000);
+    assert.deepEqual(rig.reads, [QUIET], "a background read, so Refresh does not spin");
+    for (let minute = 1; minute < 5; minute++) rig.tick(60_000);
+    assert.equal(rig.reads.length, 1, "each read starts the interval again");
+    rig.tick(60_000);
+    assert.equal(rig.reads.length, 2);
+    stop();
+    assert.equal(rig.timers.size, 0);
+    assert.equal(rig.listeners.size, 0);
+  });
+
+  it("does nothing until Muse is set up and the app has booted", () => {
+    const rig = upkeepRig({ boot: "loading" });
+    startPlanSync(rig.controller, rig.page, rig.clock);
+    rig.tick(10 * 60_000);
+    rig.patch({ boot: "error" });
+    rig.tick(10 * 60_000);
+    rig.patch({ boot: "ready", env: null });
+    rig.tick(10 * 60_000);
+    rig.patch({ env: { museFound: false } as unknown as AppState["env"] });
+    rig.tick(10 * 60_000);
+    assert.deepEqual(rig.reads, []);
+    rig.patch({ env: { museFound: true } as unknown as AppState["env"] });
+    rig.tick(60_000);
+    assert.deepEqual(rig.reads, [QUIET]);
+  });
+
+  it("stays quiet while the window is hidden and reads as soon as it comes back after a long absence", () => {
+    const rig = upkeepRig();
+    startPlanSync(rig.controller, rig.page, rig.clock);
+    rig.show("hidden");
+    rig.tick(20 * 60_000);
+    assert.deepEqual(rig.reads, []);
+    rig.show("visible");
+    assert.deepEqual(rig.reads, [QUIET], "no waiting for the next tick");
+    rig.show("hidden");
+    rig.show("visible");
+    assert.equal(rig.reads.length, 1, "coming back at once does not read twice");
+  });
+
+  it("tries again after a minute when the last read failed, and goes back to the ordinary interval once it works", () => {
+    const rig = upkeepRig({ planUsageStatus: "unavailable" });
+    startPlanSync(rig.controller, rig.page, rig.clock);
+    rig.tick(60_000);
+    assert.deepEqual(rig.reads, [QUIET]);
+    rig.patch({ planUsageStatus: "ready", planUsageAccounts: [account(null, 10)] });
+    rig.tick(60_000);
+    assert.equal(rig.reads.length, 1, "a healthy meter is not read every minute");
+    rig.patch({ planUsageAccounts: [account(null, 10, { status: "unavailable" })] });
+    rig.tick(60_000);
+    assert.equal(rig.reads.length, 2, "a failed check on one account counts too");
+  });
+});
+
+describe("the Usage page's plan polling", () => {
+  const QUIET = { background: true };
+
+  it("reads once at the start with the spinner, then quietly every minute and when the window comes back", () => {
+    const rig = upkeepRig();
+    const stop = startPlanPolling(rig.controller, rig.page, rig.clock);
+    assert.deepEqual(rig.reads, [undefined], "the opening read is the one that shows it is checking");
+    assert.deepEqual([...rig.timers.values()].map((timer) => timer.ms), [60_000]);
+    rig.tick(60_000);
+    assert.deepEqual(rig.reads, [undefined, QUIET]);
+    rig.show("hidden");
+    rig.tick(60_000);
+    assert.equal(rig.reads.length, 2, "never while hidden");
+    rig.show("visible");
+    assert.deepEqual(rig.reads, [undefined, QUIET, QUIET]);
+    stop();
+    assert.equal(rig.timers.size, 0);
+    assert.equal(rig.listeners.size, 0);
+    rig.tick(60_000);
+    assert.equal(rig.reads.length, 3, "nothing after the page is gone");
+  });
+});
+
+describe("active background tasks discovery", () => {
+  it("filters thread items to return solely in-progress background tool executions", () => {
+    const makeTaskItem = (id: string, overrides: Partial<MspItem>): MspItem => ({
+      itemId: id,
+      revision: 1,
+      status: "inProgress",
+      kind: "toolCall",
+      ...overrides,
+    });
+    const threadFold: ThreadFold = {
+      ...emptyFold(),
+      order: ["task_bg_active", "task_fg", "task_bg_done", "subagent_bg"],
+      items: {
+        task_bg_active: makeTaskItem("task_bg_active", { background: true }),
+        task_fg: makeTaskItem("task_fg", { background: false }),
+        task_bg_done: makeTaskItem("task_bg_done", { background: true, status: "completed" }),
+        subagent_bg: makeTaskItem("subagent_bg", { kind: "subagent", background: true }),
+      },
+    };
+    assert.deepEqual(backgroundTasks(threadFold), ["task_bg_active"]);
+  });
+});

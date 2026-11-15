@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+  <head> <!-- Ancilla Web Application Head -->
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FBFDFC" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0D1211" />
+    <title>Ancilla</title> <!-- Ancilla App Title -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <script type="text/javascript">
+      // Immediately evaluate stored user appearance settings to prevent flash of unstyled content
+      (function initializeClientPreferences() {
+        const prefersDark = Boolean(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        let chosenTheme = prefersDark ? "dark" : "light";
+        let viewZoom = 1;
+
+        try { // Read stored preferences if available in localStorage
+          const serialized = window.localStorage ? window.localStorage.getItem("ancilla.prefs.v1") : null;
+          if (serialized) {
+            const parsed = JSON.parse(serialized);
+            if (parsed && (parsed.theme === "light" || parsed.theme === "dark")) {
+              chosenTheme = parsed.theme;
+            }
+            if (parsed && typeof parsed.zoom === "number" && Number.isFinite(parsed.zoom)) {
+              viewZoom = parsed.zoom;
+            }
+          }
+        } catch (_err) {
+          // Ignore storage access errors (private browsing or sandbox)
+        }
+
+        document.documentElement.dataset.theme = chosenTheme;
+        if (viewZoom !== 1 && !("__TAURI_INTERNALS__" in window)) {
+          document.documentElement.style.zoom = String(viewZoom);
+        }
+      })(); // Self-invoking preference initializer
+    </script> <!-- End client preferences script -->
+  </head> <!-- End head element -->
+  <body class="ancilla-body">
+    <div id="root" class="ancilla-root"></div>
+    <script type="module" src="/src/main.tsx"></script> <!-- Main web application entrypoint -->
+  </body> <!-- End body element -->
+</html> <!-- End html document -->

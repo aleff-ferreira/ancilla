@@ -1,0 +1,6 @@
+# GitHub Issue Template Configuration for Ancilla
+blank_issues_enabled: true
+contact_links:
+  - name: Security Vulnerability Reporting
+    url: https://github.com/aleff-ferreira/ancilla/security/advisories/new
+    about: Privately disclose potential security vulnerabilities directly to the maintainers.

@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes an unfinished run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        # All three are pinned: a -latest label moves to a newer image on GitHub's schedule and would change the gate
+        # unannounced. These are the images the labels resolved to on 2026-09-29 (run 36532628149), the ones the release
+        # builds on; moving to a newer image is a change made on purpose.
+        os: [windows-2025-vs2026, macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The whole history: attribution check reads the repository commit history.
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      # Every file that carries the version agrees, and the changelog has an entry for it
+      # (scripts/bump-version.mjs), so a half-done bump never reaches a tag.
+      - run: node scripts/bump-version.mjs --check
+      # No commit credits an AI tool as author, committer or co-author (CLAUDE.md, scripts/check-attribution.mjs).
+      - if: runner.os == 'Linux'
+        run: node scripts/check-attribution.mjs
+      - run: npm ci
+      # The browser test starts the runner's own Chrome with its sandbox ON (Ancilla never passes --no-sandbox);
+      # Ubuntu 24.04 blocks the unprivileged user namespaces that sandbox needs unless this is lifted.
+      - if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      # THIRD_PARTY_NOTICES.md follows the lockfiles; a dependency change has to regenerate it
+      # (npm run notices). Linux only: Windows runners check the file out with CRLF endings.
+      - if: runner.os == 'Linux'
+        run: npm run notices:check
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      # The test output is kept so a failure can be named below. Bash on every runner: the pipe and its status.
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server 2>&1 | tee "$RUNNER_TEMP/test.log"
+      - run: npm run build --workspace @ancilla/web
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test --workspace @ancilla/web 2>&1 | tee "$RUNNER_TEMP/web-test.log"
+      # The scripts that cut a release and police commits (scripts/test): the release workflow cannot be run from a
+      # branch, so what can be tested of it is tested here, on every system.
+      - shell: bash
+        run: |
+          set -o pipefail
+          npm run test:scripts 2>&1 | tee "$RUNNER_TEMP/scripts-test.log"
+      # One annotation per failing test, with its file, line and error. The run's annotations can be read
+      # through the API where the job log cannot, so a failure on a runner one cannot open still says which test.
+      - name: Annotate failing tests
+        if: failure()
+        shell: bash
+        run: node scripts/annotate-test-failures.mjs "$RUNNER_TEMP/test.log" "$RUNNER_TEMP/web-test.log" "$RUNNER_TEMP/scripts-test.log"
+
+  # The desktop crate is only otherwise compiled while cutting a release, which is far too late to
+  # find out that it does not build.
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Pinned for the same reason as the node job above.
+        os: [windows-2025-vs2026, macos-26, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      # The registry and the compiled dependencies are kept between runs, keyed by Cargo.lock; a miss only
+      # costs the full build this job did before.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: apps/desktop/src-tauri
+      # Tauri links WebKitGTK and friends, which the Ubuntu runner does not ship.
+      - name: Install Tauri Linux dependencies
+        if: runner.os == 'Linux'
+        run: bash scripts/apt-install-ubuntu.sh libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: npm ci
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+      - run: npm run build --workspace @ancilla/web
+      # tauri-build checks every path in bundle.resources before it compiles anything, and those are
+      # built rather than committed. This is what the release does through beforeBuildCommand.
+      - run: npm run bundle:server --workspace ancilla-desktop
+      # bundle.externalBin is checked the same way, so fetch the Node.js sidecar too.
+      - run: npm run fetch:node --workspace ancilla-desktop
+      - run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+      - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml

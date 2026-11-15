@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520" role="img" aria-labelledby="title desc">
+  <title id="title">Ancilla — Deep research. Agents in view.</title>
+  <desc id="desc">An AMAZONIA WORKS product. A workspace for Muse Code on desktop and the web. Fine branching lines connect research and agent activity.</desc>
+  <style>
+    .canvas { fill: #f5f8f4; }
+    .ink { fill: #182b22; }
+    .mark { fill: none; stroke: #182b22; }
+    .muted { fill: #52675b; }
+    .brand { fill: #10795f; }
+    .line { fill: none; stroke: #10795f; stroke-opacity: .28; stroke-width: 1.4; }
+    .grid { fill: none; stroke: #10795f; stroke-opacity: .08; stroke-width: 1; }
+    .node { fill: #f5f8f4; stroke: #10795f; stroke-width: 1.6; }
+    .cell { fill: #10795f; fill-opacity: .13; stroke: #10795f; stroke-opacity: .4; }
+    .live { fill: #347eae; }
+    @media (prefers-color-scheme: dark) {
+      .canvas { fill: #0b1511; }
+      .ink { fill: #edf4ec; }
+      .mark { stroke: #edf4ec; }
+      .muted { fill: #a4b4a9; }
+      .brand { fill: #63cda9; }
+      .line { stroke: #63cda9; stroke-opacity: .35; }
+      .grid { stroke: #63cda9; stroke-opacity: .08; }
+      .node { fill: #0b1511; stroke: #63cda9; }
+      .cell { fill: #63cda9; stroke: #63cda9; }
+      .live { fill: #6bb8e7; }
+    }
+  </style>
+  <rect class="canvas" width="1600" height="520" rx="16"/>
+  <path class="grid" d="M960 80V440M1040 80V440M1120 80V440M1200 80V440M1280 80V440M1360 80V440M1440 80V440M920 120H1504M920 200H1504M920 280H1504M920 360H1504M920 440H1504"/>
+  <g transform="translate(80 50) scale(2.1)">
+    <path class="mark" d="M8.25 22.5L16 8.5L23.75 22.5" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="brand" cx="16" cy="18.75" r="2"/>
+  </g>
+  <text class="ink" x="164" y="101" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="44" font-weight="600" letter-spacing="-1">Ancilla</text>
+  <text class="muted" x="1500" y="96" text-anchor="end" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="17" letter-spacing="3.5">AMAZONIA WORKS</text>
+  <path class="line" d="M88 135H1512"/>
+  <text class="ink" font-family="Fraunces, Georgia, 'Times New Roman', serif" font-size="78" letter-spacing="-1.5">
+    <tspan x="88" y="256">Deep research.</tspan>
+    <tspan x="88" y="345">Agents in view.</tspan>
+  </text>
+  <text class="muted" x="91" y="421" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="25">A workspace for Muse Code · Desktop + Web</text>
+  <g class="line">
+    <path d="M960 304C1016 304 1010 216 1080 216H1214M960 304C1022 304 1056 304 1080 304H1214M960 304C1016 304 1010 392 1080 392H1214"/>
+    <path d="M1250 216H1320C1370 216 1366 304 1430 304M1250 304H1430M1250 392H1320C1370 392 1366 304 1430 304"/>
+  </g>
+  <circle class="node" cx="960" cy="304" r="13"/>
+  <circle class="brand" cx="960" cy="304" r="4"/>
+  <circle class="node" cx="1080" cy="216" r="5"/>
+  <circle class="node" cx="1080" cy="304" r="5"/>
+  <circle class="node" cx="1080" cy="392" r="5"/>
+  <g class="cell">
+    <rect x="1214" y="198" width="36" height="36" rx="5"/>
+    <rect x="1214" y="286" width="36" height="36" rx="5"/>
+    <rect x="1214" y="374" width="36" height="36" rx="5"/>
+  </g>
+  <circle class="brand" cx="1232" cy="216" r="4"/>
+  <circle class="live" cx="1232" cy="304" r="4"/>
+  <circle class="brand" cx="1232" cy="392" r="4"/>
+  <circle class="node" cx="1430" cy="304" r="13"/>
+  <circle class="brand" cx="1430" cy="304" r="4"/>
+  <g class="muted" font-family="'JetBrains Mono', 'SFMono-Regular', Consolas, monospace" font-size="15" letter-spacing="1.2">
+    <text x="1097" y="194">RESEARCH</text>
+    <text x="1097" y="282">MONITOR</text>
+    <text x="1097" y="370">SYNTHESIZE</text>
+  </g>
+</svg>

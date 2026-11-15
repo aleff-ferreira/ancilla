@@ -1,0 +1,98 @@
+name: Linux installer smoke tests
+
+# A packaged AppImage lays its files out differently from a `tauri build --no-bundle` tree, and that layout is
+# what decides whether the app finds its bundled Node.js at all. The same packaged app is the only place the quit
+# path runs by machine: the window closed, the server gone within the app's grace, the port kept across a relaunch.
+# Building the desktop app takes minutes, so this runs only when something that shapes the bundle changes.
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "packages/server/**"
+      - ".github/workflows/linux-appimage.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "packages/server/**"
+      - ".github/workflows/linux-appimage.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes an unfinished run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - name: Skip until Linux bundling lands
+        id: guard
+        run: |
+          if [ -f apps/desktop/src-tauri/tauri.linux.conf.json ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No tauri.linux.conf.json yet, so there is no AppImage to test."
+          fi
+      - uses: actions/setup-node@v5
+        if: steps.guard.outputs.ready == 'true'
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.guard.outputs.ready == 'true'
+      - name: Install Tauri and test dependencies
+        if: steps.guard.outputs.ready == 'true'
+        # xvfb stands in for a display; the webkit runtime is what the window needs once it opens. The smoke finds the
+        # window with xdotool and closes it with an X client message (python3-xlib), and dbus-run-session gives one
+        # run of each installer the session bus that the single-instance plugin needs.
+        run: |
+          bash scripts/apt-install-ubuntu.sh libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev xvfb rpm libarchive-tools desktop-file-utils \
+            xdotool python3-xlib dbus
+      - run: npm ci
+        if: steps.guard.outputs.ready == 'true'
+      - run: npm run build --workspace @ancilla/daemon --workspace @ancilla/ui --workspace @ancilla/server
+        if: steps.guard.outputs.ready == 'true'
+      - name: Build Debian, RPM and AppImage installers
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          ANCILLA_NODE_TARGET: x86_64-unknown-linux-gnu
+        # No updater signing key on a pull request, so the updater artifacts are left out.
+        run: npm run tauri --workspace ancilla-desktop -- build --target x86_64-unknown-linux-gnu --bundles deb,rpm,appimage --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Check runtimes, dependencies, menu entries and icons in every installer
+        if: steps.guard.outputs.ready == 'true'
+        run: bash apps/desktop/scripts/verify-linux-bundles.sh apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle
+      # Each installer is launched, quit through its window, launched again while the first copy closes, and launched
+      # over a folder a server started by hand owns: once with no session bus, where the data folder lock alone keeps
+      # two copies apart, and once under a session bus, where the single-instance plugin forwards a second launch to
+      # the running copy.
+      - name: Install the Debian package and launch it from its system path
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          debs=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb)
+          sudo apt-get install -y "${debs[0]}"
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js /usr/bin/ancilla
+      - name: Launch the installed package twice under a session bus
+        if: steps.guard.outputs.ready == 'true'
+        run: xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js /usr/bin/ancilla
+      - name: Launch the AppImage without requiring FUSE
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          xvfb-run -a bash apps/desktop/scripts/smoke-linux.sh --server packages/server/dist/src/cli.js "${images[0]}" --appimage-extract-and-run
+      - name: Launch the AppImage twice under a session bus
+        if: steps.guard.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          images=("$GITHUB_WORKSPACE"/apps/desktop/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          xvfb-run -a dbus-run-session -- bash apps/desktop/scripts/smoke-linux.sh --bus --server packages/server/dist/src/cli.js "${images[0]}" --appimage-extract-and-run

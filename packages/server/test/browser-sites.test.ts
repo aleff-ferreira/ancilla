@@ -1,0 +1,557 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { BrowserError, BrowserService, cookieMatchesOrigin, type BrowserEvent, type CdpCookie } from "../src/browser/service.js";
+import {
+  BrowseSites,
+  hostKind,
+  isRestrictedAssistantHost,
+  isRestrictedAssistantOrigin,
+  isRestrictedAssistantUrl,
+  kindOfOrigin,
+  originOf,
+  SiteGate,
+  SiteRules,
+  type SiteQuestion,
+} from "../src/browser/sites.js";
+import { fakeBrowser, healthy, type FakeBrowser } from "./browser-fake.js";
+
+/**
+ * Which sites the assistant's browser may open: the origins and what they lead into, the saved rules, the questions and the
+ * answers, and the browser holding every page of the assistant's tabs until the gate has spoken.
+ */
+
+const tick = (ms = 30) => new Promise((r) => setTimeout(r, ms));
+const sent = (fake: FakeBrowser, method: string) => fake.calls.filter((c) => c.method === method);
+const FOUND = { browser: { kind: "edge" as const, path: "/fake/edge" } };
+
+// ------------------------------------------------------------------ origins
+
+test("originOf: only http and https pages have an origin, with the port when it is not the default", () => {
+  assert.equal(originOf("https://Example.com/a/b?q=1#x"), "https://example.com");
+  assert.equal(originOf("http://localhost:5173/app"), "http://localhost:5173");
+  assert.equal(originOf("https://example.com:443/"), "https://example.com");
+  for (const refused of ["file:///C:/secret.txt", "chrome://settings", "edge://flags", "javascript:alert(1)", "data:text/html,hi", "view-source:https://a.example/", "about:blank", "not a url", ""]) {
+    assert.equal(originOf(refused), null, refused);
+  }
+  assert.equal(originOf("http://2130706433/"), "http://127.0.0.1", "a number for an address is read as the address it is");
+});
+
+test("hostKind: what leads into this computer or its network is local, the rest is public", () => {
+  for (const local of ["localhost", "app.localhost", "127.0.0.1", "127.8.8.8", "10.1.2.3", "172.16.0.1", "172.31.255.1", "192.168.1.1", "169.254.1.1", "100.64.0.9", "0.0.0.0", "::1", "[::1]", "fd12::1", "fe80::1", "::ffff:127.0.0.1", "printer.local", "nas.lan", "router", "nas"]) {
+    assert.equal(hostKind(local), "local", local);
+  }
+  for (const pub of ["example.com", "en.wikipedia.org", "8.8.8.8", "172.32.0.1", "172.15.0.1", "100.128.0.1", "2606:4700::1111"]) {
+    assert.equal(hostKind(pub), "public", pub);
+  }
+  assert.equal(kindOfOrigin("http://192.168.0.10:8080"), "local");
+  assert.equal(kindOfOrigin("https://example.com"), "public");
+});
+
+// ------------------------------------------------------------------ rules
+
+test("rules: saved to a file, read back, removed; a missing, broken or hand-edited file means only what is valid", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ancilla-sites-"));
+  try {
+    const file = join(dir, "browser", "sites.json");
+    const rules = new SiteRules(file, () => 1000);
+    assert.deepEqual(rules.list(), []);
+    rules.set("https://b.example", "block");
+    rules.set("https://a.example", "allow");
+    rules.set("not an origin", "allow");
+    rules.set("https://a.example/path", "allow");
+    assert.deepEqual(rules.list().map((r) => [r.origin, r.decision]), [["https://a.example", "allow"], ["https://b.example", "block"]]);
+    const again = new SiteRules(file);
+    assert.equal(again.get("https://a.example")?.decision, "allow");
+    assert.equal(again.get("https://b.example")?.decision, "block");
+    assert.equal(again.remove("https://a.example"), true);
+    assert.equal(again.remove("https://a.example"), false);
+    assert.equal(new SiteRules(file).get("https://a.example"), null);
+    writeFileSync(file, JSON.stringify({ rules: [{ origin: "https://ok.example", decision: "allow" }, { origin: "file:///x", decision: "allow" }, { origin: "https://bad.example", decision: "maybe" }, 7, null] }));
+    assert.deepEqual(new SiteRules(file).list().map((r) => r.origin), ["https://ok.example"]);
+    writeFileSync(file, "{ not json");
+    assert.deepEqual(new SiteRules(file).list(), []);
+    assert.match(readFileSync(join(dir, "browser", "sites.json"), "utf8"), /not json/, "a file that cannot be read is left alone until a rule is saved");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------------------------------ the gate
+
+function gate(options: { onChange?: () => void } = {}) {
+  const rules = new SiteRules(null, () => 5);
+  return { rules, gate: new SiteGate(rules, { ...options, now: () => 7 }) };
+}
+
+test("gate: an unknown site asks, a rule or an answer for the task decides after, and a block beats everything", async () => {
+  const { rules, gate: g } = gate();
+  assert.equal(g.check("t1", "https://a.example"), "ask");
+  const pending = g.request("t1", "https://a.example/page");
+  const question = g.pending() as SiteQuestion;
+  assert.deepEqual([question.taskId, question.origin, question.kind, question.at], ["t1", "https://a.example", "public", 7]);
+  assert.equal(g.waiting("t1"), true);
+  assert.equal(g.waiting("t2"), false);
+  g.answer(question.id, "task");
+  assert.equal(await pending, true);
+  assert.equal(g.check("t1", "https://a.example"), "allow");
+  assert.equal(g.check("t2", "https://a.example"), "ask", "what was allowed for one task is not allowed for another");
+  assert.equal(await g.request("t1", "https://a.example/other"), true, "asked once, not again");
+  rules.set("https://a.example", "block");
+  assert.equal(g.check("t1", "https://a.example"), "block", "a saved block beats an answer for the task");
+  assert.equal(await g.request("t1", "https://a.example"), false);
+  assert.equal(await g.request("t1", "file:///etc/passwd"), false, "a page that is not on the web is never opened");
+});
+
+test("gate: always and block are saved; not now is remembered for the task only", async () => {
+  const { rules, gate: g } = gate();
+  const always = g.request("t1", "https://always.example");
+  g.answer((g.pending() as SiteQuestion).id, "always");
+  assert.equal(await always, true);
+  assert.equal(rules.get("https://always.example")?.decision, "allow");
+  assert.equal(g.check("t9", "https://always.example"), "allow", "a saved rule holds for every task");
+
+  const blocked = g.request("t1", "https://blocked.example");
+  g.answer((g.pending() as SiteQuestion).id, "block");
+  assert.equal(await blocked, false);
+  assert.equal(rules.get("https://blocked.example")?.decision, "block");
+  assert.equal(await g.request("t9", "https://blocked.example"), false);
+
+  const notNow = g.request("t1", "https://later.example");
+  g.answer((g.pending() as SiteQuestion).id, "not-now");
+  assert.equal(await notNow, false);
+  assert.equal(rules.get("https://later.example"), null, "nothing saved");
+  assert.equal(await g.request("t1", "https://later.example"), false, "and not asked again by this task");
+  assert.equal(g.check("t2", "https://later.example"), "ask", "but another task asks");
+});
+
+test("gate: one question at a time, the others wait behind it and are settled by its answer when they can be", async () => {
+  const changes: string[] = [];
+  const { gate: g } = gate({ onChange: () => changes.push("changed") });
+  const first = g.request("t1", "https://a.example/1");
+  const same = g.request("t1", "https://a.example/2");
+  const other = g.request("t1", "https://b.example/");
+  const third = g.request("t1", "https://c.example/");
+  assert.equal((g.pending() as SiteQuestion).origin, "https://a.example", "the first is the one shown");
+  assert.throws(() => g.answer("sq_nope", "task"), /not waiting any more/);
+  g.answer((g.pending() as SiteQuestion).id, "always");
+  assert.deepEqual(await Promise.all([first, same]), [true, true], "two pages of one site are one question");
+  assert.equal((g.pending() as SiteQuestion).origin, "https://b.example");
+  g.answer((g.pending() as SiteQuestion).id, "block");
+  assert.equal(await other, false);
+  assert.equal((g.pending() as SiteQuestion).origin, "https://c.example");
+  g.answer((g.pending() as SiteQuestion).id, "task");
+  assert.equal(await third, true);
+  assert.equal(g.pending(), null);
+  assert.ok(changes.length >= 6, "every change is announced so a screen can follow");
+});
+
+test("gate: the end of a task refuses its questions and forgets what it was allowed; an expired question is refused once", async () => {
+  const { gate: g } = gate();
+  const granted = g.request("t1", "https://a.example");
+  g.answer((g.pending() as SiteQuestion).id, "task");
+  await granted;
+  const open = g.request("t1", "https://b.example");
+  const settled = g.settled("t1");
+  let done = false;
+  void settled.then(() => (done = true));
+  await tick(5);
+  assert.equal(done, false, "settled waits while a question is open");
+  g.end("t1");
+  assert.equal(await open, false);
+  await settled;
+  assert.equal(g.check("t1", "https://a.example"), "ask", "its grants are forgotten");
+
+  const slow = g.request("t2", "https://c.example");
+  g.expire("t2");
+  assert.equal(await slow, false);
+  assert.equal(g.check("t2", "https://c.example"), "block", "refused for the task, not saved");
+  assert.equal(g.pending(), null);
+
+  const controller = new AbortController();
+  const aborted = g.request("t3", "https://d.example", controller.signal);
+  assert.equal(g.waiting("t3"), true);
+  controller.abort();
+  assert.equal(await aborted, false);
+  assert.equal(g.waiting("t3"), false, "a request that was given up on leaves no question behind");
+});
+
+test("gate: a site on this computer or its network is said to be, and is never allowed by anything but its own exact answer", async () => {
+  const { gate: g } = gate();
+  const request = g.request("t1", "http://localhost:5173/");
+  assert.equal((g.pending() as SiteQuestion).kind, "local");
+  g.answer((g.pending() as SiteQuestion).id, "task");
+  await request;
+  assert.equal(g.check("t1", "http://localhost:5173"), "allow");
+  assert.equal(g.check("t1", "http://localhost:3000"), "ask", "another port is another site");
+  assert.equal(g.check("t1", "http://127.0.0.1:5173"), "ask", "and so is another name for it");
+});
+
+// ------------------------------------------------------------------ what decides for the browser
+
+test("decide: a page waits for the task's question; with no task nothing loads; a frame loads unless it leads inside or is blocked", async () => {
+  let task: string | null = null;
+  const sites = new BrowseSites(null, () => ({ taskId: () => task, gateChanged: () => undefined }));
+  const req = (url: string, mainFrame: boolean) => ({ url, origin: originOf(url) as string, tabId: "T1", mainFrame });
+  assert.equal(await sites.decide(req("https://a.example/", true)), false, "no task is browsing: nothing is opened");
+  assert.equal(await sites.decide(req("https://a.example/ad", false)), true, "a frame of a public site is only a part of a page");
+  assert.equal(await sites.decide(req("http://192.168.1.1/", false)), false, "a frame that leads inside is not");
+  task = "t1";
+  const asked = sites.decide(req("https://a.example/", true));
+  assert.equal(sites.gate.pending()?.origin, "https://a.example");
+  sites.gate.answer((sites.gate.pending() as SiteQuestion).id, "task");
+  assert.equal(await asked, true);
+  sites.gate.rules.set("https://tracker.example", "block");
+  assert.equal(await sites.decide(req("https://tracker.example/x.html", false)), false, "a blocked site is not let in as a frame either");
+  sites.gate.rules.set("http://192.168.1.1", "allow");
+  assert.equal(await sites.decide(req("http://192.168.1.1/", false)), true, "unless the person said so for that exact site");
+});
+
+// ------------------------------------------------------------------ the browser holds the page
+
+function gated(fake: FakeBrowser, decide: (r: { url: string; origin: string; tabId: string; mainFrame: boolean }) => Promise<boolean>) {
+  return new BrowserService({ dataDir: ":memory:", find: () => FOUND, launch: () => fake.proc, gracefulMs: 200, siteGate: decide });
+}
+
+test("service: only the assistant's tabs are held, and only for pages (Fetch on documents)", async () => {
+  const fake = fakeBrowser(healthy());
+  const svc = gated(fake, async () => true);
+  const mine = await svc.openTab("you");
+  const theirs = await svc.openTab("assistant");
+  const fetches = sent(fake, "Fetch.enable");
+  assert.equal(fetches.length, 1, "one tab is held");
+  assert.equal(fetches[0]?.sessionId, `S-${theirs.id}`);
+  assert.deepEqual(fetches[0]?.params, { patterns: [{ urlPattern: "*", resourceType: "Document", requestStage: "Request" }] });
+  assert.notEqual(fetches[0]?.sessionId, `S-${mine.id}`);
+  await svc.dispose();
+  const plain = fakeBrowser(healthy());
+  const open = new BrowserService({ dataDir: ":memory:", find: () => FOUND, launch: () => plain.proc, gracefulMs: 200 });
+  await open.openTab("assistant");
+  assert.equal(sent(plain, "Fetch.enable").length, 0, "with no gate there is nothing to ask");
+  await open.dispose();
+});
+
+test("service: a page that is allowed goes on; one that is refused fails as blocked and the assistant is told, once", async () => {
+  const fake = fakeBrowser(healthy());
+  const answers: Array<Promise<boolean>> = [];
+  const seen: Array<{ url: string; origin: string; mainFrame: boolean }> = [];
+  let broken = false;
+  const svc = gated(fake, (r) => {
+    seen.push({ url: r.url, origin: r.origin, mainFrame: r.mainFrame });
+    if (broken) return Promise.reject(new Error("the gate broke"));
+    return answers.shift() ?? Promise.resolve(false);
+  });
+  const tab = await svc.openTab("assistant");
+  const session = `S-${tab.id}`;
+  answers.push(Promise.resolve(true));
+  fake.emit("Fetch.requestPaused", { requestId: "R1", frameId: tab.id, resourceType: "Document", request: { url: "https://ok.example/page" } }, session);
+  await tick();
+  assert.deepEqual(sent(fake, "Fetch.continueRequest").map((c) => c.params), [{ requestId: "R1" }]);
+  assert.deepEqual(seen[0], { url: "https://ok.example/page", origin: "https://ok.example", mainFrame: true });
+
+  answers.push(Promise.resolve(false));
+  fake.emit("Fetch.requestPaused", { requestId: "R2", frameId: tab.id, resourceType: "Document", request: { url: "https://no.example/" } }, session);
+  await tick();
+  assert.deepEqual(sent(fake, "Fetch.failRequest").map((c) => c.params), [{ requestId: "R2", errorReason: "Aborted" }], "aborted, so the page that had the link stays");
+  assert.deepEqual(svc.takeNotes(tab.id), ["https://no.example was not opened: the person did not allow it."]);
+  assert.deepEqual(svc.takeNotes(tab.id), [], "said once");
+
+  // A frame inside the page is told apart from the page.
+  answers.push(Promise.resolve(true));
+  fake.emit("Fetch.requestPaused", { requestId: "R3", frameId: "some-child-frame", resourceType: "Document", request: { url: "https://ads.example/frame" } }, session);
+  await tick();
+  assert.equal(seen[2]?.mainFrame, false);
+  // A gate that fails is a refusal, never a pass.
+  broken = true;
+  fake.emit("Fetch.requestPaused", { requestId: "R4", frameId: tab.id, resourceType: "Document", request: { url: "https://broken.example/" } }, session);
+  await tick();
+  assert.ok(sent(fake, "Fetch.failRequest").some((c) => c.params["requestId"] === "R4"));
+  await svc.dispose();
+});
+
+test("service: a page waits while the person decides, and nothing is sent for it until they have", async () => {
+  const fake = fakeBrowser(healthy());
+  let answer: (allowed: boolean) => void = () => undefined;
+  const svc = gated(fake, () => new Promise<boolean>((resolve) => (answer = resolve)));
+  const tab = await svc.openTab("assistant");
+  fake.emit("Fetch.requestPaused", { requestId: "R1", frameId: tab.id, resourceType: "Document", request: { url: "https://slow.example/" } }, `S-${tab.id}`);
+  await tick(60);
+  assert.equal(sent(fake, "Fetch.continueRequest").length + sent(fake, "Fetch.failRequest").length, 0, "held");
+  answer(true);
+  await tick();
+  assert.equal(sent(fake, "Fetch.continueRequest").length, 1);
+  await svc.dispose();
+});
+
+test("service: a navigation the browser refused as blocked is a blocked error, not a broken page", async () => {
+  const fake = fakeBrowser(healthy((method) => (method === "Page.navigate" ? { errorText: "net::ERR_BLOCKED_BY_CLIENT" } : undefined)));
+  const svc = gated(fake, async () => false);
+  const tab = await svc.openTab("assistant");
+  await assert.rejects(svc.navigate(tab.id, "https://no.example/"), (e: unknown) => e instanceof BrowserError && e.code === "blocked");
+  const other = fakeBrowser(healthy((method) => (method === "Page.navigate" ? { errorText: "net::ERR_NAME_NOT_RESOLVED" } : undefined)));
+  const svc2 = gated(other, async () => true);
+  const tab2 = await svc2.openTab("assistant");
+  await assert.rejects(svc2.navigate(tab2.id, "https://nowhere.invalid/"), (e: unknown) => e instanceof BrowserError && e.code === "invalid" && /ERR_NAME_NOT_RESOLVED/.test(e.message));
+  await svc.dispose();
+  await svc2.dispose();
+});
+
+test("service: a popup of the assistant's tab is closed and noted; a dialog is dismissed by the browser, not left to freeze the page", async () => {
+  const fake = fakeBrowser(healthy());
+  const svc = gated(fake, async () => true);
+  const events: BrowserEvent[] = [];
+  svc.on((e) => events.push(e));
+  const tab = await svc.openTab("assistant");
+  fake.emit("Target.targetCreated", { targetInfo: { targetId: "P1", type: "page", openerId: tab.id, url: "https://pop.example/", title: "" } });
+  await tick();
+  assert.ok(sent(fake, "Target.closeTarget").some((c) => c.params["targetId"] === "P1"));
+  assert.equal((await svc.listTabs()).some((t) => t.id === "P1"), false, "never a tab");
+  assert.ok(events.some((e) => e.type === "notice" && e.kind === "popup"));
+  fake.emit("Page.javascriptDialogOpening", { type: "alert", message: "Hello", url: "https://a.example/" }, `S-${tab.id}`);
+  fake.emit("Page.javascriptDialogOpening", { type: "confirm", message: "Delete everything?", url: "https://a.example/" }, `S-${tab.id}`);
+  await tick();
+  assert.deepEqual(sent(fake, "Page.handleJavaScriptDialog").map((c) => c.params["accept"]), [true, false], "an alert is accepted, a question is declined");
+  const notes = svc.takeNotes(tab.id);
+  assert.equal(notes.length, 3);
+  assert.match(notes[0] as string, /popup window/);
+  assert.match(notes[2] as string, /confirm dialog.*Delete everything\?.*dismissed/);
+  assert.equal(events.some((e) => e.type === "dialog"), false, "no pane is told: nobody is there to answer it");
+  await svc.dispose();
+});
+
+// ------------------------------------------------------------------ controlled sign-in persistence & origin cookie sharing
+
+test("rules & gate: per-origin sign-in sharing persists when saved, clears on task end for task grants, and never applies to blocks", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ancilla-signin-"));
+  try {
+    const file = join(dir, "sites.json");
+    const rules = new SiteRules(file, () => 100);
+    const g = new SiteGate(rules, { now: () => 200 });
+
+    // Task-scoped signed-in grant
+    const askTask = g.request("t1", "https://mail.example/inbox");
+    g.answer((g.pending() as SiteQuestion).id, "task-signed-in");
+    assert.equal(await askTask, true);
+    assert.equal(g.usesSignIn("t1", "https://mail.example"), true);
+    assert.equal(g.usesSignIn("t2", "https://mail.example"), false, "not shared with other tasks");
+    assert.equal(rules.get("https://mail.example"), null, "task grant is not persisted to disk");
+    g.end("t1");
+    assert.equal(g.usesSignIn("t1", "https://mail.example"), false, "cleared when task ends");
+
+    // Persistent signed-in rule
+    const askAlways = g.request("t2", "https://drive.example/files");
+    g.answer((g.pending() as SiteQuestion).id, "always-signed-in");
+    assert.equal(await askAlways, true);
+    assert.equal(g.usesSignIn("t9", "https://drive.example"), true);
+
+    const reloaded = new SiteRules(file);
+    assert.equal(reloaded.get("https://drive.example")?.useSignIn, true);
+    assert.equal(reloaded.setSignIn("https://drive.example", false), true);
+    assert.equal(new SiteRules(file).get("https://drive.example")?.useSignIn, undefined);
+
+    rules.set("https://blocked.example", "block", true);
+    assert.equal(rules.get("https://blocked.example")?.useSignIn, undefined, "blocked sites never store useSignIn");
+    assert.equal(rules.setSignIn("https://blocked.example", true), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cookieMatchesOrigin: enforces RFC 6265 host-only vs domain matching, HTTPS Secure flag, and expiration", () => {
+  const now = 1_700_000_000;
+  const domainCookie: CdpCookie = { name: "sid", value: "1", domain: ".example.com", path: "/", secure: true, expires: now + 3600 };
+  const hostOnlyCookie: CdpCookie = { name: "__Host-sess", value: "2", domain: "app.example.com", hostOnly: true, path: "/", secure: true, session: true };
+  const expiredCookie: CdpCookie = { name: "old", value: "3", domain: ".example.com", expires: now - 10 };
+
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://example.com", now), true);
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://app.example.com", now), true);
+  assert.equal(cookieMatchesOrigin(domainCookie, "https://badexample.com", now), false);
+  assert.equal(cookieMatchesOrigin(domainCookie, "http://app.example.com", now), false, "Secure cookie never sent to http");
+
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://app.example.com", now), true);
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://sub.app.example.com", now), false, "host-only cookie does not match subdomains");
+  assert.equal(cookieMatchesOrigin(hostOnlyCookie, "https://example.com", now), false);
+
+  assert.equal(cookieMatchesOrigin(expiredCookie, "https://example.com", now), false);
+});
+
+test("service: hydrates only matching origin cookies one-way from you -> assistant when signInGate allows, resets on resetAssistant, and still holds POSTs", async () => {
+  const youCookies: CdpCookie[] = [
+    { name: "__Host-session", value: "secret-app", domain: "app.example.com", hostOnly: true, path: "/", secure: true, httpOnly: true, sameSite: "Lax", session: true },
+    { name: "org_pref", value: "dark", domain: ".example.com", hostOnly: false, path: "/", secure: true, session: true },
+    { name: "other_secret", value: "never-leak", domain: "bank.example.org", hostOnly: true, path: "/", secure: true, session: true },
+  ];
+  const fake = fakeBrowser(
+    healthy((method) => {
+      if (method === "Storage.getCookies") return { cookies: youCookies };
+      return undefined;
+    }),
+  );
+  const commits: string[] = [];
+  const svc = new BrowserService({
+    dataDir: ":memory:",
+    find: () => FOUND,
+    launch: () => fake.proc,
+    gracefulMs: 200,
+    siteGate: async () => true,
+    signInGate: (req) => req.origin === "https://app.example.com",
+    commitGate: async (req) => (commits.push(`${req.method} ${req.url}`), false),
+  });
+  const tab = await svc.openTab("assistant");
+  const session = `S-${tab.id}`;
+
+  // Approved signed-in origin hydrates matching cookies once before continuing request
+  fake.emit("Fetch.requestPaused", { requestId: "R1", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/dashboard", method: "GET" } }, session);
+  await tick();
+  const setCalls = sent(fake, "Storage.setCookies");
+  assert.equal(setCalls.length, 1);
+  assert.equal(setCalls[0]?.params["browserContextId"], "CTX-A", "written only into assistant ephemeral context");
+  const copied = setCalls[0]?.params["cookies"] as Array<Record<string, unknown>>;
+  assert.deepEqual(copied.map((c) => c["name"]), ["__Host-session", "org_pref"], "bank.example.org cookie is never copied");
+  assert.equal(copied[0]?.["url"], "https://app.example.com/", "host-only cookie uses url, preserving host-only scope");
+  assert.equal(copied[0]?.["domain"], undefined);
+  assert.equal(copied[1]?.["domain"], ".example.com", "domain cookie preserves domain scope");
+
+  // Second request to same origin does not re-copy until resetAssistant()
+  fake.emit("Fetch.requestPaused", { requestId: "R2", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/settings", method: "GET" } }, session);
+  await tick();
+  assert.equal(sent(fake, "Storage.setCookies").length, 1);
+
+  // Origin without signInGate grant receives zero cookies
+  fake.emit("Fetch.requestPaused", { requestId: "R3", frameId: tab.id, resourceType: "Document", request: { url: "https://bank.example.org/", method: "GET" } }, session);
+  await tick();
+  assert.equal(sent(fake, "Storage.setCookies").length, 1);
+
+  // Form POST on signed-in origin is STILL intercepted by commitGate!
+  fake.emit("Fetch.requestPaused", { requestId: "R4", frameId: tab.id, resourceType: "Document", request: { url: "https://app.example.com/delete", method: "POST", postData: "confirm=1" } }, session);
+  await tick();
+  assert.deepEqual(commits, ["POST https://app.example.com/delete"]);
+  assert.ok(sent(fake, "Fetch.failRequest").some((c) => c.params["requestId"] === "R4"));
+
+  // resetAssistant clears sharedOrigins so a fresh task hydrates fresh cookies
+  await svc.resetAssistant();
+  const tab2 = await svc.openTab("assistant");
+  await svc.shareOriginSignIn("https://app.example.com");
+  assert.equal(sent(fake, "Storage.setCookies").length, 2);
+  void tab2;
+
+  await svc.dispose();
+});
+
+test("restricted Meta consumer domains: blocked in assistant browsing and sign-in cookie sharing while leaving the user's own you tabs unrestricted", async () => {
+  for (const host of [
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com.",
+    "fb.com",
+    "lookaside.fbsbx.com",
+    "messenger.com",
+    "www.messenger.com",
+    "instagram.com",
+    "www.instagram.com",
+    "scontent.cdninstagram.com",
+    "whatsapp.com",
+    "web.whatsapp.com",
+    "mmg.whatsapp.net",
+    "threads.net",
+    "www.threads.com",
+    "meta.ai",
+    "api.meta.ai",
+  ]) {
+    assert.equal(isRestrictedAssistantHost(host), true, host);
+    assert.equal(isRestrictedAssistantOrigin(`https://${host.replace(/\.+$/, "")}`), true, host);
+    assert.equal(isRestrictedAssistantUrl(`https://${host}/path`), true, host);
+  }
+  for (const allowed of ["notfacebook.com", "myinstagram.org", "example.com", "localhost"]) {
+    assert.equal(isRestrictedAssistantHost(allowed), false, allowed);
+    assert.equal(isRestrictedAssistantOrigin(`https://${allowed}`), false, allowed);
+  }
+
+  const dir = mkdtempSync(join(tmpdir(), "ancilla-meta-fence-"));
+  try {
+    const file = join(dir, "sites.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        rules: [
+          { origin: "https://www.instagram.com", decision: "allow", at: 1, useSignIn: true },
+          { origin: "https://docs.example.com", decision: "allow", at: 2, useSignIn: true },
+        ],
+      }),
+      "utf8",
+    );
+    const sites = new BrowseSites(file, () => ({ taskId: () => "t1", gateChanged: () => undefined }));
+    assert.equal(sites.rules.get("https://www.instagram.com"), null, "persisted allow rule for restricted origin is ignored on load");
+    assert.equal(sites.rules.get("https://docs.example.com")?.decision, "allow");
+
+    sites.rules.set("https://www.facebook.com", "allow", true);
+    assert.equal(sites.rules.get("https://www.facebook.com"), null, "cannot save Always allow for restricted origin");
+    assert.equal(sites.rules.setSignIn("https://www.facebook.com", true), false);
+
+    // YOLO / session grant cannot bypass the fence
+    sites.grantSessionOrigin("https://web.whatsapp.com");
+    assert.equal(sites.isAllowedNow("https://web.whatsapp.com"), false);
+    assert.equal(sites.gate.check("t1", "https://web.whatsapp.com"), "block");
+    assert.equal(await sites.gate.request("t1", "https://web.whatsapp.com/"), false);
+    assert.equal(sites.gate.pending(), null, "never prompts the user to allow a restricted origin");
+    assert.equal(await sites.decide({ url: "https://www.threads.net/@u", origin: "https://www.threads.net", tabId: "tab1", mainFrame: true }), false);
+    assert.equal(await sites.decide({ url: "https://www.facebook.com/plugins/like.php", origin: "https://www.facebook.com", tabId: "tab1", mainFrame: false }), false, "subframes blocked too");
+    assert.equal(sites.shouldShareSignIn({ url: "https://meta.ai/", origin: "https://meta.ai", tabId: "tab1", mainFrame: true }), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  const fake = fakeBrowser(
+    healthy((method) => {
+      if (method === "Storage.getCookies") {
+        return {
+          cookies: [{ name: "c_user", value: "123", domain: ".facebook.com", hostOnly: false, path: "/", secure: true, session: true }],
+        };
+      }
+      if (method === "Page.navigate") return {};
+      return undefined;
+    }),
+  );
+  const svc = new BrowserService({
+    dataDir: ":memory:",
+    find: () => FOUND,
+    launch: () => fake.proc,
+    gracefulMs: 200,
+    siteGate: async () => true,
+    signInGate: () => true,
+  });
+
+  // Assistant tab creation, navigation, request interception, and sign-in hydration are all blocked
+  await assert.rejects(
+    svc.openTab("assistant", "https://www.instagram.com/"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+  const assistantTab = await svc.openTab("assistant");
+  await assert.rejects(
+    svc.navigate(assistantTab.id, "https://web.whatsapp.com/"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+  await assert.rejects(
+    svc.shareOriginSignIn("https://www.facebook.com"),
+    (e: unknown) => e instanceof BrowserError && e.code === "blocked",
+  );
+
+  fake.emit(
+    "Fetch.requestPaused",
+    { requestId: "R-META", frameId: assistantTab.id, resourceType: "Document", request: { url: "https://www.facebook.com/home", method: "GET" } },
+    `S-${assistantTab.id}`,
+  );
+  await tick();
+  assert.ok(sent(fake, "Fetch.failRequest").some((c) => c.params["requestId"] === "R-META"));
+  assert.equal(sent(fake, "Storage.setCookies").length, 0, "no cookies copied for restricted origin even if gates return true");
+  assert.match(svc.takeNotes(assistantTab.id)[0] ?? "", /disabled on Meta consumer sites/);
+
+  // Meanwhile, the user's own `you` context remains completely unrestricted
+  const youTab = await svc.openTab("you", "https://www.instagram.com/");
+  assert.equal(youTab.context, "you");
+
+  await svc.dispose();
+});

@@ -1,0 +1,34 @@
+[package]
+name = "ancilla"
+version = "0.29.0"
+description = "Ancilla: desktop ADE for the Muse Code CLI"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/aleff-ferreira/ancilla"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["webview-data-url"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+# A webview does not reliably have the browser's Notification API, so the OS notifier comes from here.
+tauri-plugin-notification = "2"
+# Links in replies open in the default browser; the webview itself has nowhere to put them.
+tauri-plugin-opener = "2"
+# Save As grants the filesystem plugin access to only the file selected by the user.
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+# One Ancilla per user: a second launch hands its arguments to the running copy and exits.
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_8"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

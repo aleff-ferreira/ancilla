@@ -1,0 +1,322 @@
+import { createHash } from "node:crypto";
+
+/**
+ * The small, deterministic text toolkit the assistant's memory is built on: normalisation for comparing, a light
+ * stemmer, similarity, digests for deduplication and for recognising erased content, the exact identifiers a
+ * statement contains, and a parser for the few ways people say when. Nothing here calls a model.
+ */
+
+export function squash(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+export const STOPWORDS = new Set(
+  ("a an the and or but if then else of to in on at by for with from as is are was were be been being am do does did done have has had " +
+    "i me my mine we us our you your it its this that these those there here so than too very can could should would will shall may might must " +
+    "not no yes just also about into over under up down out off again more most some any all each other such only own same what which who whom " +
+    "when where why how please thanks thank " +
+    "o os um uma uns umas da dos das na nos nas por para com sem que se mas ou como mais muito tambem eu meu minha meus minhas voce voces " +
+    "seu sua seus suas isso isto esse essa este esta aquilo aquele aquela sao estou estao foi tenho pelo pela pelos pelas sobre entre " +
+    "qual quais quem onde quando porque " +
+    "el la los las un una unos unas del al en con pero muy yo mi mis tu tus su sus esto eso ese esa es soy eres estan fue tengo tiene " +
+    "cual cuales quien donde cuando").split(" "),
+);
+
+/** Lower case, accents folded, and the odd quote marks made plain, so that two spellings of one thing compare equal. */
+export function fold(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .toLowerCase();
+}
+
+/** A deliberately light stemmer: it merges the common inflections and leaves everything else alone. */
+export function stem(word: string): string {
+  let w = word;
+  if (w.length <= 3) return w;
+  if (w.endsWith("coes") && w.length > 6) return `${w.slice(0, -4)}cao`;
+  if (w.endsWith("oes") && w.length > 5) return `${w.slice(0, -3)}ao`;
+  if (w.endsWith("ais") && w.length > 5) return `${w.slice(0, -3)}al`;
+  if (w.endsWith("eis") && w.length > 5) return `${w.slice(0, -3)}el`;
+  if (w.endsWith("ies") && w.length > 4) return `${w.slice(0, -3)}y`;
+  if (w.endsWith("sses")) return w.slice(0, -2);
+  if (w.endsWith("ing") && w.length > 5) {
+    w = w.slice(0, -3);
+    if (/(.)\1$/.test(w) && !/(ss|ll|zz)$/.test(w)) w = w.slice(0, -1);
+    return w;
+  }
+  if (w.endsWith("ed") && w.length > 4) {
+    w = w.slice(0, -2);
+    if (/(.)\1$/.test(w) && !/(ss|ll|zz)$/.test(w)) w = w.slice(0, -1);
+    return w;
+  }
+  if (w.endsWith("es") && /(s|x|z|ch|sh)es$/.test(w)) return w.slice(0, -2);
+  if (w.endsWith("s") && !w.endsWith("ss") && !w.endsWith("us") && !w.endsWith("is")) return w.slice(0, -1);
+  if (w.endsWith("ly") && w.length > 5) return w.slice(0, -2);
+  return w;
+}
+
+/** `don't` becomes `do not` and `can't` `cannot`, so a negation is one word and never a stray `t`. */
+export function expandContractions(text: string): string {
+  return text
+    .replace(/\bcan't\b/g, "cannot")
+    .replace(/\bwon't\b/g, "will not")
+    .replace(/\bshan't\b/g, "shall not")
+    .replace(/\b(\w+)n't\b/g, "$1 not")
+    .replace(/\b(\w+)'(?:ll|ve|re|d|m)\b/g, "$1");
+}
+
+const NEGATORS = new Set([
+  "never", "not", "no", "avoid", "without", "stop", "cannot", "nothing", "none", "neither", "nor", "forbidden",
+  "nao", "nunca", "jamais", "jamas", "sem", "sin", "proibido", "prohibido", "evitar", "evite", "nada", "nenhum", "nenhuma", "ningun", "ninguno", "ninguna",
+]);
+
+/** How many words of refusal a statement carries: an odd count means it says the opposite of an even one. */
+export function negations(text: string): number {
+  let n = 0;
+  for (const word of expandContractions(fold(text)).split(/[^a-z]+/)) if (NEGATORS.has(word)) n += 1;
+  return n;
+}
+
+/** The words of a text, stemmed, without the words that carry no meaning on their own. Identifiers stay whole. */
+export function tokens(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of expandContractions(fold(text)).split(/[^a-z0-9._\-/\\@#:]+/)) {
+    const word = raw.replace(/^[._\-/\\:]+|[._\-/\\:]+$/g, "");
+    if (!word || STOPWORDS.has(word)) continue;
+    out.push(/[._\-/\\@#:]/.test(word) ? word : stem(word));
+  }
+  return out;
+}
+
+export function tokenSet(text: string): Set<string> {
+  return new Set(tokens(text));
+}
+
+export function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let both = 0;
+  for (const word of a) if (b.has(word)) both += 1;
+  return both / (a.size + b.size - both);
+}
+
+/** How much of `a` is in `b`: 1 when every word of a short query appears in a long statement. */
+export function containment(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size === 0) return 0;
+  let both = 0;
+  for (const word of a) if (b.has(word)) both += 1;
+  return both / a.size;
+}
+
+/** Character trigrams of a folded word, for forgiving a typo. */
+export function trigrams(word: string): Set<string> {
+  const padded = `  ${fold(word)} `;
+  const out = new Set<string>();
+  for (let i = 0; i + 3 <= padded.length; i += 1) out.add(padded.slice(i, i + 3));
+  return out;
+}
+
+/** A stable digest of what a text says, ignoring case, accents and spacing, so the same words are recognised again. */
+export function digest(text: string): string {
+  const norm = fold(text)
+    .split(/[^a-z0-9._\-/\\@#:]+/)
+    .map((word) => word.replace(/^[._\-/\\:]+|[._\-/\\:]+$/g, ""))
+    .filter(Boolean)
+    .join(" ");
+  return createHash("sha256").update(norm).digest("hex").slice(0, 32);
+}
+
+/** What a tombstone stores in place of erased content: bound to a scope so a word forgotten in one project is not blocked in another. */
+export function fingerprint(text: string, scope: string): string {
+  return createHash("sha256").update(`${scope}\u0000${digest(text)}`).digest("hex").slice(0, 32);
+}
+
+const IDENTIFIER_PATTERNS: RegExp[] = [
+  /https?:\/\/[^\s)>\]"'`]+/g,
+  /\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b/g,
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+  /(?:[A-Za-z]:\\|~\/|\.{1,2}\/|\/)[\w@%+=.,\\/-]+/g,
+  /\b[\w.-]+\/[\w./-]*\.[a-z0-9]{1,6}\b/gi,
+  /\b[\w-]+\.(?:md|txt|json|jsonl|ts|tsx|js|mjs|cjs|py|rs|toml|yaml|yml|html|css|sql|sh|ps1|lock|csv|pdf|docx)\b/gi,
+  /\bv?\d+\.\d+(?:\.\d+)*(?:-[\w.]+)?\b/g,
+  /\b[A-Z][A-Z0-9]{1,9}-\d+\b/g,
+  /\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b/g,
+  /[$€£]\s?\d[\d,.]*/g,
+  /\b\d+(?:[.,]\d+)?\s?(?:ms|sec|seconds?|min|minutes?|hours?|days?|weeks?|kb|mb|gb|tb|%|usd|eur|brl|tokens?)\b/gi,
+  /`([^`\n]{1,80})`/g,
+  /\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b/g,
+];
+
+/** The exact strings in a statement that must survive any rewrite: paths, urls, ids, versions, amounts, quoted names. */
+export function identifiersOf(text: string): string[] {
+  const seen = new Set<string>();
+  const found: string[] = [];
+  for (const pattern of IDENTIFIER_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const raw = (match[1] ?? match[0]).replace(/[.,;:!?)\]]+$/, "");
+      if (raw.length < 2 || seen.has(raw)) continue;
+      seen.add(raw);
+      found.push(raw);
+    }
+  }
+  // Several patterns see parts of one identifier (docs/NOTES.md also reads as NOTES.md): only the whole is kept.
+  return found.filter((id) => !found.some((other) => other !== id && other.length > id.length && other.includes(id)));
+}
+
+// ---------------------------------------------------------------------------------------------- the past
+
+/** A question is about the past when it says so: "what was", "back then", "last month", "three weeks ago". */
+export function isPastQuestion(text: string): boolean {
+  const folded = fold(text);
+  return /\b(?:was|were|had|did|used to|back then|at that time|ago|last (?:week|month|year)|previously|yesterday|as of|ontem|ayer|semana pas+ada|mes pas+ado|ano pas+ado|antigamente|anteriormente)\b/i.test(folded);
+}
+
+const PAST_MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const UNIT_MS: Record<string, number> = { day: 86_400_000, week: 7 * 86_400_000, month: 30 * 86_400_000, year: 365 * 86_400_000 };
+const NUMBER_WORDS: Record<string, number> = {
+  a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10,
+  un: 1, una: 1, dos: 2, cuatro: 4, siete: 7, ocho: 8, nueve: 9, diez: 10,
+};
+
+/**
+ * The moment a question about the past is about, or null when it names none: an ISO date, "yesterday", "last week",
+ * "last month", "last year", "three weeks ago", or a month ("in September", "back in March 2026"). A day or a month
+ * means its last instant, so what was said that day or that month counts. `offsetMinutes` is the local clock's
+ * distance east of UTC.
+ */
+export function parseAsOf(text: string, now: number, offsetMinutes = 0): number | null {
+  const t = fold(text);
+  const off = offsetMinutes * 60_000;
+  const local = new Date(now + off);
+  const y = local.getUTCFullYear();
+  const m = local.getUTCMonth();
+  const d = local.getUTCDate();
+  const endOf = (year: number, month: number, day: number): number => Date.UTC(year, month, day, 23, 59, 59, 999) - off;
+
+  const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/.exec(t);
+  if (iso) return endOf(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  const ago = /\b(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (day|week|month|year)s? ago\b/.exec(t);
+  if (ago) {
+    const count = /^\d+$/.test(ago[1] as string) ? Number(ago[1]) : (NUMBER_WORDS[ago[1] as string] ?? 1);
+    return now - count * (UNIT_MS[ago[2] as string] as number);
+  }
+  if (/\b(?:yesterday|ontem|ayer)\b/.test(t)) return endOf(y, m, d - 1);
+  if (/\b(?:last week|semana pas+ada)\b/.test(t)) {
+    const sinceMonday = (local.getUTCDay() + 6) % 7;
+    return Date.UTC(y, m, d - sinceMonday) - off - 1;
+  }
+  if (/\b(?:last month|mes pas+ado)\b/.test(t)) return endOf(y, m, 0);
+  if (/\b(?:last year|ano pas+ado)\b/.test(t)) return endOf(y - 1, 11, 31);
+  const named = new RegExp(`\\b(${PAST_MONTHS.join("|")})(?:,? (\\d{4}))?\\b`).exec(t);
+  if (named) {
+    // "may" is also a verb: it counts as a month only with a year or after a word that says "in" or "of".
+    if (named[1] === "may" && !named[2] && !/\b(?:in|of|during|since|until|before|by) may\b/.test(t)) return null;
+    const month = PAST_MONTHS.indexOf(named[1] as string);
+    let year = named[2] ? Number(named[2]) : y;
+    // With no year, a month later than this one is last year's ("in March", said in February), and this month is this month.
+    if (!named[2] && month > m) year -= 1;
+    return Math.min(endOf(year, month + 1, 0), now);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------------------------- when
+
+const DAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+export interface When {
+  at: number;
+  matched: string;
+}
+
+/**
+ * Reads when something is due from the way people say it: an ISO date, today, tomorrow, "in 3 days", "next friday",
+ * "by march 3", "at 5pm". `offsetMinutes` is the local clock's distance east of UTC. A date without a time falls at
+ * 09:00 local. Returns null when nothing is said, and never guesses.
+ */
+export function parseWhen(text: string, now: number, offsetMinutes = 0): When | null {
+  const lower = fold(text);
+  const shift = offsetMinutes * 60_000;
+  const local = new Date(now + shift);
+  const y = local.getUTCFullYear();
+  const mo = local.getUTCMonth();
+  const d = local.getUTCDate();
+  const wd = local.getUTCDay();
+  const make = (year: number, month: number, day: number, hour = 9, minute = 0): number => Date.UTC(year, month, day, hour, minute) - shift;
+
+  let time: { hour: number; minute: number } | null = null;
+  let timeText = "";
+  const t = /\b(?:at|as|a las)\s+(\d{1,2})(?::(\d{2})|h(\d{2})?)?\s*(am|pm)?\b/.exec(lower);
+  if (t) {
+    let hour = Number(t[1]);
+    const minute = t[2] ? Number(t[2]) : t[3] ? Number(t[3]) : 0;
+    if (t[4] === "pm" && hour < 12) hour += 12;
+    if (t[4] === "am" && hour === 12) hour = 0;
+    if (hour <= 23 && minute <= 59) {
+      time = { hour, minute };
+      timeText = t[0];
+    }
+  }
+  const at = (year: number, month: number, day: number, fallbackHour = 9): number => make(year, month, day, time?.hour ?? fallbackHour, time?.minute ?? 0);
+  const done = (value: number, matched: string): When => ({ at: value, matched: timeText && !matched.includes(timeText) ? `${matched} ${timeText}` : matched });
+
+  let m = /\b(\d{4})-(\d{2})-(\d{2})(?:[t ](\d{1,2}):(\d{2}))?\b/.exec(lower);
+  if (m) {
+    const hour = m[4] !== undefined ? Number(m[4]) : time?.hour ?? 9;
+    const minute = m[5] !== undefined ? Number(m[5]) : time?.minute ?? 0;
+    return { at: make(Number(m[1]), Number(m[2]) - 1, Number(m[3]), hour, minute), matched: m[0] };
+  }
+  m = /\b(?:in|em|en)\s+(\d+|an?|um|uma|un|una|one|two|dois|duas|dos|three|tres|four|quatro|cuatro|five|cinco|six|seis|seven|sete|siete|eight|oito|ocho|nine|nove|nueve|ten|dez|diez)\s+(minute|minuto|hour|hora|day|dia|week|semana|month|mes)(?:s|es)?\b/.exec(lower);
+  if (m) {
+    const n = /^\d+$/.test(m[1] as string) ? Number(m[1]) : (NUMBER_WORDS[m[1] as string] ?? 1);
+    const unitMap: Record<string, number> = {
+      minute: 60_000, minuto: 60_000,
+      hour: HOUR, hora: HOUR,
+      day: DAY, dia: DAY,
+      week: 7 * DAY, semana: 7 * DAY,
+      month: 30 * DAY, mes: 30 * DAY,
+    };
+    const unit = unitMap[m[2] as string] ?? DAY;
+    return { at: now + n * unit, matched: m[0] };
+  }
+  if (/\b(?:day after tomorrow|depois de amanha|pasado manana)\b/.test(lower)) return done(at(y, mo, d + 2), "day after tomorrow");
+  if (/\b(?:tomorrow|amanha|manana)\b/.test(lower)) return done(at(y, mo, d + 1), "tomorrow");
+  if (/\b(?:tonight|hoje a noite|esta noche)\b/.test(lower)) return done(at(y, mo, d, 20), "tonight");
+  if (/\b(?:today|hoje|hoy)\b/.test(lower)) return done(at(y, mo, d, 17), "today");
+  m = /\bnext\s+(week|month|year)\b/.exec(lower);
+  if (m) {
+    if (m[1] === "week") return done(at(y, mo, d + 7), m[0]);
+    if (m[1] === "month") return done(at(y, mo + 1, d), m[0]);
+    return done(at(y + 1, mo, d), m[0]);
+  }
+  m = /\bend of (?:the )?(day|week|month)\b/.exec(lower);
+  if (m) {
+    if (m[1] === "day") return done(at(y, mo, d, 17), m[0]);
+    if (m[1] === "week") return done(at(y, mo, d + ((5 - wd + 7) % 7), 17), m[0]);
+    return done(at(y, mo + 1, 0, 17), m[0]);
+  }
+  m = new RegExp(`\\b(?:next\\s+|on\\s+|by\\s+|this\\s+)?(${DAYS.join("|")})\\b`).exec(lower);
+  if (m) {
+    const target = DAYS.indexOf(m[1] as string);
+    const ahead = (target - wd + 7) % 7 || 7;
+    return done(at(y, mo, d + ahead), m[0]);
+  }
+  m = new RegExp(`\\b(${MONTHS.map((x) => x.slice(0, 3)).join("|")})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`).exec(lower);
+  if (m) {
+    const month = MONTHS.findIndex((x) => x.startsWith(m![1] as string));
+    const day = Number(m[2]);
+    if (day >= 1 && day <= 31) {
+      let when = at(y, month, day);
+      if (when < now) when = at(y + 1, month, day);
+      return done(when, m[0]);
+    }
+  }
+  if (time) return done(at(y, mo, d) < now ? at(y, mo, d + 1) : at(y, mo, d), timeText);
+  return null;
+}

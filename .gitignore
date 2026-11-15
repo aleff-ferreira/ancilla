@@ -1,0 +1,63 @@
+# ==============================================================================
+# Ancilla Git Ignore Rules
+# ==============================================================================
+
+# Node & Package Manager Build Artifacts
+node_modules/
+dist/
+dist-test/
+build/
+out/
+.next/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust & Tauri Desktop Artifacts
+**/target/
+**/src-tauri/gen/
+**/src-tauri/resources/
+**/src-tauri/binaries/
+apps/desktop/.cache/
+
+# Local Environment, Secrets & Credentials
+.env
+.env.*
+*.pem
+*.key
+auth.json
+.opencode/
+
+# Operating System & Editor Metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Test, Coverage & Browser Automation Output
+coverage/
+.playwright-mcp/
+*.png
+
+# Asset Whitelist: Retain Documentation & Shipped Brand Imagery
+!docs/assets/*.png
+!docs/assets/**/*.png
+!apps/desktop/src-tauri/icons/**/*.png
+!apps/web/public/*.png
+!assets/brand/*.png
+
+# Local Marketing & Non-Public Working Notes
+marketing/
+projects/
+
+# Local Agent Workspaces
+.agents/
+.agents/**
+
+# Vercel Deployment Artifacts
+.vercel
+
+# Worktree & Temporary Branch Checkouts
+.claude/worktrees/

@@ -1,0 +1,40 @@
+{
+  "name": "@ancilla/server",
+  "license": "AGPL-3.0-only",
+  "version": "0.29.0",
+  "description": "Ancilla local server: REST + SSE bridge between the shared UI and Muse MSP hosts",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "ancilla-server": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@ancilla/daemon": "*",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "docx": "^9.7.2",
+    "hast-util-to-html": "^9.0.5",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-to-hast": "^13.2.1",
+    "micromark-extension-gfm": "^3.0.0",
+    "pdfkit": "^0.20.2",
+    "ws": "^8.22.2"
+  },
+  "devDependencies": {
+    "@types/hast": "^3.0.5",
+    "@types/mdast": "^4.0.4",
+    "@types/node": "^22.0.0",
+    "@types/pdfkit": "^0.17.6",
+    "@types/ws": "^8.18.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
