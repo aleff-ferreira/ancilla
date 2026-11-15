@@ -19,9 +19,9 @@ const word = (...parts) => parts.join("");
 // again, these two must be set to the new commits, and a fetch will not fix a check that cannot find them.
 
 /** The baseline commit of the repository history. */
-export const BASELINE = "756d15b73e087f8962c793c0fa1c5b579730adaa";
+export const BASELINE = "2652971f23fa4e65e0218246131c5358778a7864";
 /** The repository start commit; every commit after it is checked under the strict rules. */
-export const HISTORY_START = "8e5b141f4285364e30011897cae74ed9adb29683";
+export const HISTORY_START = "2652971f23fa4e65e0218246131c5358778a7864";
 
 // The old rule, unchanged.
 const LEGACY_TOOLS = new RegExp([word("cla", "ude"), word("anthr", "opic"), word("copi", "lot"), word("co", "dex"), word("open", "ai"), "gemini", "cursor"].join("|"), "i");

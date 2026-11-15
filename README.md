@@ -18,8 +18,8 @@ Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.29.0:** overhauled voice mode responsiveness and speech comprehension—with dedicated lean Muse voice hosts, early `eot_gate` settlement, acoustic prosody turn-taking, pre-ready mic buffering, clause-level English/Portuguese/Spanish TTS, active-vocabulary phonetic grounding, spoken technical path/port/identifier normalization, ambient bystander and broadcast shielding, multilingual self-repaired memory capture, and macOS/Linux desktop microphone permissions.
-> [Read the release notes](docs/CHANGELOG.md#0290).
+> **New in 0.29.1:** codebase-wide runtime and UI optimizations—with a built-in zero-dependency account profile subsystem, streamlined MSP host and SQLite store internals, faster high-volume thread folding and motion primitives, leaner desktop sidecar bundling, and expanded verification suites across daemon, server, UI, web, and release tooling.
+> [Read the release notes](docs/CHANGELOG.md#0291).
 
 > **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
 > supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is

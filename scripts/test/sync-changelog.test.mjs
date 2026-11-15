@@ -89,9 +89,10 @@ const x = 1;
     dirs.push(tempDir);
     const outTarget = join(tempDir, "changelog.generated.ts");
 
+    const expectedVersion = JSON.parse(readFileSync("package.json", "utf8")).version;
     const entries = syncChangelog("docs/CHANGELOG.md", outTarget);
     assert.ok(entries.length > 0);
-    assert.equal(entries[0].version, "0.29.0");
+    assert.equal(entries[0].version, expectedVersion);
 
     const newGenerated = readFileSync(outTarget, "utf8");
     assert.equal(newGenerated, currentGenerated);

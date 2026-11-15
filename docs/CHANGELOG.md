@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.29.1
+
+### New
+
+- **Streamlined account profile management and runtime modularization.** Consolidated multi-account profile isolation into a zero-dependency built-in profile subsystem (`packages/server/src/profiles/`), tightened MSP stdio transport, SQLite persistence, and host session lifecycle internals across `@ancilla/daemon` and `@ancilla/server`, and trimmed desktop sidecar bundle overhead.
+- **Reactive UI rendering optimizations and expanded verification suites.** Optimized high-volume thread state folding, virtualized timeline rendering, diff layout passes, and shared motion primitives (`Collapse`, `PixelLoader`, `RollingDigits`, `SwapIcon`), alongside expanded automated test coverage across `@ancilla/daemon`, `@ancilla/server`, `@ancilla/ui`, `@ancilla/web`, and release/build verification scripts (`scripts/test/`).
+
+### Fixed
+
+- **Monotonic timing guards in high-volume fold and subscription quota tests.** Updated partial-page fold benchmarks and recreated-account future-stamp quota assertions to measure elapsed time against monotonic clocks rather than wall-clock jumps under virtualized runners.
+
 ## 0.29.0
 
 ### New

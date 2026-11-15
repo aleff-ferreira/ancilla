@@ -186,8 +186,8 @@ describe("the rules for a message", () => {
   });
 
   test("the baseline is the last commit of the history the old rule judged, named in full", () => {
-    assert.equal(BASELINE, "756d15b73e087f8962c793c0fa1c5b579730adaa");
-    assert.equal(HISTORY_START, "8e5b141f4285364e30011897cae74ed9adb29683");
+    assert.equal(BASELINE, "2652971f23fa4e65e0218246131c5358778a7864");
+    assert.equal(HISTORY_START, "2652971f23fa4e65e0218246131c5358778a7864");
     for (const sha of [BASELINE, HISTORY_START]) assert.match(sha, /^[0-9a-f]{40}$/, "an abbreviation can turn ambiguous as the history grows");
   });
 });
