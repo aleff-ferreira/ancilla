@@ -9,6 +9,10 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: readonly ChangelogEntry[] = [
   {
+    "version": "0.29.2",
+    "body": "### Fixed\n\n- **Windows Minimize and Close caption button glyphs (`WindowControls`).** Passed the Minimize (`\\uE921`) and Close (`\\uE8BB`) Fluent caption code points as JavaScript string expressions rather than JSX string attributes so they render single-character window icons instead of literal `\\u` text.\n- **Sidebar and Crew panel dropdown menu triggers and React roster keys.** Wired Radix `MenuTrigger` props and `forwardRef` tooltip forwarding onto the Sidebar's **Group threads**, **Updates**, and **Theme** buttons and the Crew panel actions menu, passed `key` directly on `RosterRow` elements during Crew roster reconciliation, and guarded client layout effects during server-side markup rendering."
+  },
+  {
     "version": "0.29.1",
     "body": "### New\n\n- **Streamlined account profile management and runtime modularization.** Consolidated multi-account profile isolation into a zero-dependency built-in profile subsystem (`packages/server/src/profiles/`), tightened MSP stdio transport, SQLite persistence, and host session lifecycle internals across `@ancilla/daemon` and `@ancilla/server`, and trimmed desktop sidecar bundle overhead.\n- **Reactive UI rendering optimizations and expanded verification suites.** Optimized high-volume thread state folding, virtualized timeline rendering, diff layout passes, and shared motion primitives (`Collapse`, `PixelLoader`, `RollingDigits`, `SwapIcon`), alongside expanded automated test coverage across `@ancilla/daemon`, `@ancilla/server`, `@ancilla/ui`, `@ancilla/web`, and release/build verification scripts (`scripts/test/`).\n\n### Fixed\n\n- **Monotonic timing guards in high-volume fold and subscription quota tests.** Updated partial-page fold benchmarks and recreated-account future-stamp quota assertions to measure elapsed time against monotonic clocks rather than wall-clock jumps under virtualized runners."
   },

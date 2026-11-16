@@ -185,9 +185,9 @@ export function WindowControls(): JSX.Element | null {
   );
   return (
     <div role="group" aria-label="Window Controls" className={controlsClassName}>
-      <CaptionButton label="Minimize" glyph="\uE921" onClick={() => frame.minimize()} />
+      <CaptionButton label="Minimize" glyph={"\uE921"} onClick={() => frame.minimize()} />
       <CaptionButton label={isMaximized ? "Restore" : "Maximize"} glyph={isMaximized ? "\uE923" : "\uE922"} onClick={() => { frame.toggleMaximize(); }} />
-      <CaptionButton isClose label="Close" glyph="\uE8BB" onClick={() => frame.close()} />
+      <CaptionButton isClose label="Close" glyph={"\uE8BB"} onClick={() => frame.close()} />
     </div>
   );
 }

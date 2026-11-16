@@ -167,10 +167,6 @@ interface ActionsMenuProps {
   onCloseAllPhases: () => void;
 }
 
-function MenuTriggerContainer({ children }: { readonly children: ReactNode }): ReactElement {
-  return <MenuTrigger asChild>{children}</MenuTrigger>;
-}
-
 function PanelActionsDropdownMenu({
   activeRun,
   isReadOnly,
@@ -186,7 +182,7 @@ function PanelActionsDropdownMenu({
   return (
     <Menu>
       <Tip label="More" side="bottom">
-        <MenuTriggerContainer>
+        <MenuTrigger asChild>
           <IconButton
             label="Crew panel actions"
             size="sm"
@@ -195,7 +191,7 @@ function PanelActionsDropdownMenu({
           >
             <DotsThreeIcon className="shrink-0" size={16} />
           </IconButton>
-        </MenuTriggerContainer>
+        </MenuTrigger>
       </Tip>
       <MenuContent align="end">
         <MenuItem

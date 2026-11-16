@@ -607,7 +607,13 @@ function GroupingOptionsDropdown() {
   const currentGrouping = useApp((s) => s.prefs.groupBy);
   return (
     <DropdownMenu>
-      <TipIconButton tip="Group threads" label="Group threads" icon={<FunnelSimpleIcon size={14} />} />
+      <Tip label="Group threads">
+        <MenuOpenTrigger asChild>
+          <IconButton size="xs" label="Group threads">
+            <FunnelSimpleIcon size={14} />
+          </IconButton>
+        </MenuOpenTrigger>
+      </Tip>
       <MenuFlyout align="end">
         <MenuRadioGroup value={currentGrouping} onValueChange={(val) => ctrl.setGroupBy(val === "status" ? "status" : "project")}>
           {GROUP_OPTIONS.map((g) => (
@@ -1048,14 +1054,14 @@ function ApplicationUpdatesMenu() {
 
   return (
     <DropdownMenu>
-      <MenuOpenTrigger asChild>
-        <Tip label={tipText} side="top">
+      <Tip label={tipText} side="top">
+        <MenuOpenTrigger asChild>
           <IconButton label="Updates" className="relative">
             <DownloadSimpleIcon size={15} />
             {hasUpdatePending ? <span aria-hidden="true" className={cn("absolute top-1.5 right-1.5 size-1.5 rounded-full", indicatorDotClass)} /> : null}
           </IconButton>
-        </Tip>
-      </MenuOpenTrigger>
+        </MenuOpenTrigger>
+      </Tip>
       <MenuFlyout side="top" align="start" className="w-[290px]">
         <UpdateSummaryHeader updates={updatesState} autoUpdate={autoUpdateEnabled} paused={areUpdatesPaused} now={minuteClock} />
         <MenuDivider />
@@ -1129,7 +1135,13 @@ function AppAppearanceMenu() {
 
   return (
     <DropdownMenu>
-      <TipIconButton tip="Theme" label="Theme" icon={themeDisplayIcon} side="top" />
+      <Tip label="Theme" side="top">
+        <MenuOpenTrigger asChild>
+          <IconButton size="xs" label="Theme">
+            {themeDisplayIcon}
+          </IconButton>
+        </MenuOpenTrigger>
+      </Tip>
       <MenuFlyout side="top" align="end" className="min-w-[160px]">
         <MenuRadioGroup value={selectedTheme} onValueChange={(t) => ctrl.setTheme(t === "light" || t === "dark" ? t : "system")}>
           {THEME_OPTIONS_LIST.map((opt) => (

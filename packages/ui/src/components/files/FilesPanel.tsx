@@ -43,6 +43,8 @@ import {
 import { DEFAULT_FILES_WIDTH } from "../../model/store.js";
 import type { FileContent, FileEntry } from "../../types.js";
 import { FileLinksContext, Markdown, languageFromPath, type FileLinks } from "../ui/Markdown.js";
+
+const useClientLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 import { Tip } from "../ui/overlays.js";
 import { Button, IconButton, Spinner, cn } from "../ui/primitives.js";
 import { highlight } from "sugar-high";
@@ -929,7 +931,7 @@ function SourceView({
     return segments.join("");
   }, [text, path]);
 
-  useLayoutEffect(() => {
+  useClientLayoutEffect(() => {
     const rootContainer = codeNodeRef.current;
     if (!rootContainer) return;
 

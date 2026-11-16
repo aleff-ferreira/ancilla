@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.29.2
+
+### Fixed
+
+- **Windows Minimize and Close caption button glyphs (`WindowControls`).** Passed the Minimize (`\uE921`) and Close (`\uE8BB`) Fluent caption code points as JavaScript string expressions rather than JSX string attributes so they render single-character window icons instead of literal `\u` text.
+- **Sidebar and Crew panel dropdown menu triggers and React roster keys.** Wired Radix `MenuTrigger` props and `forwardRef` tooltip forwarding onto the Sidebar's **Group threads**, **Updates**, and **Theme** buttons and the Crew panel actions menu, passed `key` directly on `RosterRow` elements during Crew roster reconciliation, and guarded client layout effects during server-side markup rendering.
+
 ## 0.29.1
 
 ### New

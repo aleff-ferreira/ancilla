@@ -18,8 +18,8 @@ Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.29.1:** codebase-wide runtime and UI optimizations—with a built-in zero-dependency account profile subsystem, streamlined MSP host and SQLite store internals, faster high-volume thread folding and motion primitives, leaner desktop sidecar bundling, and expanded verification suites across daemon, server, UI, web, and release tooling.
-> [Read the release notes](docs/CHANGELOG.md#0291).
+> **New in 0.29.2:** fixes Windows Minimize and Close caption button glyphs, restores dropdown trigger wiring on the Sidebar's Group threads, Updates, and Theme controls and the Crew panel actions menu, and fixes React key reconciliation on Crew roster agent rows.
+> [Read the release notes](docs/CHANGELOG.md#0292).
 
 > **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
 > supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is

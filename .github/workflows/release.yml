@@ -41,9 +41,8 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.29.1**
-    - **Streamlined account profile subsystem and server/daemon modularization.** Consolidates named account profile isolation into a built-in zero-dependency module (`packages/server/src/profiles/`), refines MSP stdio transport, SQLite store, and host session lifecycle internals across `@ancilla/daemon` and `@ancilla/server`, and trims desktop sidecar bundle overhead.
-    - **Reactive UI rendering optimizations and expanded verification coverage.** Optimizes high-volume thread state folding, timeline virtualization, diff rendering, and shared UI primitives (`Collapse`, `PixelLoader`, `RollingDigits`, `SwapIcon`), and expands automated test suites across daemon, server, UI, web, and release verification scripts.
+    **New in 0.29.2**
+    - **Window caption glyphs and dropdown menu triggers.** Restores single-codepoint Fluent caption icons on the Windows Minimize (`\uE921`) and Close (`\uE8BB`) window controls, wires Radix menu triggers and ref forwarding across the Sidebar's Group threads, Updates, and Theme menus as well as the Crew panel actions button, and fixes React key reconciliation on virtualized Crew roster rows.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 

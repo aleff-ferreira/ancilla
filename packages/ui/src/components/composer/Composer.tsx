@@ -23,6 +23,8 @@ import { ContextMeter } from "./ContextPanel.js";
 import { SlashMenu, slashOptionId, type SlashMenuState } from "./SlashMenu.js";
 import { SwapIcon } from "../ui/sourced.js";
 
+const useClientLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
 /** Persistent composer draft that syncs with disk storage across view switches. */
 function useDraft(storageKey: string): [string, (nextVal: string) => void] {
   const [draftValue, setDraftValue] = useState<string>(() => loadDraft(storageKey));
@@ -396,7 +398,7 @@ export function Composer(props: ComposerProps) {
     setHighlightedRow(0);
   }, [matchedCommandWord, activeMenu?.kind, activeMenu?.prefix, activeModelFilter]);
 
-  useLayoutEffect(() => {
+  useClientLayoutEffect(() => {
     const targetElement = textAreaRef.current;
     if (!targetElement) return;
     targetElement.style.height = "auto";

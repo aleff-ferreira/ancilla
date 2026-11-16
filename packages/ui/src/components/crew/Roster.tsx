@@ -420,7 +420,6 @@ export function Roster(props: RosterProps) {
         );
       case "agent": {
         const agentRowProps = {
-          key: entryItem.id,
           ref: (node: HTMLElement | null) => props.register(entryItem.id, node),
           agent: entryItem.agent,
           run: props.run,
@@ -436,7 +435,7 @@ export function Roster(props: RosterProps) {
           finale: props.finale,
           style: layoutStyle,
         };
-        return <RosterRow {...agentRowProps} />;
+        return <RosterRow key={entryItem.id} {...agentRowProps} />;
       }
     }
   };

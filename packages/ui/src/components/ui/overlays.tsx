@@ -1,6 +1,6 @@
 import { Dialog as RDialog, DropdownMenu, Tooltip as RTooltip } from "radix-ui";
 import { CaretRightIcon, CheckIcon, XIcon } from "./icons.js";
-import type { ReactElement, ReactNode } from "react";
+import { forwardRef, type ReactElement, type ReactNode } from "react";
 import { Shortcut, cn } from "./primitives.js";
 
 export const FLOATING = Object.freeze({ collisionPadding: 12, sticky: "always" as const });
@@ -12,15 +12,15 @@ export function TooltipProvider({ children }: TooltipProviderProps) {
 
 export type TipProps = { label: ReactNode; shortcut?: readonly string[] | string[]; side?: "top" | "right" | "bottom" | "left"; align?: "start" | "center" | "end"; children: ReactElement };
 
-export function Tip({ label, shortcut, side = "bottom", align = "center", children }: TipProps) {
+export const Tip = forwardRef<HTMLElement, TipProps>(function Tip({ label, shortcut, side = "bottom", align = "center", children, ...rest }, ref) {
   const shortcutDisplay = shortcut ? <Shortcut keys={shortcut} className="opacity-80 [&_kbd]:border-transparent [&_kbd]:bg-white/15 [&_kbd]:text-inverse-fg" /> : null;
   const tipClasses = "pop z-[var(--z-tooltip)] flex max-w-[min(360px,calc(100dvw-24px))] items-center gap-2 rounded-md bg-inverse px-2 py-1 text-xs font-medium text-inverse-fg";
 
   return <RTooltip.Root>
-      <RTooltip.Trigger asChild>{children}</RTooltip.Trigger>
+      <RTooltip.Trigger ref={ref as never} asChild {...rest}>{children}</RTooltip.Trigger>
       <RTooltip.Portal><RTooltip.Content side={side} align={align} sideOffset={6} {...FLOATING} className={tipClasses}>{label}{shortcutDisplay}</RTooltip.Content></RTooltip.Portal>
     </RTooltip.Root>;
-}
+});
 
 export const Menu = DropdownMenu.Root;
 export const MenuTrigger = DropdownMenu.Trigger;

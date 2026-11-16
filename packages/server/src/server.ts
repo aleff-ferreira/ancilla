@@ -172,7 +172,7 @@ import {
 } from "./subscriptionQuota.js";
 import { ensureMuseStorage, inspectMuseStorage, repairMuseStorage, type MuseStorageDiagnosis, type MuseStorageOptions } from "./museStorage.js";
 
-export const ANCILLA_VERSION = "0.29.1";
+export const ANCILLA_VERSION = "0.29.2";
 
 /** Information describing why and how a host process exited. */
 export interface HostExit {
