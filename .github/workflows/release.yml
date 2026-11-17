@@ -41,8 +41,10 @@ env:
 
     **Deep Research:** investigate questions with parallel workers, follow their searches and sources, and save cited reports as PDF, Word or HTML. **Crew:** follow ordinary prompts and tools alongside workflows, native agents and background tasks, with timelines, live status and controls for work that needs you.
 
-    **New in 0.29.2**
-    - **Window caption glyphs and dropdown menu triggers.** Restores single-codepoint Fluent caption icons on the Windows Minimize (`\uE921`) and Close (`\uE8BB`) window controls, wires Radix menu triggers and ref forwarding across the Sidebar's Group threads, Updates, and Theme menus as well as the Crew panel actions button, and fixes React key reconciliation on virtualized Crew roster rows.
+    **New in 0.30.0**
+    - **A model on this computer can talk fast.** A voice call now keeps what a local model has already read of its prompt, tells a model that thinks first (Qwen3.5) not to, and gives a small model seven tools plus a router for status and memory questions in English, Portuguese and Spanish. On a graphics card its first token arrives in about 40 to 150 ms instead of 600 to 700 ms. Browsing and project work stay with the Assistant's model.
+    - **Calls on Muse stop losing their answers.** A note the harness leaves in a thread is never spoken or stored, and a slow brain is asked once for a thought, not once per pause, so a cough after your question no longer loses it.
+    - **A flight recorder for calls.** One line of words and numbers per turn says why a call thought you had finished, what it heard and how long the model took, and is deleted with its conversation.
 
     Read [what changed in this release](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/CHANGELOG.md) or [explore the interface](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md).
 

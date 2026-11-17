@@ -18,8 +18,8 @@ Venice, OpenAI, Anthropic, Google Gemini, Ollama, LM Studio, llama.cpp, vLLM) on
 [Deep Research](#deep-research) · [Crew monitoring](#crew-agent-monitoring) ·
 [Build from source](#build-from-source) · [Changelog](docs/CHANGELOG.md)
 
-> **New in 0.29.2:** fixes Windows Minimize and Close caption button glyphs, restores dropdown trigger wiring on the Sidebar's Group threads, Updates, and Theme controls and the Crew panel actions menu, and fixes React key reconciliation on Crew roster agent rows.
-> [Read the release notes](docs/CHANGELOG.md#0292).
+> **New in 0.30.0:** a model on this computer can talk fast in a voice call (the prompt stays read, and a small model gets seven tools and a router for status and memory questions), calls on Muse stop losing their answers, and a flight recorder explains each turn of a call.
+> [Read the release notes](docs/CHANGELOG.md#0300).
 
 > **Unofficial community project.** Ancilla is an independent open-source project and is not made, endorsed, or
 > supported by Meta, OpenAI, Anthropic, Google, GitHub, Microsoft, Moonshot AI, Alibaba, OpenRouter, or Venice, and is
