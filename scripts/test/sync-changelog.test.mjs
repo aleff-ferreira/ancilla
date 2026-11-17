@@ -84,7 +84,8 @@ const x = 1;
   });
 
   test("syncs real repo changelog without altering changelog.generated.ts content", () => {
-    const currentGenerated = readFileSync("packages/ui/src/model/changelog.generated.ts", "utf8");
+    // A Windows checkout turns the committed file's line endings into CRLF while the generator writes LF: the text is what is compared.
+    const currentGenerated = readFileSync("packages/ui/src/model/changelog.generated.ts", "utf8").replace(/\r\n/g, "\n");
     const tempDir = mkdtempSync(join(tmpdir(), "ancilla-changelog-sync-"));
     dirs.push(tempDir);
     const outTarget = join(tempDir, "changelog.generated.ts");
