@@ -229,7 +229,9 @@ after(async () => {
 
 describe("a task the voice delegates", () => {
   it("runs in a Muse thread on the model chosen for the Assistant, whatever the voice runs on", async () => {
-    const project = await mkdtemp(join(tmpdir(), "ancilla-talker-project-"));
+    // The task's folder goes through the credential check, which reads a 28-character run that is not a path as a
+    // secret when it looks random. On Windows the last folder name is such a run, so the prefix stays short.
+    const project = await mkdtemp(join(tmpdir(), "talker-"));
     dirs.push(project);
     const connection = new FakeConnection();
     let sessions = 0;
