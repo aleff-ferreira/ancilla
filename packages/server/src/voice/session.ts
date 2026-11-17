@@ -16,7 +16,8 @@ import type { Scheduler } from "./scheduler.js";
 import { SpeechOut } from "./speech.js";
 import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
 import { selectToolsForTurn } from "./tool-router.js";
-import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEvent } from "./turn.js";
+import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEndReason, type TurnEvent } from "./turn.js";
+import type { FlightLine } from "./flight.js";
 
 /**
  * One voice call. Microphone audio goes in; speech comes out, and in between the call listens, decides when the person has
@@ -40,8 +41,17 @@ export interface SessionConfig {
   aheadMs: number;
   /** A model that has said nothing after this long is covered by a short phrase. */
   fillerAfterMs: number;
-  /** Speech that resumes within this long of a turn ending, before the reply is heard, continues that turn. */
+  /**
+   * Speech that resumes within this long of a turn ending, before the reply is heard, continues that turn. A slow brain
+   * (a Muse thread) has no such limit: until the first sound of the answer, what the person adds is the same turn.
+   */
   mergeWindowMs: number;
+  /**
+   * For a slow brain: how much longer than the turn-taker's own verdict the call stays quiet before it asks, so that a
+   * person who pauses between thoughts is asked once, not once per thought. Shorter when the words look finished, none for
+   * a command. 0 asks at once, as for any other brain.
+   */
+  slowHoldMs: number;
   /** How long it must have been quiet before the assistant says something nobody asked for. */
   proactiveQuietMs: number;
   maxHistory: number;
@@ -61,6 +71,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   aheadMs: 2400,
   fillerAfterMs: 1500,
   mergeWindowMs: 1200,
+  slowHoldMs: 900,
   proactiveQuietMs: 2500,
   maxHistory: 40,
   maxToolRounds: 6,
@@ -85,6 +96,8 @@ export interface SessionDeps {
   takeEarlySettleSavedMs?: () => number | null;
   /** Called once when the call ends, whichever side ended it, so that whatever holds the connection can let it go. */
   onClosed?: (reason: string) => void;
+  /** Where the flight recorder's lines go, one for every turn the call decided on: see `flight.ts`. */
+  flight?: (line: FlightLine) => void;
 }
 
 const INPUT_RATE = 16;
@@ -160,6 +173,43 @@ class SampleRing {
   }
 }
 
+/** What the flight recorder keeps of a turn while it is still going. */
+interface FlightTurn {
+  turn: number | null;
+  endReason: string;
+  silenceMs: number | null;
+  speechMs: number | null;
+  streamer: string | null;
+  reread: string;
+  text: string;
+  confidence: number | null;
+  /** Set by whatever knows best what became of the turn; the place that writes the line falls back to its own word. */
+  fate: string | null;
+  rules: string[];
+  fragments: number;
+  runs: number;
+  cancelled: number;
+  firstTokenMs: number | null;
+  settled: boolean;
+}
+
+/**
+ * What the person said in a turn that has ended, kept back a little longer because a slow brain is asked once for a
+ * thought and not once per pause. It is answered when the quiet has lasted, and joined to what they add if they go on.
+ */
+interface HeldTurn {
+  text: string;
+  trace: TurnTrace;
+  prewarmed: { text: string; promise: Promise<string | null> } | null;
+  candidateNote: string | null;
+  fragments: number;
+  flight: FlightTurn;
+  /** Stops the timer that answers it; null while the person is speaking again. */
+  cancel: (() => void) | null;
+  /** The person is speaking again, so the timer is stopped until that turn is over. */
+  paused: boolean;
+}
+
 interface Reply {
   id: number;
   turn: number;
@@ -177,6 +227,10 @@ interface Reply {
   cancelTrailingFlush: (() => void) | null;
   sentFirstToken: boolean;
   completedTools: string[];
+  flight: FlightTurn | null;
+  /** Requests to the brain that have not ended, and when the first was made. */
+  brainOpen: number;
+  brainStartedAt: number | null;
 }
 
 export class VoiceSession {
@@ -221,6 +275,10 @@ export class VoiceSession {
   private readonly recentToolNames = new Set<string>();
   private lastTurnEndAt = -Infinity;
   private pendingMerge: { text: string; turn: number; count: number } | null = null;
+  /** The words of a turn that has ended, waiting out a little more quiet before a slow brain is asked. */
+  private held: HeldTurn | null = null;
+  /** Rules that fired with no turn to tell them to (an echo dismissed while the call was quiet): told to the next turn. */
+  private looseRules: string[] = [];
   private speculativeContext: { text: string; promise: Promise<string | null> } | null = null;
   private abortedToolNotes: string[] = [];
   private echoDismissedAtSample = 0;
@@ -412,6 +470,7 @@ export class VoiceSession {
           if (message.on) {
             this.disposeStream();
             this.taker = new TurnTaker(this.cfg.turn);
+            this.rearmHeld();
             this.syncExpectAnswer();
             this.prosody.reset();
             this.continuousTurnMs = 0;
@@ -460,6 +519,12 @@ export class VoiceSession {
     this.cancelTick?.();
     this.unsubscribe?.();
     this.unsubscribeApprovals?.();
+    const held = this.held;
+    this.held = null;
+    if (held) {
+      held.cancel?.();
+      this.settleFlight(held.flight, "call-ended", held.trace);
+    }
     const r = this.reply;
     if (r) {
       r.aborted = true;
@@ -468,6 +533,7 @@ export class VoiceSession {
       r.cancelTrailingFlush?.();
       r.cancelTrailingFlush = null;
       r.speech.abort();
+      this.settleReplyFlight(r, "call-ended", null);
     }
     this.reply = null;
     this.disposeStream();
@@ -553,6 +619,7 @@ export class VoiceSession {
         this.speculativeContext = null;
         this.disposeStream();
         this.taker = new TurnTaker(this.cfg.turn);
+        this.rearmHeld();
         this.syncExpectAnswer();
         this.prosody.reset();
         this.turnFrameRms = [];
@@ -642,6 +709,8 @@ export class VoiceSession {
           this.turnFrameRms = [];
           this.continuousTurnMs = 0;
           this.disposeStream();
+          // A sound that was not a turn: what the person had said before it is still waiting to be answered.
+          this.afterNothing();
           break;
         case "duck":
           this.send({ type: "duck", on: ev.on });
@@ -689,20 +758,35 @@ export class VoiceSession {
 
   private lastMergedTurn: { turn: number; count: number } = { turn: 0, count: 0 };
 
+  /** Whether the brain takes seconds to start an answer, so that it is asked once for a thought and never asked again for the same one. */
+  private isSlow(): boolean {
+    return this.deps.brain.capabilities?.slow === true;
+  }
+
   private onSpeechStart(_t: number): void {
     const now = this.deps.scheduler.now();
+    const held = this.held;
+    if (held) {
+      // The person goes on before anyone was asked: what they add is the same turn, and the clock on it stops until they are quiet again.
+      held.cancel?.();
+      held.cancel = null;
+      held.paused = true;
+    }
     const r = this.reply;
     const awaitingInFlightMuse = this.deps.host.pendingApproval?.()?.inFlightMuse === true;
     if (r && !r.speech.started && !r.aborted && r.userText !== null && !awaitingInFlightMuse) {
       // The person is speaking again before they were answered. Soon after the last turn it is the same turn, carried on,
-      // capped at 2 merges and 450 characters so ambient chatter never snowballs indefinitely.
-      if (now - this.lastTurnEndAt <= this.cfg.mergeWindowMs) {
+      // capped at 2 merges and 450 characters so ambient chatter never snowballs indefinitely. For a slow brain there is no
+      // window: until the first sound of the answer they have heard nothing, so what they add continues the same turn.
+      let merged = false;
+      if (this.isSlow() || now - this.lastTurnEndAt <= this.cfg.mergeWindowMs) {
         const prevCount = this.lastMergedTurn.turn === r.turn ? this.lastMergedTurn.count : 0;
         if (prevCount < 2 && r.userText.length <= 450) {
           this.pendingMerge = { text: r.userText, turn: r.turn, count: prevCount + 1 };
+          merged = true;
         }
       }
-      this.cancelPendingReply();
+      this.cancelPendingReply(merged ? "merged" : "cancelled", merged ? "merged-into-next" : "speech-resumed");
     }
     this.send({ type: "state", state: "listening" });
   }
@@ -755,6 +839,7 @@ export class VoiceSession {
     if (this.agent === "speaking" && !this.taker.inTurn) {
       // Something over the assistant's voice that is the assistant's voice coming back is not the person.
       if (this.looksLikeEcho(nextText)) {
+        this.noteRule("echo-dismissed");
         this.echoDismissedAtSample = this.ring.total;
         this.echoDismissedUntilQuiet = true;
         await this.handleEvents(this.taker.dismissOverlap(t), t);
@@ -796,6 +881,17 @@ export class VoiceSession {
   }
 
   private async onTurnEnd(ev: Extract<TurnEvent, { type: "turn_end" }>): Promise<void> {
+    let kept = false;
+    try {
+      kept = await this.judgeTurnEnd(ev);
+    } finally {
+      // What the person said before they went on, held for them, is not lost because what came after was nothing.
+      if (!kept) this.afterNothing();
+    }
+  }
+
+  /** Reads a finished turn. True when its words were handed on (answered, or held to be), false when it came to nothing. */
+  private async judgeTurnEnd(ev: Extract<TurnEvent, { type: "turn_end" }>): Promise<boolean> {
     const now = this.deps.scheduler.now();
     const stream = this.stream;
     this.stream = null;
@@ -822,12 +918,17 @@ export class VoiceSession {
     this.userText = "";
     const prewarmed = this.speculativeContext;
     this.speculativeContext = null;
+    const flight = this.openFlight(ev, asrResult?.streamingText ?? null, rawText);
     if (rawText === "") {
-      this.pendingMerge = null;
+      // Words of theirs that are waiting (held, or asked about and dropped when this speech began) are answered, and not apologised over.
+      const waiting = this.hasWaiting();
+      if (!waiting) this.pendingMerge = null;
       this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
       // Someone clearly spoke and nothing could be made of it: say so, rather than let them wonder if they were heard.
-      if (ev.speechMs >= 700 && this.agent === "idle" && !this.reply && stream) this.sayDirect(didntCatchPhrase(this.replyLang()), false);
-      return;
+      const said = !waiting && ev.speechMs >= 700 && this.agent === "idle" && !this.reply && Boolean(stream);
+      if (said) this.sayDirect(didntCatchPhrase(this.replyLang()), false);
+      this.settleFlight(flight, said ? "didnt-catch-empty" : "empty-silent");
+      return false;
     }
 
     const normalized = normalizeSpokenTechnical(rawText);
@@ -839,19 +940,23 @@ export class VoiceSession {
       vocabulary: this.deps.host.vocabulary?.() ?? [],
     });
     const text = grounded.text.trim();
+    flight.text = text;
+    if (grounded.meanLogProb !== null) flight.confidence = Math.round(Math.exp(Math.max(-10, grounded.meanLogProb)) * 1000) / 1000;
 
     if (
       this.mode === "hands-free" &&
       this.agent === "idle" &&
       !this.reply &&
       !this.pendingMerge &&
+      !this.held &&
       !this.assistantAskedQuestion &&
       !this.deps.host.pendingApproval?.() &&
       isBackchannel(text) &&
       ev.speechMs < 750
     ) {
       this.send({ type: "state", state: "listening" });
-      return;
+      this.settleFlight(flight, "backchannel-drop");
+      return false;
     }
 
     if (
@@ -864,13 +969,20 @@ export class VoiceSession {
       !containsPersonaWakeWord(text, this.deps.host.persona().name)
     ) {
       this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
-      return;
+      this.settleFlight(flight, "quiet-drop");
+      return false;
     }
 
     if (grounded.garbled && this.agent === "idle" && !this.reply) {
+      if (this.hasWaiting()) {
+        // What they added could not be made out; what they had already said is answered rather than lost.
+        this.settleFlight(flight, "garbled-restored");
+        return false;
+      }
       this.pendingMerge = null;
       this.sayDirect(didntCatchPhrase(this.replyLang()), false);
-      return;
+      this.settleFlight(flight, "didnt-catch-garbled");
+      return false;
     }
 
     if (turnMedianRms >= 0.015 && (grounded.meanLogProb === null || grounded.meanLogProb > -0.9)) {
@@ -887,7 +999,93 @@ export class VoiceSession {
     if (grounded.meanLogProb !== null) trace.asrConfidence = Math.exp(Math.max(-10, grounded.meanLogProb));
     if (grounded.groundedEntities.length > 0) trace.groundedEntities = grounded.groundedEntities;
 
-    this.beginUserTurn(text, "voice", trace, prewarmed, grounded.candidateNote);
+    const holdMs = this.holdFor(ev.reason, this.held ? `${this.held.text} ${text}` : text, (this.held?.fragments ?? 0) + 1);
+    if (holdMs > 0) {
+      this.holdCommit({ text, trace, prewarmed, candidateNote: grounded.candidateNote, flight }, holdMs);
+      return true;
+    }
+    this.beginUserTurn(text, "voice", trace, prewarmed, grounded.candidateNote, flight);
+    return true;
+  }
+
+  /**
+   * How much longer a slow brain waits, after the turn-taker's verdict, before it is asked. A finished-looking sentence
+   * waits a little, words that trail off a little more, anything unsure the full time, and a command not at all: "stop"
+   * is answered at once. Nothing waits for a long turn, for a stop word, or while the call is waiting for an approval.
+   */
+  private holdFor(reason: TurnEndReason, text: string, fragments: number): number {
+    if (!this.isSlow() || this.mode !== "hands-free" || this.cfg.slowHoldMs <= 0) return 0;
+    if (reason === "command" || reason === "max-silence" || reason === "max-length") return 0;
+    if (isStopIntent(text) || fragments > 4 || text.length > 450) return 0;
+    if (this.deps.host.pendingApproval?.()) return 0;
+    if (reason === "complete") return Math.round(this.cfg.slowHoldMs * 0.4);
+    if (reason === "incomplete") return Math.round(this.cfg.slowHoldMs * 0.6);
+    return this.cfg.slowHoldMs;
+  }
+
+  /** Keeps a turn back for `ms` of quiet before it is answered; joins it to the one it continues, when the person had gone on. */
+  private holdCommit(
+    part: { text: string; trace: TurnTrace; prewarmed: HeldTurn["prewarmed"]; candidateNote: string | null; flight: FlightTurn },
+    ms: number,
+  ): void {
+    const earlier = this.held;
+    earlier?.cancel?.();
+    if (earlier) this.settleFlight(earlier.flight, "merged");
+    const fragments = (earlier?.fragments ?? 0) + 1;
+    part.flight.rules.push(`held:${ms}`);
+    part.flight.fragments = fragments;
+    const held: HeldTurn = {
+      text: earlier ? `${earlier.text} ${part.text}`.replace(/\s+/g, " ").trim() : part.text,
+      trace: part.trace,
+      prewarmed: earlier ? null : part.prewarmed,
+      candidateNote: part.candidateNote ?? earlier?.candidateNote ?? null,
+      fragments,
+      flight: part.flight,
+      cancel: null,
+      paused: false,
+    };
+    held.cancel = this.deps.scheduler.after(ms, () => this.enqueue(async () => this.commitHeld(held)));
+    this.held = held;
+  }
+
+  private commitHeld(held: HeldTurn): void {
+    if (this.held !== held || held.paused || this.closed) return;
+    this.held = null;
+    this.beginUserTurn(held.text, "voice", held.trace, held.prewarmed, held.candidateNote, held.flight);
+  }
+
+  /** The person was speaking again and it came to nothing: the held turn is answered after a short quiet of its own. */
+  private rearmHeld(): void {
+    const held = this.held;
+    if (!held || !held.paused) return;
+    held.paused = false;
+    held.cancel = this.deps.scheduler.after(Math.min(400, this.cfg.slowHoldMs), () => this.enqueue(async () => this.commitHeld(held)));
+  }
+
+  /** Whether words of the person are waiting to be answered: held for a little more quiet, or asked about and dropped when they went on. */
+  private hasWaiting(): boolean {
+    return this.held !== null || (this.isSlow() && this.pendingMerge !== null && this.reply === null);
+  }
+
+  /**
+   * What was said before a sound that came to nothing (a cough, words that could not be made out, a sound of listening)
+   * is not lost: a held turn is answered after its quiet, and a question whose answer was dropped when the person began to
+   * speak is asked again.
+   */
+  private afterNothing(): void {
+    if (this.held) {
+      this.rearmHeld();
+      return;
+    }
+    const m = this.pendingMerge;
+    if (!m || !this.isSlow() || this.reply) return;
+    this.pendingMerge = null;
+    const last = this.history[this.history.length - 1];
+    if (last && last.role === "user") this.history.pop();
+    const flight = this.newFlight("restored", m.text, ["restored-after-nothing"]);
+    flight.turn = m.turn;
+    this.lastMergedTurn = { turn: m.turn, count: m.count };
+    this.startReply(m.turn, m.text, "voice", null, null, null, flight);
   }
 
   private async onPushToTalk(down: boolean): Promise<void> {
@@ -926,6 +1124,9 @@ export class VoiceSession {
       if (grounded.garbled && this.agent === "idle" && !this.reply) {
         this.pendingMerge = null;
         this.sayDirect(didntCatchPhrase(this.replyLang()), false);
+        const dropped = this.newFlight("ptt", rawText, this.looseRules.splice(0));
+        if (grounded.meanLogProb !== null) dropped.confidence = Math.round(Math.exp(Math.max(-10, grounded.meanLogProb)) * 1000) / 1000;
+        this.settleFlight(dropped, "didnt-catch-garbled");
         return;
       }
       const text = grounded.text.trim();
@@ -950,6 +1151,7 @@ export class VoiceSession {
     trace: TurnTrace | null,
     prewarmed: { text: string; promise: Promise<string | null> } | null = null,
     candidateNote: string | null = null,
+    flight: FlightTurn | null = null,
   ): void {
     if (text === "") return;
     // The person has the floor, in words that could be made out (a cough does not take it): what the call would have opened
@@ -958,6 +1160,22 @@ export class VoiceSession {
     this.speculativeContext = null;
     this.assistantAskedQuestion = false;
     this.syncExpectAnswer();
+
+    const held = this.held;
+    if (held) {
+      // Words that were being held for a slow brain, and the person has now said more (or typed): one turn, the earlier words first.
+      held.cancel?.();
+      this.held = null;
+      if (source === "voice" && isStopIntent(text) && wordsOf(text).length <= 3) {
+        // "Stop" over words that had not been asked about yet: they took them back.
+        this.settleFlight(held.flight, "taken-back");
+      } else {
+        this.settleFlight(held.flight, "merged");
+        text = `${held.text} ${text}`.replace(/\s+/g, " ").trim();
+        prewarmed = null;
+        if (flight) flight.fragments += held.fragments;
+      }
+    }
 
     if (
       this.pendingMerge &&
@@ -968,6 +1186,7 @@ export class VoiceSession {
 
     let turn: number;
     let said = text;
+    if (flight && this.pendingMerge) flight.fragments += this.pendingMerge.count;
     if (this.pendingMerge) {
       // The same turn carried on: the earlier words go first, under the same number.
       said = `${this.pendingMerge.text} ${text}`.replace(/\s+/g, " ").trim();
@@ -1013,6 +1232,10 @@ export class VoiceSession {
     }
 
     const contextPromise = source === "voice" && prewarmed ? prewarmed.promise : null;
+    if (flight) {
+      flight.turn = turn;
+      flight.text = said;
+    }
     this.startReply(
       turn,
       said,
@@ -1020,6 +1243,7 @@ export class VoiceSession {
       trace ? Object.assign(new TurnTrace(turn), trace, { turn }) : null,
       contextPromise,
       candidateNote,
+      flight,
     );
   }
 
@@ -1065,6 +1289,9 @@ export class VoiceSession {
       cancelTrailingFlush: null,
       sentFirstToken: false,
       completedTools: [],
+      flight: null,
+      brainOpen: 0,
+      brainStartedAt: null,
     };
     return reply;
   }
@@ -1117,6 +1344,7 @@ export class VoiceSession {
     trace: TurnTrace | null,
     prewarmedContext: Promise<string | null> | null = null,
     candidateNote: string | null = null,
+    flight: FlightTurn | null = null,
   ): void {
     if (this.reply && !this.reply.aborted) {
       const prev = this.reply;
@@ -1126,9 +1354,11 @@ export class VoiceSession {
       prev.cancelTrailingFlush = null;
       prev.abort.abort();
       prev.speech.abort();
+      this.settleReplyFlight(prev, "replaced", "replaced-by-new-turn");
       this.reply = null;
     }
     const reply = this.newReply(turn, text, source, trace);
+    reply.flight = flight;
     this.reply = reply;
     this.setAgent("thinking");
     reply.cancelFiller = this.deps.scheduler.after(this.cfg.fillerAfterMs, () => this.onFillerDue(reply));
@@ -1147,6 +1377,10 @@ export class VoiceSession {
 
   private failReply(reply: Reply): void {
     if (reply.aborted || this.reply !== reply) return;
+    if (reply.flight) {
+      reply.flight.fate = "failed";
+      reply.flight.rules.push("brain-error");
+    }
     const phrase = failedPhrase(this.replyLang());
     reply.full += `${reply.full === "" ? "" : " "}${phrase}`;
     reply.speech.enqueue(phrase);
@@ -1221,14 +1455,21 @@ export class VoiceSession {
         const calls: ToolCall[] = [];
         const startedTools = new Map<string, { promise: Promise<ToolResult>; accounted: boolean }>();
         let roundText = "";
-        for await (const event of brain.stream({
-          messages: [...base, ...rounds],
-          tools: round > this.cfg.maxToolRounds ? [] : tools,
-          signal: reply.abort.signal,
-        })) {
-          if (reply.aborted) return;
-          this.onBrainEvent(reply, event, calls, startedTools, (t) => (roundText += t));
-          if (event.type === "error") failed = true;
+        if (reply.flight) reply.flight.runs++;
+        reply.brainStartedAt ??= scheduler.now();
+        reply.brainOpen++;
+        try {
+          for await (const event of brain.stream({
+            messages: [...base, ...rounds],
+            tools: round > this.cfg.maxToolRounds ? [] : tools,
+            signal: reply.abort.signal,
+          })) {
+            if (reply.aborted) return;
+            this.onBrainEvent(reply, event, calls, startedTools, (t) => (roundText += t));
+            if (event.type === "error") failed = true;
+          }
+        } finally {
+          reply.brainOpen--;
         }
         this.clearTrailingFlush(reply);
         if (reply.aborted) return;
@@ -1296,6 +1537,9 @@ export class VoiceSession {
         if (!reply.sentFirstToken || !reply.trace?.firstToken) {
           if (reply.trace && reply.trace.firstToken === null) reply.trace.firstToken = this.deps.scheduler.now();
         }
+        if (reply.flight && reply.flight.firstTokenMs === null && reply.brainStartedAt !== null) {
+          reply.flight.firstTokenMs = Math.max(0, Math.round(this.deps.scheduler.now() - reply.brainStartedAt));
+        }
         reply.sentFirstToken = true;
         reply.cancelFiller?.();
         const soFar = addText(event.delta);
@@ -1357,6 +1601,7 @@ export class VoiceSession {
     if (text !== "") this.history.push({ role: "assistant", content: text });
     this.updateQuestionState(text);
     this.deps.host.record({ turn: reply.turn, role: "assistant", text, source: reply.source === "event" ? "event" : "voice", at: this.deps.scheduler.now() });
+    this.settleFlight(reply.flight, "answered", reply.trace);
     this.reply = null;
     this.setAgent("idle");
   }
@@ -1374,7 +1619,7 @@ export class VoiceSession {
   }
 
   /** The reply is over before it was heard (the person spoke again), or is being replaced. */
-  private cancelPendingReply(): void {
+  private cancelPendingReply(fate = "cancelled", rule = "cancelled-before-audio"): void {
     const r = this.reply;
     if (!r || r.speech.started) return;
     r.aborted = true;
@@ -1383,6 +1628,7 @@ export class VoiceSession {
     this.clearTrailingFlush(r);
     r.speech.abort();
     if (r.completedTools.length > 0) this.abortedToolNotes.push(...r.completedTools);
+    this.settleReplyFlight(r, fate, rule);
     this.reply = null;
     this.setAgent("idle");
   }
@@ -1411,7 +1657,87 @@ export class VoiceSession {
       this.abortedToolNotes.push(...r.completedTools);
     }
     this.deps.log(`reply ${r.id} stopped: ${reason}${wasSpeaking ? `, heard "${heard.slice(0, 60)}"` : ""}`);
+    this.settleReplyFlight(r, wasSpeaking ? "barge-in" : "cancelled", `${wasSpeaking ? "barge-in" : "interrupted-before-audio"}: ${reason}`);
     this.setAgent("idle");
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // The flight recorder
+
+  /** The record of a turn that has just ended, before anyone knows what becomes of it. */
+  private openFlight(ev: Extract<TurnEvent, { type: "turn_end" }>, streamer: string | null, reread: string): FlightTurn {
+    const flight = this.newFlight(ev.reason, reread, this.looseRules.splice(0));
+    flight.silenceMs = Math.round(ev.silenceMs);
+    flight.speechMs = Math.round(ev.speechMs);
+    flight.streamer = streamer !== null && streamer.trim() !== "" && streamer.trim() !== reread ? streamer.trim() : null;
+    flight.reread = reread;
+    return flight;
+  }
+
+  private newFlight(endReason: string, text: string, rules: string[] = []): FlightTurn {
+    return {
+      turn: null,
+      endReason,
+      silenceMs: null,
+      speechMs: null,
+      streamer: null,
+      reread: text,
+      text,
+      confidence: null,
+      fate: null,
+      rules,
+      fragments: 1,
+      runs: 0,
+      cancelled: 0,
+      firstTokenMs: null,
+      settled: false,
+    };
+  }
+
+  /** Writes the line for a turn, once, with what became of it. */
+  private settleFlight(flight: FlightTurn | null, fate: string, trace: TurnTrace | null = null): void {
+    if (!flight || flight.settled) return;
+    flight.settled = true;
+    const sink = this.deps.flight;
+    if (!sink) return;
+    try {
+      sink({
+        v: 1,
+        at: this.deps.scheduler.now(),
+        call: this.id,
+        turn: flight.turn,
+        endReason: flight.endReason,
+        silenceMs: flight.silenceMs,
+        speechMs: flight.speechMs,
+        streamer: flight.streamer,
+        reread: flight.reread,
+        text: flight.text,
+        confidence: flight.confidence,
+        fate: flight.fate ?? fate,
+        rules: flight.rules,
+        fragments: flight.fragments,
+        brain: { runs: flight.runs, cancelled: flight.cancelled, firstTokenMs: flight.firstTokenMs },
+        firstAudioMs: trace ? trace.snapshot().firstAudioMs : null,
+      });
+    } catch (error) {
+      this.deps.log(`the flight recorder failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /** A reply that was stopped before it finished: its request to the brain, if it was still out, is counted as dropped. */
+  private settleReplyFlight(r: Reply, fate: string, rule: string | null): void {
+    const flight = r.flight;
+    if (!flight || flight.settled) return;
+    if (r.brainOpen > 0) flight.cancelled++;
+    if (rule !== null) flight.rules.push(rule);
+    this.settleFlight(flight, fate, r.trace);
+  }
+
+  /** A rule that fired with the turn it belongs to: the reply being said, or else the next turn that is read. */
+  private noteRule(rule: string): void {
+    const flight = this.reply?.flight ?? null;
+    if (flight && !flight.settled) flight.rules.push(rule);
+    else if (this.looseRules.length < 8) this.looseRules.push(rule);
   }
 
   // -------------------------------------------------------------------------------------------------------------------
@@ -1438,7 +1764,7 @@ export class VoiceSession {
   }
 
   private async maybeSpeakPending(): Promise<void> {
-    if ((this.pendingSay.length === 0 && this.openingSay === null) || this.reply || this.agent !== "idle" || this.taker.inTurn || this.muted || this.micAutoPaused) return;
+    if ((this.pendingSay.length === 0 && this.openingSay === null) || this.reply || this.held || this.agent !== "idle" || this.taker.inTurn || this.muted || this.micAutoPaused) return;
     if (this.taker.quietForMs(this.nowMs()) < this.cfg.proactiveQuietMs) return;
     // What was waiting when the call opened comes first; it is said once.
     if (this.openingSay !== null) {

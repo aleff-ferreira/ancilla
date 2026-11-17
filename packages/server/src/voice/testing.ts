@@ -7,7 +7,8 @@
  */
 
 import type { PendingAuthorizationView } from "../assistant/launcher.js";
-import type { BrainEvent, BrainProvider, BrainRequest, ChatMessage, ToolCall, ToolSpec } from "./brain.js";
+import type { BrainCapabilities, BrainEvent, BrainProvider, BrainRequest, ChatMessage, ToolCall, ToolSpec } from "./brain.js";
+import type { FlightLine } from "./flight.js";
 import type { AsrEngine, AsrResult, AsrStream, Engines, TtsEngine, VadEngine, Voice } from "./engines.js";
 import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
 import { decodeAudioOut, type ClientMessage, type ServerMessage } from "./protocol.js";
@@ -197,18 +198,21 @@ export interface Reply {
   notice?: string;
 }
 
-/** A model that says what it is told, at the pace it is told. */
+/** A model that says what it is told, at the pace it is told. A slow one (`{ slow: true, speculative: false, local: false }`) is what a Muse thread is to a call. */
 export class ScriptedBrain implements BrainProvider {
   readonly id = "scripted";
   readonly label = "Scripted";
-  readonly capabilities = { tools: true, speculative: true, local: true };
+  readonly capabilities: BrainCapabilities;
   readonly requests: Array<{ messages: ChatMessage[]; tools: ToolSpec[] }> = [];
   aborted = 0;
 
   constructor(
     private readonly scheduler: Scheduler,
     private readonly script: (messages: ChatMessage[], call: number) => Reply,
-  ) {}
+    capabilities: Partial<BrainCapabilities> = {},
+  ) {
+    this.capabilities = { tools: true, speculative: true, local: true, ...capabilities };
+  }
 
   async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
     this.requests.push({ messages: request.messages, tools: request.tools });
@@ -413,12 +417,16 @@ export interface Rig {
   tts: FakeTts;
   engines: Engines;
   logs: string[];
+  /** What the flight recorder was told, one line for every turn the call decided on. */
+  flights: FlightLine[];
 }
 
 /** Builds a call with every double in place. Call `rig.session.start(...)` (or `hello`) to open it. */
 export async function makeRig(options: {
   sentences: Record<number, string>;
   script: (messages: ChatMessage[], call: number) => Reply;
+  /** What the brain says of itself: `{ slow: true, speculative: false, local: false }` makes it a Muse-like one. */
+  brain?: Partial<BrainCapabilities>;
   config?: Partial<SessionConfig>;
   asrFinalMs?: number;
   ttsLatencyMs?: number;
@@ -433,8 +441,9 @@ export async function makeRig(options: {
   const vad = new FakeVad();
   const engines: Engines = { vad, asr, tts };
   const host = new FakeHost();
-  const brain = new ScriptedBrain(sched, options.script);
+  const brain = new ScriptedBrain(sched, options.script, options.brain);
   const logs: string[] = [];
+  const flights: FlightLine[] = [];
   let session!: VoiceSession;
   const client = new SimClient(sched, () => session);
   session = new VoiceSession({
@@ -445,10 +454,11 @@ export async function makeRig(options: {
     send: client.receive,
     sendAudio: client.receiveAudio,
     log: (line) => logs.push(line),
+    flight: (line) => flights.push(line),
     ...(options.config ? { config: options.config } : {}),
     id: "test-call",
   });
   if (options.open !== false) await session.start({ type: "hello", v: 1, mode: options.mode ?? "hands-free", lang: null, echoCancelled: true, resume: null, thread: null });
   await sched.advance(0);
-  return { sched, client, session, host, brain, asr, tts, engines, logs };
+  return { sched, client, session, host, brain, asr, tts, engines, logs, flights };
 }

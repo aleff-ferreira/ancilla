@@ -134,7 +134,7 @@ async function route(service: VoiceService, req: AssistantRequest): Promise<Assi
     if (method === "GET") return { status: 200, body: { conversations: store ? store.list(integer(req.query.get("limit"), 50, 1, 200)) : [] } };
     if (method === "DELETE") {
       if (req.query.get("all") !== "1") throw new ValidationError("all", "pass all=1 to delete every conversation");
-      return { status: 200, body: { deleted: store ? store.purge(null) : 0 } };
+      return { status: 200, body: { deleted: store ? service.removeAllConversations() : 0 } };
     }
   }
 
@@ -155,7 +155,7 @@ async function route(service: VoiceService, req: AssistantRequest): Promise<Assi
       return { status: 200, body: { conversation: store.get(id) } };
     }
     if (method === "DELETE") {
-      if (!store.remove(id)) throw new NotFoundError("The conversation");
+      if (!service.removeConversation(id)) throw new NotFoundError("The conversation");
       return { status: 200, body: { deleted: 1 } };
     }
   }

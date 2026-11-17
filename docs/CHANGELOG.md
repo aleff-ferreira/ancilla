@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A voice call on a Muse thread no longer loses the answer it was waiting for.** Muse puts "[Previous turn ended without an assistant reply.]" in a thread whose last turn was cut short, and the model sometimes echoes it as its whole answer; the call settled on that first message, spoke it and stored it, and dropped the real answer that Muse's own backstop produced seconds later. A message that is only a bracketed note of the harness is now never said or stored, the call reads on until Muse completes the turn, and a turn that ends on nothing else fails plainly instead of staying silent.
+- **A slow brain is asked once for a thought, not once per pause.** The call used to ask Muse as soon as you went quiet and drop the request whenever you spoke again, which left unanswered questions in the thread (over 150 Muse runs in five calls, 36% were dropped). For a brain that says it is slow (`capabilities.slow`, set for Muse threads) the call now waits a little longer after you go quiet (0.9 s when unsure you are done, 0.36 s for a finished sentence, none for a command or a stop word), joins what you add to the same turn, and, once it has asked, joins whatever you say before the first sound of the answer however long after you stopped. A cough or a click after your question no longer loses it, and the call does not apologise over it. Fast and local models behave as before; `slowHoldMs` turns the extra quiet off.
+
+### New
+
+- **A flight recorder for calls.** One line of JSON per turn in `voice/flight/<conversation>.jsonl` in the data folder: why the call thought you had finished, the quiet and speech times, what the streaming recogniser heard against the re-reading, the confidence, which rule fired ("didn't catch" in its three places, a quiet turn dropped, an echo dismissed, words joined to the next, a request dropped, an interruption and its reason), how long the model took to its first word and how many requests it was asked and dropped, and the time to the first sound. Words and numbers only, never audio; rotated at 256 KB; deleted with its conversation (one or all, or when conversations expire). It is listed in the "What is kept" table of `docs/assistant-voice.md`.
+
 ## 0.29.2
 
 ### Fixed

@@ -137,6 +137,7 @@ across any voice model (Muse, a hosted model, or a local server).
 | The words of each conversation (yours and its, with how much of a cut-off reply you heard) | `assistant.db`, next to the memory | Until you delete them, or for the number of days you choose |
 | Notes it learned from what you said | `assistant.db` (see [the memory](assistant.md#how-the-memory-works)) | As the memory says |
 | The meaning of each note, as numbers, if you switched on [meaning search](assistant.md#meaning-search) | `assistant.db`, beside the note | As long as the note; erased with it, and all of it when meaning search is turned off |
+| How each turn went: why the call thought you had finished, what the recogniser heard (streaming and re-read), which rule kept a turn from being answered ("didn't catch", a quiet turn dropped, an echo dismissed, words joined to the next, a request dropped, an interruption and why), how long the model took to its first word, how long to the first sound. One line of JSON per turn, words and numbers only | `voice/flight/<conversation>.jsonl` in the data folder, at most about 512 KB per conversation (the file is rotated at 256 KB and the older one replaced) | Until you delete the conversation it belongs to (one or all, in the Voice tab), or it expires with it |
 | The sound of your voice | **nowhere**: it is turned into words and dropped | Not kept |
 | A key for a hosted model | `voice-secrets.json`, readable by you only | Until you remove it |
 | The downloaded models | `voice/` in the data folder | Until you press *Remove* |
@@ -176,6 +177,14 @@ The decisions that matter, and why:
 - **The model is behind one small interface** (`brain.ts`): conversation and tools in, text and tool calls out. Muse, any
   OpenAI-compatible server and a stand-in for tests all fit it. A model with no tool calling is given tools through a
   convention in its text.
+- **A slow model is asked once for a thought.** A Muse thread takes seconds to start an answer and keeps every question it is
+  sent, so a brain says so (`capabilities.slow`) and the call waits a little longer after you go quiet before it asks: 0.9 s
+  more when it is unsure you are done, less when the words look finished, none for a command ("stop"). If you go on before
+  it has asked, what you add is the same turn; if you go on after it asked but before the first sound of the answer, the
+  request is dropped and asked again with the whole of what you said, never as a second question. A sound that came to
+  nothing (a cough) does not lose the question: it is asked again. Muse's own note about a turn that was cut short
+  ("[Previous turn ended without an assistant reply.]") is never said or stored: the call reads on until Muse gives the
+  real answer. Fast models, and local ones, are asked as soon as the turn-taker is sure, as before.
 - **The notes it is told are found the way the text box's are,** by words and, if you switched it on, by meaning. The
   embedding model is asked for at most a quarter of a second, because a call is about the next half second; a server
   that is down or slow costs the turn that wait at most, and is then left alone for a while.

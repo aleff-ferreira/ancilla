@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { BrainEvent, ChatMessage } from "../src/voice/brain.js";
 import { makeBrain } from "../src/voice/brains.js";
-import { MuseThreadBrain, type MuseBrainHost } from "../src/voice/muse-brain.js";
+import { isSystemMarker, MuseThreadBrain, type MuseBrainHost } from "../src/voice/muse-brain.js";
 import { DEFAULT_VOICE_SETTINGS } from "../src/voice/settings.js";
 
 type Handler = (method: string, params: Record<string, unknown>) => void;
@@ -36,6 +36,19 @@ class FakeMuse implements MuseBrainHost {
   interrupts: Array<{ sessionId: string; turnId: string }> = [];
   watching = 0;
   waiting = false;
+  /**
+   * What the real thing does (Muse 1.4.23): a thread whose last turn was cut short, before it was answered, starts its next
+   * turn with a note of the harness that the model echoes as if it were the whole answer, and the real answer comes a few
+   * seconds later, when Muse's own backstop asks again. A double that did not do this would let a brain that settles on the
+   * first message pass every test it should fail.
+   */
+  noteAfterCutShort = true;
+  /** How long after the note the real answer comes. More than the brain's own pause before it settles on a message. */
+  noteDelayMs = 250;
+  /** How many times the note was sent. */
+  notes = 0;
+  private cutShort = new Set<string>();
+  private done = new Set<string>();
   private handler: Handler | null = null;
   private count = 0;
 
@@ -65,12 +78,26 @@ class FakeMuse implements MuseBrainHost {
     this.turns.push({ sessionId: input.sessionId, text: input.text, displayText: input.displayText });
     const n = ++this.count;
     const turnId = `t${n}`;
+    const emit = (method: string, params: Record<string, unknown>): void => {
+      if (method === "turn/completed") this.done.add(String(params["turnId"]));
+      this.handler?.(method, { sessionId: input.sessionId, ...params });
+    };
+    const echoNote = this.noteAfterCutShort && this.cutShort.delete(input.sessionId);
     // Muse answers after it has taken the prompt, the way a thread does.
-    setTimeout(() => void this.script(n, (method, params) => this.handler?.(method, { sessionId: input.sessionId, ...params }), turnId), 5);
+    setTimeout(() => {
+      if (!echoNote) {
+        void this.script(n, emit, turnId);
+        return;
+      }
+      this.notes++;
+      emit("item/completed", { item: { ...message("note", turnId), status: "completed", text: "[Previous turn ended without an assistant reply.]" } });
+      setTimeout(() => void this.script(n, emit, turnId), this.noteDelayMs);
+    }, 5);
     return { turnId };
   }
   async interruptTurn(sessionId: string, turnId: string): Promise<void> {
     this.interrupts.push({ sessionId, turnId });
+    if (!this.done.has(turnId)) this.cutShort.add(sessionId);
   }
   needsUser(): boolean {
     return this.waiting;
@@ -502,5 +529,110 @@ describe("Muse as the call's mind, on a thread the conversation already had", ()
     const events = await ask(brain, "again");
     assert.deepEqual(events, [{ type: "error", message: "Muse did not take that: session s1 is not loaded on this host", retryable: true }]);
     assert.deepEqual(muse.opens, ["s1"], "one attempt to load it, one to send, no loop");
+  });
+});
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+describe("Muse as the call's mind, on a thread whose last turn was cut short", () => {
+  const realAnswer = (emit: (method: string, params: Record<string, unknown>) => void, turnId: string, words = "It is noon.") => {
+    emit("item/started", { item: message("m1", turnId) });
+    emit("item/delta", { itemId: "m1", delta: words });
+    emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: words } });
+    emit("turn/completed", { turnId, terminal: "completed" });
+  };
+
+  it("does not say the harness's note about the turn that was cut short, and reads on until the real answer comes", async () => {
+    // The first turn is dropped half way, as a call does when the person speaks again; Muse answers the second.
+    const muse = new FakeMuse((n, emit, turnId) => {
+      if (n === 2) realAnswer(emit, turnId);
+    });
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    const abort = new AbortController();
+    const first = collect(brain.stream({ messages: [system, user("What time is")], tools: [], signal: abort.signal }));
+    while (muse.turns.length === 0) await sleep(5);
+    abort.abort();
+    assert.deepEqual(await first, [], "nothing came of the first turn");
+    assert.equal(muse.interrupts.length, 1);
+    const events = await collect(brain.stream({ messages: [system, user("What time is it?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(muse.notes, 1, "Muse did put its note in the thread, as the real one does");
+    assert.equal(text(events), "It is noon.", "the note is not said, and the answer after it is");
+    assert.deepEqual(events[events.length - 1], { type: "done", reason: "stop" });
+    assert.equal(muse.watching, 0);
+  });
+
+  it("holds back a note that arrives in pieces, and still says an answer that begins with a bracket", async () => {
+    const muse = new FakeMuse(async (n, emit, turnId) => {
+      if (n === 1) {
+        emit("item/started", { item: message("e1", turnId) });
+        emit("item/delta", { itemId: "e1", delta: "[Previous turn ended " });
+        emit("item/delta", { itemId: "e1", delta: "without an assistant reply.]" });
+        emit("item/completed", { item: { ...message("e1", turnId), status: "completed", text: "[Previous turn ended without an assistant reply.]" } });
+        await sleep(250);
+        realAnswer(emit, turnId);
+      } else {
+        emit("item/started", { item: message("m1", turnId) });
+        emit("item/delta", { itemId: "m1", delta: "[" });
+        emit("item/delta", { itemId: "m1", delta: "Okay] it is noon." });
+        emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: "[Okay] it is noon." } });
+        emit("turn/completed", { turnId, terminal: "completed" });
+      }
+    });
+    const brain = new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" });
+    const first = await collect(brain.stream({ messages: [system, user("time?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(first), "It is noon.");
+    const second = await collect(brain.stream({ messages: [system, user("time?"), { role: "assistant", content: "It is noon." } as ChatMessage, user("and now?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(second), "[Okay] it is noon.");
+  });
+
+  it("says only the answer when the note and the answer come in one message", async () => {
+    const together = "[Previous turn ended without an assistant reply.] It is noon.";
+    const whole = new FakeMuse((_n, emit, turnId) => {
+      emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: together } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+    const a = await collect(new MuseThreadBrain({ host: whole, cwd: "/w", title: "v" }).stream({ messages: [system, user("time?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(a).trim(), "It is noon.");
+    const pieces = new FakeMuse((_n, emit, turnId) => {
+      emit("item/started", { item: message("m1", turnId) });
+      emit("item/delta", { itemId: "m1", delta: "[Previous turn ended without an assistant reply.] " });
+      emit("item/delta", { itemId: "m1", delta: "It is noon." });
+      emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: together } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+    const b = await collect(new MuseThreadBrain({ host: pieces, cwd: "/w", title: "v" }).stream({ messages: [system, user("time?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(b).trim(), "It is noon.");
+  });
+
+  it("ends as a failure, not as an empty answer, when the note is all the turn had to say", async () => {
+    const muse = new FakeMuse((_n, emit, turnId) => {
+      emit("item/completed", { item: { ...message("e1", turnId), status: "completed", text: "[Previous turn ended without an assistant reply.]" } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+    const events = await collect(new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" }).stream({ messages: [system, user("time?")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(events), "");
+    assert.deepEqual(events[events.length - 1], { type: "error", message: "Muse ended its turn without an answer.", retryable: true });
+  });
+
+  it("knows a note of the harness from a call to a tool and from words that happen to be in brackets", () => {
+    assert.equal(isSystemMarker("[Previous turn ended without an assistant reply.]"), true);
+    assert.equal(isSystemMarker("  [Some other note of the harness] "), true);
+    assert.equal(isSystemMarker('[[delegate_task {"title":"x"}]]'), false, "a call to a tool is not a note");
+    assert.equal(isSystemMarker("[Okay] it is noon."), false);
+    assert.equal(isSystemMarker("It is noon."), false);
+    assert.equal(isSystemMarker(""), false);
+  });
+
+  it("passes a call to a tool through, and the text around it", async () => {
+    const call = '[[delegate_task {"title":"x"}]]';
+    const muse = new FakeMuse((_n, emit, turnId) => {
+      emit("item/started", { item: message("m1", turnId) });
+      emit("item/delta", { itemId: "m1", delta: "[" });
+      emit("item/delta", { itemId: "m1", delta: call.slice(1) });
+      emit("item/completed", { item: { ...message("m1", turnId), status: "completed", text: call } });
+      emit("turn/completed", { turnId, terminal: "completed" });
+    });
+    const events = await collect(new MuseThreadBrain({ host: muse, cwd: "/w", title: "v" }).stream({ messages: [system, user("start it")], tools: [], signal: new AbortController().signal }));
+    assert.equal(text(events), call);
   });
 });

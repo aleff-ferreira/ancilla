@@ -14,6 +14,9 @@ const SENTENCES: Record<number, string> = {
   7: "Hello there.",
   8: "Remind me to call mom.",
   9: "Que horas são?",
+  10: "I wanted to ask you about the deployment",
+  11: "the one from last Tuesday",
+  12: "and what the logs said",
 };
 
 const LONG =
@@ -426,5 +429,131 @@ describe("controls, modes and the end", () => {
     rig.session.onAudio(big);
     await rig.client.quiet(100);
     assert.ok(rig.logs.some((l) => l.includes("behind real time")));
+  });
+});
+
+/** What a Muse thread is to a call: seconds to start an answer, and a whole agent turn for every question asked. */
+const SLOW = { slow: true, speculative: false, local: false };
+const NOT_A_SENTENCE = 30;
+
+describe("a slow brain, such as a Muse thread", () => {
+  it("is asked once, and answers once, for a thought the person says in three pieces a second and a half apart", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: () => ({ ttftMs: 400, text: "The deploy went fine." }) });
+    await rig.client.speak(10, 1400);
+    await rig.client.quiet(1500);
+    await rig.client.speak(11, 1200);
+    await rig.client.quiet(1500);
+    await rig.client.speak(12, 1200);
+    await rig.client.quiet(100);
+    await finished(rig);
+    const whole = "I wanted to ask you about the deployment the one from last Tuesday and what the logs said";
+    assert.equal(rig.brain.requests.length, 1, "one request to the brain for the whole thought");
+    assert.equal(rig.brain.aborted, 0, "none dropped half way");
+    assert.deepEqual(rig.client.of("user").map((u) => u.msg.text), [whole], "one turn, in the person's order");
+    assert.match(lastUser(rig.brain.requests[0]?.messages ?? []), /the deployment the one from last Tuesday and what the logs said$/);
+    assert.deepEqual(rig.tts.said.map((s) => s.text), ["The deploy went fine."], "one answer, with no filler");
+    assert.deepEqual(rig.session.snapshot().history, [
+      { role: "user", content: whole },
+      { role: "assistant", content: "The deploy went fine." },
+    ]);
+    assert.deepEqual(rig.host.records.map((r) => r.role), ["user", "assistant"], "one stored turn, no half-asked question left behind");
+    assert.equal(rig.session.snapshot().turns, 1);
+  });
+
+  it("answers a finished sentence after a short extra quiet and a command at once, where a doubtful one waits the longest", async () => {
+    const asked = async (code: number, speakMs: number): Promise<number> => {
+      const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: () => ({ ttftMs: 100, text: "Okay." }) });
+      await rig.client.speak(code, speakMs);
+      const stopped = rig.client.sched.now();
+      await rig.client.quiet(100);
+      await finished(rig);
+      const user = rig.client.of("user")[0];
+      assert.ok(user, "it was asked");
+      return user.at - stopped;
+    };
+    const command = await asked(6, 500);
+    const sentence = await asked(1, 1000);
+    const doubtful = await asked(11, 1000);
+    assert.ok(command <= 460, `a command after ${command} ms of quiet`);
+    assert.ok(sentence >= 800 && sentence <= 940, `a finished sentence after ${sentence} ms`);
+    assert.ok(doubtful >= 1600 && doubtful <= 1800, `a doubtful turn after ${doubtful} ms`);
+  });
+
+  it("keeps a fast brain as it was: asked as soon as the turn is over, again for each piece", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, script: () => ({ ttftMs: 300, text: "Okay, got it." }) });
+    await rig.client.speak(10, 1400);
+    const stopped = rig.client.sched.now();
+    await rig.client.quiet(1500);
+    await rig.client.speak(11, 1200);
+    await rig.client.quiet(1500);
+    assert.ok(rig.brain.requests.length > 1, `${rig.brain.requests.length} requests: no extra quiet was added`);
+    const first = rig.client.of("user")[0];
+    assert.equal(first?.msg.text, "I wanted to ask you about the deployment");
+    assert.ok((first?.at ?? 0) - stopped <= 840, `asked after ${(first?.at ?? 0) - stopped} ms of quiet, the turn-taker's own`);
+  });
+
+  it("joins what the person adds before the first sound of the answer to the same turn, however long after they stopped", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: (m) => ({ ttftMs: 4000, text: lastUser(m).includes("Lisbon") ? "Lisbon, noted." : "One answer." }) });
+    await rig.client.speak(8, 1500);
+    await rig.client.quiet(1900);
+    await rig.client.speak(5, 1500);
+    await rig.client.quiet(100);
+    await finished(rig);
+    const user = rig.client.of("user");
+    assert.equal(user.length, 2, "the first reading, then the turn carried on");
+    assert.equal(user[1]?.msg.text, "Remind me to call mom. to Lisbon next week.");
+    assert.equal(user[1]?.msg.turn, user[0]?.msg.turn, "under the same number");
+    assert.equal(rig.brain.aborted, 1, "the first request was dropped, because the words had changed");
+    assert.equal(rig.session.snapshot().history.filter((m) => m.role === "user").length, 1, "and no half-asked question stays in the history");
+    assert.deepEqual(rig.tts.said.slice(-1).map((s) => s.text), ["Lisbon, noted."]);
+  });
+
+  for (const [what, sound] of [["a click", 100], ["a cough", 260]] as const) {
+    it(`asks again for the question that was dropped when the sound that followed it was ${what}, and does not apologise`, async () => {
+      const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: () => ({ ttftMs: 2500, text: "It is three o'clock." }) });
+      await rig.client.speak(1, 1000);
+      await rig.client.quiet(1900);
+      await rig.client.speak(NOT_A_SENTENCE, sound);
+      await rig.client.quiet(100);
+      await finished(rig);
+      assert.equal(rig.brain.requests.length, 2, "asked, dropped for the sound, asked again");
+      assert.equal(rig.brain.aborted, 1);
+      assert.deepEqual(rig.tts.said.map((s) => s.text).filter((t) => !/^(One moment|Let me|Give me)/.test(t)), ["It is three o'clock."], "answered, and no \"didn't catch that\"");
+      assert.deepEqual(rig.host.records.map((r) => [r.turn, r.role]), [[1, "user"], [1, "assistant"]], "one stored question, not two");
+      assert.equal(rig.session.snapshot().history.filter((m) => m.role === "user").length, 1);
+    });
+  }
+
+  it("still answers the words it was holding when what followed them came to nothing", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: () => ({ ttftMs: 300, text: "The deploy went fine." }) });
+    await rig.client.speak(10, 1400);
+    await rig.client.quiet(1200);
+    await rig.client.speak(NOT_A_SENTENCE, 260);
+    await rig.client.quiet(100);
+    await finished(rig);
+    assert.equal(rig.brain.requests.length, 1);
+    assert.equal(rig.client.of("user")[0]?.msg.text, "I wanted to ask you about the deployment");
+    assert.deepEqual(rig.tts.said.map((s) => s.text), ["The deploy went fine."]);
+  });
+
+  it("takes back words it was holding when the person says stop over them", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, script: () => ({ ttftMs: 100, text: "Okay." }) });
+    await rig.client.speak(10, 1400);
+    await rig.client.quiet(1000);
+    await rig.client.speak(6, 500);
+    await rig.client.quiet(100);
+    await finished(rig);
+    assert.deepEqual(rig.client.of("user").map((u) => u.msg.text), ["Stop."], "the held words are not sent with it");
+    assert.equal(rig.brain.requests.length, 1);
+  });
+
+  it("asks as soon as the turn-taker is sure when the extra quiet is turned off", async () => {
+    const rig = await makeRig({ sentences: SENTENCES, brain: SLOW, config: { slowHoldMs: 0 }, script: () => ({ ttftMs: 100, text: "Okay." }) });
+    await rig.client.speak(11, 1000);
+    const stopped = rig.client.sched.now();
+    await rig.client.quiet(100);
+    await finished(rig);
+    const at = (rig.client.of("user")[0]?.at ?? 0) - stopped;
+    assert.ok(at <= 840, `asked after ${at} ms`);
   });
 });

@@ -91,6 +91,11 @@ export class ConversationStore {
     return row ? toSummary(row) : null;
   }
 
+  /** The id of every conversation there is. */
+  ids(): string[] {
+    return this.store.all("SELECT id FROM conversations").map((row) => String(row.id));
+  }
+
   rename(id: string, title: string): boolean {
     if (!this.exists(id)) return false;
     this.store.run("UPDATE conversations SET title = ? WHERE id = ?", [titleOf(title) || "Conversation", id]);

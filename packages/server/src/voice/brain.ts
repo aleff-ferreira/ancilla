@@ -55,6 +55,12 @@ export interface BrainCapabilities {
   speculative: boolean;
   /** Runs on this machine: nothing said leaves it. */
   local: boolean;
+  /**
+   * Starting an answer takes seconds and costs a whole agent turn (a Muse thread). Asking twice for one question is then
+   * expensive, and leaves a thread holding a question nobody answered, so the call waits a little longer for the person
+   * to finish before it asks, and joins what they add before the first sound to the same question instead of asking again.
+   */
+  slow?: boolean;
 }
 
 export interface BrainProvider {

@@ -122,6 +122,31 @@ function clip(text: string, max: number): string {
   return flat.length <= max ? flat : `${flat.slice(0, max - 1).trimEnd()}…`;
 }
 
+const MARKER_MAX = 240;
+/** The note Muse puts in a thread whose last turn was cut short; a model sometimes echoes it back as if it were its answer. */
+const LEADING_MARKER = /^\s*\[Previous turn ended without an assistant reply\.?\]\s*/i;
+
+/**
+ * A message that is only a bracketed note of the harness ("[Previous turn ended without an assistant reply.]") is never an
+ * answer: Muse's own backstop asks again and the real answer follows seconds later. It is not spoken, not stored, and the
+ * turn is read on until Muse completes it. A call to a tool, written [[name {...}]], is not one.
+ */
+export function isSystemMarker(text: string): boolean {
+  const flat = text.trim();
+  return flat.length > 0 && flat.length <= MARKER_MAX && /^\[(?!\[)[^[\]\n]+\]\.?$/.test(flat);
+}
+
+/** Whether a message that is still arriving can turn out to be only a marker: it opens with one bracket and has not left it yet. */
+function mightBeMarker(text: string): boolean {
+  const flat = text.trimStart();
+  if (flat === "") return true;
+  if (!flat.startsWith("[") || flat.startsWith("[[") || flat.length > MARKER_MAX) return false;
+  const close = flat.indexOf("]");
+  const inside = close < 0 ? flat.slice(1) : flat.slice(1, close);
+  if (inside.includes("[") || inside.includes("\n")) return false;
+  return close < 0 || /^\.?\s*$/.test(flat.slice(close + 1));
+}
+
 /** What is new in a request: the messages after the model's own last one. */
 function freshMessages(messages: readonly ChatMessage[]): ChatMessage[] {
   let from = messages.length;
@@ -194,7 +219,7 @@ interface LingeringTurn {
 
 export class MuseThreadBrain implements BrainProvider {
   readonly id = "muse-thread";
-  readonly capabilities: BrainCapabilities = { tools: false, speculative: false, local: false };
+  readonly capabilities: BrainCapabilities = { tools: false, speculative: false, local: false, slow: true };
   private sessionId: string | null;
   private model: string | null;
   /** The model confirmed active on the underlying session after `startSession`, `openSession`, or `setModel` succeeded. */
@@ -632,6 +657,23 @@ export class MuseThreadBrain implements BrainProvider {
       const early = new Map<string, string[]>();
       const openNonMessageItems = new Set<string>();
       let completedAgentMessageAt: number | null = null;
+      // What a message has said so far while it may still turn out to be only a harness marker (held back, not yet said),
+      // the messages that were let through, and the ones that were only a marker.
+      const held = new Map<string, string>();
+      const released = new Set<string>();
+      const dropped = new Set<string>();
+      let saidAny = false;
+      const gate = (id: string, delta: string): string => {
+        if (released.has(id)) return delta;
+        const soFar = `${held.get(id) ?? ""}${delta}`;
+        if (mightBeMarker(soFar)) {
+          held.set(id, soFar);
+          return "";
+        }
+        held.delete(id);
+        released.add(id);
+        return soFar.replace(LEADING_MARKER, "");
+      };
       let lastWordAt = Date.now();
       let approvalWaitStartedAt: number | null = null;
       const idleMs = this.options.idleMs ?? DEFAULT_IDLE_MS;
@@ -676,17 +718,32 @@ export class MuseThreadBrain implements BrainProvider {
               if (buffered) {
                 early.delete(id);
                 for (const delta of buffered) {
+                  const out = gate(id, delta);
+                  if (out === "") continue;
                   spoken.add(id);
-                  yield { type: "text", delta };
+                  saidAny = true;
+                  yield { type: "text", delta: out };
                 }
               }
-              // A message that arrived whole (nothing streamed it) is said as it is.
+              // A message that arrived whole (nothing streamed it) is said as it is, unless it is only a harness marker:
+              // that is not an answer, so the turn is not settled on it and Muse is read on until it completes the turn.
               if (method === "item/completed") {
-                if (!spoken.has(id) && typeof item["text"] === "string" && item["text"] !== "") {
-                  spoken.add(id);
-                  yield { type: "text", delta: item["text"] };
+                if (!released.has(id) && !dropped.has(id)) {
+                  const all = typeof item["text"] === "string" && item["text"] !== "" ? item["text"] : (held.get(id) ?? "");
+                  held.delete(id);
+                  if (isSystemMarker(all)) {
+                    dropped.add(id);
+                  } else {
+                    const say = all.replace(LEADING_MARKER, "");
+                    if (say !== "" && !spoken.has(id)) {
+                      spoken.add(id);
+                      released.add(id);
+                      saidAny = true;
+                      yield { type: "text", delta: say };
+                    }
+                  }
                 }
-                completedAgentMessageAt = Date.now();
+                if (!dropped.has(id)) completedAgentMessageAt = Date.now();
               }
             } else if (kind !== "" && kind !== "userMessage" && kind !== "reasoning") {
               if (method === "item/completed") {
@@ -712,8 +769,13 @@ export class MuseThreadBrain implements BrainProvider {
             const kind = kinds.get(id);
             if (kind === "agentMessage") {
               completedAgentMessageAt = null;
-              spoken.add(id);
-              yield { type: "text", delta };
+              if (dropped.has(id)) continue;
+              const out = gate(id, delta);
+              if (out !== "") {
+                spoken.add(id);
+                saidAny = true;
+                yield { type: "text", delta: out };
+              }
             } else if (kind === undefined) {
               early.set(id, [...(early.get(id) ?? []), delta]);
             }
@@ -743,7 +805,22 @@ export class MuseThreadBrain implements BrainProvider {
           } else if (method === "turn/completed" && params["turnId"] === turnId) {
             const terminal = String(params["terminal"] ?? "completed");
             if (terminal === "completed") {
-              yield { type: "done", reason: "stop" };
+              // What was held back in case it was only a marker, and was not, is said now.
+              for (const [id, rest] of held) {
+                const say = rest.replace(LEADING_MARKER, "");
+                if (isSystemMarker(rest)) dropped.add(id);
+                else if (say !== "") {
+                  saidAny = true;
+                  yield { type: "text", delta: say };
+                }
+              }
+              held.clear();
+              if (dropped.size > 0 && !saidAny) {
+                // The turn ended on nothing but the harness's own note: there is no answer to speak, and a silent call is worse than a failed one.
+                yield { type: "error", message: "Muse ended its turn without an answer.", retryable: true };
+              } else {
+                yield { type: "done", reason: "stop" };
+              }
             } else if (request.signal.aborted) {
               return;
             } else {

@@ -12,6 +12,7 @@ import type { HarnessReader } from "./harness.js";
 import type { WorkspaceVoiceDeps } from "./workspace-tools.js";
 import { ConversationStore } from "./conversations.js";
 import type { Voice } from "./engines.js";
+import { FlightLog } from "./flight.js";
 import { createRemoteEngines, createSherpaEngines, httpSpeechVoices, inspectPack, type PackReport, type SherpaEngineOptions, type SherpaEngineSet, type VoiceEngineSet, type VoicePackLayout } from "./engines/index.js";
 import { InstallError, PackInstaller, type InstallerDeps, type PackJob } from "./installer.js";
 import { supertonicVoices } from "./engines/tts.js";
@@ -193,6 +194,14 @@ export class VoiceService {
 
   private voiceDir(): string {
     return join(this.deps.dataDir === ":memory:" ? "." : this.deps.dataDir, "voice");
+  }
+
+  private flight: FlightLog | null | undefined;
+
+  /** The flight recorder's files, one per conversation, next to the voice's models; none where there is no data folder. */
+  flightLog(): FlightLog | null {
+    if (this.flight === undefined) this.flight = this.deps.dataDir === ":memory:" ? null : new FlightLog(join(this.voiceDir(), "flight"), (line) => this.deps.log(`voice: ${line}`));
+    return this.flight;
   }
 
   layout(): VoicePackLayout {
@@ -483,13 +492,32 @@ export class VoiceService {
     return assistant ? new ConversationStore(assistant.store) : null;
   }
 
+  /** Deletes one conversation, and the record of how its turns went. */
+  removeConversation(id: string): boolean {
+    const store = this.conversations(false);
+    if (!store || !store.remove(id)) return false;
+    this.flightLog()?.remove(id);
+    return true;
+  }
+
+  /** Deletes every conversation, and every record of how their turns went. */
+  removeAllConversations(): number {
+    const store = this.conversations(false);
+    const gone = store ? store.purge(null) : 0;
+    this.flightLog()?.prune(null);
+    return gone;
+  }
+
   /** Deletes conversations older than the retention the person chose. Called when a call opens; cheap. */
   private expire(store: ConversationStore): void {
     const days = this.settings.get().keepDays;
-    if (days === null) return;
     try {
-      const gone = store.purge(Date.now() - days * 86_400_000);
-      if (gone > 0) this.deps.log(`voice: ${gone} conversation${gone === 1 ? "" : "s"} older than ${days} days were deleted`);
+      if (days !== null) {
+        const gone = store.purge(Date.now() - days * 86_400_000);
+        if (gone > 0) this.deps.log(`voice: ${gone} conversation${gone === 1 ? "" : "s"} older than ${days} days were deleted`);
+      }
+      // Whatever was kept for a conversation that is no longer there goes too, however it went.
+      this.flightLog()?.prune(new Set(store.ids()));
     } catch (error) {
       this.deps.log(`voice: old conversations could not be deleted: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -668,10 +696,12 @@ export class VoiceService {
     const id = `call-${randomUUID().slice(0, 8)}`;
     // The person can hang up from the screen ("end"), which closes the session from inside: the socket and the service follow.
     let opened: ActiveCall | null = null;
+    const flightLog = this.flightLog();
     const session = new VoiceSession({
       engines: set.engines,
       brain: liveBrain,
       host,
+      ...(flightLog ? { flight: (line) => flightLog.append(conversation, line) } : {}),
       scheduler: this.scheduler,
       send: (message: ServerMessage) => {
         if (message.type === "metrics") this.noteMetrics(message.metrics);
