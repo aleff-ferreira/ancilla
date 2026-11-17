@@ -61,6 +61,8 @@ export interface BrainCapabilities {
    * to finish before it asks, and joins what they add before the first sound to the same question instead of asking again.
    */
   slow?: boolean;
+  /** Keeps what it has read of a prompt from one request to the next (llama.cpp does), so a prompt that starts the same costs nothing to read again. */
+  prefixCache?: boolean;
 }
 
 export interface BrainProvider {
@@ -94,8 +96,10 @@ export interface OpenAiOptions {
  */
 const TOOLS_NOT_TAKEN = /does not support tools?|support tool|tools? (param|parameter)|unsupported[^.]{0,30}tools?|--jinja|tool[_ -]?choice|tool[_ -]?use|tool[_ -]?call|function[_ -]?call/i;
 const STREAM_OPTIONS_REFUSED = /stream[_ -]?options|include[_ -]?usage/i;
+const TEMPLATE_KWARGS_REFUSED = /chat[_ -]?template[_ -]?kwargs/i;
 const TOOL_REFUSAL_STATUS = new Set([400, 404, 422, 500, 501]);
 const streamOptionsUnsupported = new Set<string>();
+const templateKwargsUnsupported = new Set<string>();
 
 /**
  * Reasoning models (Qwen3, DeepSeek-R1, QwQ, Nemotron) often wrap internal thoughts in `<think>...</think>` inside the
@@ -198,19 +202,22 @@ export class OpenAiCompatibleProvider implements BrainProvider {
   constructor(private readonly options: OpenAiOptions) {
     this.id = `openai:${options.model}`;
     this.label = options.label ?? options.model;
-    this.capabilities = { tools: true, speculative: options.local === true, local: options.local === true };
+    this.capabilities = { tools: true, speculative: options.local === true, local: options.local === true, ...(options.local === true ? { prefixCache: true } : {}) };
   }
 
   async *stream(request: BrainRequest): AsyncGenerator<BrainEvent> {
     const o = this.options;
     const doFetch = o.fetchImpl ?? fetch;
     const base = o.baseUrl.replace(/\/+$/, "");
+    // A model of this computer that thinks first (Qwen3.5 does) is told not to: a voice that thinks for seconds is no voice. A server that does not know the field ignores it, and one that refuses it is not sent it again.
+    let useKwargs = o.local === true && !templateKwargsUnsupported.has(base);
     const send = async (withStreamOptions: boolean): Promise<Response> => {
       const body: Record<string, unknown> = {
         model: o.model,
         messages: wireMessages(request.messages),
         stream: true,
         ...(withStreamOptions ? { stream_options: { include_usage: true } } : {}),
+        ...(useKwargs ? { chat_template_kwargs: { enable_thinking: false } } : {}),
         temperature: request.temperature ?? o.temperature ?? 0.7,
       };
       if (request.maxTokens) body["max_tokens"] = request.maxTokens;
@@ -231,18 +238,26 @@ export class OpenAiCompatibleProvider implements BrainProvider {
       yield { type: "error", message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
       return;
     }
-    if ((!response.ok || !response.body) && usedStreamOptions && (response.status === 400 || response.status === 422)) {
+    if ((!response.ok || !response.body) && (usedStreamOptions || useKwargs) && (response.status === 400 || response.status === 422)) {
       let detail = "";
       try {
         detail = (await response.text()).slice(0, 300);
       } catch {
         /* the body is only for the message */
       }
-      if (STREAM_OPTIONS_REFUSED.test(detail)) {
-        streamOptionsUnsupported.add(base);
-        usedStreamOptions = false;
+      const kwargsRefused = useKwargs && TEMPLATE_KWARGS_REFUSED.test(detail);
+      const optionsRefused = usedStreamOptions && STREAM_OPTIONS_REFUSED.test(detail);
+      if (kwargsRefused || optionsRefused) {
+        if (kwargsRefused) {
+          templateKwargsUnsupported.add(base);
+          useKwargs = false;
+        }
+        if (optionsRefused) {
+          streamOptionsUnsupported.add(base);
+          usedStreamOptions = false;
+        }
         try {
-          response = await send(false);
+          response = await send(usedStreamOptions);
         } catch (error) {
           if (request.signal.aborted) return;
           yield { type: "error", message: `The model could not be reached: ${error instanceof Error ? error.message : String(error)}`, retryable: true };
@@ -1002,6 +1017,7 @@ const learnedToolModes = new Map<string, { mode: ToolMode; at: number }>();
 export function forgetToolModes(): void {
   learnedToolModes.clear();
   streamOptionsUnsupported.clear();
+  templateKwargsUnsupported.clear();
 }
 
 /** `key` names the server and model, so what was learned about one is not applied to another. */

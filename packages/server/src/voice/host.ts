@@ -40,6 +40,9 @@ export interface ToolResult {
   narration?: string;
 }
 
+/** Which running task a spoken reference points at: one, more than one (the person has to say which), or none. */
+export type TaskMatch = { kind: "one"; id: string; title: string } | { kind: "many" } | { kind: "none" };
+
 export interface HostEvent {
   id: string;
   kind: "task" | "notice";
@@ -70,6 +73,8 @@ export interface VoiceHost {
   record(entry: TranscriptEntry): void;
   tools(): ToolSpec[];
   runTool(call: ToolCall, context: { turn: number; signal: AbortSignal }): Promise<ToolResult>;
+  /** Which running task a spoken reference ("last", or a few words of its name) points at; changes nothing. Absent where there are no tasks. */
+  findTask?(ref: string): TaskMatch;
   /** Hears what happens in the background until the returned function is called. */
   subscribe(handler: (event: HostEvent) => void): () => void;
   /** Snapshot of active background tasks already running or waiting when a call opens, shown on the call card without speaking. */

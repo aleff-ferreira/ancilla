@@ -354,7 +354,9 @@ describe("realistic multi-turn conversational evaluation", () => {
         return { ttftMs: 100, text: "Start-of-week context switching always piles up fast." };
       }
       if (userTurn.includes("módulo de autenticação")) {
-        assert.match(systemPrompt, /mixed English and Portuguese/i);
+        // What moves (the time, the language of the turn) is in front of the person's words, not in the system text.
+        assert.match(userTurn, /mixed English and Portuguese/i);
+        assert.doesNotMatch(systemPrompt, /mixed English and Portuguese/i);
         return {
           ttftMs: 110,
           tool: { name: "delegate_task", args: { goal: "Check how token expiry works in auth/session.ts", title: "Auth token expiry" } },

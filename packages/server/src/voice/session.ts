@@ -14,6 +14,7 @@ import type { CallMode, ClientMessage, ServerMessage } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
 import type { Scheduler } from "./scheduler.js";
 import { SpeechOut } from "./speech.js";
+import { isTalkerBrain, TalkerTurn } from "./talker.js";
 import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
 import { selectToolsForTurn } from "./tool-router.js";
 import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEndReason, type TurnEvent } from "./turn.js";
@@ -273,6 +274,7 @@ export class VoiceSession {
   private turnCounter = 0;
   private history: ChatMessage[] = [];
   private readonly recentToolNames = new Set<string>();
+  private readonly talkerTurn = new TalkerTurn();
   private lastTurnEndAt = -Infinity;
   private pendingMerge: { text: string; turn: number; count: number } | null = null;
   /** The words of a turn that has ended, waiting out a little more quiet before a slow brain is asked. */
@@ -1429,25 +1431,32 @@ export class VoiceSession {
       if (reply.trace && host.wasLastContextCacheHit) {
         reply.trace.contextCacheHit = host.wasLastContextCacheHit();
       }
+      // A model on this computer is routed first (see talker.ts): a few requests need no model to choose the tool, or to answer.
+      const talker = isTalkerBrain(brain.capabilities);
+      const routed = talker ? await this.talkerTurn.prepare(text, host, this.replyLang(), { turn: reply.turn, signal: reply.abort.signal }) : null;
+      if (reply.aborted) return;
+      if (routed?.say) return await this.sayWithoutModel(reply, text, routed.say, routed.asked);
+      reply.completedTools.push(...(routed?.ran ?? []));
       const priorToolNote =
         this.abortedToolNotes.length > 0
           ? `[Tool actions already completed earlier in this turn before the user continued speaking — do not repeat them: ${this.abortedToolNotes.splice(0).join("; ")}]`
           : null;
-      const fullContext = [approvalOutcomeNote, priorToolNote, candidateNote, context]
-        .filter((part): part is string => Boolean(part && part.trim() !== ""))
-        .join("\n\n");
-      const system = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), {
+      // What moves (the time, the live state) goes in front of the person's words, so that the system text is the same on every turn.
+      const prompt = buildSystemPrompt(host.persona(), new Date(scheduler.now()), this.replyLang(), {
         codeSwitched: hasCodeSwitch(text),
         liveState: host.liveState?.() ?? null,
       });
+      const fullContext = [approvalOutcomeNote, priorToolNote, candidateNote, context, prompt.context]
+        .filter((part): part is string => Boolean(part && part.trim() !== ""))
+        .join("\n\n");
       const base: ChatMessage[] = [
-        { role: "system", content: system },
+        { role: "system", content: prompt.system },
         ...this.history.slice(-this.cfg.maxHistory),
         { role: "user", content: fullContext !== "" ? `${fullContext}\n\n${text}` : text, rawUserText: text },
       ];
       this.history.push({ role: "user", content: text });
-      const tools = selectToolsForTurn(text, host.tools(), [...this.recentToolNames]);
-      const rounds: ChatMessage[] = [];
+      const tools = selectToolsForTurn(text, host.tools(), [...this.recentToolNames], { talker });
+      const rounds: ChatMessage[] = [...(routed?.rounds ?? [])];
       let round = 0;
       let failed = false;
       for (;;) {
@@ -1523,6 +1532,23 @@ export class VoiceSession {
     } finally {
       this.clearTrailingFlush(reply);
     }
+  }
+
+  /** An answer that needs no model (the question before a cancellation, or that it was done): said as a model's would be. */
+  private async sayWithoutModel(reply: Reply, userText: string, phrase: string, asked: { id: string; title: string } | null): Promise<void> {
+    this.history.push({ role: "user", content: userText });
+    reply.sentFirstToken = true;
+    reply.cancelFiller?.();
+    if (reply.trace && reply.trace.firstToken === null) reply.trace.firstToken = this.deps.scheduler.now();
+    reply.full += phrase;
+    for (const piece of reply.chunker.push(`${phrase} `)) reply.speech.enqueue(piece);
+    for (const piece of reply.chunker.flush()) reply.speech.enqueue(piece);
+    this.send({ type: "assistant", turn: reply.turn, text: reply.full.trim(), done: true });
+    await reply.speech.finish();
+    // A question that was heard, even in part, waits for its answer; one that was cut off before a word of it was said does not.
+    if (asked && reply.speech.started) this.talkerTurn.arm(asked);
+    if (reply.aborted || this.reply !== reply) return;
+    this.finishReply(reply);
   }
 
   private onBrainEvent(

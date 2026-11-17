@@ -12,12 +12,24 @@ export interface LiveCallState {
   recentSwitch?: string | null;
 }
 
+/**
+ * The two halves of what a model is told about the call. `system` is the same for the whole call (it depends on the persona and
+ * on nothing that moves), so a model that keeps what it has read of a prompt, as a server on this computer does, reads it once:
+ * a single changed line in it makes everything after it be read again (measured on an RTX 5070: 200 to 480 ms, and 3.5 to 13 s
+ * on a processor alone). `context` is what moves (the time, the language of the moment, the live state of the call): it goes
+ * in front of the person's words, in the last message, where nothing has been read yet.
+ */
+export interface CallPrompt {
+  system: string;
+  context: string;
+}
+
 export function buildSystemPrompt(
   persona: Persona,
   now: Date,
   lang: Lang,
   options: { codeSwitched?: boolean; liveState?: LiveCallState | null } = {},
-): string {
+): CallPrompt {
   const who = persona.callsUser ? ` Its user is called ${persona.callsUser}.` : "";
   const language = persona.language
     ? `Speak ${persona.language}.`
@@ -33,14 +45,14 @@ export function buildSystemPrompt(
     "You are an AI. Never claim a body, feelings or experiences as fact; warmth and humor in how you speak are fine. Never invent a memory: say so when you do not know.",
     "If the user interrupts you, drop what you were saying and answer the new thing. What they heard of your last reply is what is shown to you: do not repeat what they heard.",
     "Work that takes time goes to the background through your tools; say so in a few words and carry on talking. Multiple background tasks can run at the same time: answering a new question or starting another task never stops already-running tasks, and you only pause or cancel a task when the user asks. Share relevant progress, blockers or finished results concisely.",
-    `The local time is ${now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })}.`,
   ];
   if (persona.tone) lines.push(`How you sound: ${persona.tone}`);
-  if (lang === "pt" && !persona.language) lines.push("The user is speaking Portuguese now.");
-  if (lang === "es" && !persona.language) lines.push("The user is speaking Spanish now.");
+  const moving = [`The local time is ${now.toLocaleString("en-GB", { weekday: "long", year: "numeric", month: "long", day: "numeric", hour: "2-digit", minute: "2-digit" })}.`];
+  if (lang === "pt" && !persona.language) moving.push("The user is speaking Portuguese now.");
+  if (lang === "es" && !persona.language) moving.push("The user is speaking Spanish now.");
   if (options.codeSwitched && !persona.language) {
     const mixed = lang === "pt" ? "English and Portuguese" : lang === "es" ? "English and Spanish" : "English and another language";
-    lines.push(`The user mixed ${mixed} in this turn; match their main language naturally.`);
+    moving.push(`The user mixed ${mixed} in this turn; match their main language naturally.`);
   }
   if (options.liveState) {
     const parts = [`Persona="${persona.name}"`];
@@ -48,9 +60,9 @@ export function buildSystemPrompt(
     if (options.liveState.activeModel) parts.push(`Active Model=${options.liveState.activeModel}`);
     if (options.liveState.project) parts.push(`Project=${options.liveState.project}`);
     if (options.liveState.recentSwitch) parts.push(`Recent UI switch=${options.liveState.recentSwitch}`);
-    lines.push(`[Live Call State — overrides any CLI banner: ${parts.join(" | ")}]`);
+    moving.push(`[Live Call State — overrides any CLI banner: ${parts.join(" | ")}]`);
   }
-  return lines.join("\n");
+  return { system: lines.join("\n"), context: moving.join("\n") };
 }
 
 const THINKING: Record<"en" | "pt" | "es", string[]> = {

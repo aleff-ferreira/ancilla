@@ -51,6 +51,21 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
        `--jinja`). A server that turns tools down is given them through text instead, as a model with no tool calling always
        was, and that is remembered for ten minutes. *Test* asks the model to use a test tool and says how it takes tools:
        built in, through text, or not at all (a small model may not use them, and then the assistant cannot start tasks).
+     - *A small model as the talker*: a model on this computer answers in tens of milliseconds while what it has read of the
+       prompt is still valid, so a call keeps it valid. The system text is the same for the whole call (the time, the
+       language of the moment and the live state go in front of what you said, in the last message), and when the call opens
+       Ancilla has the server read it once: one request with one word and one token to answer. A model that thinks first
+       (Qwen3.5) is told not to with `chat_template_kwargs: {"enable_thinking": false}`; a server that does not know the field
+       ignores it, and one that refuses it is not sent it again. The model is offered seven tools (`delegate_task`,
+       `propose_change`, `browse`, `list_tasks`, `task_status`, `cancel_task`, `recall`, and `use_connector` while an account
+       is connected), the same on every turn, a greeting included: models of this size choose better among seven than among
+       nineteen, and a tool list that changes is a prompt read again. Reading a project, launching, pausing a task and the
+       rest are work for `delegate_task`, which hands them to the assistant's own model. A few requests are not left to the
+       model at all (English, Portuguese and Spanish): "what is the status of the tasks", "how is the research going" and
+       "remind me what the Liverpool project is about" run `list_tasks`, `task_status` or `recall` first, and the model answers
+       from the result; "cancel that task" is asked back ("Do you want me to cancel ...?") and cancels only on a yes, in your
+       very next turn, to a question you heard. What the call browses with, and what a delegated task runs on, is the model chosen for the Assistant,
+       never the talker: a web page written by a stranger does not reach it. Muse and the other models are called as before.
 4. Press the microphone beside the assistant's name (in the sidebar, or the *Talk* button on its page).
 
 ## Talking

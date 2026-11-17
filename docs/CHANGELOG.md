@@ -10,6 +10,12 @@
 ### New
 
 - **A flight recorder for calls.** One line of JSON per turn in `voice/flight/<conversation>.jsonl` in the data folder: why the call thought you had finished, the quiet and speech times, what the streaming recogniser heard against the re-reading, the confidence, which rule fired ("didn't catch" in its three places, a quiet turn dropped, an echo dismissed, words joined to the next, a request dropped, an interruption and its reason), how long the model took to its first word and how many requests it was asked and dropped, and the time to the first sound. Words and numbers only, never audio; rotated at 256 KB; deleted with its conversation (one or all, or when conversations expire). It is listed in the "What is kept" table of `docs/assistant-voice.md`.
+- **A model on this computer can talk fast: a call keeps what the model has read of its prompt.** The system text of a call is now the same on every turn (the time, the language of the moment and the live state go in front of what you said, in the last message), a local server is made to read it once when the call opens (one request, one word, one token to answer), and a model that thinks first (Qwen3.5) is told not to with `chat_template_kwargs` (not sent to a hosted model, and dropped for a server that refuses it). A changed system line costs a local model 200 to 480 ms of reading again on a graphics card and 3.5 to 13 s on a processor alone.
+- **A talker has seven tools, and a router for what a small model gets wrong.** A model on this computer is offered `delegate_task`, `propose_change`, `browse`, `list_tasks`, `task_status`, `cancel_task` and `recall` (and `use_connector` while an account is connected), the same on every turn; the rest goes through `delegate_task`. In English, Portuguese and Spanish, status questions ("qual é o status das tarefas", "how is the auth refactor going") and questions about your own things ("remind me what ...", "o que eu disse sobre ...", "qué te dije sobre ...") run `list_tasks`, `task_status` or `recall` before the model answers; "cancel that task" is asked back and cancels only on a yes in your very next turn. Muse and the other models are called as before.
+
+### Changed
+
+- **The model that browses and does the work is the Assistant's, not the voice's.** `browse`, the connected accounts and the project steps that run without Muse use the model chosen for the Assistant, so a small voice model never reads a web page; tasks the voice delegates already ran on it, and a test now says so.
 
 ## 0.29.2
 

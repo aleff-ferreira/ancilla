@@ -398,7 +398,7 @@ describe("what is kept and said", () => {
     assert.match(questionReason(null), /Waiting for your approval/);
   });
 
-  it("is browsed by the model chosen for the voice: a server that takes tools, or Muse with none of its own", () => {
+  it("is browsed by the brain it is given (the Assistant's, see VoiceService.browseBrain): a server that takes tools, or Muse with none of its own", () => {
     const deps = { keyFor: () => "key", museExec: null, log: () => undefined };
     const hosted = makeBrowseBrain({ ...DEFAULT_VOICE_SETTINGS, brain: { kind: "openai", baseUrl: "https://api.example/v1", model: "m", local: false, label: null, apiKeyEnv: "K" } }, deps);
     assert.equal(hosted.problem, null);

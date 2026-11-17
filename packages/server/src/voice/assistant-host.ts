@@ -7,7 +7,7 @@ import { waitingCause } from "../assistant/waiting.js";
 import { VOICES } from "../assistant/context.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "./brain.js";
 import type { ConversationStore } from "./conversations.js";
-import type { HostEvent, Persona, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
+import type { HostEvent, Persona, TaskMatch, ToolResult, TranscriptEntry, VoiceHost } from "./host.js";
 import { openingPhrase, sayable, spokenTaskGist, taskMilestonePhrase, taskUpdatePhrase, type TaskNotice } from "./prompt.js";
 import type { CallApproval } from "./protocol.js";
 import type { VoiceSettings } from "./settings.js";
@@ -378,6 +378,10 @@ export class AssistantVoiceHost implements VoiceHost {
       ...(this.harnessTools ? this.harnessTools.specs() : []),
       ...(this.workspaceTools ? this.workspaceTools.specs() : []),
     ];
+  }
+
+  findTask(ref: string): TaskMatch {
+    return this.voiceTools.match(ref);
   }
 
   runTool(call: ToolCall, context: { turn: number; signal: AbortSignal }): Promise<ToolResult> {

@@ -21,6 +21,7 @@ import type { ClientMessage, ServerMessage, TurnMetrics } from "./protocol.js";
 import { serialize } from "./protocol.js";
 import { systemScheduler, type Scheduler } from "./scheduler.js";
 import { VoiceSession } from "./session.js";
+import { primeBrain, talkerPrefix } from "./talker.js";
 import { VoiceSettingsStore, type BrainSetting, type VoiceSettings, type VoiceSettingsView } from "./settings.js";
 
 function cliScopeOf(brain: BrainSetting): { providerId: string; accountId: string | null; model: string | null } | null {
@@ -250,41 +251,40 @@ export class VoiceService {
       raw.brain.kind === "assistant" ||
       (raw.brain.kind === "muse" && raw.brain.model === null && !raw.brain.accountId)
     ) {
-      const pref = profile?.model ?? null;
-      const targetProject =
-        projectHint ??
-        raw.defaultProject ??
-        this.deps.lastProject?.() ??
-        this.deps.workspace?.projects()[0]?.cwd ??
-        this.fallbackProject(false);
-      const resolved =
-        pref && pref.providerId !== null
-          ? pref
-          : (this.deps.projectDefault?.(targetProject) ?? null);
-      if (resolved && resolved.providerId !== null) {
-        if (resolved.providerId === "muse") {
-          return {
-            ...raw,
-            brain: resolved.accountId
-              ? { kind: "muse", model: resolved.modelId, accountId: resolved.accountId }
-              : { kind: "muse", model: resolved.modelId },
-          };
-        }
-        return {
-          ...raw,
-          brain: {
-            kind: "provider",
-            providerId: resolved.providerId,
-            accountId: resolved.accountId,
-            model: resolved.modelId,
-          },
-        };
-      }
+      const resolved = this.resolveAssistantBrain(raw, profile, projectHint);
+      if (resolved) return { ...raw, brain: resolved };
       if (raw.brain.kind === "assistant") {
         return { ...raw, brain: { kind: "muse", model: null } };
       }
     }
     return raw;
+  }
+
+  /** The model the person chose for the Assistant (or, failing that, its project's), as a brain setting; null when none was chosen. */
+  private resolveAssistantBrain(raw: VoiceSettings, profile: ReturnType<AssistantService["store"]["getProfile"]> | null, projectHint?: string | null): BrainSetting | null {
+    const pref = profile?.model ?? null;
+    const targetProject =
+      projectHint ??
+      raw.defaultProject ??
+      this.deps.lastProject?.() ??
+      this.deps.workspace?.projects()[0]?.cwd ??
+      this.fallbackProject(false);
+    const resolved = pref && pref.providerId !== null ? pref : (this.deps.projectDefault?.(targetProject) ?? null);
+    if (!resolved || resolved.providerId === null) return null;
+    if (resolved.providerId === "muse") {
+      return resolved.accountId ? { kind: "muse", model: resolved.modelId, accountId: resolved.accountId } : { kind: "muse", model: resolved.modelId };
+    }
+    return { kind: "provider", providerId: resolved.providerId, accountId: resolved.accountId, model: resolved.modelId };
+  }
+
+  /**
+   * What `kind: "assistant"` resolves to, whatever the voice itself is set to: the model that does the work (browsing, a
+   * connected account, a task's steps when Muse is out of reach). The voice may be a small model on this computer that only
+   * talks; it never reads a web page, and a stranger's page never reaches it.
+   */
+  assistantBrain(projectHint?: string | null): BrainSetting {
+    const profile = this.deps.assistant(false)?.store.getProfile() ?? null;
+    return this.resolveAssistantBrain(this.settings.get(), profile, projectHint) ?? { kind: "muse", model: null };
   }
 
   status(): VoiceStatus {
@@ -337,9 +337,9 @@ export class VoiceService {
     };
   }
 
-  /** The model that browses for the assistant: the voice's own, used with the browser's tools only (see browser/agent.ts). */
+  /** The model that browses for the assistant: the Assistant's own, never the voice's (which may be a small model that only talks), used with the browser's tools only (see browser/agent.ts). */
   browseBrain(): ChosenBrain {
-    return makeBrowseBrain(this.effectiveSettings(), {
+    return makeBrowseBrain({ ...this.settings.get(), brain: this.assistantBrain() }, {
       keyFor: (b) => this.settings.keyFor(b),
       museExec: this.deps.museExec ?? null,
       resolveApiAccount: this.deps.resolveApiAccount,
@@ -611,6 +611,8 @@ export class VoiceService {
       knownModels: () => this.deps.museCatalogModels?.() ?? [],
       log: (line) => this.deps.log(line),
     });
+    // A model that keeps what it has read of a prompt reads the start of this call's prompt (the system text and the tools) now, while the person settles in.
+    if (activeChosen.brain.capabilities.prefixCache) void primeBrain(activeChosen.brain, () => talkerPrefix(host));
     let pendingHttpSwitchLabel: string | null = null;
     const self = this;
     const liveBrain: BrainProvider = {

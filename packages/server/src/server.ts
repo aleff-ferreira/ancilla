@@ -1242,7 +1242,7 @@ export class AncillaServer {
     return {
       available: () => {
         const voice = this.voiceFor();
-        const b = voice.effectiveSettings().brain;
+        const b = voice.assistantBrain();
         const isApiBrain =
           b.kind === "openai" ||
           b.kind === "anthropic" ||
@@ -1267,7 +1267,7 @@ export class AncillaServer {
     return {
       available: () => {
         const voice = this.voiceFor();
-        const b = voice.effectiveSettings().brain;
+        const b = voice.assistantBrain();
         const isApiBrain =
           b.kind === "openai" ||
           b.kind === "anthropic" ||

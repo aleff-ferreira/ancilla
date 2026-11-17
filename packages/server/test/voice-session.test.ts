@@ -27,7 +27,8 @@ const LONG =
 const lastUser = (messages: ChatMessage[]): string => {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i] as ChatMessage;
-    if (m.role === "user") return m.content;
+    // The person's own words: what comes before them in the message (notes, the time of day) is not what they said.
+    if (m.role === "user") return m.rawUserText ?? m.content;
   }
   return "";
 };

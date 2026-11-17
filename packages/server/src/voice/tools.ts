@@ -7,7 +7,7 @@ import { ConflictError, NotFoundError, ValidationError } from "../assistant/stor
 import { isRestrictedAssistantUrl } from "../browser/sites.js";
 import type { ToolCall, ToolSpec } from "./brain.js";
 import { scoreNameMatch } from "./harness.js";
-import type { ToolResult } from "./host.js";
+import type { TaskMatch, ToolResult } from "./host.js";
 import { sayable, taskPhrase } from "./prompt.js";
 import type { Lang } from "./text.js";
 
@@ -198,6 +198,26 @@ export class VoiceTools {
       throw new ConflictError("More than one task fits that. Use the full id from list_tasks.");
     }
     throw new NotFoundError("That task");
+  }
+
+  /**
+   * Which running task a spoken reference points at, without changing anything: the call asks before it cancels one. "last" (or
+   * nothing) is a task only when exactly one is running; a name is matched as `task_status` matches it.
+   */
+  match(ref: string): TaskMatch {
+    const tasks = this.deps.assistant.tasks;
+    const active = tasks.list("active", 50);
+    const generic = ref === "" || ref === "last" || ref === "latest";
+    if (generic) {
+      const only = active[0];
+      return active.length === 1 && only ? { kind: "one", id: only.id, title: only.title } : active.length > 1 ? { kind: "many" } : { kind: "none" };
+    }
+    try {
+      const task = this.find(ref);
+      return TERMINAL_TASK.has(task.status) ? { kind: "none" } : { kind: "one", id: task.id, title: task.title };
+    } catch (error) {
+      return error instanceof ConflictError ? { kind: "many" } : { kind: "none" };
+    }
   }
 
   private resolveCwd(namedProject: string): string | null {

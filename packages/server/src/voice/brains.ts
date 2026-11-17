@@ -211,9 +211,11 @@ export interface BrowseBrainDeps {
 }
 
 /**
- * The model that browses for the assistant: the one chosen for the voice, but used only to answer in text. A server that takes
- * tools gets the browser's; Muse is run as `muse exec` with no tools of its own (see browser/muse-brain.ts), because a Muse thread
- * can read the person's files and the pages it reads are written by strangers.
+ * The model that browses for the assistant, used only to answer in text. The caller gives the settings with the Assistant's own
+ * model in `brain` (`VoiceService.browseBrain`): the voice may be a small model on this computer that only talks, and it must
+ * never be the one that reads a stranger's page. A server that takes tools gets the browser's; Muse is run as `muse exec` with
+ * no tools of its own (see browser/muse-brain.ts), because a Muse thread can read the person's files and the pages it reads are
+ * written by strangers.
  */
 export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps): ChosenBrain {
   const choice: BrainSetting = settings.brain.kind === "assistant" ? { kind: "muse", model: null } : settings.brain;
@@ -242,7 +244,7 @@ export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps):
     };
   }
   if (choice.kind === "muse") {
-    if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model in the voice settings." };
+    if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model for the Assistant." };
     const accountId = choice.accountId ?? null;
     return {
       brain: withTextTools(new MuseExecBrain({ run: (args, limits) => deps.museExec!(args, limits, accountId), model: choice.model, log: deps.log })),
@@ -259,7 +261,7 @@ export function makeBrowseBrain(settings: VoiceSettings, deps: BrowseBrainDeps):
       );
     }
     if (choice.providerId === "muse") {
-      if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model in the voice settings." };
+      if (!deps.museExec) return { brain: new StaticBrain("Muse is not available here."), problem: "Muse is not available here, so it cannot browse. Choose another model for the Assistant." };
       return {
         brain: withTextTools(new MuseExecBrain({ run: (args, limits) => deps.museExec!(args, limits, choice.accountId), model: choice.model, log: deps.log })),
         problem: null,
