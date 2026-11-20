@@ -52,6 +52,11 @@ export interface VoiceSettings {
   speech: SpeechSetting;
   /** The assistant may say something unprompted, in a lull, when a task needs the person or finishes. */
   proactive: boolean;
+  /**
+   * Pilot: speaking over the assistant pauses its voice at once, and what is said decides whether it stops or goes on
+   * (a stop word silences it, a sound of listening or its own echo does not). Off by default; off, nothing changes.
+   */
+  interruptPilot: boolean;
   /** How many days a conversation is kept; null keeps them until they are deleted. */
   keepDays: number | null;
   /** Where the downloaded engines and models are, when not in the data folder. */
@@ -70,6 +75,7 @@ export const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   brain: { kind: "muse", model: null },
   speech: { kind: "local" },
   proactive: true,
+  interruptPilot: false,
   keepDays: null,
   runtimeDir: null,
   modelsDir: null,
@@ -189,7 +195,7 @@ function parseSpeech(value: unknown): SpeechSetting {
 /** Reads settings from untrusted text (a file, or a patch from the page): a field that is not valid is an error, one that is missing keeps its value. */
 export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceSettings {
   if (!isObject(raw)) throw new ValidationError("settings", "settings must be an object");
-  const known = ["mode", "voice", "speed", "refine", "ttsSteps", "brain", "speech", "proactive", "keepDays", "runtimeDir", "modelsDir", "defaultProject", "apiKey", "speechKey"];
+  const known = ["mode", "voice", "speed", "refine", "ttsSteps", "brain", "speech", "proactive", "interruptPilot", "keepDays", "runtimeDir", "modelsDir", "defaultProject", "apiKey", "speechKey"];
   for (const key of Object.keys(raw)) if (!known.includes(key)) throw new ValidationError(key, `unknown setting ${key}`);
   const next: VoiceSettings = { ...current };
   if ("mode" in raw) {
@@ -208,6 +214,7 @@ export function applySettingsPatch(current: VoiceSettings, raw: unknown): VoiceS
   if ("brain" in raw) next.brain = parseBrain(raw["brain"], current.brain);
   if ("speech" in raw) next.speech = parseSpeech(raw["speech"]);
   if ("proactive" in raw) next.proactive = raw["proactive"] === true;
+  if ("interruptPilot" in raw) next.interruptPilot = raw["interruptPilot"] === true;
   if ("keepDays" in raw) next.keepDays = raw["keepDays"] === null ? null : Math.round(number(raw["keepDays"], "keepDays", 1, 3650, 30));
   if ("runtimeDir" in raw) next.runtimeDir = optionalText(raw["runtimeDir"], "runtimeDir", 500);
   if ("modelsDir" in raw) next.modelsDir = optionalText(raw["modelsDir"], "modelsDir", 500);

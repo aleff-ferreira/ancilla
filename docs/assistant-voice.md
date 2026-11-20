@@ -76,6 +76,7 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
 - **Interrupting.** Start to speak over it and its voice dips at once; if it is really you (not a cough, a laugh or its own
   voice coming back through your speakers) it stops within about a quarter of a second, and what it remembers of its last
   reply is only what you heard of it. Say "stop", "wait" or "para" and it stops without waiting for more.
+  A pilot setting changes how: see [Stopping it by voice (pilot)](#stopping-it-by-voice-pilot).
 - **Typing.** The keyboard button opens a line to type in during the call. The conversation is the same one: what you type
   is in the transcript, and typing over its voice cuts it off like speaking would.
 - **Tasks in the background.** Ask it to look into something ("research the open issues and summarise them") and it
@@ -87,6 +88,30 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
   you speak first, so it never lands on a topic you chose. It goes on in the language of the conversation, and the same
   setting as the rest turns it off (Assistant, Voice, Speaks up by itself).
 - **Languages.** English and Brazilian Portuguese, switching when you do.
+
+## Stopping it by voice (pilot)
+
+*Assistant, Voice, Speak over it to stop it (pilot)* is off by default. When it is on, a short "stop" is no longer lost
+while the assistant talks:
+
+- **Its voice pauses the moment you speak over it** (about 0.15 s), keeping its place, and what you said decides what
+  happens next. A stop word ("stop", "wait", "hold on", "pare", "espera", "chega"...) cuts it off and nothing else is
+  said: a stop is silence, not a new question, and a task that is running keeps running (cancelling one still takes
+  "cancel the task" and your yes to its question). Any other words are you taking the turn: the reply is cut off at what
+  you heard of it, and what you said is answered once. A sound of listening ("mm-hm", "yeah"), a cough, a throat cleared or
+  its own voice coming back through the speakers ends the pause, and it goes on from the very same place.
+- **Nothing is cancelled by sound alone.** The recogniser needs the whole of a short word (about 0.7 s after it begins), so
+  the pause is the only thing that can come first; what cuts the reply off is the word. The price is a gap: after a sound
+  of listening the voice is silent for about half a second to a second before it goes on.
+- **What it needs.** A hands-free call, a browser or app page of this version (the page tells the server it can pause the
+  voice), and the browser's echo cancellation on. Without any of them the call is the one described above, whatever the
+  setting says. It never approves anything you say over it, and "yes" is an answer, not a sound of listening, while the
+  assistant waits for your approval.
+- **What it cannot do.** If the recogniser writes nothing for a word (it sometimes does for a very short, quiet one), the voice
+  goes on after the pause and you have to say it again; and a person near the microphone, speaking about as loudly as you,
+  is taken for you (the same as without the setting).
+- **Turning it off** puts everything back as it was: the toggle is the whole of the change (`interruptPilot` in `voice.json`);
+  nothing is migrated. The numbers are in [voice-interrupt-evaluation.md](voice-interrupt-evaluation.md).
 
 ## When it does not hear you
 
@@ -152,7 +177,7 @@ across any voice model (Muse, a hosted model, or a local server).
 | The words of each conversation (yours and its, with how much of a cut-off reply you heard) | `assistant.db`, next to the memory | Until you delete them, or for the number of days you choose |
 | Notes it learned from what you said | `assistant.db` (see [the memory](assistant.md#how-the-memory-works)) | As the memory says |
 | The meaning of each note, as numbers, if you switched on [meaning search](assistant.md#meaning-search) | `assistant.db`, beside the note | As long as the note; erased with it, and all of it when meaning search is turned off |
-| How each turn went: why the call thought you had finished, what the recogniser heard (streaming and re-read), which rule kept a turn from being answered ("didn't catch", a quiet turn dropped, an echo dismissed, words joined to the next, a request dropped, an interruption and why), how long the model took to its first word, how long to the first sound. One line of JSON per turn, words and numbers only | `voice/flight/<conversation>.jsonl` in the data folder, at most about 512 KB per conversation (the file is rotated at 256 KB and the older one replaced) | Until you delete the conversation it belongs to (one or all, in the Voice tab), or it expires with it |
+| How each turn went: why the call thought you had finished, what the recogniser heard (streaming and re-read), which rule kept a turn from being answered ("didn't catch", a quiet turn dropped, an echo dismissed, words joined to the next, a request dropped, an interruption and why, a pause over its voice that was undone and why), how long the model took to its first word, how long to the first sound. One line of JSON per turn, words and numbers only | `voice/flight/<conversation>.jsonl` in the data folder, at most about 512 KB per conversation (the file is rotated at 256 KB and the older one replaced) | Until you delete the conversation it belongs to (one or all, in the Voice tab), or it expires with it |
 | The sound of your voice | **nowhere**: it is turned into words and dropped | Not kept |
 | A key for a hosted model | `voice-secrets.json`, readable by you only | Until you remove it |
 | The downloaded models | `voice/` in the data folder | Until you press *Remove* |
@@ -188,7 +213,13 @@ The decisions that matter, and why:
   heard. A first sentence is cut early and short so that sound starts quickly.
 - **Interruption is two steps.** The voice is lowered when sound starts over it and stopped only when it is confirmed (a
   stop word, or speech that goes on), so a cough costs a dip and not a sentence. The words it hears over its own voice
-  are compared with what it said, so an echo is not taken for you.
+  are compared with what it said, so an echo is not taken for you. With the pilot setting on the first step is a pause
+  that keeps the voice's place (silence, not a dip) and the second is decided by the words alone; that logic is
+  `interrupt.ts`, which has no clock, no audio and no Node in it, so it can be reused by any client that can hand it a
+  frame's loudness, a speech probability and the recogniser's words, and carry out a pause, a resume or a cut-off. The
+  speech detector has a second, quicker reading of the same frames for it: sherpa-onnx's Silero wrapper treats a minimum
+  speech or silence of 0 as its defaults (0.25 s and 0.5 s), so the first reading says "speech" 0.22 to 0.38 s after a word
+  begins and goes on saying it for 0.5 to 1.4 s after it ends; the quick one uses 32 ms and 64 ms.
 - **The model is behind one small interface** (`brain.ts`): conversation and tools in, text and tool calls out. Muse, any
   OpenAI-compatible server and a stand-in for tests all fit it. A model with no tool calling is given tools through a
   convention in its text.
@@ -252,7 +283,9 @@ Muse thread as the model (its speed is Muse's), and a quiet or noisy room other 
 
 ## Rolling back
 
-*Remove* in the Voice tab deletes the downloaded models. Deleting `voice.json` and `voice-secrets.json` resets the
+The spoken-interruption pilot is rolled back by switching it off (Assistant, Voice, *Speak over it to stop it*, or
+`"interruptPilot": false` in `voice.json`): the server and the page then behave exactly as version 0.30.0 did, which a test
+holds to the message, the sample and the millisecond. *Remove* in the Voice tab deletes the downloaded models. Deleting `voice.json` and `voice-secrets.json` resets the
 settings. The conversations are in `assistant.db` and go with it; `scripts/assistant-rollback.mjs` can step the database
 back to before they existed (export first).
 

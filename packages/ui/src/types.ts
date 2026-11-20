@@ -1167,6 +1167,8 @@ export interface VoiceSettingsView {
   brain: VoiceBrainSetting;
   speech: VoiceSpeechSetting;
   proactive: boolean;
+  /** Pilot: speaking over the assistant pauses its voice at once and what is said decides whether it stops (off by default). */
+  interruptPilot: boolean;
   keepDays: number | null;
   runtimeDir: string | null;
   modelsDir: string | null;

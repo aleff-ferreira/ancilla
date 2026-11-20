@@ -1,3 +1,4 @@
+import type { InterruptCommand, InterruptJudge, ResumeReason } from "./interrupt.js";
 import { isBackchannel, isStopIntent, readCompleteness } from "./text.js";
 
 /**
@@ -91,7 +92,23 @@ export type TurnEvent =
   /** Sound has begun over the assistant's voice: it may be an interruption, and is worth listening to. */
   | { type: "overlap_start"; t: number; audioFrom: number }
   /** That sound stopped, or turned out to be a sound of listening or the assistant's own voice. */
-  | { type: "overlap_end"; t: number };
+  | { type: "overlap_end"; t: number }
+  /** Only with an interruption judge: the sound over the assistant is not explained by its own voice, so its voice is paused. */
+  | { type: "pause"; t: number; leaseMs: number; renewal: boolean }
+  /** Only with an interruption judge: the sound was not for the assistant, and its voice goes on from where it stopped. */
+  | { type: "resume"; t: number; reason: ResumeReason; text: string }
+  /** Only with an interruption judge: the recogniser is asked for its final reading of the sound over the assistant. */
+  | { type: "settle"; t: number; seq: number };
+
+/** What is known of a frame besides how likely it is speech; only an interruption judge reads it. */
+export interface FrameAux {
+  /** How loud the microphone is after echo cancellation (RMS, 0 to 1). */
+  rms: number;
+  /** How loud the assistant's own voice is at the speaker now (RMS, 0 to 1), or null when not known. */
+  ref: number | null;
+  /** The speech probability read for the first frames of a sound and of the quiet after it, when the detector has one. */
+  onsetProb?: number;
+}
 
 type Mode = "quiet" | "speech" | "trailing";
 
@@ -134,11 +151,25 @@ export class TurnTaker {
   private duckedAt = 0;
   private overlapText = "";
 
-  constructor(private readonly cfg: TurnConfig = DEFAULT_TURN_CONFIG) {}
+  /**
+   * With a judge, sound over the assistant's voice is decided by it (pause first, words second, see interrupt.ts) and not
+   * by the rules below; without one this is the turn-taker it has always been.
+   */
+  constructor(
+    private readonly cfg: TurnConfig = DEFAULT_TURN_CONFIG,
+    private readonly judge: InterruptJudge | null = null,
+  ) {}
 
   /** What the assistant is doing now; it changes how the microphone is read. */
   setAgent(t: number, activity: AgentActivity): TurnEvent[] {
     const out: TurnEvent[] = [];
+    const held = this.judge?.paused === true;
+    this.judge?.setSpeaking(activity === "speaking");
+    if (held && activity !== "speaking") {
+      // Its voice was held for what the person said, and the assistant is no longer speaking (its reply ended or was
+      // replaced): what is held is stale, and is dropped, not played late.
+      out.push({ type: "resume", t, reason: "agent-stopped", text: "" }, { type: "overlap_end", t });
+    }
     if (this.agent === "speaking" && activity !== "speaking") {
       this.agentStoppedAt = t;
       if (this.ducked) {
@@ -175,11 +206,56 @@ export class TurnTaker {
   transcript(t: number, text: string): TurnEvent[] {
     if (this.mode === "quiet") {
       if (this.agent !== "speaking") return [];
+      if (this.judge) return this.applyJudge(this.judge.transcript(t, text, false), t);
       this.overlapText = text;
       return this.judgeOverlap(t);
     }
     this.text = text;
     return [];
+  }
+
+  /** Only with a judge: whether the recogniser will say when it has read out the last words of the sound over the assistant. */
+  expectAck(on: boolean): void {
+    this.judge?.expectAck(on);
+  }
+
+  /** Only with a judge: the recogniser has read out the last words that settle number `seq` asked for. */
+  settled(t: number, seq: number): TurnEvent[] {
+    if (!this.judge || this.mode !== "quiet") return [];
+    return this.applyJudge(this.judge.settled(t, seq), t);
+  }
+
+  private applyJudge(commands: InterruptCommand[], t: number): TurnEvent[] {
+    const out: TurnEvent[] = [];
+    for (const cmd of commands) {
+      switch (cmd.type) {
+        case "open":
+          out.push({ type: "overlap_start", t: cmd.t, audioFrom: cmd.audioFrom });
+          break;
+        case "pause":
+          out.push({ type: "pause", t: cmd.t, leaseMs: cmd.leaseMs, renewal: cmd.renewal });
+          break;
+        case "resume":
+          out.push({ type: "resume", t: cmd.t, reason: cmd.reason, text: cmd.text });
+          break;
+        case "settle":
+          out.push({ type: "settle", t: cmd.t, seq: cmd.seq });
+          break;
+        case "close":
+          out.push({ type: "overlap_end", t: cmd.t });
+          break;
+        case "backchannel":
+          out.push({ type: "backchannel", t: cmd.t, text: cmd.text });
+          break;
+        case "interrupt":
+          this.onsetStart = cmd.from;
+          this.onsetVoicedMs = cmd.voicedMs;
+          this.overlapText = cmd.text;
+          this.interrupt(t, cmd.reason === "stop-word" ? "keyword" : "speech", out);
+          break;
+      }
+    }
+    return out;
   }
 
   /** The verdict of a model that listens to the end of the audio, as the chance that the turn is over (0 to 1). */
@@ -190,16 +266,21 @@ export class TurnTaker {
   /** Marks whether the assistant just asked a question or awaits approval, so "Yes"/"Yeah"/"Sim" is not dropped as a backchannel. */
   setExpectAnswer(expect: boolean): void {
     this.expectAnswer = expect;
+    this.judge?.setExpectAnswer(expect);
   }
 
-  /** One voice-activity frame, ending at time `t` (milliseconds). */
-  frame(t: number, prob: number): TurnEvent[] {
+  /** One voice-activity frame, ending at time `t` (milliseconds); `aux` is what the interruption judge, if any, also needs. */
+  frame(t: number, prob: number, aux?: FrameAux): TurnEvent[] {
     const out: TurnEvent[] = [];
     const cfg = this.cfg;
     if (prob >= cfg.onProb) this.lastVoicedT = t;
     switch (this.mode) {
       case "quiet":
-        this.frameQuiet(t, prob, out);
+        if (this.judge && aux && this.agent === "speaking") {
+          out.push(...this.applyJudge(this.judge.frame({ t, prob: aux.onsetProb ?? prob, rms: aux.rms, ref: aux.ref }), t));
+        } else {
+          this.frameQuiet(t, prob, out);
+        }
         break;
       case "speech": {
         if (prob > cfg.offProb) {

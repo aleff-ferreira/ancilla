@@ -363,7 +363,10 @@ async function handle(message: ToWorker): Promise<void> {
     }
     case "flush": {
       const item = live.get(message.id);
-      if (!item || !streaming) return;
+      if (!item || !streaming) {
+        if (message.ack) post({ op: "flushed", id: message.id });
+        return;
+      }
       try {
         if (offline && item.total >= MIN_SEGMENT_SAMPLES && item.total <= MAX_SEGMENT_SAMPLES) {
           const reading =
@@ -388,6 +391,8 @@ async function handle(message: ToWorker): Promise<void> {
         publish(message.id, item);
       } catch (error) {
         post({ op: "log", line: `the last words could not be read: ${error instanceof Error ? error.message : String(error)}` });
+      } finally {
+        if (message.ack) post({ op: "flushed", id: message.id });
       }
       return;
     }

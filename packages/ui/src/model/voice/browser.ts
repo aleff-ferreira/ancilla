@@ -81,6 +81,7 @@ export function browserCallIO(socketUrl: () => string | null): CallIO & { dispos
       }
     },
     createPlayer: (sampleRate, onIdle): Player => new WebPlayer(ensureContext(), sampleRate, onIdle),
+    pausable: true,
     dispose: () => {
       const closing = context;
       context = null;

@@ -24,7 +24,7 @@ export type ClientMessage =
    * Opens the call. `thread` names the conversation to go on from (null: the last one, or a new one); `project` is the folder
    * work started by voice runs in. Either may be left out.
    */
-  | { type: "hello"; v: number; mode: CallMode; lang: string | null; echoCancelled: boolean; resume: string | null; thread: string | null; project?: string | null }
+  | { type: "hello"; v: number; mode: CallMode; lang: string | null; echoCancelled: boolean; resume: string | null; thread: string | null; project?: string | null; pause?: boolean }
   | { type: "playback"; utterance: number; samples: number }
   | { type: "interrupt"; utterance: number; samples: number }
   | { type: "text"; text: string }
@@ -77,6 +77,10 @@ export type ServerMessage =
   | { type: "speak_end"; utterance: number }
   | { type: "interrupted"; utterance: number; heard: string }
   | { type: "duck"; on: boolean }
+  /** Only to a page that said in `hello` that it can pause: silence the reply and keep its place; it comes back by itself after `leaseMs` unless told again. */
+  | { type: "pause"; utterance: number; leaseMs: number }
+  /** Only to a page that said it can pause: the reply goes on from where it was paused, or with `drop`, what was held is thrown away (the reply is over). */
+  | { type: "resume"; utterance: number; drop?: true }
   | { type: "task"; id: string; title: string; status: string; note: string | null }
   | { type: "approval"; request: CallApproval | null }
   | { type: "notice"; level: "info" | "warn"; text: string }
@@ -118,7 +122,7 @@ export function parseClientMessage(raw: string): ClientMessage | null {
       const thread = value["thread"] === null || value["thread"] === undefined ? null : short(value["thread"], 80);
       const project = value["project"] === null || value["project"] === undefined ? null : short(value["project"], 500);
       if (v === null) return null;
-      return { type: "hello", v, mode, lang, echoCancelled: value["echoCancelled"] === true, resume, thread, project };
+      return { type: "hello", v, mode, lang, echoCancelled: value["echoCancelled"] === true, resume, thread, project, ...(value["pause"] === true ? { pause: true } : {}) };
     }
     case "playback":
     case "interrupt": {

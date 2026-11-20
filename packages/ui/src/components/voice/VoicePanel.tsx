@@ -73,6 +73,7 @@ const DEFAULT_VOICE_STATUS: VoiceStatusView = {
     brain: { kind: "muse", model: null, accountId: null },
     speech: { kind: "local" },
     proactive: false,
+    interruptPilot: false,
     keepDays: null,
     runtimeDir: null,
     modelsDir: null,
@@ -756,6 +757,9 @@ function Sound(props: { settings: VoiceSettingsView; status: VoiceStatusView; sa
       </Row>
       <Row label="Speaks up by itself" description="When a task you gave it finishes or needs you, it says so in a pause in the conversation, and a call opens with what changed since you last talked. It never interrupts you, and says nothing if you speak first.">
         <Toggle checked={settings.proactive} onChange={(proactive) => void props.save({ proactive })} label="Let it speak up about tasks" />
+      </Row>
+      <Row label="Speak over it to stop it (pilot)" description="When you speak over the assistant, its voice pauses at once, and what you say decides what happens: a stop word silences it, a sound of listening like “mm-hm” lets it go on from the same place. Works in hands-free calls with echo cancellation on; a spoken “stop” is not a command to cancel a task. Off by default.">
+        <Toggle checked={settings.interruptPilot} onChange={(interruptPilot) => void props.save({ interruptPilot })} label="Pause the voice when I speak over it" />
       </Row>
       <Row label="Reads each turn twice" description={status.pack.refine ? "Uses the accuracy booster to write down what you said. Slower to load, much better with names and numbers." : "Needs the accuracy booster, which is not installed."}>
         <Toggle checked={settings.refine && status.pack.refine} disabled={!status.pack.refine} onChange={(refine) => void props.save({ refine })} label="Use the accuracy booster" />

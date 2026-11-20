@@ -17,7 +17,7 @@ export type ToWorker =
   /** Samples at 16 kHz; the buffer is handed over. */
   | { op: "audio"; id: number; samples: Float32Array }
   /** The person went quiet: the last words are flushed out and, with an offline model, what was said is read ahead of time. */
-  | { op: "flush"; id: number }
+  | { op: "flush"; id: number; ack?: boolean }
   | { op: "finish"; req: number; id: number; sentAt: number }
   | { op: "dispose"; id: number };
 
@@ -42,4 +42,6 @@ export type FromWorker =
   | { op: "reply"; req: number; ok: true; value?: FinalResult | { loadMs: number } | null }
   | { op: "reply"; req: number; ok: false; error: string }
   | { op: "partial"; id: number; text: string }
+  /** A flush that was asked for with `ack` has been read out (its words, if any, were sent as a partial before this). */
+  | { op: "flushed"; id: number }
   | { op: "log"; line: string };

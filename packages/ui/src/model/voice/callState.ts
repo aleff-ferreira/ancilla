@@ -151,6 +151,8 @@ export function reduceServer(view: CallView, message: ServerMessage, now: number
     case "speaking":
     case "speak_end":
     case "pong":
+    case "pause":
+    case "resume":
       return view;
     case "duck":
       return { ...view, ducked: message.on };

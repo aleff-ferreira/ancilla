@@ -43,6 +43,8 @@ export interface CallIO {
   /** Starts the microphone; `onFrame` gets 32 ms of 16 kHz audio and how loud it was. Rejects when the person says no. */
   startMic(onFrame: (pcm: Int16Array, rms: number, peak?: number) => void): Promise<MicHandle>;
   createPlayer(sampleRate: number, onIdle?: (utterance: number, played: number) => void): Player;
+  /** The player this makes can pause and resume the voice (`Player.pause`); the server is told so when the call opens. */
+  readonly pausable?: boolean;
   /** Lets go of the audio machinery once the call is over. */
   dispose?(): void;
 }
@@ -256,6 +258,8 @@ export class CallSession {
       resume: null,
       thread: null,
       project: this.options.project,
+      // This page can silence the voice and keep its place; whether anything asks it to is a setting on the server.
+      ...(this.io.pausable ? { pause: true } : {}),
     });
   }
 
@@ -322,6 +326,21 @@ export class CallSession {
       }
       case "duck":
         this.player?.duck(message.on);
+        break;
+      case "pause": {
+        // Only sent when the server's pilot is on and this page said it could: the voice stops, and the exact place goes back.
+        const paused = this.player?.pause?.(message.leaseMs);
+        if (paused && paused.utterance === message.utterance) this.sendMessage({ type: "playback", utterance: paused.utterance, samples: paused.played });
+        break;
+      }
+      case "resume":
+        if (message.drop === true) {
+          // The reply the voice was held for is over: what is held is thrown away, and the place it stopped at goes back.
+          const stopped = this.player?.stop();
+          if (stopped && stopped.utterance === message.utterance) this.sendMessage({ type: "playback", utterance: stopped.utterance, samples: stopped.played });
+        } else {
+          this.player?.resume?.();
+        }
         break;
       case "ended":
         this.player?.stop();

@@ -36,6 +36,8 @@ interface Pending {
 class WorkerStream implements AsrStream {
   latest = "";
   onPartial?: (result: AsrResult) => void;
+  onFlushed?: () => void;
+  readonly ackFlush = true;
   private done = false;
 
   constructor(
@@ -52,8 +54,8 @@ class WorkerStream implements AsrStream {
     return { text: this.latest };
   }
 
-  flush(): void {
-    if (!this.done) this.owner.send({ op: "flush", id: this.id });
+  flush(options?: { ack?: boolean }): void {
+    if (!this.done) this.owner.send({ op: "flush", id: this.id, ...(options?.ack ? { ack: true } : {}) });
   }
 
   async finish(): Promise<AsrResult> {
@@ -237,6 +239,9 @@ export class SherpaAsr implements AsrEngine {
         }
         return;
       }
+      case "flushed":
+        this.streams.get(message.id)?.onFlushed?.();
+        return;
       case "log":
         this.options.log?.(message.line);
         return;

@@ -711,7 +711,7 @@ export class VoiceService {
       },
       sendAudio: (frame) => socket.sendBinary(frame),
       log: (line) => this.deps.log(`voice: ${line}`),
-      config: { speed: settings.speed, debug: process.env["ANCILLA_VOICE_DEBUG"] === "1" },
+      config: { speed: settings.speed, debug: process.env["ANCILLA_VOICE_DEBUG"] === "1", ...(settings.interruptPilot ? { interruptPilot: true } : {}) },
       id,
       modelLabel: () => activeChosen.brain.label,
       takeEarlySettleSavedMs: () => {

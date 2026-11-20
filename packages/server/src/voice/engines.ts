@@ -16,6 +16,12 @@ export interface VadEngine {
   readonly frameSamples: number;
   /** The chance, 0 to 1, that the frame is speech. */
   process(frame: Float32Array): MaybePromise<number>;
+  /**
+   * The same chance read for the first frames of a sound and the first frames of quiet after it, for deciding that someone
+   * has begun to speak over the assistant; `process` is read for finding the end of a turn and may be slower to both. An
+   * engine without a quicker reading is asked nothing here (the call uses `process`).
+   */
+  processOnset?(frame: Float32Array): MaybePromise<number>;
   reset(): void;
 }
 
@@ -47,7 +53,14 @@ export interface AsrStream {
    * The person has gone quiet: gives the recogniser the trailing silence it needs to say the last words it was waiting
    * to be sure of, without ending the stream (the person may go on).
    */
-  flush?(): MaybePromise<void>;
+  flush?(options?: { ack?: boolean }): MaybePromise<void>;
+  /**
+   * The stream can say when a flush asked for with `ack` has been read out and its words delivered (through `onPartial`):
+   * a recogniser that is busy reads late, and whoever waits for the last words wants to know when they are in, not to guess.
+   */
+  readonly ackFlush?: boolean;
+  /** Called once for every flush that asked for `ack`, when the words of it have been delivered. */
+  onFlushed?: () => void;
   /** The end of the audio: the final words. The stream is not used again. */
   finish(): MaybePromise<AsrResult>;
   dispose(): void;

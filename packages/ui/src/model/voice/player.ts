@@ -16,6 +16,14 @@ export interface Player {
   stop(): { utterance: number; played: number };
   /** Lower the voice (someone may be about to speak) or bring it back. */
   duck(on: boolean): void;
+  /**
+   * Silence the voice at once but keep its place (and whatever arrives meanwhile), until `resume` or until `leaseMs` have
+   * passed with no further `pause`, so that a voice paused for a sound that was never meant for it cannot stay silent for
+   * ever. Returns where it stopped; null when it was paused already (the lease is only renewed).
+   */
+  pause?(leaseMs: number): { utterance: number; played: number } | null;
+  /** Goes on from where `pause` stopped. */
+  resume?(): void;
   /** How loud the voice is right now, 0 to 1. */
   level(): number;
   close(): void;
@@ -77,6 +85,12 @@ export class PlaybackLedger {
     return { utterance, played };
   }
 
+  /** Moves everything that had not finished at `at` later by `delta` seconds, as when the voice was paused for that long. */
+  shift(at: number, delta: number): void {
+    for (const p of this.pieces) if (p.start + p.samples / this.rate > at) p.start += delta;
+    if (this.end > at) this.end += delta;
+  }
+
   /** Forgets pieces that finished long ago, so that a long call does not keep every sentence. */
   trim(now: number): void {
     const keep: Piece[] = [];
@@ -99,6 +113,23 @@ export class PlaybackLedger {
 /** How soon audio may start after it arrives: a little, so that two pieces that arrive together are joined. */
 const LEAD_SECONDS = 0.04;
 const DUCKED_GAIN = 0.2;
+/** A paused voice fades out over about this long (the sources stop after it), so that it does not click. */
+const PAUSE_FADE_SECONDS = 0.03;
+
+interface Held {
+  utterance: number;
+  pcm: Int16Array;
+}
+
+interface PausedState {
+  /** When the sources were told to stop, on the audio clock. */
+  stopAt: number;
+  /** What was still to play, in order, and where in the first of them it was. */
+  pieces: Array<{ buffer: AudioBuffer; utterance: number; samples: number; start: number; offset: number }>;
+  lease: ReturnType<typeof setTimeout> | null;
+  /** Audio that arrived while paused. */
+  held: Held[];
+}
 
 /** The speakers, through Web Audio. */
 export class WebPlayer implements Player {
@@ -106,9 +137,12 @@ export class WebPlayer implements Player {
   private readonly gain: GainNode;
   private readonly analyser: AnalyserNode;
   private readonly sources = new Set<AudioBufferSourceNode>();
+  private readonly meta = new Map<AudioBufferSourceNode, { buffer: AudioBuffer; utterance: number; samples: number; start: number }>();
   private readonly scheduledSamples = new Map<number, number>();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly scratch: Uint8Array<ArrayBuffer>;
+  private paused: PausedState | null = null;
+  private ducked = false;
 
   constructor(
     private readonly ctx: AudioContext,
@@ -142,17 +176,38 @@ export class WebPlayer implements Player {
       if (oldest === undefined) break;
       this.scheduledSamples.delete(oldest);
     }
+    // While the voice is paused what arrives is kept, in order, for when it goes on.
+    if (this.paused) {
+      this.paused.held.push({ utterance, pcm });
+      return;
+    }
+    this.begin(utterance, pcm);
+  }
+
+  private bufferOf(pcm: Int16Array): AudioBuffer {
     const buffer = this.ctx.createBuffer(1, pcm.length, this.rate);
     const channel = buffer.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) channel[i] = (pcm[i] as number) / 32768;
+    return buffer;
+  }
+
+  private begin(utterance: number, pcm: Int16Array): void {
+    const buffer = this.bufferOf(pcm);
     const source = this.ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(this.gain);
     const start = this.ledger.schedule(utterance, pcm.length, this.ctx.currentTime, LEAD_SECONDS);
     source.start(start);
+    this.track(source, buffer, utterance, pcm.length, start);
+    this.ledger.trim(this.ctx.currentTime);
+  }
+
+  private track(source: AudioBufferSourceNode, buffer: AudioBuffer, utterance: number, samples: number, start: number): void {
     this.sources.add(source);
+    this.meta.set(source, { buffer, utterance, samples, start });
     source.onended = () => {
       if (!this.sources.delete(source)) return;
+      this.meta.delete(source);
       source.disconnect();
       if (this.sources.size === 0 && this.onIdle) {
         const playedNow = this.played(utterance);
@@ -170,11 +225,11 @@ export class WebPlayer implements Player {
         }
       }
     };
-    this.ledger.trim(this.ctx.currentTime);
   }
 
   played(utterance: number): number {
-    return this.ledger.played(utterance, this.heardAt());
+    // A paused voice has played what it had when the sources were stopped, whatever the clock says since.
+    return this.ledger.played(utterance, this.paused ? this.paused.stopAt : this.heardAt());
   }
 
   current(): number {
@@ -187,7 +242,11 @@ export class WebPlayer implements Player {
       this.idleTimer = null;
     }
     this.scheduledSamples.clear();
-    const out = this.ledger.clear(this.heardAt());
+    const wasPaused = this.paused !== null;
+    const pausedAt = this.paused ? this.paused.stopAt : null;
+    if (this.paused?.lease) clearTimeout(this.paused.lease);
+    this.paused = null;
+    const out = this.ledger.clear(pausedAt ?? this.heardAt());
     for (const source of this.sources) {
       try {
         source.onended = null;
@@ -198,11 +257,88 @@ export class WebPlayer implements Player {
       }
     }
     this.sources.clear();
-    this.duck(false);
+    this.meta.clear();
+    if (wasPaused) {
+      // The voice was faded out for the pause: it is back at full at once, for whatever is said next.
+      this.ducked = false;
+      this.gain.gain.cancelScheduledValues(this.ctx.currentTime);
+      this.gain.gain.setValueAtTime(1, this.ctx.currentTime);
+    } else {
+      this.duck(false);
+    }
     return out;
   }
 
+  pause(leaseMs: number): { utterance: number; played: number } | null {
+    if (this.paused) {
+      this.armLease(leaseMs);
+      return null;
+    }
+    const now = this.ctx.currentTime;
+    const stopAt = now + PAUSE_FADE_SECONDS;
+    this.gain.gain.cancelScheduledValues(now);
+    this.gain.gain.setTargetAtTime(0, now, 0.006);
+    const state: PausedState = { stopAt, pieces: [], lease: null, held: [] };
+    // What has not finished by then is stopped, and started afresh from where it was when the voice goes on.
+    for (const [source, m] of [...this.meta]) {
+      const elapsed = Math.max(0, stopAt - m.start);
+      if (elapsed * this.rate >= m.samples) continue; // it has finished by then
+      state.pieces.push({ buffer: m.buffer, utterance: m.utterance, samples: m.samples, start: m.start, offset: elapsed });
+      try {
+        source.onended = null;
+        source.stop(stopAt);
+      } catch {
+        /* a source that has already ended */
+      }
+      this.sources.delete(source);
+      this.meta.delete(source);
+    }
+    this.paused = state;
+    this.armLease(leaseMs);
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
+    }
+    const utterance = this.ledger.current;
+    return { utterance, played: this.ledger.played(utterance, stopAt) };
+  }
+
+  private armLease(leaseMs: number): void {
+    const state = this.paused;
+    if (!state) return;
+    if (state.lease) clearTimeout(state.lease);
+    state.lease = setTimeout(() => this.resume(), Math.max(50, leaseMs));
+  }
+
+  resume(): void {
+    const state = this.paused;
+    if (!state) return;
+    if (state.lease) clearTimeout(state.lease);
+    this.paused = null;
+    const now = this.ctx.currentTime;
+    const resumeAt = now + LEAD_SECONDS;
+    const delta = resumeAt - state.stopAt;
+    this.ledger.shift(state.stopAt, delta);
+    this.gain.gain.cancelScheduledValues(now);
+    this.gain.gain.setValueAtTime(0, now);
+    this.gain.gain.setTargetAtTime(this.ducked ? DUCKED_GAIN : 1, now, 0.01);
+    let first = true;
+    for (const piece of state.pieces) {
+      const source = this.ctx.createBufferSource();
+      source.buffer = piece.buffer;
+      source.connect(this.gain);
+      const start = piece.start + delta;
+      if (first && piece.offset > 0) source.start(resumeAt, piece.offset);
+      else source.start(Math.max(resumeAt, start));
+      first = false;
+      this.track(source, piece.buffer, piece.utterance, piece.samples, start);
+    }
+    for (const held of state.held) this.begin(held.utterance, held.pcm);
+  }
+
   duck(on: boolean): void {
+    this.ducked = on;
+    if (this.paused) return;
     this.gain.gain.setTargetAtTime(on ? DUCKED_GAIN : 1, this.ctx.currentTime, 0.04);
   }
 

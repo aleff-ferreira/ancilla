@@ -105,9 +105,14 @@ class FakeAsrStream implements AsrStream {
   /** How many times the session asked for the last words (the person had gone quiet). */
   flushes = 0;
 
-  flush(): void {
+  readonly ackFlush = true;
+  onFlushed?: () => void;
+
+  flush(options?: { ack?: boolean }): void {
     this.flushes++;
     this.closeRun();
+    // The words are there at once; a flush that asked to be told is told after them.
+    if (options?.ack) queueMicrotask(() => this.onFlushed?.());
   }
 
   partial(): AsrResult {
@@ -323,6 +328,11 @@ export class SimClient {
   playedAt: number[] = [];
   echoAmp = 0;
   rate = 16_000;
+  /** Whether the voice is paused (a page that does what `pause` asks): nothing is played, the place is kept. */
+  paused = false;
+  /** Pauses and resumes, as the page was asked. */
+  readonly pauseLog: Array<{ at: number; paused: boolean; played: number }> = [];
+  private pauseLeaseUntil = 0;
 
   constructor(
     readonly sched: ManualScheduler,
@@ -337,7 +347,22 @@ export class SimClient {
   receive = (msg: ServerMessage): void => {
     this.messages.push({ at: this.sched.now(), msg });
     if (msg.type === "ready") this.rate = msg.sampleRate;
-    if (msg.type === "interrupted") this.queued = this.played; // the speakers are emptied
+    if (msg.type === "interrupted") {
+      this.queued = this.played; // the speakers are emptied
+      this.paused = false;
+    }
+    if (msg.type === "pause") {
+      // The voice stops where it is, and the page says exactly where that was.
+      if (!this.paused) this.pauseLog.push({ at: this.sched.now(), paused: true, played: this.played });
+      this.paused = true;
+      this.pauseLeaseUntil = this.sched.now() + msg.leaseMs;
+      this.getSession().onMessage({ type: "playback", utterance: msg.utterance, samples: this.played });
+    }
+    if (msg.type === "resume" && this.paused) {
+      this.paused = false;
+      this.pauseLog.push({ at: this.sched.now(), paused: false, played: this.played });
+    }
+    if (msg.type === "resume" && msg.drop === true) this.queued = this.played; // what was held is thrown away
   };
 
   receiveAudio = (buf: Buffer): void => {
@@ -360,7 +385,12 @@ export class SimClient {
   private async step(mic: Int16Array): Promise<void> {
     const session = this.getSession();
     const stepSamples = Math.round(this.rate * 0.02);
-    const available = this.queued - this.played;
+    if (this.paused && this.sched.now() >= this.pauseLeaseUntil) {
+      // The lease ran out with nothing more said: the page brings the voice back by itself.
+      this.paused = false;
+      this.pauseLog.push({ at: this.sched.now(), paused: false, played: this.played });
+    }
+    const available = this.paused ? 0 : this.queued - this.played;
     const advance = Math.min(available, stepSamples);
     this.playing = advance > 0;
     if (advance > 0) {
@@ -433,6 +463,8 @@ export async function makeRig(options: {
   msPerChar?: number;
   open?: boolean;
   mode?: "hands-free" | "push-to-talk";
+  /** More of what the page says in its hello, such as `{ pause: true }`. */
+  hello?: { pause?: boolean; echoCancelled?: boolean };
 }): Promise<Rig> {
   const { ManualScheduler: Manual } = await import("./scheduler.js");
   const sched = new Manual(1_000_000);
@@ -458,7 +490,18 @@ export async function makeRig(options: {
     ...(options.config ? { config: options.config } : {}),
     id: "test-call",
   });
-  if (options.open !== false) await session.start({ type: "hello", v: 1, mode: options.mode ?? "hands-free", lang: null, echoCancelled: true, resume: null, thread: null });
+  if (options.open !== false) {
+    await session.start({
+      type: "hello",
+      v: 1,
+      mode: options.mode ?? "hands-free",
+      lang: null,
+      echoCancelled: options.hello?.echoCancelled ?? true,
+      resume: null,
+      thread: null,
+      ...(options.hello?.pause ? { pause: true } : {}),
+    });
+  }
   await sched.advance(0);
   return { sched, client, session, host, brain, asr, tts, engines, logs, flights };
 }

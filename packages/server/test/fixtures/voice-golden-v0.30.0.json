@@ -1,0 +1,4984 @@
+[
+ {
+  "name": "ordinary turn",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1004660,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1006360,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1008860,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1016820,
+    "speak_end",
+    {
+     "utterance": 1
+    }
+   ],
+   [
+    1016820,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    216960
+   ],
+   [
+    1011360,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1016820
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 1,
+  "asrStreams": 1,
+  "logs": []
+ },
+ {
+  "name": "a stop word over the reply",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1003880,
+    "duck",
+    {
+     "on": true
+    }
+   ],
+   [
+    1004080,
+    "interrupted",
+    {
+     "utterance": 1,
+     "heard": "The weather in Lisbon tomorrow will be"
+    }
+   ],
+   [
+    1004080,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1004080,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1004080,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Stop"
+    }
+   ],
+   [
+    1004680,
+    "user",
+    {
+     "turn": 2,
+     "text": "Stop",
+     "source": "voice"
+    }
+   ],
+   [
+    1004680,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1004880,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Okay.",
+     "done": false
+    }
+   ],
+   [
+    1004880,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "Okay.",
+     "samples": 4800
+    }
+   ],
+   [
+    1004880,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Okay.",
+     "done": true
+    }
+   ],
+   [
+    1004880,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1004880,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 2,
+      "endpointMs": 384,
+      "asrMs": 384,
+      "firstTokenMs": 584,
+      "firstAudioMs": 584,
+      "totalMs": 584,
+      "bargeIn": false,
+      "endpointReason": "command"
+     }
+    }
+   ],
+   [
+    1006680,
+    "speak_end",
+    {
+     "utterance": 2
+    }
+   ],
+   [
+    1006680,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    83520
+   ],
+   [
+    1004880,
+    2,
+    4800
+   ],
+   [
+    1004880,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "barge-in",
+    "rules": [
+     "barge-in: the person spoke (keyword)"
+    ],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   },
+   {
+    "turn": 2,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "command",
+    "text": "Stop",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1004080,
+    "heard": "The weather in Lisbon tomorrow will be",
+    "interrupted": true
+   },
+   {
+    "turn": 2,
+    "role": "user",
+    "text": "Stop",
+    "source": "voice",
+    "at": 1004680
+   },
+   {
+    "turn": 2,
+    "role": "assistant",
+    "text": "Okay.",
+    "source": "voice",
+    "at": 1006680
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be [the user interrupted here]"
+   },
+   {
+    "role": "user",
+    "content": "Stop"
+   },
+   {
+    "role": "assistant",
+    "content": "Okay."
+   }
+  ],
+  "brainRequests": 2,
+  "asrStreams": 2,
+  "logs": [
+   "reply 1 stopped: the person spoke (keyword), heard \"The weather in Lisbon tomorrow will be\""
+  ]
+ },
+ {
+  "name": "words over the reply that are not a stop",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1003360,
+    "duck",
+    {
+     "on": true
+    }
+   ],
+   [
+    1003560,
+    "interrupted",
+    {
+     "utterance": 1,
+     "heard": "The weather in Lisbon"
+    }
+   ],
+   [
+    1003560,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1003560,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1003560,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell"
+    }
+   ],
+   [
+    1003820,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell me"
+    }
+   ],
+   [
+    1004080,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell me something"
+    }
+   ],
+   [
+    1004320,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell me something else"
+    }
+   ],
+   [
+    1005060,
+    "user",
+    {
+     "turn": 2,
+     "text": "Tell me something else",
+     "source": "voice"
+    }
+   ],
+   [
+    1005060,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1005310,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1005330,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1005350,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1005370,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1005390,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1005390,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1005390,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1005390,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 2,
+      "endpointMs": 768,
+      "asrMs": 768,
+      "firstTokenMs": 1018,
+      "firstAudioMs": 1098,
+      "totalMs": 1098,
+      "bargeIn": false,
+      "endpointReason": "unknown"
+     }
+    }
+   ],
+   [
+    1005410,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1005430,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1005430,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1005450,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1005470,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1005490,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1005510,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1005530,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1005530,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1005550,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1005570,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1005590,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1005610,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1005630,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1005650,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1005670,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1005690,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1005710,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1005730,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1005750,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1005770,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1005790,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1005810,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1005830,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1005850,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1005870,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1005870,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1006100,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1008300,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1010000,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1012500,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1020460,
+    "speak_end",
+    {
+     "utterance": 2
+    }
+   ],
+   [
+    1020460,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    83520
+   ],
+   [
+    1005390,
+    2,
+    216960
+   ],
+   [
+    1015000,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "barge-in",
+    "rules": [
+     "barge-in: the person spoke (speech)"
+    ],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   },
+   {
+    "turn": 2,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "unknown",
+    "text": "Tell me something else",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1003560,
+    "heard": "The weather in Lisbon",
+    "interrupted": true
+   },
+   {
+    "turn": 2,
+    "role": "user",
+    "text": "Tell me something else",
+    "source": "voice",
+    "at": 1005060
+   },
+   {
+    "turn": 2,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1020460
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon [the user interrupted here]"
+   },
+   {
+    "role": "user",
+    "content": "Tell me something else"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 2,
+  "asrStreams": 2,
+  "logs": [
+   "reply 1 stopped: the person spoke (speech), heard \"The weather in Lisbon\""
+  ]
+ },
+ {
+  "name": "a sound of listening over the reply",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1003360,
+    "duck",
+    {
+     "on": true
+    }
+   ],
+   [
+    1003560,
+    "duck",
+    {
+     "on": false
+    }
+   ],
+   [
+    1004660,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1006360,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1008860,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1016820,
+    "speak_end",
+    {
+     "utterance": 1
+    }
+   ],
+   [
+    1016820,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    216960
+   ],
+   [
+    1011360,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1016820
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 1,
+  "asrStreams": 2,
+  "logs": []
+ },
+ {
+  "name": "the assistant's own echo",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1004660,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1006360,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1008860,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1016820,
+    "speak_end",
+    {
+     "utterance": 1
+    }
+   ],
+   [
+    1016820,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    216960
+   ],
+   [
+    1011360,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1016820
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 1,
+  "asrStreams": 1,
+  "logs": []
+ },
+ {
+  "name": "a click while it speaks",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1003360,
+    "duck",
+    {
+     "on": true
+    }
+   ],
+   [
+    1003780,
+    "duck",
+    {
+     "on": false
+    }
+   ],
+   [
+    1004660,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1006360,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1008860,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1016820,
+    "speak_end",
+    {
+     "utterance": 1
+    }
+   ],
+   [
+    1016820,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    216960
+   ],
+   [
+    1011360,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1016820
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 1,
+  "asrStreams": 2,
+  "logs": []
+ },
+ {
+  "name": "speech resumed right after a turn",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001100,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001100,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001280,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1001280,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1001540,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell"
+    }
+   ],
+   [
+    1001800,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell me"
+    }
+   ],
+   [
+    1001920,
+    "partial",
+    {
+     "turn": 2,
+     "text": "Tell me something else"
+    }
+   ],
+   [
+    1002600,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it? Tell me something else",
+     "source": "voice"
+    }
+   ],
+   [
+    1002600,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1002850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1002870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1002890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1002910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1002930,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1002930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1002930,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1002930,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 768,
+      "asrMs": 768,
+      "firstTokenMs": 1018,
+      "firstAudioMs": 1098,
+      "totalMs": 1098,
+      "bargeIn": false,
+      "endpointReason": "unknown"
+     }
+    }
+   ],
+   [
+    1002950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1002970,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1002970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1002990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1003010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1003030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1003050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1003070,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1003070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1003090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1003110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1003130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1003150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1003170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1003190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1003210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1003230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1003250,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1003270,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1003290,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1003310,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1003330,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1003350,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1003370,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1003390,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1003410,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1003410,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1003640,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1005840,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "Bring a jacket if you plan to eat outside.",
+     "samples": 40320
+    }
+   ],
+   [
+    1007540,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "On Thursday clouds roll in from the coast.",
+     "samples": 40320
+    }
+   ],
+   [
+    1010040,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 1,
+     "text": "Friday looks bright again.",
+     "samples": 24960
+    }
+   ],
+   [
+    1018000,
+    "speak_end",
+    {
+     "utterance": 2
+    }
+   ],
+   [
+    1018000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1002930,
+    2,
+    216960
+   ],
+   [
+    1012540,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "merged",
+    "rules": [
+     "merged-into-next"
+    ],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   },
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "unknown",
+    "text": "What time is it? Tell me something else",
+    "fragments": 2
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001100
+   },
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it? Tell me something else",
+    "source": "voice",
+    "at": 1002600
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1018000
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it? Tell me something else"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again."
+   }
+  ],
+  "brainRequests": 2,
+  "asrStreams": 2,
+  "logs": []
+ },
+ {
+  "name": "a stop word with nothing to stop",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "Stop"
+    }
+   ],
+   [
+    1000900,
+    "user",
+    {
+     "turn": 1,
+     "text": "Stop",
+     "source": "voice"
+    }
+   ],
+   [
+    1000900,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001100,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "Okay.",
+     "done": false
+    }
+   ],
+   [
+    1001100,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "Okay.",
+     "samples": 4800
+    }
+   ],
+   [
+    1001100,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "Okay.",
+     "done": true
+    }
+   ],
+   [
+    1001100,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001100,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 384,
+      "asrMs": 384,
+      "firstTokenMs": 584,
+      "firstAudioMs": 584,
+      "totalMs": 584,
+      "bargeIn": false,
+      "endpointReason": "command"
+     }
+    }
+   ],
+   [
+    1001380,
+    "speak_end",
+    {
+     "utterance": 1
+    }
+   ],
+   [
+    1001400,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001100,
+    1,
+    4800
+   ],
+   [
+    1001100,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "answered",
+    "rules": [],
+    "endReason": "command",
+    "text": "Stop",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "Stop",
+    "source": "voice",
+    "at": 1000900
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "Okay.",
+    "source": "voice",
+    "at": 1001400
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "Stop"
+   },
+   {
+    "role": "assistant",
+    "content": "Okay."
+   }
+  ],
+  "brainRequests": 1,
+  "asrStreams": 1,
+  "logs": []
+ },
+ {
+  "name": "typed text over the reply",
+  "messages": [
+   [
+    1000000,
+    "ready",
+    {
+     "session": "test-call",
+     "sampleRate": 16000,
+     "engine": "fake-asr + fake-tts",
+     "voice": "en-1",
+     "lang": null,
+     "resumed": false,
+     "model": "Scripted"
+    }
+   ],
+   [
+    1000000,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000100,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1000360,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What"
+    }
+   ],
+   [
+    1000620,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time"
+    }
+   ],
+   [
+    1000880,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is"
+    }
+   ],
+   [
+    1001000,
+    "partial",
+    {
+     "turn": 1,
+     "text": "What time is it?"
+    }
+   ],
+   [
+    1001420,
+    "user",
+    {
+     "turn": 1,
+     "text": "What time is it?",
+     "source": "voice"
+    }
+   ],
+   [
+    1001420,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1001670,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weat",
+     "done": false
+    }
+   ],
+   [
+    1001690,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in L",
+     "done": false
+    }
+   ],
+   [
+    1001710,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon to",
+     "done": false
+    }
+   ],
+   [
+    1001730,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow w",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will",
+     "samples": 33600
+    }
+   ],
+   [
+    1001750,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be m",
+     "done": false
+    }
+   ],
+   [
+    1001750,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1001750,
+    "metrics",
+    {
+     "metrics": {
+      "turn": 1,
+      "endpointMs": 480,
+      "asrMs": 480,
+      "firstTokenMs": 730,
+      "firstAudioMs": 810,
+      "totalMs": 810,
+      "bargeIn": false,
+      "endpointReason": "complete"
+     }
+    }
+   ],
+   [
+    1001770,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly su",
+     "done": false
+    }
+   ],
+   [
+    1001790,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "be mostly sunny.",
+     "samples": 15360
+    }
+   ],
+   [
+    1001790,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A l",
+     "done": false
+    }
+   ],
+   [
+    1001810,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light bre",
+     "done": false
+    }
+   ],
+   [
+    1001830,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze come",
+     "done": false
+    }
+   ],
+   [
+    1001850,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from t",
+     "done": false
+    }
+   ],
+   [
+    1001870,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north",
+     "done": false
+    }
+   ],
+   [
+    1001890,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "A light breeze comes from the north.",
+     "samples": 34560
+    }
+   ],
+   [
+    1001890,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the",
+     "done": false
+    }
+   ],
+   [
+    1001910,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening",
+     "done": false
+    }
+   ],
+   [
+    1001930,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cool",
+     "done": false
+    }
+   ],
+   [
+    1001950,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down.",
+     "done": false
+    }
+   ],
+   [
+    1001970,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a",
+     "done": false
+    }
+   ],
+   [
+    1001990,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket i",
+     "done": false
+    }
+   ],
+   [
+    1002010,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you pl",
+     "done": false
+    }
+   ],
+   [
+    1002030,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to ea",
+     "done": false
+    }
+   ],
+   [
+    1002050,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outsid",
+     "done": false
+    }
+   ],
+   [
+    1002070,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Th",
+     "done": false
+    }
+   ],
+   [
+    1002090,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday c",
+     "done": false
+    }
+   ],
+   [
+    1002110,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds ro",
+     "done": false
+    }
+   ],
+   [
+    1002130,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in fr",
+     "done": false
+    }
+   ],
+   [
+    1002150,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the c",
+     "done": false
+    }
+   ],
+   [
+    1002170,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Fr",
+     "done": false
+    }
+   ],
+   [
+    1002190,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday loo",
+     "done": false
+    }
+   ],
+   [
+    1002210,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks brigh",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": false
+    }
+   ],
+   [
+    1002230,
+    "assistant",
+    {
+     "turn": 1,
+     "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+     "done": true
+    }
+   ],
+   [
+    1002460,
+    "speaking",
+    {
+     "utterance": 1,
+     "turn": 1,
+     "text": "In the evening it cools down.",
+     "samples": 27840
+    }
+   ],
+   [
+    1002800,
+    "interrupted",
+    {
+     "utterance": 1,
+     "heard": "The weather in"
+    }
+   ],
+   [
+    1002800,
+    "state",
+    {
+     "state": "listening"
+    }
+   ],
+   [
+    1002800,
+    "user",
+    {
+     "turn": 2,
+     "text": "Tuesday, please",
+     "source": "text"
+    }
+   ],
+   [
+    1002800,
+    "state",
+    {
+     "state": "thinking"
+    }
+   ],
+   [
+    1003000,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "Done.",
+     "samples": 4800
+    }
+   ],
+   [
+    1003000,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Done. Tu",
+     "done": false
+    }
+   ],
+   [
+    1003000,
+    "state",
+    {
+     "state": "speaking"
+    }
+   ],
+   [
+    1003020,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Done. Tuesday it",
+     "done": false
+    }
+   ],
+   [
+    1003040,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Done. Tuesday it is.",
+     "done": false
+    }
+   ],
+   [
+    1003040,
+    "speaking",
+    {
+     "utterance": 2,
+     "turn": 2,
+     "text": "Tuesday it is.",
+     "samples": 13440
+    }
+   ],
+   [
+    1003040,
+    "assistant",
+    {
+     "turn": 2,
+     "text": "Done. Tuesday it is.",
+     "done": true
+    }
+   ],
+   [
+    1005680,
+    "speak_end",
+    {
+     "utterance": 2
+    }
+   ],
+   [
+    1005680,
+    "state",
+    {
+     "state": "listening"
+    }
+   ]
+  ],
+  "audio": [
+   [
+    1001750,
+    1,
+    83520
+   ],
+   [
+    1003000,
+    2,
+    18240
+   ],
+   [
+    1003040,
+    -1,
+    0
+   ]
+  ],
+  "flights": [
+   {
+    "turn": 1,
+    "fate": "barge-in",
+    "rules": [
+     "barge-in: typed text"
+    ],
+    "endReason": "complete",
+    "text": "What time is it?",
+    "fragments": 1
+   }
+  ],
+  "records": [
+   {
+    "turn": 1,
+    "role": "user",
+    "text": "What time is it?",
+    "source": "voice",
+    "at": 1001420
+   },
+   {
+    "turn": 1,
+    "role": "assistant",
+    "text": "The weather in Lisbon tomorrow will be mostly sunny. A light breeze comes from the north. In the evening it cools down. Bring a jacket if you plan to eat outside. On Thursday clouds roll in from the coast. Friday looks bright again.",
+    "source": "voice",
+    "at": 1002800,
+    "heard": "The weather in",
+    "interrupted": true
+   },
+   {
+    "turn": 2,
+    "role": "user",
+    "text": "Tuesday, please",
+    "source": "text",
+    "at": 1002800
+   },
+   {
+    "turn": 2,
+    "role": "assistant",
+    "text": "Done. Tuesday it is.",
+    "source": "voice",
+    "at": 1005680
+   }
+  ],
+  "history": [
+   {
+    "role": "user",
+    "content": "What time is it?"
+   },
+   {
+    "role": "assistant",
+    "content": "The weather in [the user interrupted here]"
+   },
+   {
+    "role": "user",
+    "content": "Tuesday, please"
+   },
+   {
+    "role": "assistant",
+    "content": "Done. Tuesday it is."
+   }
+  ],
+  "brainRequests": 2,
+  "asrStreams": 1,
+  "logs": [
+   "reply 1 stopped: typed text, heard \"The weather in\""
+  ]
+ }
+]

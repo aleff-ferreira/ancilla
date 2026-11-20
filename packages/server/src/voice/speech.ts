@@ -24,6 +24,8 @@ export interface SpeechDeps {
   onAudioActive?: () => void;
   /** Called when all currently queued audio has finished playing while `finish()` has not yet been called. */
   onQueueDrained?: () => void;
+  /** Called with every stretch of audio sent, and where in the reply it begins, for whoever needs to know how loud the voice is. */
+  onPiece?: (utterance: number, firstSample: number, pcm: Int16Array) => void;
   log: (line: string) => void;
 }
 
@@ -232,6 +234,7 @@ export class SpeechOut {
           for (let i = 0; i < pcm.length; i += step) {
             const piece = pcm.subarray(i, Math.min(pcm.length, i + step));
             this.deps.sendAudio(encodeAudioOut(this.utterance, this.chunk++, this.sent, piece));
+            this.deps.onPiece?.(this.utterance, this.sent, piece);
             this.sent += piece.length;
             samples += piece.length;
             if (!segmentStartedAudio) {

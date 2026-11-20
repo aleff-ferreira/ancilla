@@ -6,6 +6,7 @@ import type { BrainEvent, BrainProvider, ChatMessage, ToolCall } from "./brain.j
 import { pickVoice, toFloat, type AsrResult, type AsrStream, type Engines } from "./engines.js";
 import { groundUtterance } from "./grounding.js";
 import type { HostEvent, ToolResult, VoiceHost } from "./host.js";
+import { DEFAULT_INTERRUPT_CONFIG, InterruptJudge, PlayoutLevels, isPureStop, type InterruptConfig } from "./interrupt.js";
 import { TurnTrace } from "./metrics.js";
 import { normalizeSpokenTechnical } from "./normalize.js";
 import { buildSystemPrompt, didntCatchPhrase, failedPhrase, thinkingPhrase } from "./prompt.js";
@@ -17,7 +18,7 @@ import { SpeechOut } from "./speech.js";
 import { isTalkerBrain, TalkerTurn } from "./talker.js";
 import { guessLanguage, hasCodeSwitch, isBackchannel, isStopIntent, paceForText, SpeechChunker, wordsOf, type Lang } from "./text.js";
 import { selectToolsForTurn } from "./tool-router.js";
-import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type TurnConfig, type TurnEndReason, type TurnEvent } from "./turn.js";
+import { DEFAULT_TURN_CONFIG, TurnTaker, type AgentActivity, type FrameAux, type TurnConfig, type TurnEndReason, type TurnEvent } from "./turn.js";
 import type { FlightLine } from "./flight.js";
 
 /**
@@ -62,6 +63,13 @@ export interface SessionConfig {
   maxBacklogFrames: number;
   /** Writes what the turn-taker decided, and when, to the log: for finding out why a call did what it did. */
   debug: boolean;
+  /**
+   * The spoken-interruption pilot (see interrupt.ts): sound over the assistant's voice pauses it, and what the sound says
+   * decides whether it is cut off or goes on. Off, the call is the one it has always been.
+   */
+  interruptPilot: boolean;
+  /** The pilot's own settings, when they are not the defaults. */
+  interrupt?: Partial<InterruptConfig>;
 }
 
 export const DEFAULT_SESSION_CONFIG: SessionConfig = {
@@ -79,6 +87,7 @@ export const DEFAULT_SESSION_CONFIG: SessionConfig = {
   speed: 1,
   maxBacklogFrames: 160,
   debug: false,
+  interruptPilot: false,
 };
 
 export interface SessionDeps {
@@ -103,6 +112,9 @@ export interface SessionDeps {
 
 const INPUT_RATE = 16;
 
+/** The longest a task waits to be started while the person may be taking the floor from the reply it came from (pilot only). */
+const HOLD_TASK_MAX_MS = 4000;
+
 const ECHO_NEVER_SUPPRESS = new Set([
   "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright", "actually",
   "no", "nope", "not", "cancel", "never", "stop", "wait", "hold", "pause",
@@ -116,6 +128,16 @@ function hasContiguousSubphrase(words: readonly string[], heard: readonly string
     if (hasContiguousPhrase(words, heard.slice(i, i + minLen))) return true;
   }
   return false;
+}
+
+function int16Rms(pcm: Int16Array): number {
+  if (pcm.length === 0) return 0;
+  let sum = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    const v = (pcm[i] as number) / 32768;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / pcm.length);
 }
 
 function medianValue(values: readonly number[]): number {
@@ -240,6 +262,11 @@ export class VoiceSession {
   private readonly ring: SampleRing;
   private readonly prosody = new ProsodyTracker();
   private taker: TurnTaker;
+  /** The pilot's judge of sound over the assistant's voice, when the pilot is on and the page can pause; null otherwise. */
+  private judge: InterruptJudge | null = null;
+  private playout: PlayoutLevels | null = null;
+  /** When the person last cut a reply off with a stop word: what they say next, if it is only that, is not answered. */
+  private stopInterruptAt = -Infinity;
   private chain: Promise<void> = Promise.resolve();
   private carry = new Float32Array(0);
   private backlog = 0;
@@ -306,6 +333,38 @@ export class VoiceSession {
     this.id = deps.id ?? `call-${Math.random().toString(36).slice(2, 10)}`;
   }
 
+  /** A fresh turn-taker; with the pilot, one that hands sound over the assistant's voice to the judge. */
+  private newTaker(): TurnTaker {
+    if (!this.judge) return new TurnTaker(this.cfg.turn);
+    this.judge.restart(this.agent === "speaking");
+    return new TurnTaker(this.cfg.turn, this.judge);
+  }
+
+  /** The pilot has paused the voice and can no longer follow the sound that did it: the voice goes on. */
+  private releasePause(): void {
+    if (!this.judge?.paused) return;
+    this.playout?.resume(this.deps.scheduler.now());
+    this.send({ type: "resume", utterance: this.reply?.speech.utterance ?? this.utteranceCounter });
+  }
+
+  /**
+   * With the pilot, a task is not started from a reply while the person may be taking the floor from it: its voice is held
+   * for a sound it could not explain, or they are speaking now. If they take the floor the task is never started; if not it
+   * starts a moment late. The wait is bounded. False when the reply was cut off meanwhile.
+   */
+  private async holdForPerson(reply: Reply): Promise<boolean> {
+    const until = this.deps.scheduler.now() + HOLD_TASK_MAX_MS;
+    while (!reply.aborted && (this.judge?.paused === true || this.taker.inTurn) && this.deps.scheduler.now() < until) {
+      await new Promise<void>((resolve) => this.deps.scheduler.after(40, resolve));
+    }
+    return !reply.aborted;
+  }
+
+  /** What the person said is a stop word and no more, and it came right after they cut a reply off with one. */
+  private isPureStop(text: string): boolean {
+    return isPureStop(text) && this.deps.scheduler.now() - this.stopInterruptAt < 8000;
+  }
+
   private syncExpectAnswer(): void {
     this.taker.setExpectAnswer(this.assistantAskedQuestion || Boolean(this.deps.host.pendingApproval?.()));
   }
@@ -334,9 +393,16 @@ export class VoiceSession {
     }
     this.mode = hello.mode;
     this.echoCancelled = hello.echoCancelled;
+    // The pilot needs a page that can pause the voice and a browser that cancels the echo; without either the call is the usual one.
+    if (this.cfg.interruptPilot && hello.pause === true && hello.echoCancelled && hello.mode === "hands-free") {
+      this.judge = new InterruptJudge({ looksLikeEcho: (text) => this.looksLikeEcho(text) }, { ...DEFAULT_INTERRUPT_CONFIG, ...(this.cfg.interrupt ?? {}) });
+      this.playout = new PlayoutLevels(this.deps.engines.tts.sampleRate);
+    }
     if (!this.customPostAgentGrace) {
       this.cfg.turn = { ...this.cfg.turn, postAgentGraceMs: hello.echoCancelled ? 80 : 220 };
-      this.taker = new TurnTaker(this.cfg.turn);
+      this.taker = this.newTaker();
+    } else if (this.judge) {
+      this.taker = this.newTaker();
     }
     this.lang = hello.lang;
     this.userLang = hello.lang
@@ -435,6 +501,7 @@ export class VoiceSession {
   onMessage(message: ClientMessage): void {
     switch (message.type) {
       case "playback":
+        this.playout?.reported(message.utterance, message.samples, this.deps.scheduler.now());
         if (this.reply && this.reply.speech.utterance === message.utterance) this.reply.speech.reportPlayed(message.samples);
         break;
       case "interrupt":
@@ -470,8 +537,9 @@ export class VoiceSession {
         this.enqueue(async () => {
           this.muted = message.on;
           if (message.on) {
+            this.releasePause();
             this.disposeStream();
-            this.taker = new TurnTaker(this.cfg.turn);
+            this.taker = this.newTaker();
             this.rearmHeld();
             this.syncExpectAnswer();
             this.prosody.reset();
@@ -493,7 +561,7 @@ export class VoiceSession {
           this.micAutoPaused = false;
           this.continuousTurnMs = 0;
           this.carry = new Float32Array(0);
-          this.taker = new TurnTaker(this.cfg.turn);
+          this.taker = this.newTaker();
           this.syncExpectAnswer();
           this.send({ type: "mic_paused", paused: false, reason: null });
           if (!this.muted) {
@@ -619,8 +687,9 @@ export class VoiceSession {
         this.micAutoPaused = true;
         this.continuousTurnMs = 0;
         this.speculativeContext = null;
+        this.releasePause();
         this.disposeStream();
-        this.taker = new TurnTaker(this.cfg.turn);
+        this.taker = this.newTaker();
         this.rearmHeld();
         this.syncExpectAnswer();
         this.prosody.reset();
@@ -637,7 +706,13 @@ export class VoiceSession {
       this.continuousTurnMs = 0;
     }
     const t = this.nowMs();
-    const fed = await this.handleEvents(this.taker.frame(t, prob), t);
+    let aux: FrameAux | undefined;
+    if (this.judge && this.playout) {
+      // The quick reading of the detector runs on every frame: it has a state of its own, which skipped frames would spoil.
+      const onsetProb = await this.deps.engines.vad.processOnset?.(frame);
+      aux = { rms, ref: this.playout.levelAt(this.deps.scheduler.now()), ...(onsetProb !== undefined ? { onsetProb } : {}) };
+    }
+    const fed = await this.handleEvents(this.taker.frame(t, prob, aux), t);
     // Once the recogniser has been flushed it is fed nothing until the person speaks again: the quiet is not worth decoding,
     // and what is read at the pause stands ready when the turn ends.
     if (this.stream && !fed && !this.flushed) await this.stream.accept(frame);
@@ -717,7 +792,50 @@ export class VoiceSession {
         case "duck":
           this.send({ type: "duck", on: ev.on });
           break;
+        case "pause":
+          // The sound over the assistant's voice is not explained by the voice itself: it stops, keeping its place, until the words decide.
+          if (!ev.renewal) {
+            this.noteRule("paused");
+            this.playout?.pause(this.deps.scheduler.now());
+          }
+          this.send({ type: "pause", utterance: this.reply?.speech.utterance ?? this.utteranceCounter, leaseMs: ev.leaseMs });
+          break;
+        case "resume":
+          if (ev.reason === "agent-stopped") {
+            // The reply its voice was held for is over (it ended or was replaced): what is held is dropped, not played late.
+            this.noteRule("dropped:agent-stopped");
+            this.playout?.clear();
+            this.send({ type: "resume", utterance: this.reply?.speech.utterance ?? this.utteranceCounter, drop: true });
+            break;
+          }
+          // It was not for the assistant (a sound of listening, its own voice, nothing that could be read): it goes on from where it stopped.
+          this.noteRule(`resumed:${ev.reason}`);
+          if (ev.reason === "echo") this.echoDismissedAtSample = this.ring.total;
+          this.playout?.resume(this.deps.scheduler.now());
+          this.send({ type: "resume", utterance: this.reply?.speech.utterance ?? this.utteranceCounter });
+          break;
+        case "settle": {
+          // The sound has ended: the recogniser is asked to read what it has, and the words arrive as they do for any other.
+          // A recogniser that can says when it is done, so that the wait is for that and not a guess about a busy machine.
+          const stream = this.stream;
+          if (!stream) break;
+          if (stream.ackFlush && stream.flush) {
+            this.taker.expectAck(true);
+            stream.onFlushed = () => {
+              this.enqueue(async () => {
+                if (this.stream !== stream) return;
+                const at = this.nowMs();
+                await this.handleEvents(this.taker.settled(at, ev.seq), at);
+              });
+            };
+            void stream.flush({ ack: true });
+          } else {
+            void stream.flush?.();
+          }
+          break;
+        }
         case "barge_in":
+          if (this.judge && ev.reason === "keyword") this.stopInterruptAt = this.deps.scheduler.now();
           this.interruptReply(`the person spoke (${ev.reason})`);
           break;
         case "speech_resume":
@@ -838,7 +956,7 @@ export class VoiceSession {
     if (this.stream !== stream || nextText === this.userText) return;
     this.userText = nextText;
     const t = this.nowMs();
-    if (this.agent === "speaking" && !this.taker.inTurn) {
+    if (this.agent === "speaking" && !this.taker.inTurn && !this.judge) {
       // Something over the assistant's voice that is the assistant's voice coming back is not the person.
       if (this.looksLikeEcho(nextText)) {
         this.noteRule("echo-dismissed");
@@ -989,6 +1107,7 @@ export class VoiceSession {
 
     if (turnMedianRms >= 0.015 && (grounded.meanLogProb === null || grounded.meanLogProb > -0.9)) {
       this.foregroundRms = this.foregroundRms === 0 ? turnMedianRms : this.foregroundRms * 0.75 + turnMedianRms * 0.25;
+      this.judge?.setForeground(this.foregroundRms);
     }
 
     const trace = new TurnTrace(this.turnCounter + 1);
@@ -1206,6 +1325,19 @@ export class VoiceSession {
     this.send({ type: "user", turn, text: said, source });
     this.deps.host.record({ turn, role: "user", text: said, source, at: this.deps.scheduler.now() });
 
+    if (this.judge && source === "voice" && this.isPureStop(said)) {
+      // "Stop" cut a reply off, and that is all it asked: the voice is silent and nothing is answered. Tasks that are running go on.
+      this.stopInterruptAt = -Infinity;
+      this.history.push({ role: "user", content: said });
+      if (flight) {
+        flight.turn = turn;
+        flight.text = said;
+      }
+      this.settleFlight(flight, "stop-silenced");
+      this.send({ type: "state", state: this.agent === "idle" ? "listening" : this.agent });
+      return;
+    }
+
     const pending = this.deps.host.pendingApproval?.() ?? null;
     if (pending?.inFlightMuse && this.reply && !this.reply.aborted) {
       const intent = parseUserAuthorizationIntent(said);
@@ -1272,6 +1404,9 @@ export class VoiceSession {
           this.setAgent("thinking");
         }
       },
+      ...(this.playout
+        ? { onPiece: (utterance: number, first: number, pcm: Int16Array) => this.playout?.add(utterance, first, first + pcm.length, int16Rms(pcm), this.deps.scheduler.now()) }
+        : {}),
       log: (line) => this.deps.log(line),
     });
     const reply: Reply = {
@@ -1590,9 +1725,15 @@ export class VoiceSession {
           const oldest = this.recentToolNames.values().next().value;
           if (oldest !== undefined) this.recentToolNames.delete(oldest);
         }
-        const entry = {
+        const entry: { accounted: boolean; promise: Promise<ToolResult> } = {
           accounted: false,
-          promise: this.deps.host.runTool(event.call, { turn: reply.turn, signal: reply.abort.signal }),
+          promise: this.judge
+            ? this.holdForPerson(reply).then((go) => {
+                if (go) return this.deps.host.runTool(event.call, { turn: reply.turn, signal: reply.abort.signal });
+                entry.accounted = true; // never started: there is nothing to tell the next turn about
+                return { ok: false, text: "" };
+              })
+            : this.deps.host.runTool(event.call, { turn: reply.turn, signal: reply.abort.signal }),
         };
         entry.promise.then(
           (res) => {
@@ -1670,6 +1811,7 @@ export class VoiceSession {
     this.clearTrailingFlush(r);
     const heard = r.speech.heard().text;
     r.speech.abort();
+    this.playout?.clear();
     this.reply = null;
     const toolNote = r.completedTools.length > 0 ? `[completed before interruption: ${r.completedTools.join("; ")}] ` : "";
     if (wasSpeaking) {
