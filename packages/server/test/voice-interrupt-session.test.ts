@@ -208,6 +208,45 @@ describe("a correction over the reply, with the pilot on", () => {
     await session.close("done");
   });
 
+  it("holds a task while what the person said has ended but is still being read, which is when a slow recogniser lets one through", async () => {
+    const { client, session } = await stubbornCall(4000);
+    const inner = session as unknown as { holdForPerson(reply: { aborted: boolean }): Promise<boolean>; turnsBeingRead: number };
+    await client.quiet(1000); // some of the call, with nothing said
+    // the person has finished and the recogniser's last words are awaited: what comes of it is not known
+    inner.turnsBeingRead = 1;
+    const reply = { aborted: false };
+    let went: boolean | null = null;
+    void inner.holdForPerson(reply).then((go) => {
+      went = go;
+    });
+    await client.quiet(1500);
+    assert.equal(went, null, "the task waits");
+    inner.turnsBeingRead = 0; // it came to nothing
+    await client.quiet(100);
+    assert.equal(went, true, "and starts when it is known that the person took nothing");
+    // a reply that is cut off meanwhile never starts it
+    inner.turnsBeingRead = 1;
+    const cut = { aborted: false };
+    let result: boolean | null = null;
+    void inner.holdForPerson(cut).then((go) => {
+      result = go;
+    });
+    await client.quiet(300);
+    cut.aborted = true;
+    await client.quiet(100);
+    assert.equal(result, false, "the person took the floor: it is never started");
+    // and a wait that nothing ends has an end of its own
+    inner.turnsBeingRead = 1;
+    let last: boolean | null = null;
+    void inner.holdForPerson({ aborted: false }).then((go) => {
+      last = go;
+    });
+    await client.quiet(12_500);
+    assert.equal(last, true, "bounded");
+    inner.turnsBeingRead = 0;
+    await session.close("done");
+  });
+
   it("starts the task, a moment late, when what held the voice was a sound that asked for nothing", async () => {
     const { sched, host, brain, client, session } = await stubbornCall(2000);
     await client.speak(1, 900);

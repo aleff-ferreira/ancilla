@@ -319,9 +319,12 @@ export class WebPlayer implements Player {
     const resumeAt = now + LEAD_SECONDS;
     const delta = resumeAt - state.stopAt;
     this.ledger.shift(state.stopAt, delta);
+    // Silent until the voice starts again, and faded in from there: a ramp that began at the call would be over before the
+    // first sample plays (the voice goes on `LEAD_SECONDS` later), and the voice would start with a click.
     this.gain.gain.cancelScheduledValues(now);
     this.gain.gain.setValueAtTime(0, now);
-    this.gain.gain.setTargetAtTime(this.ducked ? DUCKED_GAIN : 1, now, 0.01);
+    this.gain.gain.setValueAtTime(0, resumeAt);
+    this.gain.gain.setTargetAtTime(this.ducked ? DUCKED_GAIN : 1, resumeAt, 0.006);
     let first = true;
     for (const piece of state.pieces) {
       const source = this.ctx.createBufferSource();

@@ -113,7 +113,9 @@ export interface SessionDeps {
 const INPUT_RATE = 16;
 
 /** The longest a task waits to be started while the person may be taking the floor from the reply it came from (pilot only). */
-const HOLD_TASK_MAX_MS = 4000;
+const HOLD_TASK_MAX_MS = 12_000;
+/** A task also waits this long after the last sound of the person's voice: a turn begins a moment after the voice does. */
+const HOLD_TASK_AFTER_VOICE_MS = 500;
 
 const ECHO_NEVER_SUPPRESS = new Set([
   "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "alright", "actually",
@@ -347,14 +349,28 @@ export class VoiceSession {
     this.send({ type: "resume", utterance: this.reply?.speech.utterance ?? this.utteranceCounter });
   }
 
+  /** Turns of the person that have ended and are being read (the recogniser's last words are awaited): what comes of them is not known yet. */
+  private turnsBeingRead = 0;
+
+  /** Whether the person may be taking the floor from the reply that is current: their voice is held, they are speaking, or what they said is being read. */
+  private personMayBeTakingTheFloor(): boolean {
+    return (
+      this.judge?.paused === true ||
+      this.taker.inTurn ||
+      this.turnsBeingRead > 0 ||
+      this.taker.quietForMs(this.nowMs()) < HOLD_TASK_AFTER_VOICE_MS
+    );
+  }
+
   /**
    * With the pilot, a task is not started from a reply while the person may be taking the floor from it: its voice is held
-   * for a sound it could not explain, or they are speaking now. If they take the floor the task is never started; if not it
-   * starts a moment late. The wait is bounded. False when the reply was cut off meanwhile.
+   * for a sound it could not explain, they are speaking now, or what they said is still being read. If they take the floor
+   * the task is never started; if not it starts a moment late. The wait is bounded. False when the reply was cut off
+   * meanwhile.
    */
   private async holdForPerson(reply: Reply): Promise<boolean> {
     const until = this.deps.scheduler.now() + HOLD_TASK_MAX_MS;
-    while (!reply.aborted && (this.judge?.paused === true || this.taker.inTurn) && this.deps.scheduler.now() < until) {
+    while (!reply.aborted && this.personMayBeTakingTheFloor() && this.deps.scheduler.now() < until) {
       await new Promise<void>((resolve) => this.deps.scheduler.after(40, resolve));
     }
     return !reply.aborted;
@@ -1002,9 +1018,11 @@ export class VoiceSession {
 
   private async onTurnEnd(ev: Extract<TurnEvent, { type: "turn_end" }>): Promise<void> {
     let kept = false;
+    this.turnsBeingRead++;
     try {
       kept = await this.judgeTurnEnd(ev);
     } finally {
+      this.turnsBeingRead--;
       // What the person said before they went on, held for them, is not lost because what came after was nothing.
       if (!kept) this.afterNothing();
     }

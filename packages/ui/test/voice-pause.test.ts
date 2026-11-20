@@ -24,6 +24,8 @@ interface FakeSource {
 function fakeContext(rate = 1000) {
   const sources: FakeSource[] = [];
   const gains: Array<[string, number, number?]> = [];
+  /** The same automation with the time each step is for: when a ramp begins matters as much as what it ramps to. */
+  const ramps: Array<{ kind: "value" | "target"; value: number; at: number }> = [];
   const clock = { now: 0, latency: 0 };
   const ctx = {
     get currentTime() {
@@ -38,8 +40,14 @@ function fakeContext(rate = 1000) {
       connect: () => undefined,
       disconnect: () => undefined,
       gain: {
-        setTargetAtTime: (v: number, _t: number, tc: number) => void gains.push(["target", v, tc]),
-        setValueAtTime: (v: number) => void gains.push(["value", v]),
+        setTargetAtTime: (v: number, t: number, tc: number) => {
+          gains.push(["target", v, tc]);
+          ramps.push({ kind: "target", value: v, at: t });
+        },
+        setValueAtTime: (v: number, t: number) => {
+          gains.push(["value", v]);
+          ramps.push({ kind: "value", value: v, at: t });
+        },
         cancelScheduledValues: () => void gains.push(["cancel", 0]),
       },
     }),
@@ -70,7 +78,7 @@ function fakeContext(rate = 1000) {
     },
   } as unknown as AudioContext;
   void rate;
-  return { ctx, sources, gains, clock };
+  return { ctx, sources, gains, ramps, clock };
 }
 
 const pcm = (n: number): Int16Array => new Int16Array(n);
@@ -133,6 +141,22 @@ describe("a voice that can be paused", () => {
     assert.ok(Math.abs((held?.startedAt ?? 0) - 4.55) < 1e-9, "the held audio after the end of what was paused");
     clock.now = 3.34;
     assert.ok(near(player.played(1), 790), `0.3 s after it went on: ${player.played(1)}`);
+    player.close();
+  });
+
+  it("fades in from the moment it goes on, not from the call that says so, so that it does not start with a click", () => {
+    const { ctx, ramps, clock } = fakeContext();
+    const player = new WebPlayer(ctx, 1000);
+    player.enqueue(1, pcm(1000));
+    clock.now = 0.5;
+    player.pause?.(60_000);
+    clock.now = 3;
+    ramps.length = 0;
+    player.resume?.();
+    // the voice goes on a lead after the call (3.04): a ramp that began at 3 would be over before its first sample
+    const fadeIn = ramps.find((r) => r.kind === "target" && r.value === 1);
+    assert.ok(fadeIn !== undefined && fadeIn.at >= 3.04 - 1e-9, `the fade-in begins at ${fadeIn?.at}, when the voice does (3.04)`);
+    assert.ok(ramps.some((r) => r.kind === "value" && r.value === 0 && r.at >= 3.04 - 1e-9), "and it is silent until then");
     player.close();
   });
 
