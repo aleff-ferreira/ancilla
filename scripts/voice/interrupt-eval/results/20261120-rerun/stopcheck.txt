@@ -1,0 +1,32 @@
+dev|en|Enough.                     4/4
+dev|en|Hold on.                    4/4
+dev|en|Okay, stop.                 3/4   NOT A STOP: en:F2: "A cap"
+dev|en|Pause.                      4/4
+dev|en|Stop it.                    4/4
+dev|en|Stop.                       4/4
+dev|en|That's enough.              4/4
+dev|en|Wait.                       4/4
+dev|pt|Calma.                      4/4
+dev|pt|Chega.                      3/4   NOT A STOP: pt:M2: ""
+dev|pt|Espera.                     3/4   NOT A STOP: pt:M2: "Spir."
+dev|pt|Já chega.                   2/4   NOT A STOP: pt:F2: "Just for the" ; pt:F3: "Já show."
+dev|pt|Para.                       2/4   NOT A STOP: pt:F2: "But up." ; pt:M3: "Bye."
+dev|pt|Pare aí.                    3/4   NOT A STOP: pt:F3: "Pareí."
+dev|pt|Pare.                       2/4   NOT A STOP: pt:M2: "Parece que" ; pt:M3: "Party."
+dev|pt|Peraí.                      3/4   NOT A STOP: pt:M3: ""
+heldout|en|Enough.                 8/8
+heldout|en|Hold on.                8/8
+heldout|en|Okay, stop.             8/8
+heldout|en|Pause.                  7/8   NOT A STOP: en:F5: "Pose"
+heldout|en|Stop it.                8/8
+heldout|en|Stop.                   7/8   NOT A STOP: kokoro-gb:26: "Zdą."
+heldout|en|That's enough.          8/8
+heldout|en|Wait.                   8/8
+heldout|pt|Calma.                  4/4
+heldout|pt|Chega.                  2/4   NOT A STOP: pt:F4: "She again." ; pt:F5: "She"
+heldout|pt|Espera.                 3/4   NOT A STOP: pt:M4: "Despair."
+heldout|pt|Já chega.               4/4
+heldout|pt|Para.                   2/4   NOT A STOP: pt:F4: "But" ; pt:F5: ""
+heldout|pt|Pare aí.                3/4   NOT A STOP: pt:M4: "Paraí"
+heldout|pt|Pare.                   1/4   NOT A STOP: pt:F4: "Party" ; pt:F5: "Party." ; pt:M4: ""
+heldout|pt|Peraí.                  3/4   NOT A STOP: pt:M5: "Pero ahí."

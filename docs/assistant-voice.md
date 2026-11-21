@@ -73,9 +73,11 @@ Related: [the assistant](assistant.md), [how it is evaluated](assistant-evaluati
 - **Hands-free** listens all the time and works out when you have finished. A finished sentence is answered after about
   half a second; a sentence that trails off ("and then...", "um") is given time; a one-word command is answered at once.
 - **Push to talk** listens only while you hold the button or the space bar.
-- **Interrupting.** Start to speak over it and its voice dips at once; if it is really you (not a cough, a laugh or its own
-  voice coming back through your speakers) it stops within about a quarter of a second, and what it remembers of its last
-  reply is only what you heard of it. Say "stop", "wait" or "para" and it stops without waiting for more.
+- **Interrupting.** Start to speak over it and its voice dips; if it is really you (not a cough, a laugh or its own
+  voice coming back through your speakers) it stops, and what it remembers of its last reply is only what you heard of it.
+  Measured with synthetic voices, a short word such as "stop" silences it a median of 0.75 s after it begins, and the call
+  cuts it off for about half of the sounds that were not for it (see [the evaluation](voice-interrupt-evaluation.md)).
+  Say "stop", "wait" or "para" and it stops without waiting for more.
   A pilot setting changes how: see [Stopping it by voice (pilot)](#stopping-it-by-voice-pilot).
 - **Typing.** The keyboard button opens a line to type in during the call. The conversation is the same one: what you type
   is in the transcript, and typing over its voice cuts it off like speaking would.
@@ -102,14 +104,18 @@ while the assistant talks:
   its own voice coming back through the speakers ends the pause, and it goes on from the very same place.
 - **Nothing is cancelled by sound alone.** The recogniser needs the whole of a short word (about 0.7 s after it begins), so
   the pause is the only thing that can come first; what cuts the reply off is the word. The price is a gap: after a sound
-  of listening the voice is silent for about half a second to a second before it goes on.
+  of listening the voice is silent for about half a second to a second before it goes on (up to three seconds when the
+  computer is busy). Measured with synthetic voices, a stop silences the voice a median of 0.14 s after it begins.
 - **What it needs.** A hands-free call, a browser or app page of this version (the page tells the server it can pause the
   voice), and the browser's echo cancellation on. Without any of them the call is the one described above, whatever the
   setting says. It never approves anything you say over it, and "yes" is an answer, not a sound of listening, while the
   assistant waits for your approval.
-- **What it cannot do.** If the recogniser writes nothing for a word (it sometimes does for a very short, quiet one), the voice
-  goes on after the pause and you have to say it again; and a person near the microphone, speaking about as loudly as you,
-  is taken for you (the same as without the setting).
+- **What it cannot do.** If the recogniser writes nothing for a word, the voice goes on after the pause and you have to say it
+  again. It does this for short Portuguese stop words about three times in ten even when they are said alone (English: about
+  once in thirty), and in the evaluation 10 of 20 Portuguese stops were lost against none of 20 English ones. A person near the
+  microphone, speaking about as loudly as you, is taken for you (the same as without the setting), and so is a distant voice
+  when the call has not yet learned how loud you are. A single word that is not a stop does not take the floor from the
+  assistant; say more than that. This is why the setting is a pilot and is off.
 - **Turning it off** puts everything back as it was: the toggle is the whole of the change (`interruptPilot` in `voice.json`);
   nothing is migrated. The numbers are in [voice-interrupt-evaluation.md](voice-interrupt-evaluation.md).
 
@@ -218,7 +224,7 @@ The decisions that matter, and why:
   `interrupt.ts`, which has no clock, no audio and no Node in it, so it can be reused by any client that can hand it a
   frame's loudness, a speech probability and the recogniser's words, and carry out a pause, a resume or a cut-off. The
   speech detector has a second, quicker reading of the same frames for it: sherpa-onnx's Silero wrapper treats a minimum
-  speech or silence of 0 as its defaults (0.25 s and 0.5 s), so the first reading says "speech" 0.22 to 0.38 s after a word
+  speech or silence of 0 as its defaults (0.25 s and 0.5 s), so the first reading says "speech" 0.22 to 0.42 s after a word
   begins and goes on saying it for 0.5 to 1.4 s after it ends; the quick one uses 32 ms and 64 ms.
 - **The model is behind one small interface** (`brain.ts`): conversation and tools in, text and tool calls out. Muse, any
   OpenAI-compatible server and a stand-in for tests all fit it. A model with no tool calling is given tools through a
@@ -254,7 +260,7 @@ reproduces the call numbers.
 | The same, with everything on this computer: a 4-billion-parameter model (Qwen3-4B-Instruct, 4-bit) on the laptop's graphics card through llama.cpp, the speech on the processor | about 1.0 to 1.2 s at the median; the model loads in 3.5 to 6.6 s the first time |
 | Finding a note by meaning, with a local embedding model, during that wait | 6 ms for the question's vector; a call never waits more than 0.25 s for it, and the words answer alone when it is late |
 | A whole call on this computer, spoken by a synthetic voice over the socket: five questions, four of them about notes the assistant holds ("which car do I have?" against "drives a Subaru Outback") and one of general knowledge | All five heard word for word; the four were answered from the notes and the fifth from the model; 1.0 to 1.3 s from the end of speech to the first sound, 1.07 s at the median. A first run found a flaw this way: a short question was looked up together with the one before it, which pulled its meaning toward the earlier topic and, for the words, made its own word too small a part of the search to match its note (the text box had the same fault), so it is now looked up on its own, and with the question before it only when that finds nothing |
-| Interrupting | the voice dips 0.06 s after you start, stops about 0.25 s after |
+| Interrupting a short word (synthetic voices, version 0.30.0, the evaluation in [voice-interrupt-evaluation.md](voice-interrupt-evaluation.md)) | the voice stops a median of 0.75 s after you start (95th percentile 0.84 s); the call cut the reply off for 25 of 40 sounds that were not for it (a "mm-hm", a cough, its own echo, a voice in the next room). With the pilot setting on: silent a median of 0.14 s after, and 6 of 40 such sounds cancelled a reply; the price is a pause of about half a second after a sound it then ignores |
 | First call after starting Ancilla | 4 to 6 s to load the models; they stay loaded for ten minutes after a call |
 
 What is **not** measured: a call through the desktop app's own web view (echo cancellation there depends on the platform;

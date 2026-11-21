@@ -1,0 +1,64 @@
+
+## stop
+baseline  success 36/40 (77%-96%); silenced within 350 ms 1/40 (0%-13%) (gap-at-onset 0, self-interrupts 0); silence latency median 747 p95 840 ms
+pilot     success 30/40 (60%-86%); silenced within 350 ms 30/40 (60%-86%) (gap-at-onset 0, self-interrupts 0); silence latency median 140 p95 178 ms
+tuned     success 29/40 (57%-84%); silenced within 350 ms 29/40 (57%-84%) (gap-at-onset 11, self-interrupts 11); silence latency median 235 p95 269 ms
+
+## correction
+baseline  success 38/40 (83%-99%); silenced within 350 ms 2/40 (1%-17%) (gap-at-onset 0, self-interrupts 0); silence latency median 740 p95 877 ms
+          corrected word heard 39/40; exactly one corrected reply 38/40; stale tool calls 0; duplicate tasks 0
+pilot     success 36/40 (77%-96%); silenced within 350 ms 34/40 (71%-93%) (gap-at-onset 0, self-interrupts 0); silence latency median 139 p95 1642 ms
+          corrected word heard 36/40; exactly one corrected reply 36/40; stale tool calls 0; duplicate tasks 0
+tuned     success 30/40 (60%-86%); silenced within 350 ms 33/40 (68%-91%) (gap-at-onset 7, self-interrupts 7); silence latency median 233 p95 239 ms
+          corrected word heard 36/40; exactly one corrected reply 34/40; stale tool calls 0; duplicate tasks 0
+
+## control
+baseline  false cancels 25/40 (47%-76%); with an audible dip (>150 ms) 25/40; dip median 351 ms p95 357 ms
+pilot     false cancels 6/40 (7%-29%); with an audible dip (>150 ms) 29/40; dip median 547 ms p95 1546 ms
+tuned     false cancels 33/40 (68%-91%); with an audible dip (>150 ms) 8/40; dip median 97 ms p95 417 ms
+
+## ordinary
+baseline  first audio after the end of speech: n 40/40; median 2375 ms, p95 7947 ms, max 11210 ms
+pilot     first audio after the end of speech: n 40/40; median 2395 ms, p95 11214 ms, max 12920 ms
+tuned     first audio after the end of speech: n 40/40; median 2046 ms, p95 7404 ms, max 7604 ms
+paired stop: baseline only 7, pilot only 1, both 29
+paired correction: baseline only 3, pilot only 1, both 35
+paired control: baseline only 1, pilot only 20, both 14
+paired stop: baseline only 9, tuned only 2, both 27
+paired correction: baseline only 8, tuned only 0, both 30
+paired control: baseline only 8, tuned only 0, both 7
+paired stop: pilot only 10, tuned only 9, both 20
+paired correction: pilot only 6, tuned only 0, both 30
+paired control: pilot only 27, tuned only 0, both 7
+
+## gates (pilot against baseline)
+
+| # | gate | measured | verdict |
+| --- | --- | --- | --- |
+| 1 | stops and corrections that succeed without restatement: at least 72/80 and 15 points above baseline | 66/80 (73%-89%); baseline 74/80 (85%-97%); -10.0 points | FAIL |
+| 2 | stops that silence the old audio within 350 ms of speech onset: at least 38/40 (measured on the simulated speaker) | 30/40 (60%-86%); baseline 1/40 (0%-13%) | FAIL (physical speaker unverified) |
+| 3 | false cancellations in the controls: at most 1/40 | 6/40 (7%-29%); baseline 25/40 (47%-76%) | FAIL |
+| 4 | duplicate tasks and unauthorized actions: zero | duplicate tasks 0; tasks run after the interruption 0; tasks in episodes that asked for none 0; baseline duplicates plus stale 0 | PASS |
+| 5 | added p95 latency to the first sound of an ordinary answer: at most 100 ms | p95 11214 ms against 7947 ms (added 3267 ms); p95 of the paired differences 3267 ms over 40 turns | FAIL |
+
+## failures of pilot
+{"id":"control-118","kind":"control","sub":"backchannel","voice":"en:F4","echoDb":-40,"levelDb":-27.5,"text":"Uh-huh.","interruptRel":726.262558999937,"lastOldRel":140.0625,"falseCancel":true,"dipMs":613,"fates":["barge-in[paused,barge-in: the person spoke (speech)]","call-ended[]"],"userTurns":["-5413:Book a table for Monday at eight.","1782:for two."],"assistantAfter":["1933:Okay."]}
+{"id":"stop-003","kind":"stop","sub":"word","voice":"pt:F5","echoDb":-50,"levelDb":-27.2,"text":"Espera.","interruptRel":null,"lastOldRel":4534.3125,"dipMs":881,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-3232:Reserve uma mesa para segunda às oito."],"assistantAfter":[]}
+{"id":"stop-007","kind":"stop","sub":"word","voice":"pt:M5","echoDb":-40,"levelDb":-27.8,"text":"Pare.","interruptRel":null,"lastOldRel":4528.6875,"dipMs":1159,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-6296:Me lembre de ligar para a Ana V."],"assistantAfter":[]}
+{"id":"stop-009","kind":"stop","sub":"word","voice":"pt:M4","echoDb":-50,"levelDb":-23.8,"text":"Para.","interruptRel":null,"lastOldRel":3695.6875,"dipMs":602,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-3970:Me lembre de ligar para a Ana 5."],"assistantAfter":[]}
+{"id":"stop-011","kind":"stop","sub":"word","voice":"pt:M4","echoDb":null,"levelDb":-28.3,"text":"Para.","interruptRel":null,"lastOldRel":4526.3125,"dipMs":683,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-5514:Me lembre de ligar para a Ana 5."],"assistantAfter":[]}
+{"id":"stop-017","kind":"stop","sub":"word","voice":"pt:M4","echoDb":null,"levelDb":-30.2,"text":"Para.","interruptRel":null,"lastOldRel":4525.25,"dipMs":438,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-5545:Reserve uma mesa para segundas oito."],"assistantAfter":[]}
+{"id":"stop-023","kind":"stop","sub":"word","voice":"pt:F5","echoDb":null,"levelDb":-26.2,"text":"Para.","interruptRel":null,"lastOldRel":4482.5625,"dipMs":463,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-3177:Me lembre de ligar para a Ana 5."],"assistantAfter":[]}
+{"id":"stop-027","kind":"stop","sub":"word","voice":"pt:F5","echoDb":-50,"levelDb":-29.5,"text":"Peraí.","interruptRel":null,"lastOldRel":4526.5,"dipMs":1086,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-5811:Reserve uma mesa para segunda às oito."],"assistantAfter":[]}
+{"id":"stop-029","kind":"stop","sub":"word","voice":"pt:M5","echoDb":null,"levelDb":-24,"text":"Para.","interruptRel":null,"lastOldRel":4080.4375,"dipMs":553,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-3649:Me lembre de ligar para a Ana V."],"assistantAfter":[]}
+{"id":"stop-035","kind":"stop","sub":"word","voice":"pt:M5","echoDb":null,"levelDb":-25.2,"text":"Para.","interruptRel":null,"lastOldRel":4525.5,"dipMs":604,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-5827:Me lembre de ligar para a Ana V."],"assistantAfter":[]}
+{"id":"stop-039","kind":"stop","sub":"word","voice":"pt:F5","echoDb":-50,"levelDb":-30.2,"text":"Espera.","interruptRel":null,"lastOldRel":4524.8125,"dipMs":626,"fates":["call-ended[paused,resumed:no-words]"],"userTurns":["-2891:Reserve uma mesa para segunda às oito."],"assistantAfter":[]}
+{"id":"correction-059","kind":"correction","sub":"paused","voice":"pt:M4","echoDb":null,"levelDb":-30.2,"text":"Não, o Pedro.","interruptRel":null,"lastOldRel":1481.75,"heardSlot":false,"fixedReplies":0,"staleTools":0,"duplicateTasks":0,"dipMs":575,"fates":["replaced[paused,resumed:no-words,replaced-by-new-turn]","answered[]"],"userTurns":["-1958:Me lembre de ligar para a Ana 5.","3593:Yeah."],"assistantAfter":["3769:Certo."]}
+{"id":"correction-063","kind":"correction","sub":"paused","voice":"pt:F5","echoDb":-50,"levelDb":-25.3,"text":"Não, quinta.","interruptRel":null,"lastOldRel":12240.1875,"heardSlot":false,"fixedReplies":0,"staleTools":0,"duplicateTasks":0,"dipMs":1547,"fates":["call-ended[paused,resumed:no-words,paused,resumed:no-words]"],"userTurns":["-3621:Reserve uma mesa para segunda às oito."],"assistantAfter":[]}
+{"id":"correction-073","kind":"correction","sub":"plain","voice":"pt:F5","echoDb":-40,"levelDb":-27.3,"text":"Espera, não segunda, sexta.","interruptRel":1013.6482120000292,"lastOldRel":109.6875,"heardSlot":false,"fixedReplies":0,"staleTools":0,"duplicateTasks":0,"dipMs":933,"fates":["barge-in[paused,barge-in: the person spoke (keyword)]","answered[]"],"userTurns":["-4485:Reserve uma mesa para segunda às oito.","3662:Espera num segunda cesta."],"assistantAfter":["3815:Certo."]}
+{"id":"correction-079","kind":"correction","sub":"paused","voice":"pt:F4","echoDb":-40,"levelDb":-28.1,"text":"Não, o Pedro.","interruptRel":null,"lastOldRel":1570.1875,"heardSlot":false,"fixedReplies":0,"staleTools":0,"duplicateTasks":0,"dipMs":549,"fates":["replaced[paused,resumed:no-words,replaced-by-new-turn]","answered[]"],"userTurns":["-1845:Me lembro de ligar pra Ana 5.","3959:Well pay other."],"assistantAfter":["4133:Certo."]}
+{"id":"control-087","kind":"control","sub":"background","voice":"pt:F5","echoDb":-50,"levelDb":-50,"text":"Você lembrou de ligar para o encanador por causa da pia da cozinha hoje de manhã?","interruptRel":1390.5135629996657,"lastOldRel":495.0625,"falseCancel":true,"dipMs":924,"fates":["barge-in[paused,barge-in: the person spoke (speech)]","call-ended[]"],"userTurns":["-6572:Reserve uma mesa para segunda às oito.","6315:Você lembrou de ligar para o encanador por causa da pia da cozinha hoje de manhã."],"assistantAfter":["6466:Certo."]}
+{"id":"control-095","kind":"control","sub":"background","voice":"pt:M5","echoDb":null,"levelDb":-50,"text":"Acho que a reunião mudou para as três horas, mas deixa eu olhar a agenda de novo.","interruptRel":1363.3643689998426,"lastOldRel":620,"falseCancel":true,"dipMs":771,"fates":["barge-in[paused,barge-in: the person spoke (speech)]","call-ended[]"],"userTurns":["-4774:Me lembre de ligar para a Ana V.","6455:Acho que a reunião mudou para as três horas, mas deixa eu olhar a agenda de novo."],"assistantAfter":["6606:Certo."]}
+{"id":"control-111","kind":"control","sub":"background","voice":"pt:F5","echoDb":-50,"levelDb":-50,"text":"Você lembrou de ligar para o encanador por causa da pia da cozinha hoje de manhã?","interruptRel":1397.524520999752,"lastOldRel":491.4375,"falseCancel":true,"dipMs":934,"fates":["barge-in[paused,barge-in: the person spoke (speech)]","call-ended[]"],"userTurns":["-6334:Reserve uma mesa para segunda às oito.","6604:Você lembrou de ligar para o encanador por causa da pia da cozinha hoje de manhã."],"assistantAfter":["6758:Certo."]}
+{"id":"control-115","kind":"control","sub":"throatclear","voice":"pt:F5","echoDb":-40,"levelDb":-28.8,"text":"Ahem.","interruptRel":603.3714669998735,"lastOldRel":140.4375,"falseCancel":true,"dipMs":490,"fates":["barge-in[paused,barge-in: the person spoke (speech)]","backchannel-drop[]"],"userTurns":["-4564:Me lembre de ligar para a Ana 5."],"assistantAfter":[]}
+{"id":"control-119","kind":"control","sub":"background","voice":"pt:F4","echoDb":null,"levelDb":-50,"text":"Você lembrou de ligar para o encanador por causa da pia da cozinha hoje de manhã?","interruptRel":2761.1070650001056,"lastOldRel":1548.25,"falseCancel":true,"dipMs":1546,"fates":["barge-in[paused,resumed:echo,paused,barge-in: the person spoke (speech)]","call-ended[]"],"userTurns":["-5176:Me lembro de ligar pra Ana 5.","6365:En canadora por causa da pia da cozinha hoje de manhã."],"assistantAfter":["6516:Certo."]}

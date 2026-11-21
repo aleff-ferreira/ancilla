@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echo probe: recording, please leave open</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font: 13px/1.45 system-ui, "Segoe UI", sans-serif; background: #10141a; color: #cfd6e0; margin: 14px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  pre { white-space: pre-wrap; margin: 8px 0 0; color: #9fb0c4; }
+</style>
+</head>
+<body>
+<h1>Echo probe: measurement in progress</h1>
+<div>Plays test speech and records the microphone for a few minutes. Please stay quiet and leave this window open; it closes by itself.</div>
+<div id="status">waiting for the driver</div>
+<pre id="log"></pre>
+<script>
+/*
+ * The page side of the echo probe (see README.md). It mirrors the call's audio path in packages/ui/src/model/voice:
+ *   - one AudioContext({latencyHint:"interactive"}) for both directions,
+ *   - the microphone through the shipped capture worklet (numberOfOutputs: 0), here twice at the same time:
+ *       A = echoCancellation + noiseSuppression + autoGainControl (what the app uses),
+ *       B = all three off (the raw microphone),
+ *   - the speakers through AudioBufferSourceNodes at the buffer's native rate -> GainNode -> destination (as WebPlayer does),
+ *   - a third worklet instance taps the gain node, so the exact PCM that was played reaches the same 16 kHz / 512-sample
+ *     framing, on the same audio clock, as the two microphone streams.
+ * Everything is driven by the driver through window.probe (Chrome DevTools Protocol). Nothing here changes a system setting.
+ */
+(() => {
+  "use strict";
+  const FRAME = 512;
+  const WORKLET = "echo-probe-capture";
+  const S = {
+    ctx: null, gain: null, nodes: {}, streams: {}, tracks: {}, frames: { A: [], B: [], REF: [] },
+    buffers: {}, plays: [], clock: [], trackEvents: [], sr: 0, ratio: 0, clickBuffer: null,
+  };
+  const say = (text) => { document.getElementById("log").textContent += text + "\n"; };
+  const setStatus = (text) => { document.getElementById("status").textContent = text; };
+  const round = (x, d = 3) => Math.round(x * 10 ** d) / 10 ** d;
+
+  function parseWav(arrayBuffer) {
+    const v = new DataView(arrayBuffer);
+    let at = 12, rate = 0, channels = 1, bits = 16, data = null;
+    while (at + 8 <= v.byteLength) {
+      const id = String.fromCharCode(v.getUint8(at), v.getUint8(at + 1), v.getUint8(at + 2), v.getUint8(at + 3));
+      const size = v.getUint32(at + 4, true);
+      if (id === "fmt ") { channels = v.getUint16(at + 10, true); rate = v.getUint32(at + 12, true); bits = v.getUint16(at + 22, true); }
+      if (id === "data") { data = new Int16Array(arrayBuffer.slice(at + 8, Math.min(v.byteLength, at + 8 + size))); break; }
+      at += 8 + size + (size & 1);
+    }
+    if (!data || bits !== 16 || channels !== 1) throw new Error("expected a 16-bit mono PCM WAV");
+    return { rate, pcm: data };
+  }
+
+  function wav16(samples, rate) {
+    const n = samples.length;
+    const buf = new ArrayBuffer(44 + n * 2);
+    const v = new DataView(buf);
+    const tag = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+    tag(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); tag(8, "WAVE"); tag(12, "fmt ");
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+    v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); tag(36, "data"); v.setUint32(40, n * 2, true);
+    new Int16Array(buf, 44, n).set(samples);
+    return buf;
+  }
+
+  function trackInfo(track) {
+    if (!track) return null;
+    return { label: track.label, muted: track.muted, enabled: track.enabled, readyState: track.readyState, settings: track.getSettings(), constraints: track.getConstraints() };
+  }
+
+  async function init() {
+    if (S.ctx) throw new Error("already initialised");
+    const ctx = new AudioContext({ latencyHint: "interactive" });
+    S.ctx = ctx;
+    S.sr = ctx.sampleRate;
+    S.ratio = ctx.sampleRate / 16000;
+    if (ctx.state !== "running") await ctx.resume();
+    await ctx.audioWorklet.addModule("/worklet.js");
+    const md = navigator.mediaDevices;
+    // Same call as the app's startMic() for A, then the same device with every processing stage off for B.
+    const A = await md.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    const deviceId = A.getAudioTracks()[0].getSettings().deviceId;
+    const B = await md.getUserMedia({ audio: { ...(deviceId ? { deviceId: { exact: deviceId } } : {}), echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+    S.streams = { A, B };
+    S.tracks = { A: A.getAudioTracks()[0], B: B.getAudioTracks()[0] };
+    for (const tag of ["A", "B"]) {
+      for (const kind of ["mute", "unmute", "ended"]) S.tracks[tag].addEventListener(kind, () => S.trackEvents.push({ tag, kind, perf: performance.now() }));
+    }
+    S.gain = ctx.createGain();
+    S.gain.gain.value = 1;
+    S.gain.connect(ctx.destination);
+    for (const tag of ["A", "B", "REF"]) {
+      const node = new AudioWorkletNode(ctx, WORKLET, { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, processorOptions: { tag } });
+      node.port.onmessage = (event) => {
+        const d = event.data;
+        S.frames[tag].push({ n: d.n, cf: d.cf, calls: d.calls, cf0: d.cf0, arr: performance.now(), pcm: new Int16Array(d.pcm) });
+      };
+      S.nodes[tag] = node;
+    }
+    ctx.createMediaStreamSource(A).connect(S.nodes.A);
+    ctx.createMediaStreamSource(B).connect(S.nodes.B);
+    // The reference tap must never be starved. A worklet whose input has been silent for a while is handed no samples, and its
+    // frames then skip the silent stretches, which shifts the reference against the microphone (measured: seconds). A constant
+    // of -100 dBFS keeps the input active; it rounds to 0 in the 16-bit files and goes to the tap only, never to the speakers.
+    S.tap = ctx.createGain();
+    S.gain.connect(S.tap);
+    const keepAlive = ctx.createConstantSource();
+    keepAlive.offset.value = 1e-5;
+    keepAlive.connect(S.tap);
+    keepAlive.start();
+    S.tap.connect(S.nodes.REF);
+    setInterval(() => {
+      const t = ctx.getOutputTimestamp();
+      S.clock.push({ perf: performance.now(), cur: ctx.currentTime, outCtx: t.contextTime, outPerf: t.performanceTime, outLat: ctx.outputLatency });
+      if (S.clock.length > 6000) S.clock.splice(0, 1000);
+    }, 200);
+    setStatus("running: " + ctx.sampleRate + " Hz, mic A+B open");
+    return info();
+  }
+
+  async function info() {
+    const ctx = S.ctx;
+    const devices = (await navigator.mediaDevices.enumerateDevices()).map((d) => ({ kind: d.kind, label: d.label, id: d.deviceId.slice(0, 8), group: d.groupId.slice(0, 8) }));
+    return {
+      userAgent: navigator.userAgent,
+      supported: navigator.mediaDevices.getSupportedConstraints(),
+      ctx: { sampleRate: ctx.sampleRate, state: ctx.state, baseLatency: ctx.baseLatency, outputLatency: ctx.outputLatency, currentTime: ctx.currentTime },
+      A: trackInfo(S.tracks.A),
+      B: trackInfo(S.tracks.B),
+      devices,
+      perfNow: performance.now(),
+      timeOrigin: performance.timeOrigin,
+      crossOriginIsolated: self.crossOriginIsolated,
+    };
+  }
+
+  /** Looks at the newest ~1.6 s of frames: is the raw microphone exactly zero (muted or blocked), and are A and B the same samples? */
+  async function checkMic(ms = 1600) {
+    const want = Math.ceil((ms / 1000) * 16000 / FRAME);
+    const startA = S.frames.A.length;
+    await new Promise((r) => setTimeout(r, ms + 200));
+    const out = { frames: { A: S.frames.A.length - startA, B: S.frames.B.length - startA, REF: S.frames.REF.length }, wanted: want, tracks: { A: trackInfo(S.tracks.A), B: trackInfo(S.tracks.B) } };
+    const stats = (tag) => {
+      const fr = S.frames[tag].slice(startA);
+      let nonzero = 0, total = 0, sq = 0, peak = 0;
+      for (const f of fr) for (let i = 0; i < f.pcm.length; i++) { const s = f.pcm[i]; total++; if (s !== 0) nonzero++; sq += s * s; if (Math.abs(s) > peak) peak = Math.abs(s); }
+      return { frames: fr.length, samples: total, nonzero, rmsDbfs: total ? round(20 * Math.log10(Math.max(Math.sqrt(sq / total) / 32768, 1e-9)), 1) : null, peakDbfs: round(20 * Math.log10(Math.max(peak / 32768, 1e-9)), 1), allZero: total > 0 && nonzero === 0 };
+    };
+    out.A = stats("A");
+    out.B = stats("B");
+    let same = 0, cmp = 0;
+    const m = Math.min(S.frames.A.length, S.frames.B.length);
+    for (let k = startA; k < m; k++) { const a = S.frames.A[k].pcm, b = S.frames.B[k].pcm; for (let i = 0; i < a.length; i++) { cmp++; if (a[i] === b[i]) same++; } }
+    out.identicalSampleFraction = cmp ? round(same / cmp, 4) : null;
+    out.cf0 = { A: S.frames.A[0]?.cf0, B: S.frames.B[0]?.cf0, REF: S.frames.REF[0]?.cf0 };
+    return out;
+  }
+
+  async function loadAsset(name, url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(url + " -> " + res.status);
+    const { rate, pcm } = parseWav(await res.arrayBuffer());
+    const buffer = S.ctx.createBuffer(1, pcm.length, rate); // at the file's own rate, as WebPlayer does: the node converts
+    const ch = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    S.buffers[name] = buffer;
+    return { name, rate, seconds: round(pcm.length / rate, 2) };
+  }
+
+  /** Plays `name` (or a part of it) through the gain node, scheduled on the audio clock `leadSec` from now. */
+  function playReply(name, { durationSec = null, offsetSec = 0, leadSec = 0.3 } = {}) {
+    const ctx = S.ctx;
+    const buffer = S.buffers[name];
+    if (!buffer) throw new Error("no buffer " + name);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(S.gain);
+    const perfCall = performance.now();
+    const ctxAtCall = ctx.currentTime;
+    const ots = ctx.getOutputTimestamp();
+    const when = ctxAtCall + leadSec;
+    const dur = Math.min(durationSec ?? buffer.duration, buffer.duration - offsetSec);
+    source.start(when, offsetSec, dur);
+    const rec = { kind: "reply", name, when, durSec: dur, offsetSec, perfCall, ctxAtCall, outCtx: ots.contextTime, outPerf: ots.performanceTime, outLat: ctx.outputLatency, bufferRate: buffer.sampleRate, leadSec };
+    S.plays.push(rec);
+    return rec;
+  }
+
+  /** A click is a 3 ms Hann-windowed chirp (0.8 -> 6.5 kHz, peak 0.8): wide enough in band for a laptop speaker and sharp when matched-filtered. */
+  function clickBuffer() {
+    if (S.clickBuffer) return S.clickBuffer;
+    const ctx = S.ctx;
+    const n = Math.round(ctx.sampleRate * 0.003);
+    const b = ctx.createBuffer(1, n, ctx.sampleRate);
+    const d = b.getChannelData(0);
+    const T = n / ctx.sampleRate;
+    for (let i = 0; i < n; i++) {
+      const t = i / ctx.sampleRate;
+      const phase = 2 * Math.PI * (800 * t + ((6500 - 800) * t * t) / (2 * T));
+      d[i] = 0.8 * (0.5 - 0.5 * Math.cos((2 * Math.PI * (i + 0.5)) / n)) * Math.sin(phase);
+    }
+    S.clickBuffer = b;
+    return b;
+  }
+
+  function playClicks({ count = 10, spacingSec = 1, leadSec = 0.5 } = {}) {
+    const ctx = S.ctx;
+    const buffer = clickBuffer();
+    const perfCall = performance.now();
+    const ctxAtCall = ctx.currentTime;
+    const ots = ctx.getOutputTimestamp();
+    const times = [];
+    for (let k = 0; k < count; k++) {
+      const when = ctxAtCall + leadSec + k * spacingSec;
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(S.gain);
+      source.start(when);
+      times.push(when);
+    }
+    const rec = { kind: "clicks", times, perfCall, ctxAtCall, outCtx: ots.contextTime, outPerf: ots.performanceTime, outLat: ctx.outputLatency, widthMs: 3 };
+    S.plays.push(rec);
+    return rec;
+  }
+
+  /** RMS (dBFS) of the newest `ms` of A and B: the driver's optional quiet gate and a record of the room before a run. */
+  function ambientDb(ms = 1000) {
+    const k = Math.max(1, Math.round((ms / 1000) * 16000 / FRAME));
+    const level = (tag) => {
+      const fr = S.frames[tag].slice(-k);
+      let sq = 0, n = 0;
+      for (const f of fr) for (let i = 0; i < f.pcm.length; i++) { sq += f.pcm[i] * f.pcm[i]; n++; }
+      return n ? round(20 * Math.log10(Math.max(Math.sqrt(sq / n) / 32768, 1e-9)), 1) : -180;
+    };
+    return { A: level("A"), B: level("B") };
+  }
+
+  function mark() {
+    return { n0: S.frames.A.length, perf: performance.now(), ctx: S.ctx.currentTime, playIdx: S.plays.length, clockIdx: S.clock.length };
+  }
+
+  function slicePcm(tag, from, to) {
+    const out = new Int16Array(Math.max(0, to - from));
+    const fr = S.frames[tag];
+    if (to <= from || !fr.length) return out;
+    const k0 = Math.max(0, Math.floor(from / FRAME));
+    const k1 = Math.min(fr.length - 1, Math.floor((to - 1) / FRAME));
+    for (let k = k0; k <= k1; k++) {
+      const base = k * FRAME;
+      const a = Math.max(from, base);
+      const b = Math.min(to, base + FRAME);
+      if (b > a) out.set(fr[k].pcm.subarray(a - base, b - base), a - from);
+    }
+    return out;
+  }
+
+  async function upload(name, body) {
+    const res = await fetch("/upload?name=" + encodeURIComponent(name), { method: "POST", body });
+    if (!res.ok) throw new Error("upload " + name + " -> " + res.status);
+  }
+
+  /** Writes <name>-A.wav (processed), -B.wav (raw) and -ref.wav (what was played), all 16 kHz mono on one sample grid; returns the timing metadata. */
+  async function exportSegment(name, mk, n1 = null) {
+    const fA = S.frames.A, fB = S.frames.B, fR = S.frames.REF;
+    const n0 = mk.n0;
+    const end = Math.min(n1 ?? Infinity, fA.length, fB.length);
+    const cf0 = { A: fA[0].cf0, B: fB[0].cf0, REF: fR[0].cf0 };
+    const ratio = S.ratio;
+    const shift16 = { A: 0, B: Math.round((cf0.B - cf0.A) / ratio), REF: Math.round((cf0.REF - cf0.A) / ratio) };
+    const from = n0 * FRAME, to = end * FRAME;
+    const parts = { A: "A", B: "B", REF: "ref" };
+    for (const tag of ["A", "B", "REF"]) {
+      const pcm = slicePcm(tag, from - shift16[tag], to - shift16[tag]);
+      await upload(name + "-" + parts[tag] + ".wav", wav16(pcm, 16000));
+    }
+    const gaps = { A: 0, B: 0, REF: 0 };
+    for (const tag of ["A", "B", "REF"]) {
+      const fr = S.frames[tag];
+      for (let k = 0; k < fr.length; k++) if (fr[k].n !== k || (fr[k].cf - fr[k].cf0) / 128 + 1 !== fr[k].calls) gaps[tag]++;
+    }
+    const slim = (fr) => { const o = []; for (let k = n0; k < Math.min(end, fr.length); k++) o.push([fr[k].n, fr[k].cf, round(fr[k].arr, 2), fr[k].calls]); return o; };
+    // Is the reference on the microphone's clock? Frame k of the three taps must complete in the same render block (to a few
+    // blocks); a worklet that was starved of input would complete it much later. Reported in 16 kHz samples.
+    let skewMin = 0, skewMax = 0;
+    for (let k = n0; k < Math.min(end, fR.length); k++) { const s = (fR[k].cf - fA[k].cf) / ratio; if (s < skewMin) skewMin = s; if (s > skewMax) skewMax = s; }
+    const refFrames = Math.min(end, fR.length) - n0;
+    const tNow = performance.now();
+    return {
+      name, sr: S.sr, ratio, cf0, shift16, n0, n1: end, segStartCf: cf0.A + n0 * FRAME * ratio,
+      refSkewSamples: { min: round(skewMin, 1), max: round(skewMax, 1), refFrames, micFrames: end - n0 },
+      frames: { A: slim(fA), B: slim(fB), REF: slim(fR) }, gaps,
+      plays: S.plays.slice(mk.playIdx), clock: S.clock.slice(Math.max(0, mk.clockIdx - 5)), trackEvents: S.trackEvents,
+      exportedAtPerf: tNow, outputLatencyNow: S.ctx.outputLatency,
+    };
+  }
+
+  /** Page-initiated clock ping against the driver's HTTP server (the driver stamps its own QueryPerformanceCounter time). */
+  async function pingSync(n = 40) {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const t0 = performance.now();
+      const res = await fetch("/ping?i=" + i, { cache: "no-store" });
+      const j = await res.json();
+      out.push({ t0, t1: performance.now(), hr: j.hr });
+    }
+    return out;
+  }
+
+  function stopAll() {
+    S.gain.disconnect();
+    S.gain = S.ctx.createGain();
+    S.gain.connect(S.ctx.destination);
+    S.gain.connect(S.tap);
+  }
+
+  window.probe = { init, info, checkMic, loadAsset, playReply, playClicks, ambientDb, mark, exportSegment, pingSync, stopAll, nowPerf: () => performance.now(), state: S };
+  window.addEventListener("error", (e) => say("error: " + e.message));
+  window.addEventListener("unhandledrejection", (e) => say("rejection: " + (e.reason && e.reason.message || e.reason)));
+})();
+</script>
+</body>
+</html>

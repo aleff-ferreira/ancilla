@@ -1,0 +1,39 @@
+== pilot: failures by cause
+ 10  (en 0, pt 10)  stop: the recogniser read nothing (the voice went on)  [003 007 009 011 017 023 027 029 035 039]
+  4  (en 0, pt 4)  correction: the corrected word was not read (recogniser)  [059 063 073 079]
+  4  (en 0, pt 4)  control: distant speech taken as the person  [087 095 111 119]
+  1  (en 1, pt 0)  control: backchannel cut the reply or made a turn  [118]
+  1  (en 0, pt 1)  control: throatclear cut the reply or made a turn  [115]
+== baseline: failures by cause
+ 15  (en 10, pt 5)  control: backchannel cut the reply or made a turn  [080 086 088 094 096 102 104 110 112 118 081 089 097 105 113]
+  5  (en 0, pt 5)  control: distant speech taken as the person  [087 095 103 111 119]
+  4  (en 1, pt 3)  stop: other (call-ended[])  [004 007 029 035]
+  2  (en 2, pt 0)  control: echo cut the reply or made a turn  [092 108]
+  2  (en 0, pt 2)  control: throatclear cut the reply or made a turn  [083 091]
+  1  (en 1, pt 0)  correction: 2 corrected answers  [052]
+  1  (en 1, pt 0)  control: cough cut the reply or made a turn  [106]
+  1  (en 0, pt 1)  correction: the corrected word was not read (recogniser)  [059]
+== tuned: failures by cause
+ 15  (en 10, pt 5)  control: backchannel cut the reply or made a turn  [080 086 088 094 096 102 104 110 112 118 081 089 097 105 113]
+  5  (en 0, pt 5)  control: throatclear cut the reply or made a turn  [083 091 099 107 115]
+  5  (en 0, pt 5)  control: distant speech taken as the person  [087 095 103 111 119]
+  4  (en 4, pt 0)  control: echo cut the reply or made a turn  [084 092 100 108]
+  4  (en 0, pt 4)  correction: the corrected word was not read (recogniser)  [059 061 063 079]
+  3  (en 2, pt 1)  stop: other (barge-in[barge-in: the person spoke (speech)] quiet-drop[] call-ended[])  [004 010 019]
+  2  (en 2, pt 0)  correction: 0 corrected answers  [052 058]
+  2  (en 2, pt 0)  correction: other (barge-in[barge-in: the person spoke (speech)] answered[] answered[])  [070 076]
+  2  (en 2, pt 0)  control: cough cut the reply or made a turn  [082 106]
+  2  (en 0, pt 2)  stop: other (barge-in[barge-in: the person spoke (speech)] empty-silent[] call-ended[])  [013 037]
+  2  (en 0, pt 2)  control: clicks cut the reply or made a turn  [085 109]
+  1  (en 1, pt 0)  stop: other (barge-in[barge-in: the person spoke (speech)] answered[] call-ended[])  [016]
+  1  (en 1, pt 0)  stop: other (barge-in[barge-in: the person spoke (speech)] answered[] barge-in[barge-in: the person spoke (speech)] backchannel-drop[])  [022]
+  1  (en 1, pt 0)  stop: other (barge-in[barge-in: the person spoke (speech)] barge-in[barge-in: the person spoke (speech)] call-ended[])  [028]
+  1  (en 1, pt 0)  correction: other (barge-in[barge-in: the person spoke (speech)] barge-in[barge-in: the person spoke (speech)] backchannel-drop[] answered[])  [040]
+  1  (en 0, pt 1)  stop: other (barge-in[barge-in: the person spoke (speech)] quiet-drop[] didnt-catch-empty[])  [001]
+  1  (en 0, pt 1)  stop: other (barge-in[barge-in: the person spoke (speech)] quiet-drop[] barge-in[barge-in: the person spoke (speech)] empty-silent[])  [007]
+  1  (en 0, pt 1)  stop: other (barge-in[barge-in: the person spoke (speech)] empty-silent[] barge-in[barge-in: the person spoke (speech)] empty-silent[])  [031]
+  1  (en 0, pt 1)  correction: other (barge-in[barge-in: the person spoke (speech)] quiet-drop[] answered[])  [073]
+== tasks started after the person began to correct (late-brain corrections)
+pilot     0 of 8
+baseline  0 of 8
+tuned     0 of 8

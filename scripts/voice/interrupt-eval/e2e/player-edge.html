@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebPlayer in Edge: timing and continuity test</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body { font: 13px/1.45 system-ui, "Segoe UI", sans-serif; background: #10141a; color: #cfd6e0; margin: 14px; }
+  h1 { font-size: 15px; margin: 0 0 8px; }
+  pre { white-space: pre-wrap; margin: 8px 0 0; color: #9fb0c4; }
+</style>
+</head>
+<body>
+<h1>WebPlayer in Edge: timing and continuity test</h1>
+<div>Plays the assistant's voice through the real WebPlayer on a muted output and records what the player hands to the audio destination. Nothing is audible. Leave this window open; the driver closes it.</div>
+<div id="status">waiting for the driver</div>
+<pre id="log"></pre>
+<script src="/player.js"></script>
+<script>
+/*
+ * The page side of the player test (see README.md). Everything is driven by the driver through window.edge over the DevTools
+ * Protocol. Timing is kept on the audio clock: every call is stamped with ctx.currentTime read synchronously just before it, and
+ * the tap records each 128-frame block with the context's own frame counter, so no wall clock enters a measurement.
+ *
+ * The tap: AudioNode.prototype.connect is patched before the player exists, so that whatever is connected to ctx.destination
+ * is also connected to a recorder (an AudioWorkletNode). The recorder therefore sees exactly what the player hands to the
+ * audio device, without any change to the player.
+ */
+(() => {
+  "use strict";
+  const PIECE = 1764;                          // 40 ms of 44.1 kHz audio: the server's piece
+  const AHEAD = Math.round(2.4 * 44100);       // the server keeps about this much ahead of what has played
+  const CHUNK = 256;                           // frames per tap message
+  const S = { ctx: null, tap: null, pcm: {}, info: null };
+  const R = { on: false, chunks: [], skips: [], ring: new Float64Array(64), n: 0, odd: 0, stale: 0 };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const say = (t) => { document.getElementById("log").textContent += t + "\n"; };
+  const setStatus = (t) => { document.getElementById("status").textContent = t; };
+
+  // Runs in the audio thread (its source is taken from this function's text). It copies every block it is given, with the
+  // frame number of the first block, into 256-frame messages, and returns true so that it is processed even when its input is silent.
+  function tapProcessorSource() {
+    class TapRecorder extends AudioWorkletProcessor {
+      constructor() { super(); this.buf = new Float32Array(256); this.fill = 0; this.frame0 = 0; this.odd = 0; this.v = -1; this.stale = 0; this.skips = []; }
+      flush() {
+        const data = this.fill === 256 ? this.buf : this.buf.slice(0, this.fill);
+        this.port.postMessage({ frame0: this.frame0, data, odd: this.odd, stale: this.stale, skips: this.skips }, [data.buffer]);
+        this.buf = new Float32Array(256);
+        this.fill = 0;
+        this.skips = [];
+      }
+      process(inputs) {
+        const ch = inputs[0] && inputs[0][0];
+        // The engine hands this node one block per call, but currentFrame is only refreshed once per burst of calls (it repeats
+        // inside a burst). So a block's frame is the previous block's plus 128, taken from currentFrame when that is further
+        // on. A currentFrame beyond that is a block the engine did not hand over: noted, and no message spans it.
+        let v = currentFrame;
+        if (this.v >= 0) {
+          v = this.v + 128;
+          if (currentFrame > v) {
+            if (this.skips.length < 50) this.skips.push([v, currentFrame]);
+            if (this.fill > 0) this.flush();
+            v = currentFrame;
+          } else if (currentFrame < v) this.stale++;
+        }
+        this.v = v;
+        if (this.fill === 0) this.frame0 = v;
+        if (ch && ch.length !== 128) this.odd++;
+        for (let i = 0; i < 128; i++) this.buf[this.fill + i] = ch && i < ch.length ? ch[i] : 0;
+        this.fill += 128;
+        if (this.fill >= 256) this.flush();
+        return true;
+      }
+    }
+    registerProcessor("tap-recorder", TapRecorder);
+  }
+
+  function onChunk(ev) {
+    const d = ev.data;
+    const x = d.data;
+    let s = 0;
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+    R.ring[R.n & 63] = s;
+    R.n++;
+    if (d.odd) R.odd = d.odd;
+    R.stale = d.stale;
+    if (R.on) {
+      R.chunks.push({ frame0: d.frame0, data: x });
+      if (d.skips && d.skips.length) R.skips.push(...d.skips);
+    }
+  }
+  /** Level (dBFS RMS) of the newest `k` messages of the tap. */
+  const levelDb = (k) => {
+    let s = 0;
+    for (let i = 1; i <= k; i++) s += R.ring[(R.n - i) & 63];
+    return 10 * Math.log10(Math.max(s / (k * CHUNK), 1e-12));
+  };
+
+  /** What was recorded since `fromFrame`, as one run of samples (zero where a message is missing, counted in gaps). */
+  function take(fromFrame) {
+    const ch = R.chunks;
+    if (!ch.length) return null;
+    const first = Math.max(fromFrame, ch[0].frame0);
+    const last = ch[ch.length - 1];
+    const end = last.frame0 + last.data.length;
+    const samples = new Float32Array(Math.max(0, end - first));
+    const gapList = [];
+    let prevEnd = -1;
+    for (const c of ch) {
+      const cEnd = c.frame0 + c.data.length;
+      // a hole between two messages that lies inside the exported run (positions are relative to its start)
+      if (prevEnd >= 0 && c.frame0 !== prevEnd && cEnd > first && gapList.length < 40) gapList.push([prevEnd - first, c.frame0 - first]);
+      prevEnd = cEnd;
+      const s = Math.max(first, c.frame0), e = Math.min(end, cEnd);
+      if (e > s) samples.set(c.data.subarray(s - c.frame0, e - c.frame0), s - first);
+    }
+    return { startFrame: first, samples, gaps: gapList.length, gapList };
+  }
+
+  function toB64(f32) {
+    const u8 = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength);
+    let s = "";
+    for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+
+  async function loadWav(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(url + " -> " + res.status);
+    const buf = await res.arrayBuffer();
+    const v = new DataView(buf);
+    let at = 12, rate = 0, data = null;
+    while (at + 8 <= v.byteLength) {
+      const id = String.fromCharCode(v.getUint8(at), v.getUint8(at + 1), v.getUint8(at + 2), v.getUint8(at + 3));
+      const size = v.getUint32(at + 4, true);
+      if (id === "fmt ") rate = v.getUint32(at + 12, true);
+      if (id === "data") { data = new Int16Array(buf.slice(at + 8, Math.min(v.byteLength, at + 8 + size))); break; }
+      at += 8 + size + (size & 1);
+    }
+    if (!data || rate !== 44100) throw new Error("expected 44.1 kHz 16-bit mono: " + url + " has rate " + rate);
+    return data;
+  }
+
+  async function init() {
+    if (S.ctx) throw new Error("already initialised");
+    // The same context as the app: a plain AudioContext with the interactive latency hint.
+    const ctx = new AudioContext({ latencyHint: "interactive" });
+    S.ctx = ctx;
+    if (ctx.state !== "running") await ctx.resume();
+    const url = URL.createObjectURL(new Blob(["(" + tapProcessorSource.toString() + ")();"], { type: "application/javascript" }));
+    await ctx.audioWorklet.addModule(url);
+    const tap = new AudioWorkletNode(ctx, "tap-recorder", { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1, channelCountMode: "explicit" });
+    tap.port.onmessage = onChunk;
+    S.tap = tap;
+    // The tap: whatever is connected to the destination is also connected to the recorder. Patched before the player exists.
+    const connect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function (dest, ...rest) {
+      const out = connect.call(this, dest, ...rest);
+      if (dest === ctx.destination && this !== tap) connect.call(this, tap);
+      return out;
+    };
+    S.pcm.en = await loadWav("/assets/reply-en-native.wav");
+    S.pcm.pt = await loadWav("/assets/reply-pt-native.wav");
+    // The audio clock starts a moment after the context does; then measure how fast it runs against the wall clock.
+    for (let i = 0; i < 200 && ctx.currentTime === 0; i++) await sleep(10);
+    const c0 = ctx.currentTime, p0 = performance.now();
+    await sleep(1000);
+    const advanced = ctx.currentTime - c0;
+    S.info = {
+      userAgent: navigator.userAgent,
+      sampleRate: ctx.sampleRate,
+      state: ctx.state,
+      baseLatency: ctx.baseLatency,
+      outputLatency: ctx.outputLatency,
+      clockRate: advanced / ((performance.now() - p0) / 1000),
+      tapMessages: R.n,
+      visibility: document.visibilityState,
+      focused: document.hasFocus(),
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      enSamples: S.pcm.en.length,
+      ptSamples: S.pcm.pt.length,
+    };
+    setStatus("ready: " + ctx.sampleRate + " Hz, base latency " + ctx.baseLatency);
+    return S.info;
+  }
+
+  /**
+   * One trial. spec: { id, type: "T1".."T6", moment (seconds into the reply), u2Offset (T6: where utterance 2 starts in the
+   * Portuguese reply, in 44.1 kHz samples) }. Returns the events (each stamped with the audio clock), the player's own
+   * numbers, and the tap's record from 0.7 s before the first call to the end.
+   */
+  async function runTrial(spec) {
+    const ctx = S.ctx, sr = ctx.sampleRate;
+    const events = [], reads = [];
+    const lat = () => ctx.outputLatency || ctx.baseLatency || 0;
+    const player = new Player.WebPlayer(ctx, 44100);
+    const pcm = S.pcm.en;
+    const st = { sent: 0, timer: 0 };
+
+    // The page's feeder: keeps about 2.4 s ahead of what the player says has played, checking every 100 ms.
+    const tick = () => {
+      const c = ctx.currentTime;
+      const played = player.played(1);
+      reads.push([c, played, lat()]);
+      while (st.sent < pcm.length && st.sent - played < AHEAD) {
+        const end = Math.min(pcm.length, st.sent + PIECE);
+        player.enqueue(1, pcm.subarray(st.sent, end));
+        st.sent = end;
+      }
+    };
+    const feederStart = () => { clearInterval(st.timer); tick(); st.timer = setInterval(tick, 100); };
+    const feederStop = () => clearInterval(st.timer);
+    /** Runs fn, stamping the audio clock read synchronously just before it. */
+    const timed = (name, fn) => {
+      const p0 = performance.now();
+      const c0 = ctx.currentTime;
+      const ret = fn();
+      const rec = { name, c0, f0: Math.round(c0 * sr), ms: performance.now() - p0, ret: ret === undefined ? null : ret };
+      events.push(rec);
+      return rec;
+    };
+    const untilCtx = async (t) => { while (ctx.currentTime < t) await sleep(10); };
+    const srcDb = (a, from, to) => {
+      let s = 0;
+      const hi = Math.min(to, a.length);
+      for (let i = from; i < hi; i++) { const x = a[i] / 32768; s += x * x; }
+      return 10 * Math.log10(Math.max(s / Math.max(1, hi - from), 1e-12));
+    };
+    /**
+     * Waits (up to maxMs) until the tap's last 100 ms and last 20 ms had energy, so that the call never lands on a natural pause
+     * (and, when `extra` is given, until that holds too: T4 wants speech in the three pieces it will hold).
+     */
+    const untilEnergy = async (maxMs, extra) => {
+      const t0 = performance.now();
+      while (!(levelDb(19) >= -40 && levelDb(4) >= -45 && (!extra || extra()))) {
+        if (performance.now() - t0 > maxMs) return false;
+        await sleep(1);
+      }
+      return true;
+    };
+
+    const scenarios = {
+      // the shipped path
+      async T1() {
+        feederStop();
+        const r = timed("stop", () => player.stop());
+        r.playedAfter = player.played(1);
+        await sleep(1900);
+      },
+      // a pause that only the lease ends
+      async T2() {
+        const r = timed("pause", () => player.pause(1500));
+        r.playedAfter = player.played(1);
+        await sleep(1500 + 40 + 1000);
+      },
+      // pause, then resume 600 ms later
+      async T3() {
+        const r1 = timed("pause", () => player.pause(60000));
+        r1.playedAfter = player.played(1);
+        await sleep(600);
+        const r2 = timed("resume", () => player.resume());
+        r2.playedAfter = player.played(1);
+        await sleep(1700);
+      },
+      // pause, three more pieces arrive while paused, resume
+      async T4() {
+        feederStop();
+        const r1 = timed("pause", () => player.pause(60000));
+        r1.playedAfter = player.played(1);
+        await sleep(150);
+        const sent0 = st.sent;
+        const rh = timed("enqueueHeld", () => {
+          for (let k = 0; k < 3; k++) {
+            const end = Math.min(pcm.length, st.sent + PIECE);
+            player.enqueue(1, pcm.subarray(st.sent, end));
+            st.sent = end;
+          }
+        });
+        rh.sent0 = sent0;
+        rh.sent1 = st.sent;
+        rh.playedAfter = player.played(1);
+        await sleep(450);
+        const r2 = timed("resume", () => player.resume());
+        r2.playedAfter = player.played(1);
+        feederStart();
+        await sleep(3500);
+      },
+      // renewals: pause(1500) three times, 600 ms apart, then nothing
+      async T5() {
+        for (let k = 0; k < 3; k++) {
+          const r = timed("pause", () => player.pause(1500));
+          r.k = k;
+          r.playedAfter = player.played(1);
+          if (k < 2) await sleep(600);
+        }
+        await sleep(1500 + 40 + 1000);
+      },
+      // pause, then stop while paused, then a new utterance
+      async T6() {
+        feederStop();
+        const r1 = timed("pause", () => player.pause(1500));
+        r1.playedAfter = player.played(1);
+        await sleep(300);
+        const r2 = timed("stop", () => player.stop());
+        r2.playedAfter = player.played(1);
+        await sleep(1600);
+        const pcm2 = S.pcm.pt;
+        const off = spec.u2Offset;
+        const r3 = timed("enqueue2", () => {
+          for (let k = 0; k < 37; k++) player.enqueue(2, pcm2.subarray(off + k * PIECE, off + (k + 1) * PIECE));
+        });
+        r3.playedAfter = player.played(2);
+        r3.current = player.current();
+        await sleep(1800);
+      },
+      // pause with audio held, then the drop: stop() while paused (what the page does for a server resume with drop: true).
+      // Nothing may be heard from then on, not even when the 1500 ms lease would have ended (it does so inside the record).
+      async T7() {
+        feederStop();
+        const r1 = timed("pause", () => player.pause(1500));
+        r1.playedAfter = player.played(1);
+        await sleep(150);
+        const sent0 = st.sent;
+        const rh = timed("enqueueHeld", () => {
+          for (let k = 0; k < 3; k++) {
+            const end = Math.min(pcm.length, st.sent + PIECE);
+            player.enqueue(1, pcm.subarray(st.sent, end));
+            st.sent = end;
+          }
+        });
+        rh.sent0 = sent0;
+        rh.sent1 = st.sent;
+        await sleep(450);
+        const r2 = timed("drop", () => player.stop());
+        r2.playedAfter = player.played(1);
+        await sleep(2700);
+      },
+    };
+    if (!scenarios[spec.type]) throw new Error("unknown trial type " + spec.type);
+
+    R.chunks = [];
+    R.skips = [];
+    R.on = true;
+    const stale0 = R.stale;
+    const cEnq = ctx.currentTime;
+    feederStart();                                  // the first tick enqueues the opening 2.4 s
+    await untilCtx(cEnq + 0.04 + spec.moment);
+    const holds = spec.type === "T4" || spec.type === "T7"; // these hold three pieces while paused: they must contain speech
+    const held = holds ? () => srcDb(pcm, st.sent, st.sent + 3 * PIECE) >= -40 : null;
+    const energyOk = await untilEnergy(spec.waitMs ?? (holds ? 3000 : 1000), held);
+    await scenarios[spec.type]();
+    feederStop();
+    await sleep(250);                               // the last tap messages arrive
+    const first = events[0].f0;
+    const rec = take(first - Math.round(0.7 * sr));
+    R.on = false;
+    R.chunks = [];
+    const out = {
+      spec, sr, baseLatency: ctx.baseLatency, outputLatency: ctx.outputLatency,
+      enq: { c: cEnq, f: Math.round(cEnq * sr) }, energyOk, events, reads, sent: st.sent,
+      tap: { startFrame: rec.startFrame, gaps: rec.gaps, gapList: rec.gapList, length: rec.samples.length, b64: toB64(rec.samples) },
+      skips: R.skips.slice(0, 50).map(([a, b]) => [a - rec.startFrame, b - rec.startFrame]),
+      staleLabels: R.stale - stale0,
+      visibility: document.visibilityState, focused: document.hasFocus(), odd: R.odd,
+    };
+    player.close();
+    await sleep(300);
+    return out;
+  }
+
+  window.edge = { init, runTrial, state: S };
+  window.addEventListener("error", (e) => say("error: " + e.message));
+  window.addEventListener("unhandledrejection", (e) => say("rejection: " + ((e.reason && e.reason.message) || e.reason)));
+})();
+</script>
+</body>
+</html>

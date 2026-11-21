@@ -1,0 +1,7 @@
+en:F2 "Remind me to call Ana at five."  baseline engine: "Remind me to call Anne at five."  pilot engine: "Remind me to call Anne at five."
+en:M3 "Actually, make it Wednesday."  baseline engine: "Actually make it Wednesday."  pilot engine: "Actually make it Wednesday."
+en:F3 "Stop."  baseline engine: "Stop."  pilot engine: "Stop."
+pt:M2 "Me lembre de ligar para a Ana às cinco."  baseline engine: "Me lembre de ligar para a Ana 5."  pilot engine: "Me lembre de ligar para a Ana 5."
+pt:F3 "Na verdade, quarta."  baseline engine: "Na verdade, quarta."  pilot engine: "Na verdade, quarta."
+pt:M3 "Pare."  baseline engine: "Pare."  pilot engine: "Pare."
+speech detector: 585 frames, 0 differ, largest difference 0; recogniser: 0 of 6 readings differ
