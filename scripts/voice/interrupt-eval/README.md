@@ -73,6 +73,7 @@ file each, and give `report.mjs` all the files), `--limit N`, `--only id,id`, `-
 | `engines-equal.mjs` | same audio through the engines of two builds: probabilities and words must be identical |
 | `classify.mjs` | why an arm's episodes failed, by cause and language, and which late-brain corrections started a task |
 | `framecost.mjs` | what the pilot adds to the work done for each 32 ms frame |
+| `shadow/` | an open acoustic detector run offline on what a reference call heard: `run.mjs ... --arm deaf=<root>:deaf --dump <dir>` records the microphone and speaker of a call that never reacts, `shadow/detect.py` (onnxruntime and numpy; the model is not in the repository: `pipecat-ai/backchannel-detector` at `4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854`, `backchannel-fp32.onnx`, sha256 `3e5d47740e5f75211cc78c5df701be9afe7b76c4115144212a18598766909240`) turns it into decisions, `shadow/summarize.mjs` puts them next to the call's |
 | `e2e/` | the page's own player (`WebPlayer`) in a real Edge: stop, pause, resume, drop, timed at the node before the audio device |
 | `results/` | the raw lines of the two held-out runs, their reports, load samples and failure causes (see the `README.txt` in each) |
 

@@ -112,7 +112,7 @@ while the assistant talks:
   assistant waits for your approval.
 - **What it cannot do.** If the recogniser writes nothing for a word, the voice goes on after the pause and you have to say it
   again. It does this for short Portuguese stop words about three times in ten even when they are said alone (English: about
-  once in thirty), and in the evaluation 10 of 20 Portuguese stops were lost against none of 20 English ones. A person near the
+  once in thirty), and in the evaluation 10 of 20 Portuguese stops were lost against none of 20 English ones (3 of 20 on a later draw). A person near the
   microphone, speaking about as loudly as you, is taken for you (the same as without the setting), and so is a distant voice
   when the call has not yet learned how loud you are. A single word that is not a stop does not take the floor from the
   assistant; say more than that. This is why the setting is a pilot and is off.

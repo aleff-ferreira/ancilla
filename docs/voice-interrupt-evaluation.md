@@ -22,12 +22,13 @@ Intervals are in section 5.
 | At most 1/40 false cancellations | 6/40 (baseline 25/40, the same pipeline tuned by settings alone 33/40) | **Failed** |
 | Zero duplicate tasks or unauthorized actions | 0 of each. The first run found a stale task in 6 of 8 late-brain corrections; fixed and run again | **Passed** |
 | At most 100 ms added p95 latency to the first useful audio of an ordinary turn | the end-to-end measurement cannot resolve 100 ms (turn-to-turn variation of 0.5 s or more with other programs on the machine); the work the pilot adds is 0.40 ms per 32 ms frame | **Unverified end to end** |
-| The strongest feasible model-based approach compared with a tuned version of the shipped pipeline | the shipped pipeline tuned by settings alone was measured; the open model was not (it needs a 4 MB download that was not approved) | **Unverified** |
+| The strongest feasible model-based approach compared with a tuned version of the shipped pipeline | the shipped pipeline tuned by settings alone was measured (section 5), and so was the open Pipecat acoustic detector, offline, in English only (section 5.5): at its published threshold 0.7 it decides to stop for 19 of 20 sounds that were not for the assistant, at 0.9 it catches 2 of 20 stops; no threshold meets the gates. Portuguese has no such model | **Measured; neither meets the gates** |
 | Off, the call is exactly v0.30.0 | whole-call golden traces recorded from a build of v0.30.0 are compared in a test, three ways of being off | **Passed** |
 | Rollback | turn `interruptPilot` off (Assistant, Voice); nothing is migrated | n/a |
 
 In English the pilot does what it was built for: 20 of 20 stops silence the old voice within 350 ms (median 141 ms against
-747 ms), 20 of 20 corrections are answered once, and 1 of 20 control sounds cancels a reply (13 of 20 for v0.30.0). In
+747 ms), 20 of 20 corrections are answered once, and 1 of 20 control sounds cancels a reply (13 of 20 for v0.30.0). On a later
+draw of the English episodes (section 5.5) it was 17 of 20, 20 of 20 and 1 of 20. In
 Portuguese it is limited by the recogniser: short Portuguese stop words are read correctly only 44 times in 64 when said
 alone (69%, English 93 in 96), so 10 of 20 stops were not read and the voice went on. The pilot is off by default and lands
 that way.
@@ -84,7 +85,7 @@ the notices), so nothing Android-specific was built.
 | Approach | What it gives | Why it was not the pilot |
 | --- | --- | --- |
 | **Tune the shipped rules** (quick detector, lower thresholds, shorter windows, no new states) | cuts earlier | it must decide before the words exist; measured as the `tuned` arm (section 5): it silences at a median of 235 ms, but cuts the reply off for 33 of 40 control sounds and fails 10 of 40 corrections |
-| **A trained acoustic interruption classifier** (the closest open one is pipecat `backchannel-detector`: BSD-2-Clause, 734k parameters per its card (961k in its safetensors), English only, sha `4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854`) | no words needed; published median 280 to 300 ms to catch an interruption | published 82.9% and 81.2% caught within 700 ms (two English test sets, simulated echo), so it cannot reach 95% inside 350 ms alone, and it has no Portuguese; **not measured here**: running it needs a download (4 MB) that was not asked for |
+| **A trained acoustic interruption classifier** (the closest open one is pipecat `backchannel-detector`: BSD-2-Clause, 734k parameters per its card (961k in its safetensors), English only, sha `4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854`) | no words needed; published median 280 to 300 ms to catch an interruption | published 82.9% and 81.2% caught within 700 ms (two English test sets, simulated echo), so it cannot reach 95% inside 350 ms alone, and it has no Portuguese; **measured here offline on this evaluation's English audio** (section 5.5): at its published threshold it decides to stop for 19 of 20 non-stops, including the assistant's own echo, and at a stricter one it decides within 300 ms for only 2 of 20 stops |
 | **Pause, then decide by the words** (this pilot) | silence at the speaker as early as the sound is found, cancellation only on words | costs a gap after a sound of listening (about 0.5 to 1 s); the words must be recognised |
 | Speaker verification for other talkers | would also reject a person nearby | needs enrolment, and none of the open ones were fast enough (see the literature) |
 
@@ -326,6 +327,53 @@ it, and the pilot was fixed for both before the second run:
 The first run's numbers for the ordinary turns (median first sound 9.0 s for the baseline, 9.3 s for the pilot) say only that
 the machine was overloaded.
 
+### 5.5 The open acoustic detector, offline, in English
+
+The brief asked for the strongest feasible model-based approach to be compared with a tuned version of the shipped pipeline.
+The closest open model is the Pipecat backchannel detector (BSD-2-Clause; `pipecat-ai/backchannel-detector` at revision
+`4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854`; English only, per its card). It was downloaded with the user's approval
+(`backchannel-fp32.onnx`, 3,869,783 bytes, sha256 `3e5d47740e5f75211cc78c5df701be9afe7b76c4115144212a18598766909240`, checked
+against the published hash, and `model.json`) and run offline with onnxruntime 1.28.0.
+
+**What was run.** A reference call that never reacts to what is said over its voice (the `:deaf` arm of `run.mjs`) was run on
+the 60 English held-out episodes, and its microphone and speaker were recorded: the sound the call heard, with the assistant's
+own voice going on underneath and the person's sound over it at the episode's level and echo residue. That is a fresh draw of
+the plan (synthesis is not seeded), so the baseline (the call with the setting off) and the pilot were run on it as well, and
+the table compares all of them on the same audio (`results/20261121-shadow/`). The detector takes the 16 kHz microphone in 40
+ms chunks together with a `bot_state` describing the assistant's voice, and says per 20 ms frame how likely the sound is a
+floor-taking interruption (the card's `negative` plus `floor_take`). A decision to stop is taken at the end of the 40 ms chunk
+of the first frame at or above a threshold; the card uses 0.7. A decision is the decision to stop, not the silence: the page
+adds about 55 ms of fade and output.
+
+**What the card does not say.** The order and edge values of `bot_state` (the code repository the card links to returned 404), so
+three encodings were run: the card's fields in the order it lists them ("card"), the same with 0 instead of 1 for "seconds
+since it stopped" while the assistant speaks ("stop0"), and all zeros ("zeros").
+
+| Decider, on the same audio | Stops decided within 300 ms (of 20) | Corrections decided within 300 ms (of 20) | Sounds that were not for the assistant that got a decision to stop (of 20) |
+| --- | --- | --- | --- |
+| the call as it was (silent within 350 ms) | 1 | 3 | 13 |
+| the pilot (silent within 350 ms) | 17 | 20 | 1 |
+| detector, card encoding, threshold 0.5 | 20 | 20 | 20 |
+| detector, card encoding, **threshold 0.7 (the card's)** | 18 | 20 | 19 |
+| detector, card encoding, threshold 0.9 | 2 | 8 | 2 |
+| detector, stop0, threshold 0.7 | 6 | 14 | 5 |
+| detector, stop0, threshold 0.9 | 0 | 8 | 0 |
+| detector, zeros, threshold 0.7 | 17 | 19 | 16 |
+| detector, zeros, threshold 0.9 | 1 | 6 | 1 |
+
+(The intervals, the other thresholds and the breakdown by kind of sound are in `results/20261121-shadow/shadow-summary.md`.)
+
+**Reading it.** No threshold gives both what the gates ask for. At the card's 0.7 the detector is fast (median decision 80 ms)
+and decides to stop for 19 of the 20 sounds that were not for the assistant: 9 of 10 sounds of listening, 5 of 5 coughs and 5
+of 5 stretches of the assistant's own echo. In 6 of 20 stop episodes and 8 of 20 correction episodes it had already decided to
+stop before the person spoke, on the assistant's own voice. At 0.9 it is nearly silent on non-stops (2 of 20) and decides
+within 300 ms for only 2 of 20 stops. With the "stop0" encoding at 0.7 it decides within 300 ms for 6 of 20 stops and still
+for 5 of 20 non-stops. The card says its training echo was the partner's channel mixed back in, not what an echo canceller leaves, which is what this audio
+has, so this is a measure of the model as published, on this pipeline's residue, and not of what the same architecture could do
+if trained on it. With the same audio the pilot silenced 17 of 20 English stops and 20 of 20 corrections and cancelled a
+reply for 1 of 20 non-stops (second run: 20 of 20, 20 of 20 and 1 of 20; with 20 episodes per class a few episodes of spread
+between draws is normal). The model was not run on Portuguese: its card says English only.
+
 ## 6. Remaining failures and limits
 
 **What the second run still gets wrong** (the pilot's failed episodes, by cause; the ids are in `results/20261120-rerun/`):
@@ -377,8 +425,10 @@ baseline lost 4 stops that nothing cut off, and cut the reply off for 25 of the 
   browser-wide echo reference is unverified (section 7).
 - **Real people and rooms.** The people are synthetic voices (Supertonic and Kokoro), and the coughs and keyboard clicks are
   synthetic as well. Portuguese is Brazilian Portuguese through Supertonic only.
-- **The model-based approach.** Not measured: it needs a download (section 3). The comparison in this document is between the
-  shipped pipeline, the same pipeline tuned by settings alone, and the pilot.
+- **The model-based approach.** One open model was measured, offline, in English (section 5.5), not integrated into a call, and
+  without the voice-activity or word stage it is meant to sit behind in the framework it comes from. Its card does not say how
+  its `bot_state` input is laid out, so three encodings were run. It has no Portuguese version. A model trained on the residue
+  of this pipeline's echo canceller is a different experiment, and was not made.
 - **End-to-end latency of ordinary turns.** Measured, and too noisy to resolve 100 ms (section 5.1); the added work per frame
   was measured instead.
 - **Android.** The repository has no Android code and no plan for one, so nothing was built for it; `interrupt.ts` is the
@@ -388,8 +438,9 @@ baseline lost 4 stops that nothing cut off, and cut the reply off for 25 of the 
 **Worth doing next (not done here)**
 
 1. A detector of short stop words that does not need the recogniser's words, measured in both languages. The open Pipecat
-   backchannel detector (section 7) is English only; a Portuguese one would have to be trained and evaluated. Running the open
-   one needs a 4 MB download, which has to be approved.
+   detector as published is not it (section 5.5: it mistakes the assistant's own echo and sounds of listening for
+   interruptions); a small model trained on this pipeline's own echo residue, with Portuguese, would have to be built and
+   evaluated against the same episodes.
 2. The speech detector's wrapper treats a minimum silence of 0 as 0.5 s, which also delays the end of speech of an ordinary
    turn. Changing it would alter every call, so it was left alone (the flag-off call must stay exactly 0.30.0); it deserves its
    own evaluation.
@@ -435,7 +486,7 @@ outputs 42.3% and 95.0% under two metric definitions, so figures cannot be moved
 
 | Model | Revision | Licence | Fit | Used here |
 | --- | --- | --- | --- | --- |
-| [pipecat-ai/backchannel-detector](https://huggingface.co/pipecat-ai/backchannel-detector) | `4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854` | BSD-2-Clause | Streaming (40 ms chunks), 734k parameters, about 0.3 ms of CPU per chunk, English only; 82.9% and 81.2% of interruptions caught within 700 ms, median 280 to 300 ms (the card's own two English test sets, simulated echo) | No: a download was not requested |
+| [pipecat-ai/backchannel-detector](https://huggingface.co/pipecat-ai/backchannel-detector) | `4896f4774cdf1a9c5b581b0cd4a0c4000e8bb854` | BSD-2-Clause | Streaming (40 ms chunks), 734k parameters, about 0.3 ms of CPU per chunk, English only; 82.9% and 81.2% of interruptions caught within 700 ms, median 280 to 300 ms (the card's own two English test sets, simulated echo) | **Yes, offline, English** (section 5.5): `backchannel-fp32.onnx` (3,869,783 bytes, sha256 `3e5d47740e5f75211cc78c5df701be9afe7b76c4115144212a18598766909240`) and `model.json`, downloaded with the user's approval, run with onnxruntime 1.28.0 |
 | [AustinXiao/voxturn](https://huggingface.co/AustinXiao/voxturn) | `fe3d4a319c4e74279544188bd0e8292325852dbc` | CC BY-NC 4.0 | 14 languages including Portuguese; 0.8B parameters; a GPU; non-commercial | No: licence |
 | [HashNuke/barge-in-detector](https://huggingface.co/HashNuke/barge-in-detector) | `28177ae331b8ee751ab2a1bb62da5c5632b8473f` | MIT | Text only (needs the recogniser's words, which is the late part); no Portuguese | No |
 

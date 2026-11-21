@@ -5,6 +5,7 @@
 //   node scripts/voice/interrupt-eval/run.mjs --split heldout|dev --arm baseline=<built checkout> --arm pilot=<built checkout>:pilot
 //        [--kinds stop,correction,control,ordinary] [--shard 0/1] [--limit N] [--echo off,-50,-40] [--only id,id]
 //        [--runtime <dir with node_modules/sherpa-onnx-node>] [--models <voice models dir>] [--seed N] [--out file.jsonl]
+//        [--lang en|pt] [--dump <dir>]   (--dump writes the microphone and speaker of every `:deaf` arm, for shadow/)
 //
 // An arm is `name=<root>` (the voice code of that checkout, as it is), `name=<root>:pilot` (the same build with the
 // spoken-interruption setting on and a page that can pause) or `name=<root>:tuned` (the shipped pipeline tuned by settings
@@ -27,9 +28,15 @@ const arms = all("arm").map((s) => {
   const [root, mode] = spec.split(":");
   const pilot = mode === "pilot";
   const v = rig.loadVoice(root);
-  const arm = { name, root, v, pause: pilot, sessionConfig: pilot ? { interruptPilot: true } : undefined, tuned: mode === "tuned" };
+  const arm = { name, root, v, pause: pilot, sessionConfig: pilot ? { interruptPilot: true } : undefined, tuned: mode === "tuned", deaf: mode === "deaf" };
   if (arm.tuned) {
     arm.sessionConfig = { turn: { ...v.turn.DEFAULT_TURN_CONFIG, onsetFrames: 2, minSpeechMs: 96, bargeInProb: 0.4, bargeInMinMs: 96, bargeInNoTextMs: 160, duckAfterMs: 32 } };
+  }
+  if (arm.deaf) {
+    // A reference, not a contestant: a call that never reacts to what is said over its voice (a speech probability of 2 is never
+    // reached), so that its reply goes on and the microphone hears the person over the whole of it. With `--dump` its
+    // microphone and speaker are written out for an offline model; it is never scored and never written to the results.
+    arm.sessionConfig = { turn: { ...v.turn.DEFAULT_TURN_CONFIG, bargeInProb: 2 } };
   }
   return arm;
 });
@@ -41,6 +48,8 @@ const echoDbs = flag("echo", "off,-50,-40").split(",").map((s) => (s === "off" ?
 const out = flag("out", null);
 const seed = Number(flag("seed", "20261120"));
 const only = flag("only", null)?.split(",") ?? null;
+const langOnly = flag("lang", null);
+const dumpDir = flag("dump", null);
 const runtimeDir = flag("runtime", process.env.ANCILLA_VOICE_RUNTIME ?? path.join(os.homedir(), "voice-lab"));
 const modelsDir = flag("models", process.env.ANCILLA_VOICE_MODELS ?? path.join(runtimeDir, "models"));
 
@@ -177,14 +186,34 @@ async function runEpisode(arm, e, rendered) {
     ...brainOpt,
     until: ({ events, now, interruptedAt, firstAudioAt }) => {
       const us = events.find((x) => x.msg.type === "user_track_start");
+      // the reference arm is only listened to for a few seconds after the person begins
+      if (arm.deaf) return us ? now - us.t > Math.max(7000, trackLen / 16 + 2000) : firstAudioAt !== null && now - firstAudioAt > e.afterFirstAudioMs + 7000;
       if (us) return now - us.t > Math.max(tailMs, trackLen / 16 + tailMs - 1500);
       return firstAudioAt !== null && now - firstAudioAt > e.afterFirstAudioMs + 4500;
     },
   });
+  if (arm.deaf) {
+    if (dumpDir) dumpMicrophone(e, rendered, res);
+    return null;
+  }
   return scoreRun(e, rendered, res);
 }
 
-const plan = ep.planEpisodes({ split, seed, echoDbs }).filter((e) => kinds.includes(e.kind) && (only === null || only.includes(e.id)));
+/** The microphone and the speaker of a reference run, from 3 s before the sound under test to 6 s after it. */
+function dumpMicrophone(e, rendered, res) {
+  const onset = res.userStartMs === null ? (res.firstAudioAt ?? 0) + e.afterFirstAudioMs : res.userStartMs + rendered.onsetMs;
+  const from = Math.max(0, Math.floor(((onset - 3000) * rig.RATE16) / 1000));
+  const to = Math.min(res.micSamples, Math.floor(((onset + 6000) * rig.RATE16) / 1000));
+  fs.mkdirSync(dumpDir, { recursive: true });
+  const spk = new Float32Array(Math.max(0, to - from));
+  for (let i = 0; i < spk.length; i++) spk[i] = from + i < res.speaker.length ? res.speaker[from + i] : 0;
+  const bytes = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength);
+  fs.writeFileSync(path.join(dumpDir, `${e.id}.mic.f32`), bytes(res.mic16.slice(from, to)));
+  fs.writeFileSync(path.join(dumpDir, `${e.id}.spk.f32`), bytes(spk));
+  fs.writeFileSync(path.join(dumpDir, `${e.id}.json`), JSON.stringify({ id: e.id, kind: e.kind, sub: e.sub, lang: e.lang, voice: e.voice, echoDb: e.echoDb, levelDb: e.levelDb, text: e.text ?? null, rate: rig.RATE16, samples: spk.length, onsetMs: onset - (from * 1000) / rig.RATE16, firstAudioMs: res.firstAudioAt === null ? null : res.firstAudioAt - (from * 1000) / rig.RATE16, noPerson: res.userStartMs === null }));
+}
+
+const plan = ep.planEpisodes({ split, seed, echoDbs }).filter((e) => kinds.includes(e.kind) && (only === null || only.includes(e.id)) && (langOnly === null || e.lang === langOnly));
 const mine = plan.filter((_, i) => i % shardN === shardI).slice(0, limit);
 const sink = out ? fs.createWriteStream(out, { flags: "a" }) : null;
 let k = 0;
@@ -193,6 +222,7 @@ for (const e of mine) {
   const order = k++ % 2 === 0 ? arms : [...arms].reverse();
   for (const arm of order) {
     const r = await runEpisode(arm, e, rendered);
+    if (r === null) continue; // a reference run: nothing to score
     r.arm = arm.name;
     sink?.write(JSON.stringify(r) + "\n");
     const f = (x) => (x === null || x === undefined ? "-" : Math.round(x));

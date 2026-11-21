@@ -305,6 +305,8 @@ export async function runEpisode(opts) {
   for (let i = 0; i < rendered; i++) speakerUtt[i] = i - shift >= 0 ? handoffUtt[i - shift] : 0;
   return {
     events, flights, logs, speaker, speakerUtt, duckLog, firstAudioAt, interruptedAt, endMs,
+    // what the call heard, sample for sample (16 kHz), for the offline comparison with a model that is not part of the call
+    mic16, micSamples: Math.min(mic16.length, (k + 1) * FRAME),
     userStartMs: userStartSample === null ? null : (userStartSample * 1000) / RATE16,
     history: session.snapshot().history,
     brainRequests: brain.requests ? brain.requests.length : null,
