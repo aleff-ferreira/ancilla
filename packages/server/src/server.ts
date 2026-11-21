@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { extname, join, normalize, posix, resolve, sep, win32 } from "node:path";
 import type { Duplex, Readable, Writable } from "node:stream";
@@ -148,6 +148,9 @@ import { ConnectorRegistry } from "./connectors/registry.js";
 import { handleConnectors, isConnectorPath } from "./connectors/routes.js";
 import { ConnectorRunner } from "./connectors/runner.js";
 import { FileSecretStore } from "./connectors/secrets.js";
+import { PowerShellCollector } from "./sentinel/collector.js";
+import { handleSentinel, isSentinelPath } from "./sentinel/routes.js";
+import { SentinelService, watchWanted } from "./sentinel/service.js";
 import { runBrainReadStep, runBrainWriteStep } from "./assistant/brain-step.js";
 import { AmbiguousStartError, type ExecutiveHost, type FallbackReadRunner, type FallbackWriteRunner } from "./assistant/executive.js";
 import { ASSISTANT_DB_FILE, AssistantService } from "./assistant/service.js";
@@ -1031,6 +1034,7 @@ export class AncillaServer {
   private browseRunner: BrowseRunner | null = null;
   private connectorState: { registry: ConnectorRegistry; audit: AuditLog } | null = null;
   private connectorRunner: ConnectorRunner | null = null;
+  private sentinel: SentinelService | null = null;
   private authorizationHub: AuthorizationHub | null = null;
   private launchManager: LaunchManager | null = null;
   private readonly researchEngine: ResearchEngine;
@@ -1235,6 +1239,20 @@ export class AncillaServer {
       log: (line) => this.log(line),
     });
     return this.connectorRunner;
+  }
+
+  /** The Sentinel, made on first use: it watches the machine only when the person has switched Watch on. */
+  private sentinelFor(): SentinelService {
+    if (!this.sentinel) {
+      const folder = this.options.dataDir === ":memory:" ? null : join(this.options.dataDir, "sentinel");
+      this.sentinel = new SentinelService({
+        dir: folder,
+        collector: new PowerShellCollector({ dir: folder ?? join(tmpdir(), "ancilla-sentinel"), log: (line) => this.log(line) }),
+        emit: (event) => this.emit("ancilla", event),
+        log: (line) => this.log(line),
+      });
+    }
+    return this.sentinel;
   }
 
   /** Runs read-only project steps on the configured non-Muse assistant model when Muse CLI is not reachable. */
@@ -2314,6 +2332,16 @@ export class AncillaServer {
     if (!this.closed) {
       this.assistantFor(false);
     }
+    // The Sentinel opens here only when Watch was left on; otherwise it opens when something asks about it.
+    if (!this.closed && this.options.dataDir !== ":memory:" && watchWanted(join(this.options.dataDir, "sentinel"))) {
+      try {
+        this.sentinelFor().start();
+      } catch (error) {
+        // A Sentinel that cannot open its history must not keep the server from starting.
+        this.log(`sentinel: it could not start: ${error instanceof Error ? error.message : String(error)}`);
+        this.sentinel = null;
+      }
+    }
     // A server that was closed while it swept has nothing to schedule.
     if (!this.closed) {
       // No sweep at startup: which threads are busy in other Muse clients is only known after discovery.
@@ -2474,6 +2502,8 @@ export class AncillaServer {
     this.connectorRunner = null;
     this.connectorState?.registry.close();
     this.connectorState = null;
+    this.sentinel?.close();
+    this.sentinel = null;
     await this.browserService?.dispose().catch(() => undefined);
     this.browserService = null;
     // The voice first: a call reads and writes the assistant's database, and it hangs up before that closes.
@@ -3537,6 +3567,10 @@ export class AncillaServer {
     if (isConnectorPath(path)) {
       const { registry, audit } = this.connectorsFor();
       this.sendAssistant(res, await handleConnectors({ registry, audit, assistant: () => this.assistantFor(true), project: () => this.store.listProjects()[0]?.cwd ?? null }, { method, path, query: url.searchParams, body: () => this.readBody(req) }));
+      return true;
+    }
+    if (isSentinelPath(path)) {
+      this.sendAssistant(res, await handleSentinel(this.sentinelFor(), { method, path, query: url.searchParams, body: () => this.readBody(req) }));
       return true;
     }
     if (isAssistantPath(path)) {
